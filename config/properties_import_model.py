@@ -3,18 +3,6 @@ import os
 
 class Properties_ImportModel(bpy.types.PropertyGroup):
 
-    use_ssmt4: bpy.props.BoolProperty(
-        name="SSMT4 Alpha测试",
-        description="启用后会将插件改为和SSMT4进行联动，除开发者与内测用户外的普通用户请勿开启",
-        default=False,
-    ) # type: ignore
-
-    @classmethod
-    def use_ssmt4(cls):
-        '''
-        bpy.context.scene.properties_import_model.use_ssmt4
-        '''
-        return bpy.context.scene.properties_import_model.use_ssmt4
 
     '''
     TODO 关于非镜像工作流，我突然有了新的灵感

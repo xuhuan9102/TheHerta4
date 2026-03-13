@@ -1219,7 +1219,7 @@ class SSMTQuickPartialExport(bpy.types.Operator):
         
         print(f"[QuickExport] 开始快速局部导出，选中物体数量: {len(selected_objects)}")
         
-        GlobalConfig.read_from_main_json()
+        GlobalConfig.read_from_main_json_ssmt4()
         
         temp_tree_name = f"_QuickExport_Temp_{GlobalConfig.workspacename}" if GlobalConfig.workspacename else "_QuickExport_Temp"
         

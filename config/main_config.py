@@ -45,40 +45,12 @@ class GlobalConfig:
     current_game_migoto_folder = ""
     logic_name = ""
 
-    # 适配的SSMT最低版本号
+    # 适配的SSMT最低版本号，读取settings.json的VersionNumber字段得到
     ssmt_version_number = 0
 
     # 多文件导出功能：Buffer文件夹后缀（如"01"、"02"等）
     buffer_folder_suffix = ""
 
-    @classmethod
-    def read_from_main_json(cls) :
-        try:
-            main_json_path = GlobalConfig.path_main_json()
-
-            # 先从main_json_path里读取dbmt位置，也就是dbmt总工作空间的位置
-            # 在新架构中，总工作空间位置已不会再发生改变，所以用户只需要选择一次就可以了
-            if os.path.exists(main_json_path):
-                main_setting_file = open(main_json_path)
-                main_setting_json = json.load(main_setting_file)
-                main_setting_file.close()
-                cls.workspacename = main_setting_json.get("CurrentWorkSpace","")
-                cls.gamename = main_setting_json.get("CurrentGameName","")
-                cls.dbmtlocation = main_setting_json.get("DBMTWorkFolder","") + "\\"
-                cls.ssmt_version_number = main_setting_json.get("VersionNumber",0)
-            else:
-                print("Can't find: " + main_json_path)
-            
-            game_config_json_path = os.path.join(GlobalConfig.path_ssmt3_global_configs_folder(),"Games\\" + cls.gamename + "\\Config.json")
-            if os.path.exists(game_config_json_path):
-                game_config_json_file = open(game_config_json_path)
-                game_config_json = json.load(game_config_json_file)
-                game_config_json_file.close()
-
-                cls.current_game_migoto_folder = game_config_json.get("3DmigotoPath","")
-                cls.logic_name = game_config_json.get("LogicName","")
-        except Exception as e:
-            print(e)
 
     @classmethod
     def read_from_main_json_ssmt4(cls) :
@@ -121,8 +93,8 @@ class GlobalConfig:
     def path_reverse_output_folder(cls):
         # 先从main_json_path里读取dbmt位置，也就是dbmt总工作空间的位置
         # 在新架构中，总工作空间位置已不会再发生改变，所以用户只需要选择一次就可以了
-        if os.path.exists(cls.path_main_json()):
-            main_setting_file = open(cls.path_main_json())
+        if os.path.exists(cls.path_main_json_ssmt4()):
+            main_setting_file = open(cls.path_main_json_ssmt4())
             main_setting_json = json.load(main_setting_file)
             main_setting_file.close()
             reverse_output_folder = main_setting_json.get("ReverseOutputFolder","") + "\\"
@@ -210,15 +182,6 @@ class GlobalConfig:
     def path_main_json_ssmt4(cls):
         return os.path.join(GlobalConfig.path_ssmt4_global_configs_folder(), "settings.json")
     
-    @classmethod
-    def path_ssmt3_global_configs_folder(cls):
-        return os.path.join(GlobalConfig.path_appdata_local(),"SSMT3GlobalConfigs\\")
-    
-    # 定义基础的Json文件路径
-    @classmethod
-    def path_main_json(cls):
-        return os.path.join(GlobalConfig.path_ssmt3_global_configs_folder(), "SSMT3-Config.json")
-        
 
 
 

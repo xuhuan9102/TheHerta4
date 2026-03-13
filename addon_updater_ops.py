@@ -1337,12 +1337,12 @@ def register(bl_info):
 
     # Choose your own repository, must match git name for GitHUb and Bitbucket,
     # for GitLab use project ID (numbers only).
-    updater.repo = "TheHerta3"
+    updater.repo = "TheHerta4"
 
     # updater.addon = # define at top of module, MUST be done first
 
     # Website for manual addon download, optional but recommended to set.
-    updater.website = "https://github.com/StarBobis/TheHerta3/releases"
+    updater.website = "https://github.com/StarBobis/TheHerta4/releases"
 
     # Addon subfolder path.
     # "sample/path/to/addon"

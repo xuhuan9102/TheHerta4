@@ -47,12 +47,12 @@ from .config import properties_extract_model
 from .config.plugin_config import PluginConfig
 
 bl_info = {
-    "name": "TheHerta3",
+    "name": "TheHerta4",
     "description": "SSMT3.0 Series's Blender Plugin.",
     "blender": (4, 5, 0),
-    "version": (3, 7, 0),
+    "version": (4, 0, 1),
     "location": "View3D",
-    "min_ssmt_version": 361, # 确保TheHerta3正确工作的SSMT最低版本号
+    "min_ssmt_version": 4020, # 确保TheHerta4正确工作的SSMT最低版本号
     "category": "Generic"
 }
 
@@ -67,7 +67,7 @@ class UpdaterPanel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_context = "objectmode"
-    bl_category = "TheHerta3"
+    bl_category = "TheHerta4"
     bl_order = 99
     bl_options = {'DEFAULT_CLOSED'}
 
