@@ -32,7 +32,7 @@ class ModModelIdentityV:
         如果用户用不到某个DrawIB的话，就可以隐藏掉对应的obj
         隐藏掉的obj就不会被统计生成DrawIBModel，做到只导入模型，不生成Mod的效果。
         '''
-        for draw_ib in self.branch_model.draw_ib__component_count_list__dict.keys():
+        for draw_ib in self.branch_model.draw_ib_list:
             draw_ib_model = DrawIBModel(draw_ib=draw_ib,branch_model=self.branch_model)
             self.drawib_drawibmodel_dict[draw_ib] = draw_ib_model
         

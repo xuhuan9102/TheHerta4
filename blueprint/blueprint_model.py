@@ -58,23 +58,12 @@ class BluePrintModel:
 
         # TODO
         # 然后开始解析形态键节点
-
-        self.draw_ib__component_count_list__dict = {}
-
+        self.draw_ib_list = []
         for obj_data_model in self.ordered_draw_obj_data_model_list:
             draw_ib = obj_data_model.draw_ib
-            component_count = obj_data_model.component_count
 
-            component_count_list = []
-            if draw_ib in self.draw_ib__component_count_list__dict:
-                component_count_list = self.draw_ib__component_count_list__dict[draw_ib]
-            
-            if component_count not in component_count_list:
-                component_count_list.append(component_count)
-
-            component_count_list.sort()
-            
-            self.draw_ib__component_count_list__dict[draw_ib] = component_count_list
+            if draw_ib not in self.draw_ib_list:
+                self.draw_ib_list.append(draw_ib)
 
     def parse_current_node(self, current_node:bpy.types.Node, chain_key_list:list[M_Key]):
         for unknown_node in BlueprintExportHelper.get_connected_nodes(current_node):
@@ -220,10 +209,6 @@ class BluePrintModel:
 
         elif unknown_node.bl_idname == "SSMTNode_Object_Info":
             obj_model = ObjDataModel(obj_name=unknown_node.object_name)
-            
-            obj_model.draw_ib = unknown_node.draw_ib
-            obj_model.component_count = int(unknown_node.component) 
-            obj_model.obj_alias_name = unknown_node.alias_name
             
             if hasattr(unknown_node, 'original_object_name') and unknown_node.original_object_name:
                 obj_model.display_name = unknown_node.original_object_name
