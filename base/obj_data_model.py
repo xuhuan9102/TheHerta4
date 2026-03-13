@@ -1,17 +1,19 @@
 from .m_condition import M_Condition
 from .m_draw_indexed import M_DrawIndexed
-
+from .obj_rule_name import ObjRuleName
 
 from dataclasses import dataclass, field
 
 @dataclass
 class ObjDataModel:
     obj_name:str
-    display_name:str = field(init=False,repr=False,default="")
 
-    component_count:int = field(init=False,repr=False,default=0)
+    # 传入obj_name后，根据ObjRuleName解析出这些属性，方便后续使用
     draw_ib:str = field(init=False,repr=False,default="")
-    obj_alias_name:str = field(init=False,repr=False)
+    index_count:str = field(init=False,repr=False,default="")
+    first_index:str = field(init=False,repr=False,default="")
+    obj_alias_name:str = field(init=False,repr=False,default="")
+    display_name:str = field(init=False,repr=False,default="")
 
     ib:list = field(init=False,repr=False,default_factory=list)
     category_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
@@ -23,10 +25,13 @@ class ObjDataModel:
     drawindexed_obj:M_DrawIndexed = field(init=False,repr=False,default_factory=M_DrawIndexed)
 
     def __post_init__(self):
+        obj_rule_name = ObjRuleName(self.obj_name)
+
+        self.draw_ib = obj_rule_name.draw_ib
+        self.index_count = obj_rule_name.index_count
+        self.first_index = obj_rule_name.first_index
+        self.obj_alias_name = obj_rule_name.obj_alias_name
         self.display_name = self.obj_name
-        if "-" in self.obj_name:
-            obj_name_split = self.obj_name.split("-")
-            self.draw_ib = obj_name_split[0]
-            self.component_count = int(obj_name_split[1])
-            self.obj_alias_name = obj_name_split[2]
+        
+       
        

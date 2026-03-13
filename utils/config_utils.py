@@ -131,6 +131,17 @@ class ConfigUtils:
             raise Fatal("Target tmp.json didn't exists: " + tmp_json_path)
 
 
+    @classmethod
+    def read_import_json(cls,import_folder_path:str) ->dict:
+        import_json_path = os.path.join(import_folder_path, "import.json")
+        if os.path.exists(import_json_path):
+            import_json_file = open(import_json_path)
+            import_json = json.load(import_json_file)
+            import_json_file.close()
+            return import_json
+        else:
+            raise Fatal("Target import.json didn't exists: " + import_json_path)
+
     # Read model prefix attribute in fmt file to locate .ib and .vb file.
     # Save lots of space when reverse mod which have same stride but different kinds of D3D11GameType.
     @classmethod

@@ -5,3 +5,38 @@
 - 先声明，后执行，而不是边声明边执行，例如WWMITools就是先把所有的状态和逻辑声明好，最后触发的时候统一执行，层层传递数据类型，其对数据类型的准确封装是构建优雅数据结构的关键。如果不是先声明后执行的话，就会导致重复获取某些信息，例如mesh.loops在导出时多次重复获取其中内容导致执行速度下降。这就是设计上的缺陷导致的，如果是先声明后执行，可复用之前结果就不会导致重复情况。
 - Python看似简单，但是如果不当成一个强数据类型的语言来使用，在Blender插件开发时就会遇到许多问题，所以后续所有的方法参数和返回值以及类的属性都必须声明类型，应逐个检查并重构整个插件。
 - 对于Blender插件开发来说，其对Blender的bpy部分的封装应该在数据结构的较底层，否则将会导致代码混乱且无法理解原理，也就是我们目前面临的情况。有一部分工具类必须是专门负责和bpy中类型进行对接使用的。
+
+
+# IndexBuffer和CategoryBuffer的架构
+
+一个DrawIB里，基于MatchFirstIndex和IndexCount可以分出多个Component
+
+此时每个Component都可以有属于它自己的VertexBuffer
+也可以所有Component公用一个VertexBuffer
+
+所有Component可以共用一个IndexBuffer
+也可以每个Component分配一个独立的IndexBuffer
+
+上述问题一共会导致4种情况，目前这四种情况在各个游戏中均有出现。
+
+例如：
+EFMI 
+- 每个Component有独立的IB和VB
+
+WWMI 
+- 所有Component公用一个IB和VB  
+
+GIMI/其它米游
+- 每个Component可以公用一个独立的IB，也可以每个Component一个IB
+- 所有Component公用一个VB
+
+我们之前的架构是，依次对每个obj统计IndexBuffer和每个Category的Buffer
+到导出的时候让对应的逻辑决定是否去合并IndexBuffer以及CategoryBuffer
+
+我们4的新架构要从点击导出按钮的那一刻开始，根据这个游戏的最优架构，先走一个obj合并流程，得到一批克隆出来的obj
+- 直接去按component合并obj，或者不合并obj
+- 直接去按DrawIB合并obj，或者不合并obj
+得到的这些obj，再去做shapekey、ib、vb计算等处理
+在物体较多时应该能够明显改善导出速度，因为省去了拼接过程，且更加不容易出错，因为合并在一起和分开时有的边和点什么的都不一样。
+
+
