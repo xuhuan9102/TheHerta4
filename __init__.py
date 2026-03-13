@@ -13,7 +13,6 @@ from .blueprint import blueprint_node_base
 from .blueprint import blueprint_node_menu
 from .blueprint import blueprint_node_shapekey
 from .blueprint import blueprint_node_datatype
-from .blueprint import blueprint_nest_navigate
 from .blueprint import blueprint_node_cross_ib
 
 # 自动更新功能
@@ -146,8 +145,6 @@ def register():
     blueprint_node_menu.register()
     blueprint_node_shapekey.register()
     blueprint_node_datatype.register()
-
-    blueprint_nest_navigate.register()
     blueprint_node_cross_ib.register()
 
 
@@ -155,7 +152,6 @@ def register():
 def unregister():
     # 蓝图系统
     blueprint_node_cross_ib.unregister()
-    blueprint_nest_navigate.unregister()
     blueprint_node_obj.unregister()
     blueprint_import.unregister()
     blueprint_export.unregister()

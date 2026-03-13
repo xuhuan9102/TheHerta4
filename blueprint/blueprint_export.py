@@ -384,19 +384,11 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             
             for nested_output_node in nested_output_nodes:
                 collect_valid_nodes(nested_output_node, nested_tree)
-            
-            for nested_node in nested_tree.nodes:
-                if nested_node in valid_nodes and nested_node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                    collect_nested_blueprint_nodes(nested_node, nested_tree)
-        
+         
         for output_node in output_nodes:
             collect_valid_nodes(output_node, tree)
         
-        for node in tree.nodes:
-            if node not in valid_nodes:
-                continue
-            if node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                collect_nested_blueprint_nodes(node, tree)
+ 
         
         for node in valid_nodes:
             if node.bl_idname == 'SSMTNode_Object_Info':
@@ -798,215 +790,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         
         return objects
     
-    def _get_vg_process_nodes(self):
-        """获取当前蓝图中所有顶点组处理节点，按照连接顺序排序"""
-        nodes = []
-        tree = BlueprintExportHelper.get_current_blueprint_tree()
-        if not tree:
-            return nodes
-        
-        visited_blueprints = set()
-        visited_nodes = set()
-        
-        def collect_vg_process_nodes_in_order(current_node, current_tree):
-            """按照连接顺序递归收集顶点组处理节点"""
-            if current_node in visited_nodes:
-                return
-            visited_nodes.add(current_node)
-            
-            if current_node.mute:
-                return
-            
-            if current_node.bl_idname == 'SSMTNode_VertexGroupProcess':
-                nodes.append(current_node)
-            elif current_node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                blueprint_name = getattr(current_node, 'blueprint_name', '')
-                if blueprint_name and blueprint_name not in visited_blueprints:
-                    visited_blueprints.add(blueprint_name)
-                    nested_tree = bpy.data.node_groups.get(blueprint_name)
-                    if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                        nested_output = None
-                        for n in nested_tree.nodes:
-                            if n.bl_idname == 'SSMTNode_Result_Output':
-                                nested_output = n
-                                break
-                        if nested_output:
-                            collect_vg_process_nodes_in_order(nested_output, nested_tree)
-            
-            for input_socket in current_node.inputs:
-                for link in input_socket.links:
-                    collect_vg_process_nodes_in_order(link.from_node, current_tree)
-        
-        for output_node in tree.nodes:
-            if output_node.bl_idname == 'SSMTNode_Result_Output':
-                collect_vg_process_nodes_in_order(output_node, tree)
-                break
-        
-        nodes.reverse()
-        
-        print(f"[VGProcess] 收集到 {len(nodes)} 个顶点组处理节点，顺序: {[n.name for n in nodes]}")
-        return nodes
     
-    def _collect_vg_mapping_texts(self):
-        """收集所有顶点组映射表文本内容"""
-        mapping_texts = {}
-        
-        for text in bpy.data.texts:
-            if text.name.startswith('VG_Match_'):
-                content = '\n'.join(line.body for line in text.lines)
-                mapping_texts[text.name] = content
-        
-        return mapping_texts
-    
-    def _get_name_modify_nodes(self):
-        """获取所有名称修改节点（按照连接顺序）"""
-        result = []
-        
-        tree = BlueprintExportHelper.get_current_blueprint_tree()
-        if not tree:
-            return result
-        
-        visited = set()
-        
-        def collect_name_modify_nodes_in_order(node, current_tree):
-            """按照连接顺序收集名称修改节点"""
-            if node in visited:
-                return
-            visited.add(node)
-            
-            # 如果是名称修改节点，添加到结果中
-            if node.bl_idname == 'SSMTNode_Object_Name_Modify':
-                result.append(node)
-                print(f"[NameModify] 找到名称修改节点: {node.name}")
-            
-            # 递归检查连接的节点
-            for input_socket in node.inputs:
-                if input_socket.is_linked:
-                    for link in input_socket.links:
-                        from_node = link.from_node
-                        collect_name_modify_nodes_in_order(from_node, current_tree)
-        
-        def collect_nested_blueprint_nodes(nest_node, current_tree):
-            """递归收集嵌套蓝图中的名称修改节点"""
-            blueprint_name = getattr(nest_node, 'blueprint_name', '')
-            if not blueprint_name:
-                return
-            
-            if blueprint_name in visited:
-                return
-            
-            visited.add(blueprint_name)
-            
-            nested_tree = bpy.data.node_groups.get(blueprint_name)
-            if not nested_tree or nested_tree.bl_idname != 'SSMTBlueprintTreeType':
-                return
-            
-            print(f"[NameModify] 扫描嵌套蓝图: {blueprint_name}")
-            
-            nested_output_nodes = [n for n in nested_tree.nodes if n.bl_idname == 'SSMTNode_Result_Output']
-            
-            if not nested_output_nodes:
-                print(f"[NameModify] 警告: 嵌套蓝图 {blueprint_name} 没有输出节点")
-                return
-            
-            for nested_output_node in nested_output_nodes:
-                collect_name_modify_nodes_in_order(nested_output_node, nested_tree)
-            
-            for nested_node in nested_tree.nodes:
-                if nested_node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                    collect_nested_blueprint_nodes(nested_node, nested_tree)
-        
-        output_nodes = [n for n in tree.nodes if n.bl_idname == 'SSMTNode_Result_Output']
-        for output_node in output_nodes:
-            collect_name_modify_nodes_in_order(output_node, tree)
-        
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                collect_nested_blueprint_nodes(node, tree)
-        
-        # 反转结果，因为是从输出节点开始递归的，所以需要反转顺序
-        result.reverse()
-        
-        print(f"[NameModify] 共找到 {len(result)} 个名称修改节点，顺序: {[n.name for n in result]}")
-        return result
-    
-    def _get_vg_process_nodes_for_object(self, obj_name, vg_process_nodes):
-        """获取应该应用于指定物体的顶点组处理节点列表"""
-        result = []
-        
-        for node in vg_process_nodes:
-            node_tree = node.id_data
-            is_connected = self._is_object_connected_to_vg_process(obj_name, node, node_tree)
-            print(f"[VGProcess] 检查节点 {node.name} 是否连接到物体 {obj_name}: {is_connected}")
-            if is_connected:
-                result.append(node)
-        
-        return result
-    
-    def _is_object_connected_to_vg_process(self, obj_name, vg_process_node, node_tree):
-        """检查物体是否连接到指定的顶点组处理节点（支持嵌套蓝图）"""
-        visited = set()
-        
-        def find_all_object_names_for_vg_process(current_node, current_tree, depth=0):
-            """从顶点组处理节点开始，找到所有连接的物体名称"""
-            if current_node in visited:
-                return []
-            visited.add(current_node)
-            
-            indent = "  " * depth
-            print(f"[VGProcess]{indent} 搜索节点: {current_node.name} (类型: {current_node.bl_idname})")
-            
-            object_names = []
-            
-            if current_node.bl_idname == 'SSMTNode_Object_Info':
-                found_name = getattr(current_node, 'object_name', '')
-                if found_name:
-                    print(f"[VGProcess]{indent} 找到物体节点: {found_name}")
-                    return [found_name]
-            
-            elif current_node.bl_idname == 'SSMTNode_MultiFile_Export':
-                object_list = getattr(current_node, 'object_list', [])
-                for item in object_list:
-                    item_name = getattr(item, 'object_name', '')
-                    if item_name:
-                        object_names.append(item_name)
-                if object_names:
-                    print(f"[VGProcess]{indent} 找到多文件导出节点，包含 {len(object_names)} 个物体")
-                    return object_names
-            
-            elif current_node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                blueprint_name = getattr(current_node, 'blueprint_name', '')
-                if blueprint_name:
-                    nested_tree = bpy.data.node_groups.get(blueprint_name)
-                    if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                        for nested_node in nested_tree.nodes:
-                            if nested_node.bl_idname == 'SSMTNode_Result_Output':
-                                names = find_all_object_names_for_vg_process(nested_node, nested_tree, depth+1)
-                                object_names.extend(names)
-            
-            for input_socket in current_node.inputs:
-                for link in input_socket.links:
-                    names = find_all_object_names_for_vg_process(link.from_node, current_tree, depth+1)
-                    object_names.extend(names)
-            
-            return object_names
-        
-        def get_connected_object_names(vg_node, tree):
-            """获取顶点组处理节点连接的所有物体名称"""
-            object_names = []
-            for input_socket in vg_node.inputs:
-                if input_socket.name == "物体" and input_socket.is_linked:
-                    for link in input_socket.links:
-                        from_node = link.from_node
-                        print(f"[VGProcess] 物体输入连接到: {from_node.name} (类型: {from_node.bl_idname})")
-                        names = find_all_object_names_for_vg_process(from_node, tree, 1)
-                        object_names.extend(names)
-            return list(set(object_names))
-        
-        connected_objects = get_connected_object_names(vg_process_node, node_tree)
-        print(f"[VGProcess] 顶点组处理节点 '{vg_process_node.name}' 连接的物体: {connected_objects}")
-        
-        return obj_name in connected_objects
     
     def _get_processing_chain_for_object(self, obj_name, tree):
         """
@@ -1072,16 +856,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                         object_names.append(item_name)
                 if object_names:
                     return object_names
-            
-            elif current_node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                blueprint_name = getattr(current_node, 'blueprint_name', '')
-                if blueprint_name:
-                    nested_tree = bpy.data.node_groups.get(blueprint_name)
-                    if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                        for nested_node in nested_tree.nodes:
-                            if nested_node.bl_idname == 'SSMTNode_Result_Output':
-                                names = find_all_object_names(nested_node, nested_tree, depth+1)
-                                object_names.extend(names)
             
             for input_socket in current_node.inputs:
                 for link in input_socket.links:

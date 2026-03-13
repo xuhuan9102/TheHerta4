@@ -265,33 +265,6 @@ class BluePrintModel:
             # 继续递归解析后面的节点
             self.parse_current_node(unknown_node, chain_key_list)
 
-        elif unknown_node.bl_idname == "SSMTNode_Blueprint_Nest":
-            # 蓝图嵌套节点：递归解析嵌套蓝图中的所有节点
-            blueprint_name = getattr(unknown_node, 'blueprint_name', '')
-            if not blueprint_name:
-                return
-            
-            # 检查是否已经访问过该蓝图，防止循环引用
-            if blueprint_name in self.visited_blueprints:
-                print(f"[Blueprint Nest] 警告: 检测到循环引用，跳过蓝图 {blueprint_name}")
-                return
-            
-            self.visited_blueprints.add(blueprint_name)
-            
-            nested_tree = bpy.data.node_groups.get(blueprint_name)
-            if not nested_tree or nested_tree.bl_idname != 'SSMTBlueprintTreeType':
-                print(f"[Blueprint Nest] 错误: 无法找到蓝图 {blueprint_name}")
-                return
-            
-            print(f"[Blueprint Nest] 解析嵌套蓝图: {blueprint_name}")
-            
-            # 获取嵌套蓝图的输出节点
-            nested_output_node = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, 'SSMTNode_Result_Output')
-            if nested_output_node:
-                # 递归解析嵌套蓝图中的节点
-                self.parse_current_node(nested_output_node, chain_key_list)
-            else:
-                print(f"[Blueprint Nest] 警告: 嵌套蓝图 {blueprint_name} 没有输出节点")
 
     def _collect_cross_ib_objects(self, cross_ib_node):
         '''
@@ -342,15 +315,6 @@ class BluePrintModel:
                             })
                             print(f"[CrossIB] 收集到多文件导出物体: {obj_name}")
             
-            elif node.bl_idname == "SSMTNode_Blueprint_Nest":
-                blueprint_name = getattr(node, 'blueprint_name', '')
-                if blueprint_name:
-                    nested_tree = bpy.data.node_groups.get(blueprint_name)
-                    if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                        print(f"[CrossIB] 进入嵌套蓝图: {blueprint_name}")
-                        nested_output_node = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, 'SSMTNode_Result_Output')
-                        if nested_output_node:
-                            recursive_collect(nested_output_node)
             
             elif node.bl_idname in PASS_THROUGH_NODES:
                 for input_socket in node.inputs:

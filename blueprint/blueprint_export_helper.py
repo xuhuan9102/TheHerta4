@@ -179,13 +179,7 @@ class BlueprintExportHelper:
                 shapekey_name_mkey_dict[shapekey_name] = m_key
                 key_index += 1
             
-            for node in current_tree.nodes:
-                if node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                    blueprint_name = getattr(node, 'blueprint_name', '')
-                    if blueprint_name and blueprint_name != 'NONE':
-                        nested_tree = bpy.data.node_groups.get(blueprint_name)
-                        if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                            collect_shapekey_nodes(nested_tree)
+  
         
         collect_shapekey_nodes(tree)
         return shapekey_name_mkey_dict
@@ -215,14 +209,7 @@ class BlueprintExportHelper:
             if output_node:
                 nodes = BlueprintExportHelper._find_datatype_nodes_connected_to_output(output_node)
                 datatype_nodes.extend(nodes)
-            
-            for node in current_tree.nodes:
-                if node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                    blueprint_name = getattr(node, 'blueprint_name', '')
-                    if blueprint_name and blueprint_name != 'NONE':
-                        nested_tree = bpy.data.node_groups.get(blueprint_name)
-                        if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                            collect_datatype_nodes(nested_tree)
+
         
         collect_datatype_nodes(tree)
         
@@ -287,12 +274,7 @@ class BlueprintExportHelper:
                     continue
                 if node.bl_idname == 'SSMTNode_MultiFile_Export':
                     multifile_nodes.append(node)
-                elif node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                    blueprint_name = getattr(node, 'blueprint_name', '')
-                    if blueprint_name and blueprint_name != 'NONE':
-                        nested_tree = bpy.data.node_groups.get(blueprint_name)
-                        if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                            collect_multifile_nodes(nested_tree)
+         
         
         collect_multifile_nodes(tree)
         return multifile_nodes
@@ -589,12 +571,7 @@ class BlueprintExportHelper:
                     continue
                 if node.bl_idname == 'SSMTNode_CrossIB':
                     cross_ib_nodes.append(node)
-                elif node.bl_idname == 'SSMTNode_Blueprint_Nest':
-                    blueprint_name = getattr(node, 'blueprint_name', '')
-                    if blueprint_name and blueprint_name != 'NONE':
-                        nested_tree = bpy.data.node_groups.get(blueprint_name)
-                        if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                            collect_cross_ib_nodes(nested_tree)
+
         
         collect_cross_ib_nodes(tree)
         return cross_ib_nodes

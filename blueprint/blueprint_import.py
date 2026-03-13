@@ -14,11 +14,8 @@ from ..base.drawib_pair import DrawIBPair
 
 
 
-
-# 适配EFMI的全量导入逻辑
+# 全量导入逻辑
 def ImprotFromWorkSpaceFull(self, context):
-    
-
     
     # 这里先创建以当前工作空间为名称的集合，并且链接到scene，确保它存在
     workspace_collection = CollectionUtils.create_new_collection(collection_name=GlobalConfig.workspacename,color_tag=CollectionColor.Red)

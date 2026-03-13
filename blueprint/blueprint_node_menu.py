@@ -5,7 +5,6 @@ from bpy.types import NodeTree, Node, NodeSocket
 from ..config.main_config import GlobalConfig
 
 from .blueprint_node_base import SSMTBlueprintTree, SSMTNodeBase
-from .blueprint_node_nest import SSMTNode_Blueprint_Nest
 
 
 class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
@@ -738,23 +737,6 @@ class SSMT_OT_BatchConnectNodes(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class SSMT_MT_NodeMenu_Advanced(bpy.types.Menu):
-    bl_label = "高级功能"
-    
-    def draw(self, context):
-        layout = self.layout
-        layout.operator("node.add_node", text="数据类型", icon='FILE_TEXT').type = "SSMTNode_DataType"
-        layout.operator("node.add_node", text="多文件导出", icon='FILE_FOLDER').type = "SSMTNode_MultiFile_Export"
-        layout.operator("node.add_node", text="蓝图嵌套", icon='NODETREE').type = "SSMTNode_Blueprint_Nest"
-        layout.separator()
-        layout.operator("node.add_node", text="跨IB节点", icon='ARROW_LEFTRIGHT').type = "SSMTNode_CrossIB"
-        layout.separator()
-        layout.operator("node.add_node", text="物体名称修改", icon='GROUP').type = "SSMTNode_Object_Name_Modify"
-        layout.separator()
-        layout.operator("node.add_node", text="顶点组匹配", icon='GROUP').type = "SSMTNode_VertexGroupMatch"
-        layout.operator("node.add_node", text="顶点组处理", icon='GROUP').type = "SSMTNode_VertexGroupProcess"
-        layout.operator("node.add_node", text="映射表输入", icon='TEXT').type = "SSMTNode_VertexGroupMappingInput"
-
 
 class SSMT_MT_NodeMenu_Preset(bpy.types.Menu):
     bl_label = "预设"
@@ -787,7 +769,6 @@ def draw_node_add_menu(self, context):
         return
     
     layout = self.layout
-    layout.menu("SSMT_MT_NodeMenu_Advanced", text="高级功能", icon='OPTIONS')
     layout.menu("SSMT_MT_NodeMenu_Preset", text="预设", icon='PRESET')
     layout.menu("SSMT_MT_NodeMenu_Branch", text="分支", icon='RNA')
     layout.menu("SSMT_MT_NodeMenu_ShapeKey", text="形态键", icon='SHAPEKEY_DATA')
@@ -824,12 +805,10 @@ def register():
     bpy.utils.register_class(SSMT_OT_AlignNodes)
     bpy.utils.register_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.register_class(SSMT_MT_ObjectContextMenuSub)
-    bpy.utils.register_class(SSMT_MT_NodeMenu_Advanced)
     bpy.utils.register_class(SSMT_MT_NodeMenu_Preset)
     bpy.utils.register_class(SSMT_MT_NodeMenu_Branch)
     bpy.utils.register_class(SSMT_MT_NodeMenu_ShapeKey)
     bpy.utils.register_class(SSMT_MT_NodeMenu_PostProcess)
-    bpy.utils.register_class(SSMTNode_Blueprint_Nest)
 
     bpy.types.NODE_MT_add.prepend(draw_node_add_menu)
     # 添加到 3D 视图物体右键菜单
@@ -842,12 +821,10 @@ def unregister():
     bpy.types.NODE_MT_add.remove(draw_node_add_menu)
     bpy.types.VIEW3D_MT_object_context_menu.remove(draw_objects_context_menu_add)
 
-    bpy.utils.unregister_class(SSMTNode_Blueprint_Nest)
     bpy.utils.unregister_class(SSMT_MT_NodeMenu_PostProcess)
     bpy.utils.unregister_class(SSMT_MT_NodeMenu_ShapeKey)
     bpy.utils.unregister_class(SSMT_MT_NodeMenu_Branch)
     bpy.utils.unregister_class(SSMT_MT_NodeMenu_Preset)
-    bpy.utils.unregister_class(SSMT_MT_NodeMenu_Advanced)
     bpy.utils.unregister_class(SSMT_MT_ObjectContextMenuSub)
     bpy.utils.unregister_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.unregister_class(SSMT_OT_AlignNodes)

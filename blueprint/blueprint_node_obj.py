@@ -4,7 +4,6 @@ from bpy.types import NodeTree, Node, NodeSocket
 from ..config.main_config import GlobalConfig, LogicName
 from ..config.properties_generate_mod import Properties_GenerateMod
 from .blueprint_node_base import SSMTBlueprintTree, SSMTNodeBase
-from .blueprint_nest_navigate import SSMT_OT_BlueprintNestNavigate, SSMT_OT_CreateBlueprintFromNest
 
 BLENDER_VERSION = bpy.app.version[:2]
 
@@ -12,21 +11,6 @@ _picking_node_name = None
 _picking_tree_name = None
 _is_viewing_group_objects = False
 
-
-def _update_node_to_object_id_mapping():
-    """更新节点到物体ID的映射关系"""
-    from .blueprint_drag_drop import _node_to_object_id_mapping
-    
-    _node_to_object_id_mapping.clear()
-    
-    for tree in bpy.data.node_groups:
-        if tree.bl_idname == 'SSMTBlueprintTreeType':
-            for node in tree.nodes:
-                if node.bl_idname == 'SSMTNode_Object_Info':
-                    obj_id = getattr(node, 'object_id', '')
-                    if obj_id:
-                        node_key = (tree.name, node.name)
-                        _node_to_object_id_mapping[node_key] = obj_id
 
 
 class SSMT_OT_RefreshNodeObjectIDs(bpy.types.Operator):
@@ -74,7 +58,7 @@ class SSMT_OT_RefreshNodeObjectIDs(bpy.types.Operator):
         
         if updated_count > 0:
             self.report({'INFO'}, f"已更新 {updated_count} 个节点的物体引用")
-            _update_node_to_object_id_mapping()
+           
         else:
             self.report({'INFO'}, "所有节点都已建立物体引用关联")
         
@@ -522,15 +506,7 @@ class SSMT_OT_View_Group_Objects(bpy.types.Operator):
                     obj = bpy.data.objects.get(obj_name)
                     if obj:
                         objects_to_show.add(obj)
-            
-            elif getattr(current_node, "bl_idname", "") == 'SSMTNode_Blueprint_Nest':
-                blueprint_name = getattr(current_node, "blueprint_name", "")
-                if blueprint_name and blueprint_name not in visited_blueprints:
-                    visited_blueprints.add(blueprint_name)
-                    nested_tree = bpy.data.node_groups.get(blueprint_name)
-                    if nested_tree and nested_tree.bl_idname == 'SSMTBlueprintTreeType':
-                        for nested_node in nested_tree.nodes:
-                            collect_objects(nested_node)
+
 
             if hasattr(current_node, "inputs"):
                 for inp in current_node.inputs:
@@ -584,8 +560,6 @@ classes = (
     SSMTNode_SwitchKey,
     SSMT_OT_SwitchKey_AddSocket,
     SSMT_OT_SwitchKey_RemoveSocket,
-    SSMT_OT_BlueprintNestNavigate,
-    SSMT_OT_CreateBlueprintFromNest,
 )
 
 def register():
