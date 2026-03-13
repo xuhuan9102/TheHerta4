@@ -81,6 +81,9 @@ class ObjBufferHelper:
         (1) 读取obj的category_buffer
         (2) 读取obj的ib
         (3) 设置到最终的ordered_draw_obj_model_list
+
+        TODO 这里是DrawIB层级的，我们需要参考得到SubMesh层级的
+        以及后续的在DrawIB层级对SubMesh层级的合并，也要考虑到
         '''
         # 延迟导入，避免 helper 与 blueprint 之间的潜在循环依赖
         from ..blueprint.blueprint_export_helper import BlueprintExportHelper

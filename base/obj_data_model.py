@@ -15,12 +15,14 @@ class ObjDataModel:
     obj_alias_name:str = field(init=False,repr=False,default="")
     display_name:str = field(init=False,repr=False,default="")
 
+    # 这些是后续计算手动赋值进来的
+    # TODO 当然也可以直接来一个函数来计算得到，具体看最终设计
     ib:list = field(init=False,repr=False,default_factory=list)
     category_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
-
     # 仅用于WWMI的索引顶点ID字典，key是顶点索引，value是顶点ID，默认可以为None
     index_vertex_id_dict:dict = field(init=False,repr=False,default_factory=dict) 
 
+    # 生效条件，在BlueprintModel解析的时候得到
     condition:M_Condition = field(init=False,repr=False,default_factory=M_Condition)
     drawindexed_obj:M_DrawIndexed = field(init=False,repr=False,default_factory=M_DrawIndexed)
 
