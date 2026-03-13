@@ -505,7 +505,7 @@ class BluePrintModel:
                 
                     # 应用旋转和缩放
                     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-                elif GlobalConfig.logic_name == LogicName.AEMI or GlobalConfig.logic_name == LogicName.EFMI:
+                elif GlobalConfig.logic_name == LogicName.EFMI:
                     ObjUtils.select_obj(obj)
 
                     obj.rotation_euler[0] = 0
@@ -533,7 +533,7 @@ class BluePrintModel:
                 
                     # 应用旋转和缩放
                     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-                elif GlobalConfig.logic_name == LogicName.AEMI or GlobalConfig.logic_name == LogicName.EFMI:
+                elif GlobalConfig.logic_name == LogicName.EFMI:
                     ObjUtils.select_obj(obj)
 
                     obj.rotation_euler[0] = 0

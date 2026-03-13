@@ -23,7 +23,6 @@ class LogicName:
     WWMI = "WWMI"
 
     EFMI = "EFMI" # 强兼支持
-    AEMI = "AEMI"
 
     WuWa = "WuWa"
 

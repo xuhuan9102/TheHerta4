@@ -5,7 +5,7 @@ from typing import Tuple, Optional
 class TBNCodec:
     """
     10-10-10-2 TBN (Tangent-Bitangent-Normal) 编解码器
-    用于 EFMI/AEMI 格式的八面体法线压缩
+    用于 EFMI 格式的八面体法线压缩
     
     数据格式 (R10G10B10A2_UINT):
     - X (10-bit): 八面体编码的法线 X 分量

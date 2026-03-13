@@ -149,7 +149,7 @@ class ObjBufferHelper:
 
             return FormatUtils.convert_4x_float32_to_r8g8b8a8_unorm(result)
 
-        elif d3d11_element.Format == "R32_UINT" and (GlobalConfig.logic_name == LogicName.AEMI or GlobalConfig.logic_name == LogicName.EFMI):
+        elif d3d11_element.Format == "R32_UINT" and GlobalConfig.logic_name == LogicName.EFMI:
             print("终末地法线编码 - 使用 TBNCodec")
             raw_normals = normals.reshape(-1, 3)
             return TBNCodec.convert_normals_to_octahedral_r32_uint(raw_normals).reshape(-1, 1)
@@ -250,7 +250,7 @@ class ObjBufferHelper:
     @staticmethod
     def _parse_encoded_tbn(mesh_loops, mesh_loops_length, d3d11_element):
         """
-        解析并编码 EFMI/AEMI 格式的 ENCODEDDATA (10-10-10-2 TBN 编码)
+        解析并编码 EFMI 格式的 ENCODEDDATA (10-10-10-2 TBN 编码)
         
         该方法从 mesh.loops 中获取法线、切线和副切线符号，
         并使用 TBNCodec 编码为 10-10-10-2 格式的 R32_UINT 数据
@@ -460,7 +460,7 @@ class ObjBufferHelper:
             blendweights_dict, blendindices_dict = VertexGroupUtils.get_blendweights_blendindices_v3(mesh=mesh,normalize_weights = normalize_weights)
 
 
-        # 检查是否存在 ENCODEDDATA 元素 (用于 EFMI/AEMI 格式的 TBN 编码)
+        # 检查是否存在 ENCODEDDATA 元素 (用于 EFMI 格式的 TBN 编码)
         has_encoded_data = 'ENCODEDDATA' in d3d11_game_type.ElementNameD3D11ElementDict
 
         # 对每一种Element都获取对应的数据
@@ -473,19 +473,19 @@ class ObjBufferHelper:
                 data = ObjBufferHelper._parse_position(mesh_vertices, mesh_vertices_length, loop_vertex_indices, d3d11_element)
 
             elif d3d11_element_name == 'NORMAL':
-                if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI or GlobalConfig.logic_name == LogicName.AEMI):
+                if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI ):
                     pass
                 else:
                     data = ObjBufferHelper._parse_normal(mesh_loops, mesh_loops_length, d3d11_element, has_encoded_data)
 
             elif d3d11_element_name == 'TANGENT':
-                if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI or GlobalConfig.logic_name == LogicName.AEMI):
+                if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI ):
                     pass
                 else:
                     data = ObjBufferHelper._parse_tangent(mesh_loops, mesh_loops_length, d3d11_element)
 
             elif d3d11_element_name.startswith('BINORMAL'):
-                if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI or GlobalConfig.logic_name == LogicName.AEMI):
+                if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI):
                     pass
                 else:
                     data = ObjBufferHelper._parse_binormal(mesh_loops, mesh_loops_length, d3d11_element)
@@ -503,10 +503,10 @@ class ObjBufferHelper:
                 data = ObjBufferHelper._parse_blendweight(blendweights_dict, d3d11_element)
 
             elif d3d11_element_name == 'ENCODEDDATA':
-                if GlobalConfig.logic_name == LogicName.EFMI or GlobalConfig.logic_name == LogicName.AEMI:
+                if GlobalConfig.logic_name == LogicName.EFMI:
                     data = ObjBufferHelper._parse_encoded_tbn(mesh_loops, mesh_loops_length, d3d11_element)
                 else:
-                    print(f"警告: ENCODEDDATA 元素仅在 EFMI/AEMI 格式中支持，当前游戏类型: {GlobalConfig.logic_name}")
+                    print(f"警告: ENCODEDDATA 元素仅在 EFMI 格式中支持，当前游戏类型: {GlobalConfig.logic_name}")
                     data = None
 
             if data is not None:

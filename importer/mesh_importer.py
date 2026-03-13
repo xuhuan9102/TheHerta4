@@ -114,7 +114,7 @@ class MeshImporter:
                 if GlobalConfig.logic_name == LogicName.YYSLS:
                     print("燕云十六声法线处理")
                     normals = [(x[0] * 2 - 1, x[1] * 2 - 1, x[2] * 2 - 1) for x in data]
-                elif (mbf.fmt_file.logic_name == LogicName.AEMI or mbf.fmt_file.logic_name == LogicName.EFMI) and element.Format == "R32_UINT":
+                elif mbf.fmt_file.logic_name == LogicName.EFMI and element.Format == "R32_UINT":
                     print("终末地压缩法线处理(Endfield Packed Normals) - 使用 TBNCodec")
                     
                     raw = data
@@ -128,7 +128,7 @@ class MeshImporter:
                 else:
                     normals = [(x[0], x[1], x[2]) for x in data]
             elif element.SemanticName == "ENCODEDDATA":
-                if mbf.fmt_file.logic_name == LogicName.AEMI or mbf.fmt_file.logic_name == LogicName.EFMI:
+                if mbf.fmt_file.logic_name == LogicName.EFMI:
                     print("终末地 ENCODEDDATA 处理 - 使用 TBNCodec 解码 TBN 数据")
                     use_normals = True
                     
@@ -141,7 +141,7 @@ class MeshImporter:
                     normals = TBNCodec.decode_octahedral_r32_uint(raw).tolist()
                     print("终末地 ENCODEDDATA 处理完成")
                 else:
-                    print(f"警告: ENCODEDDATA 元素仅在 EFMI/AEMI 格式中支持，当前游戏类型: {mbf.fmt_file.logic_name}")
+                    print(f"警告: ENCODEDDATA 元素仅在 EFMI 格式中支持，当前游戏类型: {mbf.fmt_file.logic_name}")
             elif element.SemanticName == "TANGENT":
                 pass
             elif element.SemanticName == "BINORMAL":
@@ -214,7 +214,7 @@ class MeshImporter:
             obj.rotation_euler[2] = 0
         
         # 懒得调整了，躺倒就躺倒吧
-        if mbf.fmt_file.logic_name == LogicName.AEMI or mbf.fmt_file.logic_name == LogicName.EFMI:
+        if mbf.fmt_file.logic_name == LogicName.EFMI:
             obj.rotation_euler[0] = 0
             obj.rotation_euler[1] = 0
             obj.rotation_euler[2] = 0

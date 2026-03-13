@@ -239,12 +239,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                     from ..games.efmi import ModModelEFMI
                     migoto_mod_model = ModModelEFMI(skip_buffer_export=preview_export_only)
                     migoto_mod_model.generate_unity_vs_config_ini()
-
-                # 终末地测试AEMI，到时候老外的EFMI发布之后，再开一套新逻辑兼容他们的，咱们用这个先测试
-                elif GlobalConfig.logic_name == LogicName.AEMI:
-                    from ..games.yysls import ModModelYYSLS
-                    migoto_mod_model = ModModelYYSLS(skip_buffer_export=preview_export_only)
-                    migoto_mod_model.generate_unity_vs_config_ini()
+                
                 # UnityVS
                 elif GlobalConfig.logic_name == LogicName.UnityVS:
                     from ..games.unity import ModModelUnity
