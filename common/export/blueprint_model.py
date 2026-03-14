@@ -13,7 +13,7 @@ from ..utils.tips_utils import TipUtils
 
 from .m_key import M_Key
 from .draw_call_model import M_Condition
-from .d3d11 import D3D11GameType
+from .d3d11.d3d11_gametype import D3D11GameType
 from .draw_call_model import DrawCallModel
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
 

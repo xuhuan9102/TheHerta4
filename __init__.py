@@ -1,17 +1,25 @@
 import bpy
 
+# 全局配置
+from .base.config import properties_import_model
+from .base.config import properties_generate_mod
+from .base.config import properties_wwmi
+from .base.config import properties_extract_model
+from .base.config.plugin_config import PluginConfig
+
 # UI界面
 from .ui import ui_panel_basic
 from .ui import ui_panel_model
 from .ui import ui_panel_sword
 from .ui import ui_panel_import
 from .ui import ui_panel_fast_texture
-from .blueprint_node import blueprint_node_obj
-from .ssmt_import import blueprint_import
-from .ssmt_export import blueprint_export
-from .blueprint_node import blueprint_node_base
-from .blueprint_node import blueprint_node_menu
-from .blueprint_node import blueprint_node_shapekey
+
+from .common.blueprint_node import blueprint_node_obj
+from .common.blueprint_node import blueprint_import
+from .common.blueprint_node import blueprint_node_base
+from .common.blueprint_node import blueprint_node_menu
+from .common.blueprint_node import blueprint_node_shapekey
+from .export import blueprint_export
 
 # 自动更新功能
 from . import addon_updater_ops
@@ -19,15 +27,6 @@ from . import addon_updater_ops
 # 开发时确保同时自动更新 addon_updater_ops
 import importlib
 importlib.reload(addon_updater_ops)
-
-from bpy.types import SpaceView3D
-
-# 全局配置
-from .config import properties_import_model
-from .config import properties_generate_mod
-from .config import properties_wwmi
-from .config import properties_extract_model
-from .config.plugin_config import PluginConfig
 
 bl_info = {
     "name": "TheHerta4",

@@ -15,7 +15,7 @@ from ..utils.format_utils import Fatal
 
 from .main_config import GlobalConfig
 
-from ..common.d3d11 import D3D11GameType
+from ..common.d3d11.d3d11_gametype import D3D11GameType
 
 
 def check_and_try_generate_import_json() -> dict:

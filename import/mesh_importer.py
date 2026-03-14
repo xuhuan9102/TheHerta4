@@ -20,7 +20,7 @@ from ..config.main_config import GlobalConfig, LogicName
 from ..config.properties_import_model import Properties_ImportModel
 from ..config.properties_wwmi import Properties_WWMI
 
-from ..common.d3d11 import D3D11Element
+from ..common.d3d11.d3d11_gametype import D3D11Element
 from ..common.extracted_object import ExtractedObjectHelper
 
 # 用于解决 AttributeError: 'IMPORT_MESH_OT_migoto_raw_buffers_mmt' object has no attribute 'filepath'
