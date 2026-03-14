@@ -1,4 +1,5 @@
-from ..utils.ssmt_error_utils import SSMTErrorUtils
+from ...base.utils.ssmt_error_utils import SSMTErrorUtils
+from ..migoto.m_key import M_Key
 
 from dataclasses import dataclass, field
 
@@ -56,7 +57,6 @@ DrawIBModel层级只进行SubMeshModel的合并，最后写出
 再由每个游戏的具体逻辑去处理具体的情况，比如要不要合并IB，VB到DrawIB层级等等
 '''
 
-from .m_key import M_Key
 
 
 class M_DrawIndexed:

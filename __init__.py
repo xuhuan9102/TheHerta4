@@ -15,11 +15,12 @@ from .ui import ui_panel_import
 from .ui import ui_panel_fast_texture
 
 from .common.blueprint_node import blueprint_node_obj
-from .common.blueprint_node import blueprint_import
 from .common.blueprint_node import blueprint_node_base
 from .common.blueprint_node import blueprint_node_menu
 from .common.blueprint_node import blueprint_node_shapekey
+
 from .exporter import blueprint_export
+from .importer import blueprint_import
 
 # 自动更新功能
 from . import addon_updater_ops

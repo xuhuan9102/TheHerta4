@@ -2,7 +2,7 @@
 import bpy
 from bpy.types import NodeTree, Node, NodeSocket
 
-from ..config.main_config import GlobalConfig
+from ...base.config.main_config import GlobalConfig
 
 from .blueprint_node_base import SSMTBlueprintTree, SSMTNodeBase
 

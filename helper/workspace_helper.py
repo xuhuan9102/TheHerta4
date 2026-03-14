@@ -1,5 +1,5 @@
-from ..config.main_config import GlobalConfig
-from ..utils.json_utils import JsonUtils
+from ..base.config.main_config import GlobalConfig
+from ..base.utils.json_utils import JsonUtils
 import os
 
 from typing import List, Dict, Union
