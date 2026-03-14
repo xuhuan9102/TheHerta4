@@ -43,26 +43,8 @@ class PanelBasicInformation(bpy.types.Panel):
 
         layout.prop(context.scene.properties_import_model,"use_mirror_workflow",text="使用非镜像工作流")
         
-        layout.prop(context.scene.properties_import_model,"use_parallel_export",text="启用并行导出")
-        if context.scene.properties_import_model.use_parallel_export:
-            from ..config.properties_import_model import Properties_ImportModel
-            max_workers = Properties_ImportModel.get_max_parallel_worker_count()
-            row = layout.row()
-            row.prop(context.scene.properties_import_model,"parallel_worker_count",text=f"进程数(最大{max_workers})")
-            layout.prop(context.scene.properties_import_model,"blender_executable_path",text="Blender路径")
-            if not bpy.data.is_saved:
-                layout.label(text="项目未保存，请先保存",icon='ERROR')
-            elif bpy.data.is_dirty:
-                layout.label(text="项目有未保存的修改",icon='ERROR')
         
         layout.prop(context.scene.properties_import_model,"use_preprocess_cache",text="启用预处理缓存")
-        if context.scene.properties_import_model.use_preprocess_cache:
-            from ..utils.preprocess_cache import get_cache_manager
-            cache_manager = get_cache_manager()
-            stats = cache_manager.get_cache_stats()
-            row = layout.row()
-            row.label(text=f"缓存: {stats['total_entries']}个文件, {stats['total_size_mb']:.1f}MB")
-            row.operator("ssmt.clear_preprocess_cache", text="清理缓存", icon='TRASH')
         
         context = bpy.context  # 直接使用 bpy.context 获取完整上下文
         if len(context.selected_objects) != 0:

@@ -10,9 +10,8 @@ from ..utils.json_utils import *
 from ..utils.timer_utils import *
 
 from .draw_call_model import DrawCallModel
-from ..base.component_model import ComponentModel
 from .d3d11 import D3D11GameType
-from ..base.m_draw_indexed import M_DrawIndexed
+from ..common.draw_call_model import M_DrawIndexed
 
 from ..config.main_config import *
 from ..config.import_config import ImportConfig
@@ -21,6 +20,10 @@ from ..blueprint.blueprint_model import BluePrintModel
 
 from ..helper.buffer_export_helper import BufferExportHelper
 from ..helper.obj_buffer_helper import ObjBufferHelper
+
+class ComponentModel:
+
+    pass
 
 class DrawIBModel:
     '''

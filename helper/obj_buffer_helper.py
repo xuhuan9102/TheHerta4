@@ -2,7 +2,6 @@ import collections
 import copy
 import math
 from ..common.d3d11 import D3D11GameType
-from ..common.fatal import Fatal
 from ..common.draw_call_model import DrawCallModel
 
 
@@ -10,6 +9,7 @@ from ..utils.format_utils import FormatUtils
 from ..utils.vertexgroup_utils import VertexGroupUtils
 from ..utils.timer_utils import TimerUtils
 from ..utils.tbn_codec import TBNCodec
+from ..utils.ssmt_error_utils import SSMTErrorUtils
 
 from ..config.main_config import GlobalConfig, LogicName
 from ..config.properties_generate_mod import Properties_GenerateMod
@@ -54,7 +54,7 @@ class ObjBufferHelper:
             # Check if BLENDINDICES exists
             if d3d11_element_name.startswith("BLENDINDICES"):
                 if not obj.vertex_groups:
-                    raise Fatal("your object [" +obj.name + "] need at leat one valid Vertex Group, Please check if your model's Vertex Group is correct.")
+                    raise SSMTErrorUtils.Fatal("your object [" +obj.name + "] need at leat one valid Vertex Group, Please check if your model's Vertex Group is correct.")
 
     @staticmethod
     def get_obj_data_model_list_by_draw_ib(ordered_draw_obj_data_model_list:list[DrawCallModel], draw_ib:str):
@@ -508,7 +508,7 @@ class ObjBufferHelper:
                 # 创建一个与 blendindices_0 形状相同的全0数组，保持相同的数据类型
                 blendindices = numpy.zeros_like(blendindices_0)
             else:
-                raise Fatal("Cannot find any valid BLENDINDICES data in this model, Please check if your model's Vertex Group is correct.")
+                SSMTErrorUtils.raise_fatal("Cannot find any valid BLENDINDICES data in this model, Please check if your model's Vertex Group is correct.")
         # print(len(blendindices))
         if d3d11_element.Format == "R32G32B32A32_SINT":
             return blendindices
@@ -556,7 +556,7 @@ class ObjBufferHelper:
             # print("WWMI R16_UINT特殊处理")
         else:
             # print(blendindices.shape)
-            raise Fatal("未知的BLENDINDICES格式")
+            SSMTErrorUtils.raise_fatal("未知的BLENDINDICES格式")
 
     @staticmethod
     def _parse_blendweight(blendweights_dict, d3d11_element):
@@ -568,7 +568,7 @@ class ObjBufferHelper:
                 # 创建一个与 blendweights_0 形状相同的全0数组，保持相同的数据类型
                 blendweights = numpy.zeros_like(blendweights_0)
             else:
-                raise Fatal("Cannot find any valid BLENDWEIGHT data in this model, Please check if your model's Vertex Group is correct.")
+                SSMTErrorUtils.raise_fatal("Cannot find any valid BLENDWEIGHT data in this model, Please check if your model's Vertex Group is correct.")
         # print(len(blendweights))
         if d3d11_element.Format == "R32G32B32A32_FLOAT":
             return blendweights
@@ -594,7 +594,7 @@ class ObjBufferHelper:
 
         else:
             print(blendweights.shape)
-            raise Fatal("未知的BLENDWEIGHTS格式")
+            SSMTErrorUtils.raise_fatal("未知的BLENDWEIGHTS格式")
 
     @staticmethod
     def parse_elementname_data_dict(mesh:bpy.types.Mesh, d3d11_game_type:D3D11GameType):
@@ -713,7 +713,7 @@ class ObjBufferHelper:
                 # Missing data is a fatal condition — better to raise so caller
                 # can diagnose than to silently write zeros for an expected
                 # element (which would corrupt downstream buffers).
-                raise Fatal(f"Missing element data for '{d3d11_element_name}' when packing vertex ndarray")
+                SSMTErrorUtils.raise_fatal(f"Missing element data for '{d3d11_element_name}' when packing vertex ndarray")
             print("尝试赋值 Element: " + d3d11_element_name)
             element_vertex_ndarray[d3d11_element_name] = data
         
@@ -808,7 +808,7 @@ class ObjBufferHelper:
         # vertex set (useful for debugging or further processing).
         # Ensure the byte width matches the dtype itemsize.
         if unique_rows.shape[1] != dtype.itemsize:
-            raise Fatal(f"Unique row byte-size ({unique_rows.shape[1]}) does not match structured dtype itemsize ({dtype.itemsize})")
+            SSMTErrorUtils.raise_fatal(f"Unique row byte-size ({unique_rows.shape[1]}) does not match structured dtype itemsize ({dtype.itemsize})")
 
         n_unique = unique_rows.shape[0]
         unique_rows_contig = numpy.ascontiguousarray(unique_rows)

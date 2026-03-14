@@ -18,9 +18,8 @@ from ..utils.format_utils import FormatUtils
 
 from .extracted_object import ExtractedObject, ExtractedObjectHelper
 from .draw_call_model import DrawCallModel
-from ..base.component_model import ComponentModel
 from .d3d11 import D3D11GameType
-from ..base.m_draw_indexed import M_DrawIndexed
+from ..common.draw_call_model import M_DrawIndexed
 
 from ..config.properties_wwmi import Properties_WWMI
 from ..config.import_config import ImportConfig
@@ -32,7 +31,8 @@ from ..helper.buffer_export_helper import BufferExportHelper
 
 from ..helper.obj_buffer_helper import ObjBufferHelper
 
-
+class ComponentModel:
+    pass
 
 @dataclass
 class DrawIBModelWWMI:

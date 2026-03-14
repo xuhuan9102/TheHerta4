@@ -13,7 +13,7 @@ from .draw_call_model import DrawCallModel
 from .workspace_helper import WorkSpaceHelper
 from ..utils.format_utils import Fatal
 from ..blueprint.blueprint_export_helper import BlueprintExportHelper
-from ..base.m_draw_indexed import M_DrawIndexed, M_DrawIndexedInstanced
+from ..common.draw_call_model import M_DrawIndexed, M_DrawIndexedInstanced
 
 class M_IniHelper:
     @classmethod

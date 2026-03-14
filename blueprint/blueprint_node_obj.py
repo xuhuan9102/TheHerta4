@@ -391,9 +391,8 @@ class SSMTNode_Result_Output(SSMTNodeBase):
         self.width = 400
 
     def draw_buttons(self, context, layout):
-        op = layout.operator("ssmt.generate_mod_blueprint", text="Generate Mod", icon='EXPORT')
-        if hasattr(self, "id_data") and self.id_data:
-             op.node_tree_name = self.id_data.name
+        layout.operator("ssmt.generate_mod_blueprint", text="Generate Mod", icon='EXPORT')
+        
         
         layout.prop(context.scene.properties_generate_mod, "preview_export_only", text="配置表预导出 (仅生成INI)")
         
