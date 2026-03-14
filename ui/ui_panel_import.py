@@ -19,7 +19,6 @@ from ..utils.translate_utils import TR
 from ..config.main_config import GlobalConfig, LogicName
 
 from ..importer.mesh_importer import MeshImporter,MigotoBinaryFile
-from ..base.drawib_pair import DrawIBPair
 
 
 class Import3DMigotoRaw(bpy.types.Operator, ImportHelper):

@@ -5,7 +5,7 @@ import math
 from ..config.import_config import GlobalConfig
 from ..common.draw_ib_model_wwmi import DrawIBModelWWMI
 
-from ..base.m_global_key_counter import M_GlobalKeyCounter
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..blueprint.blueprint_model import BluePrintModel
 
 from ..common.m_ini_builder import M_IniBuilder,M_IniSection,M_SectionType
@@ -415,7 +415,7 @@ class ModModelWWMI:
             texture_override_component.append("$object_detected = 1")
 
             if len(self.branch_model.keyname_mkey_dict.keys()) != 0:
-                texture_override_component.append("$active" + str(M_GlobalKeyCounter.generated_mod_number) + " = 1")
+                texture_override_component.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
 
                 if Properties_GenerateMod.generate_branch_mod_gui():
                     texture_override_component.append("$ActiveCharacter = 1")
@@ -742,7 +742,7 @@ class ModModelWWMI:
             # 移动槽位贴图
             M_IniHelper.move_slot_style_textures(draw_ib_model=draw_ib_model)
 
-            M_GlobalKeyCounter.generated_mod_number = M_GlobalKeyCounter.generated_mod_number + 1
+            GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
 
             M_IniHelper.add_branch_key_sections(ini_builder=config_ini_builder,key_name_mkey_dict=self.branch_model.keyname_mkey_dict)
 

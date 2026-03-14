@@ -5,11 +5,11 @@ from .m_ini_builder import *
 from ..utils.json_utils import JsonUtils
 from ..config.main_config import GlobalConfig,LogicName
 from ..config.properties_generate_mod import Properties_GenerateMod
-from ..base.m_global_key_counter import M_GlobalKeyCounter
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
 
 from .draw_ib_model import DrawIBModel
 from ..base.m_key import M_Key
-from ..base.obj_data_model import ObjDataModel
+from ..base.draw_call_model import DrawCallModel
 from .workspace_helper import WorkSpaceHelper
 from ..utils.format_utils import Fatal
 from ..blueprint.blueprint_export_helper import BlueprintExportHelper
@@ -20,7 +20,7 @@ class M_IniHelper:
     def get_drawindexed_str_list(cls,ordered_draw_obj_model_list) -> list[str]:
         # 传统的使用DrawIndexed方式调用这个
         # 在输出之前，我们需要根据condition对obj_model进行分组
-        condition_str_obj_model_list_dict:dict[str,list[ObjDataModel]] = {}
+        condition_str_obj_model_list_dict:dict[str,list[DrawCallModel]] = {}
         for obj_model in ordered_draw_obj_model_list:
 
             obj_model_list = condition_str_obj_model_list_dict.get(obj_model.condition.condition_str,[])
@@ -50,7 +50,7 @@ class M_IniHelper:
     def get_drawindexed_instanced_str_list(cls,ordered_draw_obj_model_list) -> list[str]:
         # 使用DrawIndexedInstanced方式调用这个
         # 在输出之前，我们需要根据condition对obj_model进行分组
-        condition_str_obj_model_list_dict:dict[str,list[ObjDataModel]] = {}
+        condition_str_obj_model_list_dict:dict[str,list[DrawCallModel]] = {}
         for obj_model in ordered_draw_obj_model_list:
 
             obj_model_list = condition_str_obj_model_list_dict.get(obj_model.condition.condition_str,[])
@@ -359,7 +359,7 @@ class M_IniHelper:
             constants_section = M_IniSection(M_SectionType.Constants)
             constants_section.SectionName = "Constants"
 
-            for i in range(M_GlobalKeyCounter.generated_mod_number):
+            for i in range(GlobalKeyCountHelper.generated_mod_number):
                 constants_section.append("global $active" + str(i))
 
             for mkey in key_name_mkey_dict.values():
@@ -373,7 +373,7 @@ class M_IniHelper:
             present_section = M_IniSection(M_SectionType.Present)
             present_section.SectionName = "Present"
 
-            for i in range(M_GlobalKeyCounter.generated_mod_number):
+            for i in range(GlobalKeyCountHelper.generated_mod_number):
                 present_section.append("post $active" + str(i) + " = 0")
             ini_builder.append_section(present_section)
         

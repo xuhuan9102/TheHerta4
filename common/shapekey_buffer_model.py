@@ -5,7 +5,7 @@ import bpy
 from dataclasses import dataclass, field, InitVar
 from typing import Dict
 
-from ..base.d3d11_gametype import D3D11GameType
+from ..base.d3d11 import D3D11GameType
 from ..helper.obj_buffer_helper import ObjBufferHelper
 
 @dataclass

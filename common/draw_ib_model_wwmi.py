@@ -17,9 +17,9 @@ from ..utils.vertexgroup_utils import VertexGroupUtils
 from ..utils.format_utils import FormatUtils
 
 from .extracted_object import ExtractedObject, ExtractedObjectHelper
-from ..base.obj_data_model import ObjDataModel
+from ..base.draw_call_model import DrawCallModel
 from ..base.component_model import ComponentModel
-from ..base.d3d11_gametype import D3D11GameType
+from ..base.d3d11 import D3D11GameType
 from ..base.m_draw_indexed import M_DrawIndexed
 
 from ..config.properties_wwmi import Properties_WWMI
@@ -52,7 +52,7 @@ class DrawIBModelWWMI:
     extracted_object: ExtractedObject = field(init=False)
 
     # 仅类的内部使用
-    _component_model_list: list[ObjDataModel] = field(init=False,default_factory=list)
+    _component_model_list: list[DrawCallModel] = field(init=False,default_factory=list)
     
     component_name_component_model_dict: dict[str, ComponentModel] = field(init=False,default_factory=dict)
 
@@ -86,7 +86,7 @@ class DrawIBModelWWMI:
         self.extracted_object:ExtractedObject = ExtractedObjectHelper.read_metadata(GlobalConfig.path_extract_gametype_folder(draw_ib=self.draw_ib,gametype_name=self.d3d11GameType.GameTypeName)  + "Metadata.json")
 
         # 这里是要得到每个Component对应的obj_data_model列表
-        self.ordered_obj_data_model_list:list[ObjDataModel] = ObjBufferHelper.get_obj_data_model_list_by_draw_ib(
+        self.ordered_obj_data_model_list:list[DrawCallModel] = ObjBufferHelper.get_obj_data_model_list_by_draw_ib(
             ordered_draw_obj_data_model_list=self.branch_model.ordered_draw_obj_data_model_list,
             draw_ib=self.draw_ib,
         )

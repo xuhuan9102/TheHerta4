@@ -8,7 +8,7 @@ from ..config.properties_generate_mod import Properties_GenerateMod
 
 from ..common.draw_ib_model import DrawIBModel
 
-from ..base.m_global_key_counter import M_GlobalKeyCounter
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..blueprint.blueprint_model import BluePrintModel
 
 from ..common.m_ini_builder import M_IniBuilder,M_IniSection,M_SectionType
@@ -98,7 +98,7 @@ class ModModelGIMI:
             # 分支架构，如果是Position则需提供激活变量
             if category_name == d3d11_game_type.CategoryDrawCategoryDict["Position"]:
                 if len(self.branch_model.keyname_mkey_dict.keys()) != 0:
-                    texture_override_vb_section.append("$active" + str(M_GlobalKeyCounter.generated_mod_number) + " = 1")
+                    texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
 
                     if Properties_GenerateMod.generate_branch_mod_gui():
                         texture_override_vb_section.append("$ActiveCharacter = 1")
@@ -313,7 +313,7 @@ class ModModelGIMI:
 
             M_IniHelper.move_slot_style_textures(draw_ib_model=draw_ib_model)
 
-            M_GlobalKeyCounter.generated_mod_number = M_GlobalKeyCounter.generated_mod_number + 1
+            GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
 
         M_IniHelper.add_branch_key_sections(ini_builder=config_ini_builder,key_name_mkey_dict=self.branch_model.keyname_mkey_dict)
         M_IniHelper.add_shapekey_ini_sections(ini_builder=config_ini_builder,drawib_drawibmodel_dict=self.drawib_drawibmodel_dict)

@@ -1,6 +1,6 @@
 
 
-class M_GlobalKeyCounter:
+class GlobalKeyCountHelper:
     '''
     在新版的生成Mod架构中用于统计一个Mod中全局的按键索引
     以及当前生成Mod的数量，每个DrawIB都是一个Mod。

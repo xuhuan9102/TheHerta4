@@ -1,9 +1,9 @@
 import collections
 import copy
 import math
-from ..base.d3d11_gametype import D3D11GameType
+from ..base.d3d11 import D3D11GameType
 from ..base.fatal import Fatal
-from ..base.obj_data_model import ObjDataModel
+from ..base.draw_call_model import DrawCallModel
 
 
 from ..utils.format_utils import FormatUtils
@@ -57,13 +57,13 @@ class ObjBufferHelper:
                     raise Fatal("your object [" +obj.name + "] need at leat one valid Vertex Group, Please check if your model's Vertex Group is correct.")
 
     @staticmethod
-    def get_obj_data_model_list_by_draw_ib(ordered_draw_obj_data_model_list:list[ObjDataModel], draw_ib:str):
+    def get_obj_data_model_list_by_draw_ib(ordered_draw_obj_data_model_list:list[DrawCallModel], draw_ib:str):
         '''
         只返回指定draw_ib的obj列表
         这个方法存在的目的是为了兼容鸣潮的MergedObj
         这里只是根据IB获取一下对应的obj列表,不需要额外计算其它东西,因为WWMI的逻辑是融合后计算。
         '''
-        final_ordered_draw_obj_model_list:list[ObjDataModel] = []
+        final_ordered_draw_obj_model_list:list[DrawCallModel] = []
 
         for obj_model in ordered_draw_obj_data_model_list:
             # 只统计给定DrawIB的数据
@@ -75,7 +75,7 @@ class ObjBufferHelper:
         return final_ordered_draw_obj_model_list
 
     @staticmethod
-    def get_buffered_obj_data_model_list_by_draw_ib_and_game_type(ordered_draw_obj_data_model_list:list[ObjDataModel], draw_ib:str, d3d11_game_type:D3D11GameType):
+    def get_buffered_obj_data_model_list_by_draw_ib_and_game_type(ordered_draw_obj_data_model_list:list[DrawCallModel], draw_ib:str, d3d11_game_type:D3D11GameType):
         '''
         调用这个方法的时候才转换Buffer，不调用的话不转换
         (1) 读取obj的category_buffer
@@ -92,7 +92,7 @@ class ObjBufferHelper:
         __obj_name_category_buffer_list_dict:dict[str,list] = {}
         __obj_name_shape_key_buffer_dict:dict[str,dict] = {}
 
-        obj_name_obj_model_cache_dict:dict[str,ObjDataModel] = {}
+        obj_name_obj_model_cache_dict:dict[str,DrawCallModel] = {}
 
         for obj_model in ordered_draw_obj_data_model_list:
             # 只统计给定DrawIB的数据
@@ -204,7 +204,7 @@ class ObjBufferHelper:
 
                 obj_name_obj_model_cache_dict[obj_name] = obj_buffer_model
 
-        final_ordered_draw_obj_model_list:list[ObjDataModel] = []
+        final_ordered_draw_obj_model_list:list[DrawCallModel] = []
 
         print(__obj_name_ib_dict.keys())
 

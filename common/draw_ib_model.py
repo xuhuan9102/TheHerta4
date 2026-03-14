@@ -9,9 +9,9 @@ from ..utils.collection_utils import *
 from ..utils.json_utils import *
 from ..utils.timer_utils import *
 
-from ..base.obj_data_model import ObjDataModel
+from ..base.draw_call_model import DrawCallModel
 from ..base.component_model import ComponentModel
-from ..base.d3d11_gametype import D3D11GameType
+from ..base.d3d11 import D3D11GameType
 from ..base.m_draw_indexed import M_DrawIndexed
 
 from ..config.main_config import *
@@ -47,7 +47,7 @@ class DrawIBModel:
         这里是要得到每个Component对应的obj_data_model列表
         在这一步之前，需要对当前DrawIB的所有的obj_data_model填充ib和category_buf_dict属性
         '''
-        self.draw_ib_ordered_obj_data_model_list:list[ObjDataModel] = ObjBufferHelper.get_buffered_obj_data_model_list_by_draw_ib_and_game_type(
+        self.draw_ib_ordered_obj_data_model_list:list[DrawCallModel] = ObjBufferHelper.get_buffered_obj_data_model_list_by_draw_ib_and_game_type(
             ordered_draw_obj_data_model_list=branch_model.ordered_draw_obj_data_model_list,
             draw_ib=draw_ib,
             d3d11_game_type=self.import_config.d3d11GameType,
@@ -98,7 +98,7 @@ class DrawIBModel:
 
     def parse_categoryname_bytelist_dict(self):
         # 1. 收集所有对象和唯一的形态键名称
-        all_ordered_objects: list[ObjDataModel] = []
+        all_ordered_objects: list[DrawCallModel] = []
         unique_shape_key_names = set()
         processed_obj_names = set()
         
@@ -213,7 +213,7 @@ class DrawIBModel:
             component_ib_buffer = []
             component_draw_offset = 0
             
-            new_final_ordered_draw_obj_model_list:list[ObjDataModel] = [] 
+            new_final_ordered_draw_obj_model_list:list[DrawCallModel] = [] 
 
             for obj_model in component_model.final_ordered_draw_obj_model_list:
                 obj_name = obj_model.obj_name

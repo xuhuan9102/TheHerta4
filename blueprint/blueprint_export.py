@@ -9,7 +9,7 @@ from ..utils.performance_stats import start_operation, end_operation, print_perf
 from ..utils.preprocess_cache import get_cache_manager, FingerprintCalculator, reset_cache_manager
 
 from ..config.main_config import GlobalConfig, LogicName
-from ..base.m_global_key_counter import M_GlobalKeyCounter
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
 
 from ..config.properties_generate_mod import Properties_GenerateMod
 from ..config.properties_import_model import Properties_ImportModel
@@ -197,7 +197,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 # 更新导出路径
                 BlueprintExportHelper.update_export_path(export_index)
                 
-                M_GlobalKeyCounter.initialize()
+                GlobalKeyCountHelper.initialize()
 
                 # 调用对应游戏的生成Mod逻辑
                 start_operation(f"GenerateMod_Export_{export_index}")

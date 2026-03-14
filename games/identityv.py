@@ -4,7 +4,7 @@ import math
 from ..config.main_config import GlobalConfig,LogicName
 from ..common.draw_ib_model import DrawIBModel
 
-from ..base.m_global_key_counter import M_GlobalKeyCounter
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..blueprint.blueprint_model import BluePrintModel
 
 from ..common.m_ini_builder import M_IniBuilder,M_IniSection,M_SectionType
@@ -81,7 +81,7 @@ class ModModelIdentityV:
             # 分支架构，如果是Position则需提供激活变量
             if category_name == d3d11GameType.CategoryDrawCategoryDict["Position"]:
                 if len(self.branch_model.keyname_mkey_dict.values()) != 0:
-                    texture_override_vb_section.append("$active" + str(M_GlobalKeyCounter.generated_mod_number) + " = 1")
+                    texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
 
                     if Properties_GenerateMod.generate_branch_mod_gui():
                         texture_override_vb_section.append("$ActiveCharacter = 1")
@@ -117,7 +117,7 @@ class ModModelIdentityV:
             texture_override_ib_section.append("match_first_index = " + match_first_index)
 
             if self.vlr_filter_index_indent != "":
-                texture_override_ib_section.append("if vb0 == " + str(3000 + M_GlobalKeyCounter.generated_mod_number))
+                texture_override_ib_section.append("if vb0 == " + str(3000 + GlobalKeyCountHelper.generated_mod_number))
 
             texture_override_ib_section.append(self.vlr_filter_index_indent + "handling = skip")
 
@@ -302,7 +302,7 @@ class ModModelIdentityV:
                 filterindex_indent_prefix = ""
                 if category_name == d3d11GameType.CategoryDrawCategoryDict["Texcoord"]:
                     if self.vlr_filter_index_indent != "":
-                        texture_override_vb_section.append("if vb0 == " + str(3000 + M_GlobalKeyCounter.generated_mod_number))
+                        texture_override_vb_section.append("if vb0 == " + str(3000 + GlobalKeyCountHelper.generated_mod_number))
 
                 # 遍历获取所有在当前分类hash下进行替换的分类，并添加对应的资源替换
                 for original_category_name, draw_category_name in d3d11GameType.CategoryDrawCategoryDict.items():
@@ -333,7 +333,7 @@ class ModModelIdentityV:
                 # 分支架构，如果是Position则需提供激活变量
                 if category_name == d3d11GameType.CategoryDrawCategoryDict["Position"]:
                     if draw_ib_model.key_number != 0:
-                        texture_override_vb_section.append("$active" + str(M_GlobalKeyCounter.generated_mod_number) + " = 1")
+                        texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
 
                 texture_override_vb_section.new_line()
             config_ini_builder.append_section(texture_override_vb_section)
@@ -353,7 +353,7 @@ class ModModelIdentityV:
 
             M_IniHelper.move_slot_style_textures(draw_ib_model=draw_ib_model)
 
-            M_GlobalKeyCounter.generated_mod_number = M_GlobalKeyCounter.generated_mod_number + 1
+            GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
 
         M_IniHelper.add_branch_key_sections(ini_builder=config_ini_builder,key_name_mkey_dict=self.branch_model.keyname_mkey_dict)
         M_IniHelper.add_shapekey_ini_sections(ini_builder=config_ini_builder,drawib_drawibmodel_dict=self.drawib_drawibmodel_dict)

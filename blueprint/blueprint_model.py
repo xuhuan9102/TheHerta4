@@ -13,9 +13,9 @@ from ..utils.tips_utils import TipUtils
 
 from ..base.m_key import M_Key
 from ..base.m_condition import M_Condition
-from ..base.d3d11_gametype import D3D11GameType
-from ..base.obj_data_model import ObjDataModel
-from ..base.m_global_key_counter import M_GlobalKeyCounter
+from ..base.d3d11 import D3D11GameType
+from ..base.draw_call_model import DrawCallModel
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
 
 from ..common.obj_buffer_model_unity import ObjBufferModelUnity
 
@@ -32,7 +32,7 @@ class BluePrintModel:
         self.keyname_mkey_dict:dict[str,M_Key] = {} 
 
         # 全局obj_model列表，主要是obj_model里装了每个obj的生效条件。
-        self.ordered_draw_obj_data_model_list:list[ObjDataModel] = [] 
+        self.ordered_draw_obj_data_model_list:list[DrawCallModel] = [] 
 
         # 从输出节点开始递归解析所有的节点
         tree = BlueprintExportHelper.get_current_blueprint_tree()
@@ -60,7 +60,7 @@ class BluePrintModel:
             # 如果是按键开关节点，则添加一个Key，更新全局Key字典，更新Key列表并传递解析下去
             m_key = M_Key()
             current_add_key_index = len(self.keyname_mkey_dict.keys())
-            m_key.key_name = "$swapkey" + str(M_GlobalKeyCounter.global_key_index)
+            m_key.key_name = "$swapkey" + str(GlobalKeyCountHelper.global_key_index)
 
             m_key.value_list = [0,1]
 
@@ -80,7 +80,7 @@ class BluePrintModel:
             self.keyname_mkey_dict[m_key.key_name] = m_key
 
             if len(self.keyname_mkey_dict.keys()) > current_add_key_index:
-                M_GlobalKeyCounter.global_key_index = M_GlobalKeyCounter.global_key_index + 1
+                GlobalKeyCountHelper.global_key_index = GlobalKeyCountHelper.global_key_index + 1
             
             # 创建的key要加入chain_key_list传递下去
             # 因为传递解析下去的话，要让这个key生效，而又因为它是按键开关key，所以value为1生效，所以tmp_value设为1
@@ -127,7 +127,7 @@ class BluePrintModel:
                 # 如果有 > 1 个有效分支端口，则必须创建 Key，哪怕某些端口是空的（代表空分支）
                 m_key = M_Key()
                 current_add_key_index = len(self.keyname_mkey_dict.keys())
-                m_key.key_name = "$swapkey" + str(M_GlobalKeyCounter.global_key_index)
+                m_key.key_name = "$swapkey" + str(GlobalKeyCountHelper.global_key_index)
 
                 # 值列表就是分支索引的列表 [0, 1, 2, ...]
                 m_key.value_list = list(range(len(valid_input_sockets)))
@@ -143,7 +143,7 @@ class BluePrintModel:
 
                 # 更新全局key索引
                 if len(self.keyname_mkey_dict.keys()) > current_add_key_index:
-                    M_GlobalKeyCounter.global_key_index = M_GlobalKeyCounter.global_key_index + 1
+                    GlobalKeyCountHelper.global_key_index = GlobalKeyCountHelper.global_key_index + 1
 
                 # 逐个处理每个分支节点（包括空分支）
                 key_tmp_value = 0
@@ -174,7 +174,7 @@ class BluePrintModel:
 
 
         elif unknown_node.bl_idname == SSMTNode_Object_Info.bl_idname:
-            obj_model = ObjDataModel(obj_name=unknown_node.object_name)
+            obj_model = DrawCallModel(obj_name=unknown_node.object_name)
             
             if hasattr(unknown_node, 'original_object_name') and unknown_node.original_object_name:
                 obj_model.display_name = unknown_node.original_object_name
