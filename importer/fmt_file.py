@@ -1,5 +1,5 @@
 from ..common.d3d11.d3d11_gametype import D3D11Element
-from ..utils.format_utils import FormatUtils
+from ..base.utils.format_utils import FormatUtils
 import numpy
 
 

@@ -6,14 +6,14 @@ from bpy.types import Operator, Panel, PropertyGroup, UIList
 from bpy_extras.io_utils import ImportHelper
 import bpy.utils.previews
 
-from ..utils.obj_utils import ObjUtils
+from ..base.utils.obj_utils import ObjUtils
 
-from ..import.mesh_importer import MigotoBinaryFile, MeshImporter
-from ..config.main_config import GlobalConfig
+from ..importer.mesh_importer import MigotoBinaryFile, MeshImporter
+from ..base.config.main_config import GlobalConfig
 
-from ..utils.translate_utils import TR
-from ..utils.json_utils import JsonUtils
-from ..utils.collection_utils import CollectionUtils,CollectionColor
+from ..base.utils.translate_utils import TR
+from ..base.utils.json_utils import JsonUtils
+from ..base.utils.collection_utils import CollectionUtils,CollectionColor
 
 # 存储预览图集合
 preview_collections = {}

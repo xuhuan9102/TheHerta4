@@ -19,7 +19,7 @@ from .common.blueprint_node import blueprint_import
 from .common.blueprint_node import blueprint_node_base
 from .common.blueprint_node import blueprint_node_menu
 from .common.blueprint_node import blueprint_node_shapekey
-from .export import blueprint_export
+from .exporter import blueprint_export
 
 # 自动更新功能
 from . import addon_updater_ops

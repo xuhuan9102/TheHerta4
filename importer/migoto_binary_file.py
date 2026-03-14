@@ -1,8 +1,8 @@
 from .fmt_file import FMTFile
 
-from ..utils.format_utils import FormatUtils
-from ..utils.format_utils import Fatal
-from ..utils.log_utils import LOG
+from ..base.utils.format_utils import FormatUtils
+from ..base.utils.format_utils import Fatal
+from ..base.utils.log_utils import LOG
 
 import os
 import numpy

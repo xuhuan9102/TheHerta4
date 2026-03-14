@@ -1,13 +1,13 @@
 import os
 import bpy
 
-from ..utils.json_utils import JsonUtils
-from ..utils.config_utils import ConfigUtils
-from ..utils.collection_utils import CollectionColor, CollectionUtils
-from ..utils.translate_utils import TR
-from ..utils.timer_utils import TimerUtils
+from ..base.utils.json_utils import JsonUtils
+from ..base.utils.config_utils import ConfigUtils
+from ..base.utils.collection_utils import CollectionColor, CollectionUtils
+from ..base.utils.translate_utils import TR
+from ..base.utils.timer_utils import TimerUtils
 
-from ..config.main_config import GlobalConfig, LogicName
+from ..base.config.main_config import GlobalConfig, LogicName
 
 from .mesh_importer import MeshImporter,MigotoBinaryFile
 

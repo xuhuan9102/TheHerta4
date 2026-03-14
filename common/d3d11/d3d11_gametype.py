@@ -8,7 +8,7 @@ import numpy
 
 from .d3d11_element import D3D11Element
 
-from ...utils.format_utils import FormatUtils
+from ...base.utils.format_utils import FormatUtils
 from dataclasses import dataclass, field
 from typing import Dict
 

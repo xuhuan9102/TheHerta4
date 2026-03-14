@@ -16,7 +16,7 @@ from ..utils.log_utils import LOG
 from ..utils.vertexgroup_utils import VertexGroupUtils
 from ..utils.format_utils import FormatUtils
 
-from .extracted_object import ExtractedObject, ExtractedObjectHelper
+from ..base.wwmi_config.extracted_object import ExtractedObject, ExtractedObjectHelper
 from .draw_call_model import DrawCallModel
 from .d3d11 import D3D11GameType
 from ..common.draw_call_model import M_DrawIndexed

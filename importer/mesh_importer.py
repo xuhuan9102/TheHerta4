@@ -6,22 +6,22 @@ import numpy
 import itertools
 import math
 
-from ..utils.timer_utils import TimerUtils
-from ..utils.translate_utils import TR
-from ..utils.format_utils import Fatal,FormatUtils
-from ..utils.texture_utils import TextureUtils
-from ..utils.mesh_utils import MeshUtils
-from ..utils.log_utils import LOG
-from ..utils.vertexgroup_utils import VertexGroupUtils
-from ..utils.obj_utils import ObjUtils
-from ..utils.tbn_codec import TBNCodec
+from ..base.utils.timer_utils import TimerUtils
+from ..base.utils.translate_utils import TR
+from ..base.utils.format_utils import Fatal,FormatUtils
+from ..base.utils.texture_utils import TextureUtils
+from ..base.utils.mesh_utils import MeshUtils
+from ..base.utils.log_utils import LOG
+from ..base.utils.vertexgroup_utils import VertexGroupUtils
+from ..base.utils.obj_utils import ObjUtils
+from ..base.utils.tbn_codec import TBNCodec
 
-from ..config.main_config import GlobalConfig, LogicName
-from ..config.properties_import_model import Properties_ImportModel
-from ..config.properties_wwmi import Properties_WWMI
+from ..base.config.main_config import GlobalConfig, LogicName
+from ..base.config.properties_import_model import Properties_ImportModel
+from ..base.config.properties_wwmi import Properties_WWMI
 
 from ..common.d3d11.d3d11_gametype import D3D11Element
-from ..common.extracted_object import ExtractedObjectHelper
+from ..base.wwmi_config.extracted_object import ExtractedObjectHelper
 
 # 用于解决 AttributeError: 'IMPORT_MESH_OT_migoto_raw_buffers_mmt' object has no attribute 'filepath'
 from bpy_extras.io_utils import unpack_list, axis_conversion
