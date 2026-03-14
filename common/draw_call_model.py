@@ -207,6 +207,10 @@ class DrawCallModel:
         self.first_index = obj_rule_name.first_index
         self.obj_alias_name = obj_rule_name.obj_alias_name
         self.display_name = self.obj_name
+    
+    def get_unique_str(self) -> str:
+        # 这个唯一标识符是根据DrawIB、FirstIndex和IndexCount组成的字符串，作为一个整体来标识一个DrawCall
+        return self.draw_ib + "_" + self.first_index + "_" + self.index_count
         
        
        

@@ -30,9 +30,7 @@ class PanelBasicInformation(bpy.types.Panel):
         self.bl_label =  "TheHerta4 V" +  PluginConfig.get_version_string() + "  SSMT4 V" + str(GlobalConfig.ssmt_version_number)
         layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.dbmtlocation)
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)
-
-
-        layout.label(text=TR.translate("当前执行逻辑: ") + GlobalConfig.logic_name)
+        layout.label(text=TR.translate("当前游戏预设: ") + GlobalConfig.logic_name)
         layout.label(text=TR.translate("当前工作空间: ") + GlobalConfig.workspacename)
 
         if PluginConfig.get_min_ssmt_version() > GlobalConfig.ssmt_version_number:
@@ -43,10 +41,6 @@ class PanelBasicInformation(bpy.types.Panel):
 
         layout.prop(context.scene.properties_import_model,"use_mirror_workflow",text="使用非镜像工作流")
         
-        
-        layout.prop(context.scene.properties_import_model,"use_preprocess_cache",text="启用预处理缓存")
-        
-        context = bpy.context  # 直接使用 bpy.context 获取完整上下文
         if len(context.selected_objects) != 0:
             obj = context.selected_objects[0]
 
@@ -62,9 +56,6 @@ class PanelBasicInformation(bpy.types.Panel):
         # SSMT蓝图
         layout.operator("theherta3.open_persistent_blueprint", icon='NODETREE')
         
-        # 快速局部导出
-        layout.operator("ssmt.quick_partial_export", icon='EXPORT')
-
         # 导入 ib vb fmt格式文件
         layout.operator("import_mesh.migoto_raw_buffers_mmt",icon='IMPORT')
 
@@ -77,8 +68,6 @@ class PanelBasicInformation(bpy.types.Panel):
 
         # 决定导入时是否调用法线贴图
         layout.prop(context.scene.properties_import_model, "use_normal_map")
-
-        
 
 
 def register():

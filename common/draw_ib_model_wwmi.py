@@ -26,7 +26,7 @@ from ..config.import_config import ImportConfig
 
 from .obj_element_model import ObjElementModel
 from .obj_buffer_model_wwmi import ObjBufferModelWWMI
-from ..blueprint.blueprint_model import BluePrintModel
+from .blueprint_model import BluePrintModel
 from ..helper.buffer_export_helper import BufferExportHelper
 
 from ..helper.obj_buffer_helper import ObjBufferHelper

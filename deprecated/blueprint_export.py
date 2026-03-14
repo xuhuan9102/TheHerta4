@@ -15,6 +15,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
 
     def execute(self, context):
         TimerUtils.Start("GenerateMod Mod")
+
+        
         if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
             from ..games.wwmi import ModModelWWMI
             migoto_mod_model = ModModelWWMI()

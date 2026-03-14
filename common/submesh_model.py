@@ -32,11 +32,16 @@ TODO
 @dataclass
 class SubMeshModel:
 
-    obj_data_model_list:list[DrawCallModel] = field(default_factory=list)
+    drawcall_model_list:list[DrawCallModel] = field(default_factory=list)
 
     draw_ib:str = field(init=False, default="")
     first_index:int = field(init=False, default=-1)
     index_count:int = field(init=False, default=-1)
 
     def __post_init__(self):
-        pass
+
+        # 因为列表里的每个DrawCallModel的draw_ib,first_index,index_count都是一样的，所以直接取第一个就行了
+        if len(self.drawcall_model_list) > 0:
+            self.draw_ib = self.drawcall_model_list[0].draw_ib
+            self.first_index = self.drawcall_model_list[0].first_index
+            self.index_count = self.drawcall_model_list[0].index_count

@@ -10,9 +10,9 @@ from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from .draw_ib_model import DrawIBModel
 from .m_key import M_Key
 from .draw_call_model import DrawCallModel
-from .workspace_helper import WorkSpaceHelper
+from ..helper.workspace_helper import WorkSpaceHelper
 from ..utils.format_utils import Fatal
-from ..blueprint.blueprint_export_helper import BlueprintExportHelper
+from ..helper.blueprint_export_helper import BlueprintExportHelper
 from ..common.draw_call_model import M_DrawIndexed, M_DrawIndexedInstanced
 
 class M_IniHelper:

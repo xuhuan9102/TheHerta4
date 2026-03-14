@@ -86,7 +86,7 @@ class ObjBufferHelper:
         以及后续的在DrawIB层级对SubMesh层级的合并，也要考虑到
         '''
         # 延迟导入，避免 helper 与 blueprint 之间的潜在循环依赖
-        from ..blueprint.blueprint_export_helper import BlueprintExportHelper
+        from .blueprint_export_helper import BlueprintExportHelper
 
         __obj_name_ib_dict:dict[str,list] = {}
         __obj_name_category_buffer_list_dict:dict[str,list] = {}

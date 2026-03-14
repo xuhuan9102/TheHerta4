@@ -6,12 +6,12 @@ from .ui import ui_panel_model
 from .ui import ui_panel_sword
 from .ui import ui_panel_import
 from .ui import ui_panel_fast_texture
-from .blueprint import blueprint_node_obj
+from .blueprint_node import blueprint_node_obj
 from .ssmt_import import blueprint_import
 from .ssmt_export import blueprint_export
-from .blueprint import blueprint_node_base
-from .blueprint import blueprint_node_menu
-from .blueprint import blueprint_node_shapekey
+from .blueprint_node import blueprint_node_base
+from .blueprint_node import blueprint_node_menu
+from .blueprint_node import blueprint_node_shapekey
 
 # 自动更新功能
 from . import addon_updater_ops

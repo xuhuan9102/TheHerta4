@@ -18,7 +18,7 @@ from ..helper.obj_buffer_helper import ObjBufferHelper
 from ..utils.obj_utils import ObjUtils
 from .shapekey_buffer_model import ShapeKeyBufferModel
 
-from ..blueprint.blueprint_export_helper import BlueprintExportHelper
+from ..helper.blueprint_export_helper import BlueprintExportHelper
 
 @dataclass
 class ObjBufferModelUnity:
