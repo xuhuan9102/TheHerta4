@@ -7,8 +7,8 @@ from .ui import ui_panel_sword
 from .ui import ui_panel_import
 from .ui import ui_panel_fast_texture
 from .blueprint import blueprint_node_obj
-from .blueprint import blueprint_import
-from .blueprint import blueprint_export
+from .ssmt_import import blueprint_import
+from .ssmt_export import blueprint_export
 from .blueprint import blueprint_node_base
 from .blueprint import blueprint_node_menu
 from .blueprint import blueprint_node_shapekey

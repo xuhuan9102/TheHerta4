@@ -9,7 +9,7 @@ from ..utils.timer_utils import TimerUtils
 
 from ..config.main_config import GlobalConfig, LogicName
 
-from ..importer.mesh_importer import MeshImporter,MigotoBinaryFile
+from .mesh_importer import MeshImporter,MigotoBinaryFile
 
 
 
