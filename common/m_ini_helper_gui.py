@@ -5,8 +5,8 @@ import shutil
 from ..common.m_ini_builder import *
 from ..config.main_config import GlobalConfig
 from ..config.properties_generate_mod import Properties_GenerateMod
-from ..base.m_key import M_Key
-from ..base.draw_call_model import DrawCallModel
+from .m_key import M_Key
+from .draw_call_model import DrawCallModel
 
 class M_IniHelperGUI:
     @classmethod

@@ -11,7 +11,7 @@ from ..config.main_config import GlobalConfig, LogicName
 from ..config.properties_import_model import Properties_ImportModel
 from ..config.properties_generate_mod import Properties_GenerateMod
 
-from ..base.d3d11 import D3D11GameType
+from .d3d11 import D3D11GameType
 from .obj_element_model import ObjElementModel
 
 from ..helper.obj_buffer_helper import ObjBufferHelper

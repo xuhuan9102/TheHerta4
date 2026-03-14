@@ -9,9 +9,9 @@ from ..utils.collection_utils import *
 from ..utils.json_utils import *
 from ..utils.timer_utils import *
 
-from ..base.draw_call_model import DrawCallModel
+from .draw_call_model import DrawCallModel
 from ..base.component_model import ComponentModel
-from ..base.d3d11 import D3D11GameType
+from .d3d11 import D3D11GameType
 from ..base.m_draw_indexed import M_DrawIndexed
 
 from ..config.main_config import *

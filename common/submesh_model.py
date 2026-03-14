@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Dict
-from ..base.draw_call_model import DrawCallModel
+from .draw_call_model import DrawCallModel
 '''
 一般DrawIB索引缓冲区是由多个SubMesh子网格构成的
 每个Submesh分别具有不同的材质和内容

@@ -1,6 +1,6 @@
 import bpy
 from ..config.main_config import GlobalConfig
-from ..base.m_key import M_Key
+from ..common.m_key import M_Key
 
 class BlueprintExportHelper:
 

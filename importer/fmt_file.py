@@ -1,6 +1,7 @@
-from ..base.d3d11_element import D3D11Element
+from ..common.d3d11 import D3D11Element
 from ..utils.format_utils import FormatUtils
 import numpy
+
 
 class FMTFile:
     def __init__(self, fmt_file_path:str):

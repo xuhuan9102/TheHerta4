@@ -4,7 +4,7 @@ import bpy
 from dataclasses import dataclass, field
 
 
-from ..base.d3d11 import D3D11GameType
+from .d3d11 import D3D11GameType
 from .obj_element_model import ObjElementModel
 from ..utils.shapekey_utils import ShapeKeyUtils
 

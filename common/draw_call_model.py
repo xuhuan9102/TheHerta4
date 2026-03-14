@@ -1,4 +1,4 @@
-from .obj_rule_name import ObjRuleName
+from ..utils.ssmt_error_utils import SSMTErrorUtils
 
 from dataclasses import dataclass, field
 
@@ -161,18 +161,18 @@ class ObjRuleName:
             obj_name_split = obj_name_total_split[0].split("-")
             
             if len(obj_name_total_split) < 2:
-                raise Fatal("Obj名称解析错误: " + self.obj_name + "  不包含'.'分隔符\n" + self.objname_parse_error_tips)
+                SSMTErrorUtils.raise_fatal("Obj名称解析错误: " + self.obj_name + "  不包含'.'分隔符\n" + self.objname_parse_error_tips)
 
             self.obj_alias_name = ".".join(obj_name_total_split[1:]) if len(obj_name_total_split) > 1 else ""
 
             if len(obj_name_split) < 3:
-                raise Fatal("Obj名称解析错误: " + self.obj_name + "  '-'分隔符数量不足，至少需要2个\n" + self.objname_parse_error_tips)
+                SSMTErrorUtils.raise_fatal("Obj名称解析错误: " + self.obj_name + "  '-'分隔符数量不足，至少需要2个\n" + self.objname_parse_error_tips)
             else:
                 self.draw_ib = obj_name_split[0]
                 self.index_count = obj_name_split[1]
                 self.first_index = obj_name_split[2]
         else:
-            raise Fatal("Obj名称解析错误: " + self.obj_name + "  不包含'.'分隔符\n" + self.objname_parse_error_tips)
+            SSMTErrorUtils.raise_fatal("Obj名称解析错误: " + self.obj_name + "  不包含'.'分隔符\n" + self.objname_parse_error_tips)
 
 @dataclass
 class DrawCallModel:

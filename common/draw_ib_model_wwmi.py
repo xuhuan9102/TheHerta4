@@ -17,9 +17,9 @@ from ..utils.vertexgroup_utils import VertexGroupUtils
 from ..utils.format_utils import FormatUtils
 
 from .extracted_object import ExtractedObject, ExtractedObjectHelper
-from ..base.draw_call_model import DrawCallModel
+from .draw_call_model import DrawCallModel
 from ..base.component_model import ComponentModel
-from ..base.d3d11 import D3D11GameType
+from .d3d11 import D3D11GameType
 from ..base.m_draw_indexed import M_DrawIndexed
 
 from ..config.properties_wwmi import Properties_WWMI

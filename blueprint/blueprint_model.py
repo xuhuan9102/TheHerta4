@@ -11,10 +11,10 @@ from ..utils.collection_utils import CollectionUtils, CollectionColor
 from ..utils.config_utils import ConfigUtils
 from ..utils.tips_utils import TipUtils
 
-from ..base.m_key import M_Key
-from ..base.m_condition import M_Condition
-from ..base.d3d11 import D3D11GameType
-from ..base.draw_call_model import DrawCallModel
+from ..common.m_key import M_Key
+from ..common.draw_call_model import M_Condition
+from ..common.d3d11 import D3D11GameType
+from ..common.draw_call_model import DrawCallModel
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
 
 from ..common.obj_buffer_model_unity import ObjBufferModelUnity

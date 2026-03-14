@@ -5,7 +5,6 @@ from ..utils.translate_utils import TR
 from ..utils.command_utils import CommandUtils
 from ..utils.collection_utils import CollectionUtils
 from ..utils.obj_utils import ObjUtils
-from ..utils.performance_stats import start_operation, end_operation, print_performance_report, save_performance_report_to_editor, reset_performance_stats, set_performance_stats_enabled, is_performance_stats_enabled
 from ..utils.preprocess_cache import get_cache_manager, FingerprintCalculator, reset_cache_manager
 
 from ..config.main_config import GlobalConfig, LogicName
@@ -85,14 +84,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
 
     def execute(self, context):
         TimerUtils.Start("GenerateMod Mod")
-        
-        # 根据配置设置性能统计开关
-        set_performance_stats_enabled(Properties_GenerateMod.enable_performance_stats())
-        
-        # 重置性能统计
-        reset_performance_stats()
-        start_operation("GenerateMod_Total")
-        
+
         wm = context.window_manager
 
         target_tree_name = self.node_tree_name
@@ -119,14 +111,11 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             BlueprintExportHelper.forced_target_tree_name = None
 
         # 获取所有要导出的物体及其对应的节点/项目
-        start_operation("GetExportObjects")
         obj_node_mapping = self._get_export_objects_with_nodes()
         total_objects = len(obj_node_mapping)
-        end_operation("GetExportObjects")
         
         if total_objects == 0:
             self.report({'WARNING'}, "没有找到要导出的物体")
-            end_operation("GenerateMod_Total")
             return {'CANCELLED'}
         
         use_parallel = Properties_ImportModel.use_parallel_export()
@@ -146,11 +135,9 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             if use_parallel:
                 if not blend_file_saved:
                     self.report({'ERROR'}, "并行导出需要先保存项目文件")
-                    end_operation("GenerateMod_Total")
                     return {'CANCELLED'}
                 if blend_file_dirty:
                     self.report({'ERROR'}, "项目有未保存的修改，请先保存后再进行并行导出")
-                    end_operation("GenerateMod_Total")
                     return {'CANCELLED'}
             
             wm.progress_begin(0, 100)
@@ -161,18 +148,12 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             
             if use_parallel and blend_file_saved and not blend_file_dirty and total_objects >= 4:
                 print(f"[ParallelPreprocess] 启用并行预处理，物体数量: {total_objects}")
-                start_operation("ParallelPreprocess")
                 copy_mapping = self._parallel_preprocess(context, obj_node_mapping, mirror_workflow_enabled)
-                end_operation("ParallelPreprocess")
                 if not copy_mapping:
                     print("[ParallelPreprocess] 并行预处理失败，回退到单进程模式")
-                    start_operation("SequentialPreprocess")
                     copy_mapping = self._sequential_preprocess(obj_node_mapping, mirror_workflow_enabled, wm, total_objects, blend_file)
-                    end_operation("SequentialPreprocess")
             else:
-                start_operation("SequentialPreprocess")
                 copy_mapping = self._sequential_preprocess(obj_node_mapping, mirror_workflow_enabled, wm, total_objects, blend_file)
-                end_operation("SequentialPreprocess")
         
         try:
             # 计算最大导出次数
@@ -200,7 +181,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 GlobalKeyCountHelper.initialize()
 
                 # 调用对应游戏的生成Mod逻辑
-                start_operation(f"GenerateMod_Export_{export_index}")
                 if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
                     from ..games.wwmi import ModModelWWMI
                     migoto_mod_model = ModModelWWMI()
@@ -272,7 +252,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 else:
                     self.report({'ERROR'},"当前逻辑暂不支持生成Mod")
                     return {'FINISHED'}
-                end_operation(f"GenerateMod_Export_{export_index}")
 
                 print(f"第 {export_index}/{max_export_count} 次导出完成")
             
@@ -285,9 +264,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             mod_export_path = GlobalConfig.path_generate_mod_folder()
             print(f"Mod导出路径: {mod_export_path}")
             
-            start_operation("PostProcessNodes")
             BlueprintExportHelper.execute_postprocess_nodes(mod_export_path)
-            end_operation("PostProcessNodes")
             
             # 完成进度
             wm.progress_update(100)
@@ -306,7 +283,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 # 恢复节点引用并删除副本
                 if copy_mapping:
                     print("恢复节点引用并删除三角化副本...")
-                    start_operation("CleanupCopies")
                     for original_name, (copy_obj, node_or_item) in copy_mapping.items():
                         # 恢复节点/项目引用到原始物体
                         node_or_item.object_name = original_name
@@ -319,12 +295,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                                 bpy.data.meshes.remove(mesh_data, do_unlink=True)
                             
                     print(f"已清理 {len(copy_mapping)} 个三角化副本")
-                    end_operation("CleanupCopies")
             
-            # 打印性能报告到控制台和文本编辑器
-            end_operation("GenerateMod_Total")
-            print_performance_report()
-            save_performance_report_to_editor("性能统计报告")
         
         return {'FINISHED'}
     
@@ -455,9 +426,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 cache_used = False
                 
                 if use_cache:
-                    start_operation("CacheCheck", obj_name)
                     cached_obj = cache_manager.load_cache(obj_name, fingerprint, bpy.context.scene)
-                    end_operation("CacheCheck")
                     
                     if cached_obj:
                         cached_obj.name = copy_name
@@ -469,41 +438,27 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 if not copy_obj:
                     cache_misses += 1
                     
-                    start_operation("CreateCopy", obj_name)
                     copy_obj = original_obj.copy()
                     copy_obj.data = original_obj.data.copy()
-                    end_operation("CreateCopy")
                     
-                    start_operation("LinkCopy", obj_name)
                     copy_obj.name = copy_name
                     bpy.context.scene.collection.objects.link(copy_obj)
-                    end_operation("LinkCopy")
                     
                     has_armature = any(mod.type == 'ARMATURE' for mod in copy_obj.modifiers)
                     
                     if mirror_workflow_enabled:
-                        start_operation("MirrorWorkflow_Pre", obj_name)
                         ObjUtils.prepare_copy_for_mirror_workflow(copy_obj)
-                        end_operation("MirrorWorkflow_Pre")
                     elif has_armature:
-                        start_operation("ApplyArmature", obj_name)
                         ObjUtils._apply_all_modifiers(copy_obj)
-                        end_operation("ApplyArmature")
                     
-                    start_operation("Triangulate", obj_name)
                     mesh_triangulate_beauty(copy_obj)
-                    end_operation("Triangulate")
                     
                     if mirror_workflow_enabled:
-                        start_operation("MirrorWorkflow_Post", obj_name)
                         ObjUtils.apply_mirror_transform(copy_obj)
                         ObjUtils.flip_face_normals(copy_obj)
-                        end_operation("MirrorWorkflow_Post")
                     
                     if use_cache:
-                        start_operation("CacheStore", obj_name)
                         cache_manager.store_cache(obj_name, fingerprint, copy_obj)
-                        end_operation("CacheStore")
                 
                 node_or_item.original_object_name = original_name
                 copy_mapping[original_name] = (copy_obj, node_or_item)
@@ -576,7 +531,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                                 print(f"[NameModify] {original_name}: {current_name} -> {new_name} (INI: {clean_name})")
             
             elif node_type == 'vg_process':
-                start_operation(f"VGProcess_{node.name}", "batch")
                 
                 objects_to_process = [copy_obj for _, copy_obj, _ in connected_objects]
                 
@@ -602,7 +556,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                             import traceback
                             traceback.print_exc()
                 
-                end_operation(f"VGProcess_{node.name}")
         
         for original_name, (copy_obj, node_or_item) in copy_mapping.items():
             node_or_item.object_name = copy_obj.name
@@ -667,10 +620,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             print(f"[ParallelPreprocess] 开始并行预处理 {len(objects_to_process)} 个物体...")
             print(f"[ParallelPreprocess] 工作进程数: {num_workers}")
             
-            start_operation("CollectVGMapping")
             vg_mapping_texts = self._collect_vg_mapping_texts()
             print(f"[ParallelPreprocess] 收集到 {len(vg_mapping_texts)} 个映射表")
-            end_operation("CollectVGMapping")
             
             object_blend_map = manager.preprocess_parallel(
                 blend_file=blend_file,
@@ -692,10 +643,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 print(f"[ParallelPreprocess] 加载预处理结果...")
                 
                 try:
-                    start_operation("LoadPreprocessedObjects")
                     loaded_objects = load_preprocessed_objects(object_blend_map)
                     print(f"[ParallelPreprocess] loaded_objects: {list(loaded_objects.keys()) if loaded_objects else 'None'}")
-                    end_operation("LoadPreprocessedObjects")
                 except Exception as e:
                     print(f"[ParallelPreprocess] 加载失败: {e}")
                     import traceback
@@ -764,9 +713,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             self._execute_processing_chain_for_objects(copy_mapping, tree)
         
         if manager:
-            start_operation("ParallelCleanup")
             manager.cleanup()
-            end_operation("ParallelCleanup")
         wm.progress_update(50)
         
         return copy_mapping
@@ -876,16 +823,13 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         
         for i, node in enumerate(applicable_nodes):
             try:
-                start_operation(f"VGProcess_{node.name}", obj.name)
                 stats = node.process_object(obj)
                 if any(v > 0 for v in stats.values()):
                     print(f"[VGProcess] {obj.name}: 重命名={stats['renamed']}, 合并={stats['merged']}, 清理={stats['cleaned']}, 填充={stats['filled']}")
-                end_operation(f"VGProcess_{node.name}")
             except Exception as e:
                 print(f"[Process] 处理物体 {obj.name} 时出错: {e}")
                 import traceback
                 traceback.print_exc()
-                end_operation(f"VGProcess_{node.name}")
     
     def _apply_vg_process_batch(self, pending_tasks, max_workers=4):
         """批量处理顶点组任务（多线程优化版）
@@ -948,7 +892,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         for node, objs in node_to_objects.items():
             if len(objs) > 1:
                 print(f"[VGProcess] 节点 {node.name}: 多线程处理 {len(objs)} 个物体")
-                start_operation(f"VGProcess_{node.name}", "batch")
                 try:
                     all_stats = node.process_objects_batch(objs, max_workers=max_workers)
                     for obj_name, stats in all_stats.items():
@@ -958,10 +901,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                     print(f"[VGProcess] 批量处理节点 {node.name} 时出错: {e}")
                     import traceback
                     traceback.print_exc()
-                end_operation(f"VGProcess_{node.name}")
             elif len(objs) == 1:
                 obj = objs[0]
-                start_operation(f"VGProcess_{node.name}", obj.name)
                 try:
                     stats = node.process_object(obj)
                     if any(v > 0 for v in stats.values()):
@@ -970,7 +911,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                     print(f"[Process] 处理物体 {obj.name} 时出错: {e}")
                     import traceback
                     traceback.print_exc()
-                end_operation(f"VGProcess_{node.name}")
     
 
 class SSMTQuickPartialExport(bpy.types.Operator):
