@@ -312,8 +312,8 @@ class ObjBufferHelper:
                 flip_texcoord_v=True,
                 flip_bitangent_sign=True,
             ).reshape(-1, 1)
-            return new_normals
             
+            return new_normals
         else:
             # 将一维数组 reshape 成 (mesh_loops_length, 3) 形状的二维数组
             result = normals.reshape(-1, 3)
