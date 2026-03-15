@@ -89,7 +89,7 @@ class THEHERTA3_OT_OpenPersistentBlueprint(bpy.types.Operator):
     def execute(self, context):
         # 1. 获取或创建蓝图树
         GlobalConfig.read_from_main_json_ssmt4()
-        tree_name = f"Mod_{GlobalConfig.workspacename}" if GlobalConfig.workspacename else "SSMT_Mod_Logic"
+        tree_name = GlobalConfig.workspacename
         
         # 查找是否存在同名的 NodeGroup
         tree = bpy.data.node_groups.get(tree_name)
