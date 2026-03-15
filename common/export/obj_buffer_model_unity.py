@@ -33,6 +33,7 @@ class ObjBufferModelUnity:
     ib:list = field(init=False,repr=False)
     category_buffer_dict:dict = field(init=False,repr=False)
     index_loop_id_dict:dict = field(init=False,repr=False) # 仅用于WWMI的索引 Loop ID字典，key是 Buffer 索引，value是 Loop ID，默认可以为None
+    shape_key_buffer_dict:dict = field(init=False,repr=False) # key是形态键名称，value是ShapeKeyBufferModel实例
     
     def __post_init__(self) -> None:
         ObjBufferHelper.check_and_verify_attributes(obj=self.obj, d3d11_game_type=self.d3d11_game_type)

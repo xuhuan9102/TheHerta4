@@ -99,34 +99,7 @@ class ObjBufferHelper:
             if obj_model.match_draw_ib != draw_ib:
                 continue
 
-            # 检查是否是多文件导出节点创建的对象
-            if hasattr(obj_model, 'is_multifile_export') and obj_model.is_multifile_export:
-                multifile_node = BlueprintExportHelper.find_node_in_all_blueprints(obj_model.multifile_node_name)
-
-                if not multifile_node:
-                    LOG.warning(f"无法找到多文件导出节点: {obj_model.multifile_node_name}")
-                    continue
-
-                # 获取当前导出次数对应的物体信息
-                export_index = BlueprintExportHelper.get_current_export_index() - 1
-                multifile_object_info = multifile_node.get_current_object_info(export_index)
-
-                if multifile_object_info:
-                    obj_name = multifile_object_info["object_name"]
-                    obj_model.obj_name = obj_name
-                    obj_model.match_draw_ib = multifile_object_info["draw_ib"]
-                    obj_model.component_count = int(multifile_object_info["component"]) if multifile_object_info["component"] else 0
-                    obj_model.comment_alias_name = multifile_object_info["alias_name"]
-
-                    original_name = multifile_object_info.get("original_object_name", obj_name)
-                    if original_name:
-                        obj_model.display_name = original_name
-
-                    LOG.info(f"多文件导出节点更新物体: {obj_name} (第{export_index + 1}次导出)")
-                else:
-                    # 如果没有对应的物体信息，跳过这个对象
-                    LOG.warning(f"多文件导出节点在第{export_index + 1}次导出时没有对应的物体，跳过")
-                    continue
+        
 
             obj_name = obj_model.obj_name
             obj = bpy.data.objects[obj_name]

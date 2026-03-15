@@ -47,8 +47,7 @@ class GlobalConfig:
     # 适配的SSMT最低版本号，读取settings.json的VersionNumber字段得到
     ssmt_version_number = 0
 
-    # 多文件导出功能：Buffer文件夹后缀（如"01"、"02"等）
-    buffer_folder_suffix = ""
+
 
 
     @classmethod
@@ -144,8 +143,6 @@ class GlobalConfig:
     def path_generatemod_buffer_folder(cls):
        
         buffer_folder_name = "Buffer"
-        if cls.buffer_folder_suffix:
-            buffer_folder_name = f"Buffer{cls.buffer_folder_suffix}"
         
         buffer_path = os.path.join(GlobalConfig.path_generate_mod_folder(), buffer_folder_name + "\\")
         if not os.path.exists(buffer_path):
@@ -156,8 +153,6 @@ class GlobalConfig:
     def get_buffer_folder_name(cls):
         """获取当前Buffer文件夹名称（用于INI文件中的路径引用）"""
         buffer_folder_name = "Buffer"
-        if cls.buffer_folder_suffix:
-            buffer_folder_name = f"Buffer{cls.buffer_folder_suffix}"
         return buffer_folder_name
     
     @classmethod
