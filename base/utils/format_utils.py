@@ -224,17 +224,7 @@ class FormatUtils:
     @classmethod
     def convert_4x_float32_to_r16g16b16a16_snorm(cls, input_array):
         return numpy.round(input_array * 32767).astype(numpy.int16)
-    
-    @classmethod    
-    def convert_normals_to_endfield_octahedral_r32_uint(cls, input_normals):
-        """
-        Compress float3 normals to Endfield specific R32_UINT octahedral format.
-        输入: (N, 3) float32 normals
-        输出: (N,) uint32 packed data
-        
-        Note: 此方法已迁移至 TBNCodec, 保留此接口以兼容旧代码
-        """
-        return TBNCodec.convert_normals_to_octahedral_r32_uint(input_normals)
+   
 
     @classmethod    
     def convert_4x_float32_to_r8g8b8a8_unorm_blendweights(cls, input_array):
