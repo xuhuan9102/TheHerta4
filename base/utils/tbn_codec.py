@@ -51,7 +51,8 @@ class TBNCodec:
         Returns:
             shape (N, 2) 的 float32 编码向量
         """
-        n = normals / numpy.linalg.norm(normals, axis=1, keepdims=True).clip(1e-8)
+        # Keep behavior aligned with EFMI-Tools reference implementation.
+        n = normals / numpy.linalg.norm(normals, axis=1, keepdims=True)
 
         inv_l1 = 1.0 / numpy.sum(numpy.abs(n), axis=1, keepdims=True)
         n *= inv_l1
@@ -251,50 +252,165 @@ class TBNCodec:
         return encoded
 
     @staticmethod
-    def convert_normals_to_octahedral_r32_uint(input_normals: numpy.ndarray) -> numpy.ndarray:
+    def convert_normals_to_octahedral_r32_uint(
+        input_normals: numpy.ndarray,
+        sign_flag: int = 0,
+        sign_flags: Optional[numpy.ndarray] = None,
+    ) -> numpy.ndarray:
         """
         将法线转换为终末地风格的八面体 R32_UINT 格式
         (简化版,仅编码法线,不包含切线)
         
         Args:
             input_normals: shape (N, 3) 的法线向量
+            sign_flag: 全局 bit31 符号位（0 或 1）。
+            sign_flags: 每顶点 bit31 符号位数组，shape (N,)；若提供则优先于 sign_flag。
             
         Returns:
             shape (N,) 的 uint32 编码数据
         """
-        n = numpy.array(input_normals, dtype=numpy.float32)
-        
-        l1_norm = numpy.abs(n[:, 0]) + numpy.abs(n[:, 1]) + numpy.abs(n[:, 2])
-        l1_norm = numpy.where(l1_norm == 0, 1.0, l1_norm)
-        n /= l1_norm[:, numpy.newaxis]
-        
-        x, y, z = n[:, 0], n[:, 1], n[:, 2]
-        
-        neg_z = z < 0
-        sign_x = numpy.where(x >= 0, 1.0, -1.0)
-        sign_y = numpy.where(y >= 0, 1.0, -1.0)
-        
-        tx = (1.0 - numpy.abs(y)) * sign_x
-        ty = (1.0 - numpy.abs(x)) * sign_y
-        
-        x = numpy.where(neg_z, tx, x)
-        y = numpy.where(neg_z, ty, y)
-        
-        scale = 511.0
-        xq = numpy.round(x * scale).astype(numpy.int32)
-        yq = numpy.round(y * scale).astype(numpy.int32)
-        
-        xq = numpy.clip(xq, -512, 511)
-        yq = numpy.clip(yq, -512, 511)
-        
-        xu = xq & 0x3FF
-        yu = yq & 0x3FF
-        
-        packed = xu | (yu << 10)
-        packed |= 0x40000000
-        
-        return packed.astype(numpy.uint32)
+        normals = numpy.array(input_normals, dtype=numpy.float32, copy=False)
+        encoded_normals = TBNCodec.oct_encode_vector(normals)
 
+        if sign_flags is not None:
+            sf = numpy.asarray(sign_flags).reshape(-1)
+            if sf.shape[0] != encoded_normals.shape[0]:
+                raise ValueError('sign_flags length must match normals count')
+            sf = numpy.where(sf > 0, 1.0, 0.0).astype(numpy.float32)
+        else:
+            sf = numpy.full(encoded_normals.shape[0], 1.0 if sign_flag else 0.0, dtype=numpy.float32)
+
+        data = numpy.stack([
+            encoded_normals[:, 0],
+            encoded_normals[:, 1],
+            numpy.zeros(encoded_normals.shape[0], dtype=numpy.float32),
+            numpy.ones(encoded_normals.shape[0], dtype=numpy.float32),
+            sf,
+        ], axis=1)
+
+        return TBNCodec.encode_10_10_10_2(data)
+    
+    @classmethod    
+    def convert_normals_to_endfield_octahedral_r32_uint_old(
+        cls,
+        input_normals,
+        flip_axis: Optional[str] = None,
+        sign_flag: int = 0,
+        sign_flags: Optional[numpy.ndarray] = None,
+    ):
+        """
+        Compress float3 normals to Endfield specific R32_UINT octahedral format.
+        输入: (N, 3) float32 normals
+        输出: (N,) uint32 packed data
+
+        Args:
+            flip_axis: 编码前翻转的法线分量，可选 'x'/'y'/'z' 或 None。
+                仅翻转单个分量，不会整体反转法线。
+            sign_flag: 全局 bit31 符号位（0 或 1）。
+            sign_flags: 每顶点 bit31 符号位数组，shape (N,)；若提供则优先于 sign_flag。
+        """
+        n = numpy.array(input_normals, dtype=numpy.float32, copy=True)
+
+        if flip_axis is not None:
+            axis_map = {'x': 0, 'y': 1, 'z': 2}
+            axis_idx = axis_map.get(str(flip_axis).lower())
+            if axis_idx is None:
+                raise ValueError("flip_axis must be one of: None, 'x', 'y', 'z'")
+            n[:, axis_idx] *= -1.0
+
+        # Reuse canonical implementation to avoid drift between old/new code paths.
+        return cls.convert_normals_to_octahedral_r32_uint(
+            n,
+            sign_flag=sign_flag,
+            sign_flags=sign_flags,
+        )
+
+    @staticmethod
+    def convert_normals_to_endfield_octahedral_r32_uint_efmi_tools_compatible(
+        input_normals: numpy.ndarray,
+        bitangent_signs: Optional[numpy.ndarray] = None,
+        flip_bitangent_sign: bool = True,
+    ) -> numpy.ndarray:
+        """
+        使用 EFMI-Tools 兼容逻辑将 NORMAL 压缩为 R32_UINT。
+
+        说明:
+            - XY 使用八面体法线编码
+            - Z 置 0（NORMAL-only 路径无切线角度）
+            - bit30 固定为 1（packed flag）
+            - bit31 来自 bitangent_sign（-1/1 -> 0/1）
+
+        Args:
+            input_normals: shape (N, 3) 法线向量
+            bitangent_signs: shape (N,) 副切线符号，若为空则默认全 0
+            flip_bitangent_sign: 是否先翻转副切线符号（EFMI-Tools 默认 True）
+
+        Returns:
+            shape (N,) 的 uint32 编码数据
+        """
+        normals = numpy.asarray(input_normals, dtype=numpy.float32)
+        if normals.ndim != 2 or normals.shape[1] != 3:
+            raise ValueError('input_normals must be shape (N, 3)')
+
+        encoded_normals = TBNCodec.oct_encode_vector(normals)
+
+        if bitangent_signs is None:
+            sign_flags = numpy.zeros(encoded_normals.shape[0], dtype=numpy.float32)
+        else:
+            signs = numpy.asarray(bitangent_signs, dtype=numpy.float32).reshape(-1)
+            if signs.shape[0] != encoded_normals.shape[0]:
+                raise ValueError('bitangent_signs length must match normals count')
+            if flip_bitangent_sign:
+                signs = -signs
+            sign_flags = (signs + 1.0) * 0.5
+            sign_flags = numpy.where(sign_flags > 0.5, 1.0, 0.0).astype(numpy.float32)
+
+        packed_data = numpy.stack([
+            encoded_normals[:, 0],
+            encoded_normals[:, 1],
+            numpy.zeros(encoded_normals.shape[0], dtype=numpy.float32),
+            numpy.ones(encoded_normals.shape[0], dtype=numpy.float32),
+            sign_flags,
+        ], axis=1)
+
+        return TBNCodec.encode_10_10_10_2(packed_data)
+
+    @staticmethod
+    def encode_efmi_tools_r32_uint_from_tbn(
+        normals: numpy.ndarray,
+        tangents: numpy.ndarray,
+        bitangent_signs: numpy.ndarray,
+        flip_texcoord_v: bool = True,
+        flip_bitangent_sign: bool = True,
+    ) -> numpy.ndarray:
+        """
+        完整复用 EFMI-Tools 思路：将 TBN 打包为 R10G10B10A2_UINT（存入 R32_UINT）。
+
+        说明:
+            - XY: 八面体编码法线
+            - Z: 切线角度编码
+            - bit30: packed flag
+            - bit31: bitangent sign
+            - 可选执行 flip_texcoord_v / flip_bitangent_sign，与 EFMI-Tools 默认行为保持一致
+        """
+        n = numpy.asarray(normals, dtype=numpy.float32)
+        t = numpy.array(tangents, dtype=numpy.float32, copy=True)
+        b = numpy.array(bitangent_signs, dtype=numpy.float32, copy=True).reshape(-1)
+
+        if n.ndim != 2 or n.shape[1] != 3:
+            raise ValueError('normals must be shape (N, 3)')
+        if t.ndim != 2 or t.shape[1] != 3:
+            raise ValueError('tangents must be shape (N, 3)')
+        if b.ndim != 1 or b.shape[0] != n.shape[0]:
+            raise ValueError('bitangent_signs must be shape (N,) and match normals count')
+
+        if flip_texcoord_v:
+            t *= -1.0
+        if flip_bitangent_sign:
+            b *= -1.0
+
+        return TBNCodec.encode_tbn_data(n, t, b)
+    
     @staticmethod
     def decode_octahedral_r32_uint(data: numpy.ndarray) -> numpy.ndarray:
         """
