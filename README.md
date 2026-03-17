@@ -3,6 +3,12 @@
 
 SSMT4的Blender插件
 
+# 仍在开发中
+
+在此仓库开发完成发布Release版本之前，请优先考虑使用希尔维护的TheHerta3版本：
+
+https://github.com/xuhuan9102/TheHerta3
+
 # 说明
 
 TheHerta3中的蓝图架构设计与导出流程高度耦合导致无法轻易修改和测试SSMT4中全新的全量提取设计
