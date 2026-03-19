@@ -45,8 +45,17 @@ C:\Users\Administrator\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\ad
 
 基础层级:  
 - base 基础抽象数据类型  
-- utils 所有基础功能最小的单元拆分为工具类
-- config:所有与配置相关的内容
+ - config:所有与配置相关的内容
+ - resources: hlsl与图片资源
+ - utils 所有基础功能最小的单元拆分为工具类
+ - wwmi_config WWMI用到的配置类
+- common 高级抽象数据类型
+ - blueprint_node 蓝图节点
+ - d3d11 基础d3d11数据类型抽象
+ - export 生成Mod逻辑
+ - migoto 3Dmigoto数据结构
+ - read_in 模型导入逻辑
+
 
 帮助类层级: 
 - helper 相当于建立在基础抽象数据类型上的工具类

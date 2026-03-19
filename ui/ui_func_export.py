@@ -6,7 +6,7 @@ from ..base.utils.command_utils import CommandUtils
 
 from ..base.config.main_config import GlobalConfig, LogicName
 
-from .export_efmi import ExportEFMI
+from ..games.efmi import ExportEFMI
 
 from ..common.export.blueprint_model import BluePrintModel
 

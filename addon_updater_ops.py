@@ -227,20 +227,13 @@ class AddonUpdaterCheckNow(bpy.types.Operator):
             # Ignoring if error, to prevent being stuck on the error screen.
             return {'CANCELLED'}
 
-        # apply the UI settings
-        settings = get_user_preferences(context)
-        if not settings:
-            updater.print_verbose(
-                "Could not get {} preferences, update check skipped".format(
-                    __package__))
-            return {'CANCELLED'}
-
+        # Manual-only mode: disable interval gating and always check now.
         updater.set_check_interval(
-            enabled=settings.auto_check_update,
-            months=settings.updater_interval_months,
-            days=settings.updater_interval_days,
-            hours=settings.updater_interval_hours,
-            minutes=settings.updater_interval_minutes)
+            enabled=False,
+            months=0,
+            days=0,
+            hours=0,
+            minutes=0)
 
         # Input is an optional callback function. This function should take a
         # bool input. If true: update ready, if false: no update ready.
@@ -757,31 +750,8 @@ def check_for_update_background():
     *Could* be called on register, but would be bad practice as the bare
     minimum code should run at the moment of registration (addon ticked).
     """
-    if updater.invalid_updater:
-        return
-    global ran_background_check
-    if ran_background_check:
-        # Global var ensures check only happens once.
-        return
-    elif updater.update_ready is not None or updater.async_checking:
-        # Check already happened.
-        # Used here to just avoid constant applying settings below.
-        return
-
-    # Apply the UI settings.
-    settings = get_user_preferences(bpy.context)
-    if not settings:
-        return
-    updater.set_check_interval(enabled=settings.auto_check_update,
-                               months=settings.updater_interval_months,
-                               days=settings.updater_interval_days,
-                               hours=settings.updater_interval_hours,
-                               minutes=settings.updater_interval_minutes)
-
-    # Input is an optional callback function. This function should take a bool
-    # input, if true: update ready, if false: no update ready.
-    updater.check_for_update_async(background_update_callback)
-    ran_background_check = True
+    # Manual-only mode: keep API compatibility but skip background checks.
+    return
 
 
 def check_for_update_nonthreaded(self, context):
@@ -789,21 +759,13 @@ def check_for_update_nonthreaded(self, context):
     if updater.invalid_updater:
         return
 
-    # Only check if it's ready, ie after the time interval specified should
-    # be the async wrapper call here.
-    settings = get_user_preferences(bpy.context)
-    if not settings:
-        if updater.verbose:
-            print("Could not get {} preferences, update check skipped".format(
-                __package__))
-        return
-    updater.set_check_interval(enabled=settings.auto_check_update,
-                               months=settings.updater_interval_months,
-                               days=settings.updater_interval_days,
-                               hours=settings.updater_interval_hours,
-                               minutes=settings.updater_interval_minutes)
+    updater.set_check_interval(enabled=False,
+                               months=0,
+                               days=0,
+                               hours=0,
+                               minutes=0)
 
-    (update_ready, version, link) = updater.check_for_update(now=False)
+    (update_ready, version, link) = updater.check_for_update(now=True)
     if update_ready:
         atr = AddonUpdaterInstallPopup.bl_idname.split(".")
         getattr(getattr(bpy.ops, atr[0]), atr[1])('INVOKE_DEFAULT')
@@ -956,26 +918,7 @@ def update_settings_ui(self, context, element=None):
                          icon="ERROR")
             return
 
-    split = layout_split(row, factor=0.4)
-    sub_col = split.column()
-    sub_col.prop(settings, "auto_check_update")
-    sub_col = split.column()
-
-    if not settings.auto_check_update:
-        sub_col.enabled = False
-    sub_row = sub_col.row()
-    sub_row.label(text="检查间隔")
-    sub_row = sub_col.row(align=True)
-    check_col = sub_row.column(align=True)
-    check_col.prop(settings, "updater_interval_months")
-    check_col = sub_row.column(align=True)
-    check_col.prop(settings, "updater_interval_days")
-    check_col = sub_row.column(align=True)
-
-    # Consider un-commenting for local dev (e.g. to set shorter intervals)
-    # check_col.prop(settings,"updater_interval_hours")
-    # check_col = sub_row.column(align=True)
-    # check_col.prop(settings,"updater_interval_minutes")
+    row.label(text="当前仅支持手动检查更新")
 
     # Checking / managing updates.
     row = box.row()
@@ -1199,7 +1142,7 @@ def update_settings_ui_condensed(self, context, element=None):
                        text="", icon="FILE_REFRESH")
 
     row = element.row()
-    row.prop(settings, "auto_check_update")
+    row.label(text="仅手动检查更新")
 
     row = element.row()
     row.scale_y = 0.7

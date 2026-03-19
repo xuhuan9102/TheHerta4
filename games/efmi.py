@@ -87,7 +87,7 @@ class ExportEFMI:
                 drawindexed_instanced = M_DrawIndexedInstanced()
                 drawindexed_instanced.IndexCountPerInstance = drawcall_model.index_count
                 drawindexed_instanced.StartIndexLocation = drawcall_model.index_offset
-                
+                texture_override_ib_section.append("; " + drawcall_model.comment_alias_name)
                 texture_override_ib_section.append(drawindexed_instanced.get_draw_str())
             
             texture_override_ib_section.new_line()

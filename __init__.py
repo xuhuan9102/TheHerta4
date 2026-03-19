@@ -11,7 +11,7 @@ from .base.config.plugin_config import PluginConfig
 from .ui import ui_panel_basic
 from .ui import ui_panel_model
 from .ui import ui_panel_sword
-from .ui import ui_panel_import
+from .ui import ui_func_import
 from .ui import ui_panel_fast_texture
 
 from .common.blueprint_node import blueprint_node_obj
@@ -19,7 +19,7 @@ from .common.blueprint_node import blueprint_node_base
 from .common.blueprint_node import blueprint_node_menu
 from .common.blueprint_node import blueprint_node_shapekey
 
-from .exporter import blueprint_export
+from .ui import ui_func_export
 
 # 自动更新功能
 from . import addon_updater_ops
@@ -132,12 +132,12 @@ def register():
     ui_panel_basic.register()
     ui_panel_model.register()
     ui_panel_sword.register()
-    ui_panel_import.register()
+    ui_func_import.register()
     ui_panel_fast_texture.register()
 
     # 蓝图系统
     blueprint_node_obj.register()
-    blueprint_export.register()
+    ui_func_export.register()
     blueprint_node_menu.register()
     blueprint_node_shapekey.register()
 
@@ -146,13 +146,13 @@ def register():
 def unregister():
     # 蓝图系统
     blueprint_node_obj.unregister()
-    blueprint_export.unregister()
+    ui_func_export.unregister()
     blueprint_node_menu.unregister()
     blueprint_node_shapekey.unregister()
     blueprint_node_base.unregister()
 
     ui_panel_fast_texture.unregister()
-    ui_panel_import.unregister()
+    ui_func_import.unregister()
     ui_panel_sword.unregister()
     ui_panel_model.unregister()
     ui_panel_basic.unregister()
