@@ -11,7 +11,6 @@ from bpy_extras.io_utils import ImportHelper
 from ..base.utils.obj_utils import ObjUtils 
 
 from ..base.utils.json_utils import JsonUtils
-from ..base.utils.config_utils import ConfigUtils
 from ..base.utils.collection_utils import CollectionColor, CollectionUtils
 from ..base.utils.timer_utils import TimerUtils
 from ..base.utils.translate_utils import TR

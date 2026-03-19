@@ -84,6 +84,15 @@ class GlobalConfig:
         return cls.dbmtlocation
     
     @classmethod
+    def path_drawib_config_json_path(cls):
+        '''
+        当前工作空间目录下的Config.json
+        存储了所有的DrawIB和别名
+        '''
+        game_config_json_path = os.path.join(GlobalConfig.path_workspace_folder(),"Config.json")
+        return game_config_json_path
+    
+    @classmethod
     def path_configs_folder(cls):
         return os.path.join(GlobalConfig.base_path(),"Configs\\")
     

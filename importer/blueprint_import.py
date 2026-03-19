@@ -2,7 +2,6 @@ import os
 import bpy
 
 from ..base.utils.json_utils import JsonUtils
-from ..base.utils.config_utils import ConfigUtils
 from ..base.utils.collection_utils import CollectionColor, CollectionUtils
 from ..base.utils.translate_utils import TR
 from ..base.utils.timer_utils import TimerUtils
@@ -10,82 +9,47 @@ from ..base.utils.timer_utils import TimerUtils
 from ..base.config.main_config import GlobalConfig, LogicName
 
 from .mesh_importer import MeshImporter,MigotoBinaryFile
+from ..helper.workspace_helper import WorkSpaceHelper
 
 
 # 全量导入逻辑
 def ImprotFromWorkSpaceFull(self, context):
     
     # 这里先创建以当前工作空间为名称的集合，并且链接到scene，确保它存在
-    workspace_collection = CollectionUtils.create_new_collection(collection_name=GlobalConfig.workspacename,color_tag=CollectionColor.Red)
-    bpy.context.scene.collection.children.link(workspace_collection)
-
-    # 获取当前工作空间文件夹路径
-    current_workspace_folder = GlobalConfig.path_workspace_folder()
+    workspace_collection = WorkSpaceHelper.create_and_get_workspace_collection()
 
     # 获取当前工作空间文件夹下面的所有文件夹（仅保留名字包含 '-' 的文件夹）
-    workspace_subfolders = [f.path for f in os.scandir(current_workspace_folder) if f.is_dir() and '-' in f.name]
+    workspace_subfolders = WorkSpaceHelper.get_submesh_folderpath_list()
+
+    # 读取当前工作空间下的DrawIB和Alias对应关系，如果不存在就是空列表
+    # 空列表也没关系，下面会赋予默认名称
+    drawib_aliasname_dict = WorkSpaceHelper.get_drawib_aliasname_dict()
 
     # 读取时保存每个导入文件夹里导入的GameType名称到工作空间文件夹下面的Import.json，在导出时使用
     foldername_gametypename_dict = {}
 
-    for import_folder_path in workspace_subfolders:
-        import_folder_name = os.path.basename(import_folder_path)
-        print("Import FolderName: " + import_folder_name)
-
-        namesplits = import_folder_name.split('-')
-        if len(namesplits) < 3:
-            print(f"Warning: Skipping folder with unexpected name format (expected at least one '-'): {import_folder_name}")
-            raise Exception(f"Unexpected folder name format: {import_folder_name}")
-
-        draw_ib = namesplits[0]
-        index_count = namesplits[1]
-        first_index = namesplits[2]
-
-        print("尝试导入DrawIB:", draw_ib)
+    for submesh_folder_path in workspace_subfolders:
+        submesh_folder_name = os.path.basename(submesh_folder_path)
+        print("Import FolderName: " + submesh_folder_name)
         
-        # 导入时，要按照先GPU类型，再CPU类型进行排序，虽然我们已经在提取模型端排序过了
-        # 但是这里双重检查机制，确保没问题
-        gpu_import_folder_path_list = []
-        cpu_import_folder_path_list = []
-
-        dirs = os.listdir(import_folder_path)
-        for dirname in dirs:
-            if not dirname.startswith("TYPE_"):
-                continue
-            final_import_folder_path = os.path.join(import_folder_path,dirname)
-            if dirname.startswith("TYPE_GPU"):
-                gpu_import_folder_path_list.append(final_import_folder_path)
-            elif dirname.startswith("TYPE_CPU"):
-                cpu_import_folder_path_list.append(final_import_folder_path)
-
-        final_import_folder_path_list = []
-        for gpu_path in gpu_import_folder_path_list:
-            final_import_folder_path_list.append(gpu_path)
-        for cpu_path in cpu_import_folder_path_list:
-            final_import_folder_path_list.append(cpu_path)
+        # 获取导入的数据类型文件夹路径列表
+        final_import_folder_path_list = WorkSpaceHelper.get_ordered_gpu_cpu_import_folderpath_list(submesh_folder_path)
         
-
         # 接下来开始导入，尝试对当前DrawIB的每个类型进行导入
         # 如果出错的话直接提示错误并continue，直到顺位第一个导入成功
         for import_folder_path in final_import_folder_path_list:
-            gametype_name = import_folder_path.split("TYPE_")[1]
-            print("尝试导入数据类型: " + gametype_name)
-
-            print("DrawIB " + draw_ib + "尝试导入路径: " + import_folder_path)
-
             
-                
-            fmt_file_path = os.path.join(import_folder_path, import_folder_name + ".fmt")
-            mbf = MigotoBinaryFile(fmt_path=fmt_file_path,mesh_name= import_folder_name + ".自定义名称")
+            print("尝试导入路径: " + import_folder_path)
+            fmt_file_path = os.path.join(import_folder_path, submesh_folder_name + ".fmt")
+            mbf = MigotoBinaryFile(fmt_path=fmt_file_path,mesh_name= submesh_folder_name + ".自定义名称")
             MeshImporter.create_mesh_obj_from_mbf(mbf=mbf,import_collection=workspace_collection)
 
 
             # 如果能执行到这里，说明这个DrawIB成功导入了一个数据类型
             # 然后要把这个DrawIB对应的GameType名称保存下来
-            import_json = ConfigUtils.read_import_json(import_folder_path)
-            work_game_type = import_json.get("WorkGameType","")
-            foldername_gametypename_dict[import_folder_name] = work_game_type
-            self.report({'INFO'}, "成功导入" + import_folder_name + " 的数据类型: " + gametype_name)
+            gametype_name = import_folder_path.split("TYPE_")[1]
+            foldername_gametypename_dict[submesh_folder_name] = gametype_name
+            self.report({'INFO'}, "成功导入" + submesh_folder_name + " 的数据类型: " + gametype_name)
             break
 
     # 保存Import.json文件
@@ -135,17 +99,17 @@ def ImprotFromWorkSpaceFull(self, context):
         # 使用列表手动计算布局中心
         min_y = 0
         for import_folder_path in workspace_subfolders:
-            import_folder_name = os.path.basename(import_folder_path)
-
-
+            submesh_folder_name = os.path.basename(import_folder_path)
+            namesplits = submesh_folder_name.split('-')
+            if len(namesplits) < 3:
+                continue
             draw_ib = namesplits[0]
             index_count = namesplits[1]
             first_index = namesplits[2]
             
             # 在导入集合中寻找属于当前 DrawIB 的对象
             # 命名规则通常是: DrawIB-Part-Alias
-            # 我们匹配 names starting with draw_ib
-            found_objs = [obj for obj in target_objects if obj.name.startswith(import_folder_name)]
+            found_objs = [obj for obj in target_objects if obj.name.startswith(submesh_folder_name)]
             
             for obj in found_objs:
                  if obj.type == 'MESH':
@@ -164,7 +128,7 @@ def ImprotFromWorkSpaceFull(self, context):
                     else:
                         node.component = "1"
 
-                    node.alias_name = "自定义名称"
+                    node.alias_name = drawib_aliasname_dict.get(draw_ib, "自定义名称")
                         
                     node.label = obj.name # 设置节点标题方便识别
 

@@ -1,7 +1,8 @@
 from ..base.config.main_config import GlobalConfig
 from ..base.utils.json_utils import JsonUtils
+from ..base.utils.collection_utils import CollectionUtils, CollectionColor
 import os
-
+import bpy
 from typing import List, Dict, Union
 from dataclasses import dataclass, field, asdict
 
@@ -15,7 +16,75 @@ class DedupedTextureInfo:
 
 class WorkSpaceHelper:
 
+    @staticmethod
+    def get_ordered_gpu_cpu_import_folderpath_list(submesh_folderpath:str)-> List[str]:
+        # 导入时，要按照先GPU类型，再CPU类型进行排序
+        gpu_import_folder_path_list = []
+        cpu_import_folder_path_list = []
 
+        dirs = os.listdir(submesh_folderpath)
+        for dirname in dirs:
+            if not dirname.startswith("TYPE_"):
+                continue
+            final_import_folder_path = os.path.join(submesh_folderpath,dirname)
+            if dirname.startswith("TYPE_GPU"):
+                gpu_import_folder_path_list.append(final_import_folder_path)
+            elif dirname.startswith("TYPE_CPU"):
+                cpu_import_folder_path_list.append(final_import_folder_path)
+
+        final_import_folder_path_list = []
+        for gpu_path in gpu_import_folder_path_list:
+            final_import_folder_path_list.append(gpu_path)
+        for cpu_path in cpu_import_folder_path_list:
+            final_import_folder_path_list.append(cpu_path)
+
+        return final_import_folder_path_list
+
+    @staticmethod
+    def create_and_get_workspace_collection() -> bpy.types.Collection:
+        # 这里先创建以当前工作空间为名称的集合，并且链接到scene，确保它存在
+        workspace_collection = CollectionUtils.create_new_collection(collection_name=GlobalConfig.workspacename,color_tag=CollectionColor.Red)
+        bpy.context.scene.collection.children.link(workspace_collection)
+        return workspace_collection
+
+    @staticmethod
+    def get_submesh_folderpath_list() -> List[str]:
+        '''
+        获取当前工作空间文件夹下面的所有SubMesh文件夹（仅保留名字包含至少两个 '-' 的文件夹）
+        导入时就已经确保它至少包含两个'-'，即符合命名规则
+        '''
+        submesh_folderpath_list = []
+        for f in os.scandir(GlobalConfig.path_workspace_folder()):
+            if not f.is_dir():
+                continue
+            name_splits = f.name.split('-')
+            if len(name_splits) >= 3:
+                submesh_folderpath_list.append(f.path)
+            
+        return submesh_folderpath_list
+
+    @staticmethod
+    def get_drawib_aliasname_dict() -> Dict[str,str]:
+        '''
+        从当前工作空间目录下的Config.json里读取DrawIB和别名的对应关系
+        '''
+        drawib_aliasname_dict = {}
+
+        # 如果工作空间下存在Config.json就尝试获取其别名
+        config_json_path = GlobalConfig.path_drawib_config_json_path()
+        if os.path.exists(config_json_path):
+            config_json = JsonUtils.LoadFromFile(config_json_path)
+            # 读取每个DrawIB的别名到字典里，键是DrawIB名称，值是别名
+            if isinstance(config_json, list):
+                for item in config_json:
+                    if not isinstance(item, dict):
+                        continue
+                    draw_ib = str(item.get("DrawIB", "")).strip()
+                    alias_name = str(item.get("Alias", "")).strip()
+                    if draw_ib:
+                        drawib_aliasname_dict[draw_ib] = alias_name
+        return drawib_aliasname_dict
+    
 
     @staticmethod
     def get_hash_deduped_texture_info_dict(draw_ib:str) -> Dict[str,DedupedTextureInfo]:
