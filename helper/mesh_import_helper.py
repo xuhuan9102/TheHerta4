@@ -26,11 +26,10 @@ from ..base.wwmi_config.extracted_object import ExtractedObjectHelper
 # 用于解决 AttributeError: 'IMPORT_MESH_OT_migoto_raw_buffers_mmt' object has no attribute 'filepath'
 from bpy_extras.io_utils import unpack_list, axis_conversion
 
-from .fmt_file import FMTFile
-from .migoto_binary_file import MigotoBinaryFile
+from ..common.read_in.migoto_binary_file import MigotoBinaryFile
 
 
-class MeshImporter:
+class MeshImportHelper:
     '''
     这个类依赖于提供的MigotoBinaryFile进行数据导入和处理
     '''
@@ -46,9 +45,9 @@ class MeshImporter:
         mesh = bpy.data.meshes.new(mbf.mesh_name)
         obj = bpy.data.objects.new(mesh.name, mesh)
 
-        MeshImporter.set_import_coordinate(obj=obj)
-        MeshImporter.set_import_attributes(obj=obj, mbf=mbf)
-        MeshImporter.initialize_mesh(mesh, mbf)
+        MeshImportHelper.set_import_coordinate(obj=obj)
+        MeshImportHelper.set_import_attributes(obj=obj, mbf=mbf)
+        MeshImportHelper.initialize_mesh(mesh, mbf)
 
         blend_indices = {}
         blend_weights = {}
@@ -161,7 +160,7 @@ class MeshImporter:
                 blend_weights[tmpi] = new_dict
                 tmpi = tmpi + 1
 
-        MeshImporter.import_uv_layers(mesh, obj, texcoords)
+        MeshImportHelper.import_uv_layers(mesh, obj, texcoords)
 
         #  metadata.json, if contains then we can import merged vgmap.
         component = None
@@ -179,11 +178,11 @@ class MeshImporter:
         # print(len(blend_weights))
 
         print("导入顶点组")
-        MeshImporter.import_vertex_groups(mesh, obj, blend_indices, blend_weights, component)
+        MeshImportHelper.import_vertex_groups(mesh, obj, blend_indices, blend_weights, component)
         print("导入顶点组完毕")
 
 
-        MeshImporter.import_shapekeys(mesh, obj, shapekeys)
+        MeshImportHelper.import_shapekeys(mesh, obj, shapekeys)
 
         # Validate closes the loops so they don't disappear after edit mode and probably other important things:
         mesh.validate(verbose=False, clean_customdata=False)  
@@ -192,7 +191,7 @@ class MeshImporter:
         if use_normals:
             MeshUtils.set_import_normals_v2(mesh=mesh,normals=normals)
         
-        MeshImporter.create_bsdf_with_diffuse_linked(obj, mesh_name=mbf.mesh_name,directory=os.path.dirname(mbf.fmt_path))
+        MeshImportHelper.create_bsdf_with_diffuse_linked(obj, mesh_name=mbf.mesh_name,directory=os.path.dirname(mbf.fmt_path))
         
 
         # 通过fmt文件中标明的logic_name来进行预处理

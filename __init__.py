@@ -20,7 +20,6 @@ from .common.blueprint_node import blueprint_node_menu
 from .common.blueprint_node import blueprint_node_shapekey
 
 from .exporter import blueprint_export
-from .importer import blueprint_import
 
 # 自动更新功能
 from . import addon_updater_ops
@@ -138,7 +137,6 @@ def register():
 
     # 蓝图系统
     blueprint_node_obj.register()
-    blueprint_import.register()
     blueprint_export.register()
     blueprint_node_menu.register()
     blueprint_node_shapekey.register()
@@ -148,7 +146,6 @@ def register():
 def unregister():
     # 蓝图系统
     blueprint_node_obj.unregister()
-    blueprint_import.unregister()
     blueprint_export.unregister()
     blueprint_node_menu.unregister()
     blueprint_node_shapekey.unregister()

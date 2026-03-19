@@ -8,7 +8,7 @@ import bpy.utils.previews
 
 from ..base.utils.obj_utils import ObjUtils
 
-from ..importer.mesh_importer import MigotoBinaryFile, MeshImporter
+from ..helper.mesh_import_helper import MigotoBinaryFile, MeshImportHelper
 from ..base.config.main_config import GlobalConfig
 
 from ..base.utils.translate_utils import TR
@@ -302,7 +302,7 @@ class SwordImportAllReversed(bpy.types.Operator):
                 filename_without_extension = os.path.splitext(filename_with_extension)[0]
                 # 调用导入功能
                 mbf = MigotoBinaryFile(fmt_path=fmt_filepath,mesh_name=filename_without_extension)
-                MeshImporter.create_mesh_obj_from_mbf(mbf=mbf,import_collection=datatype_collection)
+                MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=datatype_collection)
 
                 
                 # Nico: 注意，鸣潮Mod逆向的模型导入后，可能会出现法线不正确的问题
