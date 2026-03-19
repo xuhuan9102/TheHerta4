@@ -17,7 +17,7 @@ from .draw_call_model import DrawCallModel
 from ...helper.global_key_count_helper import GlobalKeyCountHelper
 from ...helper.blueprint_export_helper import BlueprintExportHelper
 
-from ..blueprint_node.blueprint_node_obj import SSMTNode_Object_Group, SSMTNode_ToggleKey, SSMTNode_SwitchKey, SSMTNode_Object_Info, SSMTNode_Result_Output
+from ..blueprint_node.blueprint_node_obj import SSMTNode_Object_Group, SSMTNode_SwitchKey, SSMTNode_Object_Info, SSMTNode_Result_Output
 
 
 class BluePrintModel:
@@ -53,43 +53,6 @@ class BluePrintModel:
         if unknown_node.bl_idname == SSMTNode_Object_Group.bl_idname:
             # 如果是单纯的分组节点，则不进行任何处理直接传递下去
             self.parse_current_node(unknown_node, chain_key_list)
-
-        elif unknown_node.bl_idname == SSMTNode_ToggleKey.bl_idname:
-            # 如果是按键开关节点，则添加一个Key，更新全局Key字典，更新Key列表并传递解析下去
-            m_key = M_Key()
-            current_add_key_index = len(self.keyname_mkey_dict.keys())
-            m_key.key_name = "$swapkey" + str(GlobalKeyCountHelper.global_key_index)
-
-            m_key.value_list = [0,1]
-
-            # 设置键具体是哪个键，由用户指定
-            m_key.initialize_vk_str = unknown_node.key_name
-
-            # 设置是否默认开启
-            if unknown_node.default_on:
-                m_key.initialize_value = 1
-            else:
-                m_key.initialize_value = 0
-            
-            # 设置备注信息
-            m_key.comment = getattr(unknown_node, 'comment', '')
-            
-            # 创建的key加入全局key列表
-            self.keyname_mkey_dict[m_key.key_name] = m_key
-
-            if len(self.keyname_mkey_dict.keys()) > current_add_key_index:
-                GlobalKeyCountHelper.global_key_index = GlobalKeyCountHelper.global_key_index + 1
-            
-            # 创建的key要加入chain_key_list传递下去
-            # 因为传递解析下去的话，要让这个key生效，而又因为它是按键开关key，所以value为1生效，所以tmp_value设为1
-            chain_tmp_key = copy.deepcopy(m_key)
-            chain_tmp_key.tmp_value = 1
-
-            tmp_chain_key_list = copy.deepcopy(chain_key_list)
-            tmp_chain_key_list.append(chain_tmp_key)
-
-            # 递归解析
-            self.parse_current_node(unknown_node, tmp_chain_key_list)
 
         elif unknown_node.bl_idname == SSMTNode_SwitchKey.bl_idname:
             # 如果是按键切换节点，则该节点所有的分支节点，并逐个处理

@@ -218,7 +218,6 @@ class SSMT_MT_NodeMenu_Branch(bpy.types.Menu):
         layout.operator("node.add_node", text="Object Info", icon='OBJECT_DATAMODE').type = "SSMTNode_Object_Info"
         layout.operator("node.add_node", text="Group", icon='GROUP').type = "SSMTNode_Object_Group"
         layout.operator("node.add_node", text="Mod Output", icon='EXPORT').type = "SSMTNode_Result_Output"
-        layout.operator("node.add_node", text="Toggle Key", icon='GROUP').type = "SSMTNode_ToggleKey"
         layout.operator("node.add_node", text="Switch Key", icon='GROUP').type = "SSMTNode_SwitchKey"
 
 class SSMT_MT_NodeMenu_ShapeKey(bpy.types.Menu):
@@ -231,9 +230,9 @@ class SSMT_MT_NodeMenu_ShapeKey(bpy.types.Menu):
 
 
 class SSMT_OT_AddCommonKeySwitches(bpy.types.Operator):
-    '''Add 9 Toggle Key nodes (CTRL 1-9), group them and connect to Output'''
+    '''Add 9 Switch Key nodes (CTRL 1-9), group them and connect to Output'''
     bl_idname = "ssmt.add_common_key_switches"
-    bl_label = "常用按键开关"
+    bl_label = "常用按键切换"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -253,7 +252,7 @@ class SSMT_OT_AddCommonKeySwitches(bpy.types.Operator):
         
         # Create Frame Node
         frame_node = nodes.new(type='NodeFrame')
-        frame_node.label = "常用按键开关组"
+        frame_node.label = "常用按键切换组"
         frame_node.location = (base_x - 50, base_y + 100)
 
         # Create Group Node
@@ -282,14 +281,13 @@ class SSMT_OT_AddCommonKeySwitches(bpy.types.Operator):
             if hasattr(output_node, "update"):
                 output_node.update()
 
-        # Create 9 Keys
+        # Create 9 Switch Keys
         key_names = [f"CTRL {i}" for i in range(1, 10)]
         
         for i, key_name in enumerate(key_names):
-            key_node = nodes.new(type='SSMTNode_ToggleKey')
+            key_node = nodes.new(type='SSMTNode_SwitchKey')
             key_node.location = (base_x, base_y - i * 200)
             key_node.key_name = key_name
-            key_node.default_on = True
             key_node.parent = frame_node
             # key_node.label = key_name # Optional: override label? No need.
             

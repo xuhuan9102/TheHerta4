@@ -267,44 +267,6 @@ class SSMTNode_Object_Group(SSMTNodeBase):
              self.inputs.remove(self.inputs[-1])
 
 
-class SSMTNode_ToggleKey(SSMTNodeBase):
-    '''【按键开关】会控制所有连接到它输入端口的对象,是【按键切换】的一个特殊情况，因为常用所以单独做成了一个节点'''
-    bl_idname = 'SSMTNode_ToggleKey'
-    bl_label = 'Toggle Key'
-    bl_icon = 'GROUP'
-
-    def update_key_name(self, context):
-        self.update_node_width([self.key_name, self.comment])
-    
-    def update_comment(self, context):
-        self.update_node_width([self.key_name, self.comment])
-    
-    key_name: bpy.props.StringProperty(name="Key Name", default="", update=update_key_name) # type: ignore
-    default_on: bpy.props.BoolProperty(name="Default On", default=False) # type: ignore
-    comment: bpy.props.StringProperty(name="备注", description="备注信息，会以注释形式生成到配置表中", default="", update=update_comment) # type: ignore
-    
-    def init(self, context):
-        self.label = "按键开关"
-        self.inputs.new('SSMTSocketObject', "Input 1")
-        self.outputs.new('SSMTSocketObject', "Output")
-        self.width = 200
-        self.use_custom_color = True
-        self.color = (0.41, 0.42, 0.66)
-
-    def draw_buttons(self, context, layout):
-        row = layout.row(align=True)
-        row.prop(self, "key_name", text="按键")
-        row.operator("wm.url_open", text="", icon='HELP').url = "https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes"
-        
-        layout.prop(self, "default_on", text="默认开启")
-        layout.prop(self, "comment", text="备注")
-
-    def update(self):
-        if self.inputs and self.inputs[-1].is_linked:
-            self.inputs.new('SSMTSocketObject', f"Input {len(self.inputs) + 1}")
-        
-        if len(self.inputs) > 1 and not self.inputs[-1].is_linked and not self.inputs[-2].is_linked:
-             self.inputs.remove(self.inputs[-1])
 
 
 class SSMT_OT_SwitchKey_AddSocket(bpy.types.Operator):
@@ -555,7 +517,6 @@ classes = (
     SSMTNode_Object_Info,
     SSMTNode_Object_Group,
     SSMTNode_Result_Output,
-    SSMTNode_ToggleKey,
     SSMTNode_SwitchKey,
     SSMT_OT_SwitchKey_AddSocket,
     SSMT_OT_SwitchKey_RemoveSocket,
