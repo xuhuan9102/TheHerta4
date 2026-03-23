@@ -34,6 +34,27 @@ C:\Users\Administrator\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\ad
 
 在插件架构发生大幅度变更时可能导致无法启动Blender，此时需要手动删掉插件缓存的这个软链接。
 
+也就是说，迁移插件位置可能会导致如下错误：
+
+```
+Traceback (most recent call last):
+  File "c:\Users\Administrator\.vscode\extensions\jacqueslucke.blender-development-0.0.30\pythonFiles\launch.py", line 28, in <module>
+    blender_vscode.startup(
+  File "c:\Users\Administrator\.vscode\extensions\jacqueslucke.blender-development-0.0.30\pythonFiles\include\blender_vscode\__init__.py", line 31, in startup
+    path_mappings = load_addons.setup_addon_links(addons_to_load)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Administrator\.vscode\extensions\jacqueslucke.blender-development-0.0.30\pythonFiles\include\blender_vscode\load_addons.py", line 40, in setup_addon_links
+    load_path = _link_addon_or_extension(addon_info)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Administrator\.vscode\extensions\jacqueslucke.blender-development-0.0.30\pythonFiles\include\blender_vscode\load_addons.py", line 64, in _link_addon_or_extension
+    create_link_in_user_addon_directory(addon_info.load_dir, load_path)
+  File "c:\Users\Administrator\.vscode\extensions\jacqueslucke.blender-development-0.0.30\pythonFiles\include\blender_vscode\load_addons.py", line 237, in create_link_in_user_addon_directory
+    _winapi.CreateJunction(str(directory), str(link_path))
+FileExistsError: [WinError 183] 当文件已存在时，无法创建该文件。
+```
+
+出现此报错后，去删除掉对应位置的软链接，再次Ctrl + Shift + P即可正常调试项目
+
 # 文件夹与文件名命名大小写问题 
 
 所有的文件夹都必须小写，因为git无法追踪文件夹名称大小写改变的记录,至少VSCode集成的git做不到，也可能是VSCode的问题。

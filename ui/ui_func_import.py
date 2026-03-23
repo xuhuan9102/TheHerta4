@@ -55,22 +55,28 @@ def ImprotFromWorkSpaceFull(self, context):
         # 获取导入的数据类型文件夹路径列表
         final_import_folder_path_list = WorkSpaceHelper.get_ordered_gpu_cpu_import_folderpath_list(submesh_folder_path)
         
-        # 接下来开始导入，尝试对当前DrawIB的每个类型进行导入
-        # 如果出错的话直接提示错误并continue，直到顺位第一个导入成功
+        # 接下来开始导入，尝试对当前DrawIB的每个数据类型都进行导入
+        # 如果出错的话直接提示错误并continue
+        # 导入每个数据类型后，由用户自行删除错误的数据类型，留下正确的数据类型来使用
         for import_folder_path in final_import_folder_path_list:
-            
-            print("尝试导入路径: " + import_folder_path)
-            fmt_file_path = os.path.join(import_folder_path, submesh_folder_name + ".fmt")
-            mbf = MigotoBinaryFile(fmt_path=fmt_file_path,mesh_name= submesh_folder_name + ".自定义名称")
-            MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=workspace_collection)
-
-
-            # 如果能执行到这里，说明这个DrawIB成功导入了一个数据类型
-            # 然后要把这个DrawIB对应的GameType名称保存下来
             gametype_name = import_folder_path.split("TYPE_")[1]
-            foldername_gametypename_dict[submesh_folder_name] = gametype_name
-            self.report({'INFO'}, "成功导入" + submesh_folder_name + " 的数据类型: " + gametype_name)
-            break
+
+            try:
+                print("尝试导入路径: " + import_folder_path)
+                fmt_file_path = os.path.join(import_folder_path, submesh_folder_name + ".fmt")
+                mbf = MigotoBinaryFile(fmt_path=fmt_file_path,mesh_name= submesh_folder_name + ".自定义名称")
+                MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=workspace_collection)
+
+                # 如果能执行到这里，说明这个DrawIB成功导入了一个数据类型
+                # 然后要把这个DrawIB对应的GameType名称保存下来
+                foldername_gametypename_dict[submesh_folder_name] = gametype_name
+                self.report({'INFO'}, "成功导入" + submesh_folder_name + " 的数据类型: " + gametype_name)
+            except Exception as e:
+                print(f"Failed to import from {import_folder_path}: {e}")
+                continue
+            
+
+            
 
     # 保存Import.json文件
     save_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(),"Import.json")
