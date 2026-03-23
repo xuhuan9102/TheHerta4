@@ -57,7 +57,6 @@ def ImprotFromWorkSpaceFull(self, context):
         
         # 接下来开始导入，尝试对当前DrawIB的每个数据类型都进行导入
         # 如果出错的话直接提示错误并continue
-        # 导入每个数据类型后，由用户自行删除错误的数据类型，留下正确的数据类型来使用
         for import_folder_path in final_import_folder_path_list:
             gametype_name = import_folder_path.split("TYPE_")[1]
 
@@ -74,6 +73,10 @@ def ImprotFromWorkSpaceFull(self, context):
             except Exception as e:
                 print(f"Failed to import from {import_folder_path}: {e}")
                 continue
+            # 直到第一个导入成功就Break
+            # 因为我们还没有添加多个数据类型时，让物体携带数据类型信息的机制
+            # 所以这里暂时还是哪个导入成功了用哪个
+            break
             
 
             
