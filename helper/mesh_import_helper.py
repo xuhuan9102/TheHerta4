@@ -310,6 +310,7 @@ class MeshImportHelper:
         # 预先获取所有循环的顶点索引并转换为numpy数组
         loops = mesh.loops
         vertex_indices = numpy.array([l.vertex_index for l in loops], dtype=numpy.int32)
+        uv_limit = 100.0
         
         for texcoord, data in sorted(texcoords.items()):
             # 将原始数据转换为numpy数组（只需转换一次）
@@ -347,6 +348,16 @@ class MeshImportHelper:
                 uvs = numpy.empty((len(data_np), 2), dtype=numpy.float32)
                 uvs[:, 0] = data_np[:, c0]           # U分量
                 uvs[:, 1] = 1.0 - data_np[:, c1]     # V分量翻转
+
+                # Blender 中大范围平铺 UV 是允许的，但超过 +/-100 通常已经属于异常数据。
+                invalid_mask = numpy.any(numpy.abs(uvs) > uv_limit, axis=1)
+                if numpy.any(invalid_mask):
+                    invalid_index = int(numpy.flatnonzero(invalid_mask)[0])
+                    invalid_uv = uvs[invalid_index]
+                    raise Fatal(
+                        f"检测到异常UV数据: 对象 {obj.name}, UV层 {uv_name}, 顶点 {invalid_index}, "
+                        f"坐标 ({invalid_uv[0]:.6f}, {invalid_uv[1]:.6f}) 超出允许范围 [-{uv_limit}, {uv_limit}]"
+                    )
                 
                 # Nico: 这里加一个冗余处理，防止UV数据比顶点数据少导致越界
                 # 如果发现最大索引超过了UV数据长度，则自动填充默认值(0,0)
