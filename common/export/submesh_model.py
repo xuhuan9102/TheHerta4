@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Dict
 from .draw_call_model import DrawCallModel
+from ...base.utils.export_utils import ExportUtils
 from ...base.utils.obj_utils import ObjUtils
 from ...base.utils.collection_utils import CollectionUtils
 from ...base.utils.json_utils import JsonUtils
@@ -8,8 +8,6 @@ from ..d3d11.d3d11_gametype import D3D11GameType
 from ...helper.obj_buffer_helper import ObjBufferHelper
 
 from ...base.config.main_config import GlobalConfig
-from .obj_element_model import ObjElementModel
-from .obj_buffer_model_unity import ObjBufferModelUnity
 
 import bpy
 import os
@@ -162,24 +160,14 @@ class SubMeshModel:
 
         # 检查并校验是否有缺少的元素
         ObjBufferHelper.check_and_verify_attributes(obj=submesh_merged_obj, d3d11_game_type=self.d3d11_game_type)
-        
-        # 创建
-        obj_element_model = ObjElementModel(d3d11_game_type=self.d3d11_game_type,obj_name=submesh_merged_obj.name)
 
-        # 【可选】在这里可以做数据内容转换,例如WWMI的BLENDINDICES REMAP
-
-        # 赋值回去
-        obj_element_model.element_vertex_ndarray = ObjBufferHelper.convert_to_element_vertex_ndarray(
-            original_elementname_data_dict=obj_element_model.original_elementname_data_dict,
-            final_elementname_data_dict={},
-            mesh=obj_element_model.mesh,
-            d3d11_game_type=self.d3d11_game_type
+        obj_buffer_result = ExportUtils.build_unity_obj_buffer_result(
+            obj=submesh_merged_obj,
+            d3d11_game_type=self.d3d11_game_type,
         )
-
-        obj_buffer_model = ObjBufferModelUnity(obj=submesh_merged_obj, d3d11_game_type=self.d3d11_game_type)
-        self.ib = obj_buffer_model.ib
-        self.category_buffer_dict = obj_buffer_model.category_buffer_dict
-        self.index_vertex_id_dict = obj_buffer_model.index_loop_id_dict
+        self.ib = obj_buffer_result.ib
+        self.category_buffer_dict = obj_buffer_result.category_buffer_dict
+        self.index_vertex_id_dict = obj_buffer_result.index_loop_id_dict
 
         # 4.计算完成后，删除临时obj
         bpy.data.objects.remove(submesh_merged_obj, do_unlink=True)

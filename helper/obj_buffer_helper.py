@@ -112,6 +112,8 @@ class ObjBufferHelper:
                 if hasattr(obj_model_cached, 'shape_key_buffer_dict'):
                     __obj_name_shape_key_buffer_dict[obj.name] = obj_model_cached.shape_key_buffer_dict
             else:
+                from ..base.utils.export_utils import ExportUtils
+
                 # XXX 我们在导出具体数据之前，先对模型整体的权重进行normalize_all预处理，才能让后续的具体每一个权重的normalize_all更好的工作
                 # 使用这个的前提是当前obj中没有锁定的顶点组，所以这里要先进行判断。
                 if "Blend" in d3d11_game_type.OrderedCategoryNameList:
@@ -142,10 +144,10 @@ class ObjBufferHelper:
 
                     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
 
-                # 延迟导入 ObjBufferModelUnity 以避免循环导入
-                from ..common.obj_buffer_model_unity import ObjBufferModelUnity
-
-                obj_buffer_model = ObjBufferModelUnity(obj=obj, d3d11_game_type=d3d11_game_type)
+                obj_buffer_result = ExportUtils.build_unity_obj_buffer_result(
+                    obj=obj,
+                    d3d11_game_type=d3d11_game_type,
+                )
 
                 # 后处理翻转回来
                 if (GlobalConfig.logic_name == LogicName.SRMI
@@ -170,12 +172,12 @@ class ObjBufferHelper:
 
                     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
 
-                __obj_name_ib_dict[obj.name] = obj_buffer_model.ib
-                __obj_name_category_buffer_list_dict[obj.name] = obj_buffer_model.category_buffer_dict
-                if hasattr(obj_buffer_model, 'shape_key_buffer_dict'):
-                    __obj_name_shape_key_buffer_dict[obj.name] = obj_buffer_model.shape_key_buffer_dict
+                __obj_name_ib_dict[obj.name] = obj_buffer_result.ib
+                __obj_name_category_buffer_list_dict[obj.name] = obj_buffer_result.category_buffer_dict
+                if obj_buffer_result.shape_key_buffer_dict:
+                    __obj_name_shape_key_buffer_dict[obj.name] = obj_buffer_result.shape_key_buffer_dict
 
-                obj_name_obj_model_cache_dict[obj_name] = obj_buffer_model
+                obj_name_obj_model_cache_dict[obj_name] = obj_buffer_result
 
         final_ordered_draw_obj_model_list:list[DrawCallModel] = []
 

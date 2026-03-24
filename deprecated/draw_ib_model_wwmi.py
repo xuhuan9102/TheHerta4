@@ -25,8 +25,7 @@ from ..common.draw_call_model import M_DrawIndexed
 from ..config.properties_wwmi import Properties_WWMI
 from ..config.import_config import ImportConfig
 
-from ..common.export.obj_element_model import ObjElementModel
-from ..common.export.obj_buffer_model_wwmi import ObjBufferModelWWMI
+from ..base.utils.export_utils import ExportUtils, ObjElementContext, WWMIBufferBuildResult
 from .blueprint_model import BluePrintModel
 from ..helper.buffer_export_helper import BufferExportHelper
 
@@ -66,7 +65,7 @@ class DrawIBModelWWMI:
     # 是否启用Blend Remap技术
     blend_remap:bool = field(init=False,default=False)
     
-    obj_buffer_model_wwmi:ObjBufferModelWWMI = field(init=False,default=False)
+    obj_buffer_model_wwmi:WWMIBufferBuildResult = field(init=False,default=False)
     
     blend_remap_maps:dict = field(init=False,default_factory=dict)
     # Per-component boolean: component name -> whether that component uses remap
@@ -138,24 +137,25 @@ class DrawIBModelWWMI:
         # 导出Obj前的通用检查
         ObjBufferHelper.check_and_verify_attributes(obj=self.merged_object.object, d3d11_game_type=self.d3d11GameType)
         
-        # 创建obj_element_model
-        obj_element_model = ObjElementModel(d3d11_game_type=self.d3d11GameType, obj_name=self.merged_object.object.name)
+        element_context = ExportUtils.build_obj_element_context(
+            d3d11_game_type=self.d3d11GameType,
+            obj=self.merged_object.object,
+        )
 
         # 如果使用了remap技术则替换Remap
         if self.blend_remap:
-            self.replace_remapped_blendindices(obj_element_model)
+            self.replace_remapped_blendindices(element_context)
 
         # 上面替换完了remap这里才填充为最终的ndarray
 
-        obj_element_model.element_vertex_ndarray = ObjBufferHelper.convert_to_element_vertex_ndarray(
-            mesh=obj_element_model.mesh,
-            original_elementname_data_dict=obj_element_model.original_elementname_data_dict,
-            final_elementname_data_dict=obj_element_model.final_elementname_data_dict,
+        element_context.element_vertex_ndarray = ObjBufferHelper.convert_to_element_vertex_ndarray(
+            mesh=element_context.mesh,
+            original_elementname_data_dict=element_context.original_elementname_data_dict,
+            final_elementname_data_dict=element_context.final_elementname_data_dict,
             d3d11_game_type=self.d3d11GameType
         )
 
-        # 然后才能创建ObjBufferModelWWMI
-        self.obj_buffer_model_wwmi = ObjBufferModelWWMI(obj_element_model=obj_element_model)
+        self.obj_buffer_model_wwmi = ExportUtils.build_wwmi_obj_buffer_result(element_context)
 
         # 写出Index.buf
         BufferExportHelper.write_buf_ib_r32_uint(self.obj_buffer_model_wwmi.ib,self.draw_ib + "-Component1.buf")
@@ -189,12 +189,12 @@ class DrawIBModelWWMI:
             vg_array = numpy.zeros((len(index_vertex_id_dict), num_vgs), dtype=numpy.uint16)
 
             # Reconstruct per-unique-row original (pre-remap) BLENDINDICES by
-            # sampling `obj_element_model.original_elementname_data_dict['BLENDINDICES']`
-            # at the same loop indices used by ObjBufferModelWWMI when it built
+            # sampling `element_context.original_elementname_data_dict['BLENDINDICES']`
+            # at the same loop indices used by the WWMI buffer result when it built
             # `unique_element_vertex_ndarray`.
             # Strict path: require `unique_first_loop_indices` and original parsed BLENDINDICES.
             # If either is missing, skip writing the aligned BlendRemapVertexVG file and log a warning.
-            original_blendindices = obj_element_model.original_elementname_data_dict['BLENDINDICES']
+            original_blendindices = element_context.original_elementname_data_dict['BLENDINDICES']
 
             sampled_blendindices = original_blendindices[self.obj_buffer_model_wwmi.unique_first_loop_indices]
             # Always treat sampled_blendindices as 2D (channels in axis=1).
@@ -529,9 +529,9 @@ class DrawIBModelWWMI:
                 blend_remap_reverse.tofile(f)
 
 
-    def replace_remapped_blendindices(self, obj_element_model: ObjElementModel):
+    def replace_remapped_blendindices(self, element_context: ObjElementContext):
         """
-        使用已经生成的 self.blend_remap_maps 将 obj_element_model.element_vertex_ndarray['BLENDINDICES']
+        使用已经生成的 self.blend_remap_maps 将 BLENDINDICES
         中的全局顶点组索引替换为对应 component 的局部（compact）索引。
 
         过程：
@@ -543,7 +543,7 @@ class DrawIBModelWWMI:
         if not hasattr(self, 'blend_remap_maps') or not self.blend_remap_maps:
             return
 
-        mesh = obj_element_model.mesh
+        mesh = element_context.mesh
         loops_len = len(mesh.loops)
 
         # Build loop -> polygon mapping
@@ -555,13 +555,13 @@ class DrawIBModelWWMI:
 
         arr = None
         # Source array: original parsed dict if present
-        if 'BLENDINDICES' in getattr(obj_element_model, 'original_elementname_data_dict', {}):
+        if 'BLENDINDICES' in getattr(element_context, 'original_elementname_data_dict', {}):
             # copy to avoid mutating the original
-            src = obj_element_model.original_elementname_data_dict['BLENDINDICES']
+            src = element_context.original_elementname_data_dict['BLENDINDICES']
             arr = src.copy()
-        elif hasattr(obj_element_model, 'element_vertex_ndarray') and 'BLENDINDICES' in obj_element_model.element_vertex_ndarray.dtype.names:
+        elif element_context.element_vertex_ndarray is not None and 'BLENDINDICES' in element_context.element_vertex_ndarray.dtype.names:
             # If the caller has already packed, take a copy of the packed ndarray
-            arr = obj_element_model.element_vertex_ndarray['BLENDINDICES'].copy()
+            arr = element_context.element_vertex_ndarray['BLENDINDICES'].copy()
 
         if arr is None:
             # Nothing to remap
@@ -607,7 +607,7 @@ class DrawIBModelWWMI:
                     new = reverse_map.get(orig, orig)
                     arr[li, j] = new
 
-        obj_element_model.final_elementname_data_dict['BLENDINDICES'] = arr
+        element_context.final_elementname_data_dict['BLENDINDICES'] = arr
 
         print("Applied BLENDINDICES remap and wrote results into final_elementname_data_dict")
  

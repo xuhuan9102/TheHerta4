@@ -156,7 +156,7 @@ class DrawIBModel:
                 if hasattr(obj_model, 'shape_key_buffer_dict') and obj_model.shape_key_buffer_dict:
                     sk_buffer_model = obj_model.shape_key_buffer_dict.get(sk_name)
                     if sk_buffer_model and hasattr(sk_buffer_model, 'element_vertex_ndarray'):
-                        # ShapeKeyBufferModel 存储的是完整的 Structured Array (包含 Pos/Normal/etc)
+                        # ShapeKey BufferResult 存储的是完整的 Structured Array (包含 Pos/Normal/etc)
                         # 我们需要根据 Stride/Offset 切片出 Position Category 的数据
                         if pos_cat_stride > 0:
                             # 转换为 uint8 2D 视图 (VertexCount, TotalStride)
