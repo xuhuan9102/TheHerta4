@@ -2,7 +2,7 @@ import bpy
 from bpy.types import NodeTree, Node, NodeSocket
 
 from ...base.config.main_config import GlobalConfig, LogicName
-from ...base.config.properties_generate_mod import Properties_GenerateMod
+from ...base.config.global_properties import GlobalProterties
 from .blueprint_node_base import SSMTBlueprintTree, SSMTNodeBase
 
 BLENDER_VERSION = bpy.app.version[:2]
@@ -356,46 +356,46 @@ class SSMTNode_Result_Output(SSMTNodeBase):
         layout.operator("ssmt.generate_mod_blueprint", text="Generate Mod", icon='EXPORT')
         
         
-        layout.prop(context.scene.properties_generate_mod, "preview_export_only", text="配置表预导出 (仅生成INI)")
+        layout.prop(context.scene.global_properties, "preview_export_only", text="配置表预导出 (仅生成INI)")
         
         if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
-            layout.prop(context.scene.properties_wwmi, "ignore_muted_shape_keys")
-            layout.prop(context.scene.properties_wwmi, "apply_all_modifiers")
-            layout.prop(context.scene.properties_wwmi, "export_add_missing_vertex_groups")
+            layout.prop(context.scene.global_properties, "ignore_muted_shape_keys")
+            layout.prop(context.scene.global_properties, "apply_all_modifiers")
+            layout.prop(context.scene.global_properties, "export_add_missing_vertex_groups")
 
-        layout.prop(context.scene.properties_generate_mod, 
+        layout.prop(context.scene.global_properties, 
                     "forbid_auto_texture_ini",text="禁止自动贴图流程")
 
         if GlobalConfig.logic_name != LogicName.UnityCPU:
-            layout.prop(context.scene.properties_generate_mod,
+            layout.prop(context.scene.global_properties,
                         "recalculate_tangent",text="向量归一化法线存入TANGENT(全局)")
 
         if GlobalConfig.logic_name == LogicName.HIMI:
-            layout.prop(context.scene.properties_generate_mod,
+            layout.prop(context.scene.global_properties,
                         "recalculate_color",text="算术平均归一化法线存入COLOR(全局)")
 
         if GlobalConfig.logic_name == LogicName.ZZMI:
-            layout.prop(context.scene.properties_generate_mod, "zzz_use_slot_fix")
+            layout.prop(context.scene.global_properties, "zzz_use_slot_fix")
 
         if GlobalConfig.logic_name == LogicName.GIMI:
-            layout.prop(context.scene.properties_generate_mod, "gimi_use_orfix")
+            layout.prop(context.scene.global_properties, "gimi_use_orfix")
 
         if GlobalConfig.logic_name == LogicName.EFMI:
-            layout.prop(context.scene.properties_generate_mod, "add_rain_effect", text="添加雨水效果(vb3)")
-            layout.prop(context.scene.properties_generate_mod, "use_rabbitfx_slot", text="使用RabbitFX槽位写法")
+            layout.prop(context.scene.global_properties, "add_rain_effect", text="添加雨水效果(vb3)")
+            layout.prop(context.scene.global_properties, "use_rabbitfx_slot", text="使用RabbitFX槽位写法")
 
-        layout.prop(context.scene.properties_generate_mod, "generate_branch_mod_gui",text="生成分支架构Mod面板(测试中)")
+        layout.prop(context.scene.global_properties, "generate_branch_mod_gui",text="生成分支架构Mod面板(测试中)")
 
-        layout.prop(context.scene.properties_generate_mod, "open_mod_folder_after_generate_mod",text="生成Mod后打开Mod所在文件夹")
+        layout.prop(context.scene.global_properties, "open_mod_folder_after_generate_mod",text="生成Mod后打开Mod所在文件夹")
 
-        layout.prop(context.scene.properties_generate_mod, "use_specific_generate_mod_folder_path")
+        layout.prop(context.scene.global_properties, "use_specific_generate_mod_folder_path")
 
-        layout.prop(context.scene.properties_generate_mod, "enable_performance_stats",text="启用性能统计")
+        layout.prop(context.scene.global_properties, "enable_performance_stats",text="启用性能统计")
 
-        if Properties_GenerateMod.use_specific_generate_mod_folder_path():
+        if GlobalProterties.use_specific_generate_mod_folder_path():
             box = layout.box()
             box.label(text="当前生成Mod位置文件夹:")
-            box.label(text=context.scene.properties_generate_mod.generate_mod_folder_path)
+            box.label(text=context.scene.global_properties.generate_mod_folder_path)
 
             layout.operator("ssmt.select_generate_mod_folder", icon='FILE_FOLDER')
         

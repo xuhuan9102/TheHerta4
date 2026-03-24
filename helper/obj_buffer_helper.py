@@ -12,7 +12,7 @@ from ..base.utils.tbn_codec import TBNCodec
 from ..base.utils.ssmt_error_utils import SSMTErrorUtils
 
 from ..base.config.main_config import GlobalConfig, LogicName
-from ..base.config.properties_generate_mod import Properties_GenerateMod
+from ..base.config.global_properties import GlobalProterties
 from ..base.utils.obj_utils import ObjUtils
 from ..base.utils.log_utils import LOG
 
@@ -828,7 +828,7 @@ class ObjBufferHelper:
         if "COLOR" not in d3d11GameType.OrderedFullElementList:
             return indexed_vertices
         allow_calc = False
-        if Properties_GenerateMod.recalculate_color():
+        if GlobalProterties.recalculate_color():
             allow_calc = True
         elif obj.get("3DMigoto:RecalculateCOLOR",False): 
             allow_calc = True
@@ -902,7 +902,7 @@ class ObjBufferHelper:
         if "TANGENT" not in d3d11GameType.OrderedFullElementList:
             return indexed_vertices
         allow_calc = False
-        if Properties_GenerateMod.recalculate_tangent():
+        if GlobalProterties.recalculate_tangent():
             allow_calc = True
         elif obj.get("3DMigoto:RecalculateTANGENT",False): 
             allow_calc = True

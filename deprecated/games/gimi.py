@@ -4,7 +4,7 @@ GIMI
 import bpy
 
 from ..config.main_config import GlobalConfig
-from ..config.properties_generate_mod import Properties_GenerateMod
+from ..config.global_properties import GlobalProterties
 
 from ..common.draw_ib_model import DrawIBModel
 
@@ -100,7 +100,7 @@ class ModModelGIMI:
                 if len(self.branch_model.keyname_mkey_dict.keys()) != 0:
                     texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
 
-                    if Properties_GenerateMod.generate_branch_mod_gui():
+                    if GlobalProterties.generate_branch_mod_gui():
                         texture_override_vb_section.append("$ActiveCharacter = 1")
 
             texture_override_vb_section.new_line()
@@ -147,14 +147,14 @@ class ModModelGIMI:
 
             print("Test: ZZZ")
             # Add slot style texture slot replace.
-            if not Properties_GenerateMod.forbid_auto_texture_ini():
+            if not GlobalProterties.forbid_auto_texture_ini():
                 texture_markup_info_list = draw_ib_model.import_config.partname_texturemarkinfolist_dict.get(part_name,None)
                 
                 # 先判断是否具有NormalMap
                 normal_exists = False
                 
                 # 如果使用ORFix技术，则所有的槽位都要强制使用固定的槽位
-                if Properties_GenerateMod.gimi_use_orfix():
+                if GlobalProterties.gimi_use_orfix():
                     if texture_markup_info_list is not None:
                         
                         for texture_markup_info in texture_markup_info_list:
@@ -190,7 +190,7 @@ class ModModelGIMI:
                             slot_replace_exists = True
                             texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
 
-                    if Properties_GenerateMod.gimi_use_orfix() and slot_replace_exists:
+                    if GlobalProterties.gimi_use_orfix() and slot_replace_exists:
                         if normal_exists:
                             texture_override_ib_section.append("run = CommandList\\global\\ORFix\\ORFix")
                         else:
@@ -279,7 +279,7 @@ class ModModelGIMI:
         Add texture resource.
         只有槽位风格贴图会用到，因为Hash风格贴图有专门的方法去声明这个。
         '''
-        if Properties_GenerateMod.forbid_auto_texture_ini():
+        if GlobalProterties.forbid_auto_texture_ini():
             return 
         
         resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)

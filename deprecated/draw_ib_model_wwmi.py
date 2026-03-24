@@ -22,7 +22,7 @@ from .draw_call_model import DrawCallModel
 from .d3d11 import D3D11GameType
 from ..common.draw_call_model import M_DrawIndexed
 
-from ..config.properties_wwmi import Properties_WWMI
+from ..config.global_properties import GlobalProterties
 from ..config.import_config import ImportConfig
 
 from ..base.utils.export_utils import ExportUtils, ObjElementContext, WWMIBufferBuildResult
@@ -281,7 +281,7 @@ class DrawIBModelWWMI:
                 print("Processing temp_obj: " + temp_obj.name)
 
                 # Remove muted shape keys
-                if Properties_WWMI.ignore_muted_shape_keys() and temp_obj.data.shape_keys:
+                if GlobalProterties.ignore_muted_shape_keys() and temp_obj.data.shape_keys:
                     print("Removing muted shape keys for object: " + temp_obj.name)
                     muted_shape_keys = []
                     for shapekey_id in range(len(temp_obj.data.shape_keys.key_blocks)):
@@ -293,7 +293,7 @@ class DrawIBModelWWMI:
                         temp_obj.shape_key_remove(shape_key)
 
                 # Apply all modifiers to temporary object
-                if Properties_WWMI.apply_all_modifiers():
+                if GlobalProterties.apply_all_modifiers():
                     print("Applying all modifiers for object: " + temp_obj.name)
                     with OpenObject(bpy.context, temp_obj) as obj:
                         selected_modifiers = [modifier.name for modifier in get_modifiers(obj)]
@@ -306,7 +306,7 @@ class DrawIBModelWWMI:
                 vertex_groups = ObjUtils.get_vertex_groups(temp_obj)
 
                 # Remove ignored or unexpected vertex groups
-                if Properties_WWMI.import_merged_vgmap():
+                if GlobalProterties.import_merged_vgmap():
                     print("Remove ignored or unexpected vertex groups for object: " + temp_obj.name)
                     # Exclude VGs with 'ignore' tag or with higher id VG count from Metadata.ini for current component
                     total_vg_count = sum([component.vg_count for component in extracted_object.components])
@@ -374,7 +374,7 @@ class DrawIBModelWWMI:
 
             # 如果导入时勾选了忽略空顶点组
             # 那么导出时就得按顺序排列并且添加回来那些空的顶点组以确保不会出问题
-            if Properties_WWMI.export_add_missing_vertex_groups():
+            if GlobalProterties.export_add_missing_vertex_groups():
                 ObjUtils.select_obj(component_obj)
                 
                 VertexGroupUtils.fill_vertex_group_gaps()
@@ -415,7 +415,7 @@ class DrawIBModelWWMI:
 
         ObjUtils.rename_object(obj, 'TEMP_EXPORT_OBJECT')
 
-        if Properties_WWMI.export_add_missing_vertex_groups():
+        if GlobalProterties.export_add_missing_vertex_groups():
             ObjUtils.select_obj(obj)
             VertexGroupUtils.merge_vertex_groups_with_same_number_v2()
             # VertexGroupUtils.fill_vertex_group_gaps()

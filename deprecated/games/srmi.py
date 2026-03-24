@@ -12,7 +12,7 @@ from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..blueprint.blueprint_model import BluePrintModel
 
 from ..common.m_ini_builder import M_IniBuilder,M_IniSection,M_SectionType
-from ..config.properties_generate_mod import Properties_GenerateMod
+from ..config.global_properties import GlobalProterties
 from ..common.m_ini_helper import M_IniHelper,M_IniHelper
 
 from ..common.m_ini_helper_gui import M_IniHelperGUI
@@ -70,7 +70,7 @@ class ModModelSRMI:
         Add texture resource.
         只有槽位风格贴图会用到，因为Hash风格贴图有专门的方法去声明这个。
         '''
-        if Properties_GenerateMod.forbid_auto_texture_ini():
+        if GlobalProterties.forbid_auto_texture_ini():
             return 
         
         resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)
@@ -145,7 +145,7 @@ class ModModelSRMI:
                     if len(self.branch_model.keyname_mkey_dict.keys()) != 0:
                         texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
 
-                        if Properties_GenerateMod.generate_branch_mod_gui():
+                        if GlobalProterties.generate_branch_mod_gui():
                             texture_override_vb_section.append("$ActiveCharacter = 1")
 
                 texture_override_vb_section.new_line()
@@ -193,7 +193,7 @@ class ModModelSRMI:
             texture_override_ib_section.append(self.vlr_filter_index_indent + "ib = " + ib_resource_name)
 
             # Add slot style texture slot replace.
-            if not Properties_GenerateMod.forbid_auto_texture_ini():
+            if not GlobalProterties.forbid_auto_texture_ini():
                 texture_markup_info_list = draw_ib_model.import_config.partname_texturemarkinfolist_dict.get(part_name,None)
                 # It may not have auto texture
                 if texture_markup_info_list is not None:

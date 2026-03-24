@@ -12,7 +12,7 @@ from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..blueprint.blueprint_model import BluePrintModel
 
 from ..common.m_ini_builder import M_IniBuilder,M_IniSection,M_SectionType
-from ..config.properties_generate_mod import Properties_GenerateMod
+from ..config.global_properties import GlobalProterties
 from ..common.m_ini_helper import M_IniHelper,M_IniHelper
 from ..common.m_ini_helper_gui import M_IniHelperGUI
 
@@ -94,7 +94,7 @@ class ModModelZZMI:
                 if len(self.branch_model.keyname_mkey_dict.keys()) != 0:
                     texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
 
-                    if Properties_GenerateMod.generate_branch_mod_gui():
+                    if GlobalProterties.generate_branch_mod_gui():
                         texture_override_vb_section.append("$ActiveCharacter = 1")
 
             texture_override_vb_section.new_line()
@@ -156,35 +156,35 @@ class ModModelZZMI:
 
             print("Test: ZZZ")
             if GlobalConfig.logic_name == LogicName.ZZMI:
-                if not Properties_GenerateMod.forbid_auto_texture_ini():
+                if not GlobalProterties.forbid_auto_texture_ini():
                     texture_markup_info_list = draw_ib_model.import_config.partname_texturemarkinfolist_dict.get(part_name,None)
                     if texture_markup_info_list is not None:
                         for texture_markup_info in texture_markup_info_list:
                             if texture_markup_info.mark_type == "Slot":
-                                if texture_markup_info.mark_name == "DiffuseMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                if texture_markup_info.mark_name == "DiffuseMap" and GlobalProterties.zzz_use_slot_fix():
                                     texture_override_ib_section.append("Resource\\ZZMI\\Diffuse = ref " + texture_markup_info.get_resource_name())
-                                elif texture_markup_info.mark_name == "NormalMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "NormalMap" and GlobalProterties.zzz_use_slot_fix():
                                     texture_override_ib_section.append("Resource\\ZZMI\\NormalMap = ref " + texture_markup_info.get_resource_name())
-                                elif texture_markup_info.mark_name == "LightMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "LightMap" and GlobalProterties.zzz_use_slot_fix():
                                     texture_override_ib_section.append("Resource\\ZZMI\\LightMap = ref " + texture_markup_info.get_resource_name())
-                                elif texture_markup_info.mark_name == "MaterialMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "MaterialMap" and GlobalProterties.zzz_use_slot_fix():
                                     texture_override_ib_section.append("Resource\\ZZMI\\MaterialMap = ref " + texture_markup_info.get_resource_name())
-                                elif texture_markup_info.mark_name == "StockingMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "StockingMap" and GlobalProterties.zzz_use_slot_fix():
                                     texture_override_ib_section.append("Resource\\ZZMI\\WengineFx = ref " + texture_markup_info.get_resource_name())
                                 
                         texture_override_ib_section.append("run = CommandList\\ZZMI\\SetTextures")
 
                         for texture_markup_info in texture_markup_info_list:
                             if texture_markup_info.mark_type == "Slot":
-                                if texture_markup_info.mark_name == "DiffuseMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                if texture_markup_info.mark_name == "DiffuseMap" and GlobalProterties.zzz_use_slot_fix():
                                     pass
-                                elif texture_markup_info.mark_name == "NormalMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "NormalMap" and GlobalProterties.zzz_use_slot_fix():
                                     pass
-                                elif texture_markup_info.mark_name == "LightMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "LightMap" and GlobalProterties.zzz_use_slot_fix():
                                     pass
-                                elif texture_markup_info.mark_name == "MaterialMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "MaterialMap" and GlobalProterties.zzz_use_slot_fix():
                                     pass
-                                elif texture_markup_info.mark_name == "StockingMap" and Properties_GenerateMod.zzz_use_slot_fix():
+                                elif texture_markup_info.mark_name == "StockingMap" and GlobalProterties.zzz_use_slot_fix():
                                     pass
                                 else:
                                     texture_override_ib_section.append(self.vlr_filter_index_indent + texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
@@ -193,7 +193,7 @@ class ModModelZZMI:
                 if texture_markup_info_list is not None:
                     texture_override_ib_section.append("run = CommandListSkinTexture")
             else:
-                if not Properties_GenerateMod.forbid_auto_texture_ini():
+                if not GlobalProterties.forbid_auto_texture_ini():
                     texture_markup_info_list = draw_ib_model.import_config.partname_texturemarkinfolist_dict.get(part_name,None)
                     if texture_markup_info_list is not None:
                         for texture_markup_info in texture_markup_info_list:
@@ -303,7 +303,7 @@ class ModModelZZMI:
         '''
         只有槽位风格贴图会用到，因为Hash风格贴图有专门的方法去声明这个。
         '''
-        if Properties_GenerateMod.forbid_auto_texture_ini():
+        if GlobalProterties.forbid_auto_texture_ini():
             return 
         
         resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)

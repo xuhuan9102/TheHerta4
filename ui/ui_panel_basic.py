@@ -5,7 +5,6 @@ import bpy
 
 from ..base.config.main_config import GlobalConfig, LogicName
 from ..base.config.plugin_config import PluginConfig
-from ..base.config.properties_import_model import Properties_ImportModel
 
 from ..base.utils.translate_utils import TR
 
@@ -38,7 +37,7 @@ class PanelBasicInformation(bpy.types.Panel):
 
             layout.label(text=TR.translate("当前SSMT4版本过低无法适配"),icon='ERROR')
 
-        layout.prop(context.scene.properties_import_model,"use_mirror_workflow",text="使用非镜像工作流")
+        layout.prop(context.scene.global_properties,"use_mirror_workflow",text="使用非镜像工作流")
         
         if len(context.selected_objects) != 0:
             obj = context.selected_objects[0]
@@ -62,11 +61,11 @@ class PanelBasicInformation(bpy.types.Panel):
         layout.operator("ssmt.import_all_from_workspace_blueprint",icon='IMPORT')
 
         if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
-            layout.prop(context.scene.properties_wwmi,"import_merged_vgmap")
-            layout.prop(context.scene.properties_wwmi,"import_skip_empty_vertex_groups")
+            layout.prop(context.scene.global_properties,"import_merged_vgmap")
+            layout.prop(context.scene.global_properties,"import_skip_empty_vertex_groups")
 
         # 决定导入时是否调用法线贴图
-        layout.prop(context.scene.properties_import_model, "use_normal_map")
+        layout.prop(context.scene.global_properties, "use_normal_map")
 
 
 def register():

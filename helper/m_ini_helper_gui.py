@@ -4,7 +4,7 @@ import shutil
 
 from ..common.migoto.m_ini_builder import *
 from ..base.config.main_config import GlobalConfig
-from ..base.config.properties_generate_mod import Properties_GenerateMod
+from ..base.config.global_properties import GlobalProterties
 from ..common.migoto.m_key import M_Key
 from ..common.export.draw_call_model import DrawCallModel
 
@@ -44,7 +44,7 @@ class M_IniHelperGUI:
         特别感谢：SinsOfSeven
         '''
 
-        if not Properties_GenerateMod.generate_branch_mod_gui():
+        if not GlobalProterties.generate_branch_mod_gui():
             return
         else:
             # 在这里把所有的res下面的东西，复制到当前生成的Mod文件夹的res目录下

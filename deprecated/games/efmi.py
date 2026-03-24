@@ -11,7 +11,7 @@ from ..blueprint.blueprint_model import BluePrintModel
 from ..blueprint.blueprint_export_helper import BlueprintExportHelper
 
 from ..common.m_ini_builder import M_IniBuilder,M_IniSection,M_SectionType
-from ..config.properties_generate_mod import Properties_GenerateMod
+from ..config.global_properties import GlobalProterties
 from ..common.m_ini_helper import M_IniHelper,M_IniHelper
 from ..common.m_ini_helper_gui import M_IniHelperGUI
 
@@ -297,10 +297,10 @@ class ModModelEFMI:
 
         texture_override_ib_section.append(self.vlr_filter_index_indent + "run = CommandList\\EFMIv1\\OverrideTextures")
 
-        if not Properties_GenerateMod.forbid_auto_texture_ini():
+        if not GlobalProterties.forbid_auto_texture_ini():
             texture_markup_info_list = draw_ib_model.import_config.partname_texturemarkinfolist_dict.get(part_name,None)
             if texture_markup_info_list is not None:
-                if Properties_GenerateMod.use_rabbitfx_slot():
+                if GlobalProterties.use_rabbitfx_slot():
                     for texture_markup_info in texture_markup_info_list:
                         if texture_markup_info.mark_type == "Slot":
                             if texture_markup_info.mark_name == "DiffuseMap":
@@ -327,7 +327,7 @@ class ModModelEFMI:
             category_original_slot = d3d11GameType.CategoryExtractSlotDict[original_category_name]
             texture_override_ib_section.append(self.vlr_filter_index_indent + category_original_slot + " = Resource" + draw_ib + original_category_name)
 
-        if Properties_GenerateMod.add_rain_effect():
+        if GlobalProterties.add_rain_effect():
             texture_override_ib_section.append(self.vlr_filter_index_indent + "vb3 = Resource" + draw_ib + "Position")
 
         texture_override_ib_section.append(self.vlr_filter_index_indent + "ib = " + ib_resource_name)
@@ -469,7 +469,7 @@ class ModModelEFMI:
         if len(self.branch_model.keyname_mkey_dict.keys()) != 0:
             texture_override_ib_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
             
-            if Properties_GenerateMod.generate_branch_mod_gui():
+            if GlobalProterties.generate_branch_mod_gui():
                 texture_override_ib_section.append("$ActiveCharacter = 1")
             
         config_ini_builder.append_section(texture_override_ib_section)
@@ -514,7 +514,7 @@ class ModModelEFMI:
         Add texture resource.
         只有槽位风格贴图会用到，因为Hash风格贴图有专门的方法去声明这个。
         '''
-        if Properties_GenerateMod.forbid_auto_texture_ini():
+        if GlobalProterties.forbid_auto_texture_ini():
             return 
         
         resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)

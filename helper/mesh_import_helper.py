@@ -17,8 +17,7 @@ from ..base.utils.obj_utils import ObjUtils
 from ..base.utils.tbn_codec import TBNCodec
 
 from ..base.config.main_config import GlobalConfig, LogicName
-from ..base.config.properties_import_model import Properties_ImportModel
-from ..base.config.properties_wwmi import Properties_WWMI
+from ..base.config.global_properties import GlobalProterties
 
 from ..common.d3d11.d3d11_gametype import D3D11Element
 from ..base.wwmi_config.extracted_object import ExtractedObjectHelper
@@ -164,7 +163,7 @@ class MeshImportHelper:
 
         #  metadata.json, if contains then we can import merged vgmap.
         component = None
-        if Properties_WWMI.import_merged_vgmap() and (GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa):
+        if GlobalProterties.import_merged_vgmap() and (GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa):
             print("尝试读取Metadata.json")
             metadatajsonpath = os.path.join(os.path.dirname(mbf.fmt_path),'Metadata.json')
             if os.path.exists(metadatajsonpath):
@@ -220,7 +219,7 @@ class MeshImportHelper:
 
         # WWMI的Merged架构需要清理空顶点组，这里我们PerCompoennt也清理算了，不然做出区分后续优化太麻烦
         if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
-            if Properties_WWMI.import_skip_empty_vertex_groups():
+            if GlobalProterties.import_skip_empty_vertex_groups():
                 VertexGroupUtils.remove_unused_vertex_groups(obj)
         
 
@@ -234,7 +233,7 @@ class MeshImportHelper:
         bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
 
         # 非镜像工作流：导入后应用 Scale X = -1 + 翻转面朝向
-        if Properties_ImportModel.use_mirror_workflow():
+        if GlobalProterties.use_mirror_workflow():
             print(f"非镜像工作流：对 {obj.name} 应用镜像变换和面朝向翻转")
             ObjUtils.apply_mirror_workflow(obj)
 
@@ -554,7 +553,7 @@ class MeshImportHelper:
                     # 链接Alpha到Alpha
                     material.node_tree.links.new(bsdf.inputs['Alpha'], tex_image.outputs['Alpha'])
 
-                if normal_path is not None and Properties_ImportModel.use_normal_map():
+                if normal_path is not None and GlobalProterties.use_normal_map():
                     if (GlobalConfig.logic_name != LogicName.ZZMI) and (GlobalConfig.logic_name != LogicName.GIMI):
                         norm_image = material.node_tree.nodes.new('ShaderNodeTexImage')
                         norm_image.image = bpy.data.images.load(normal_path)

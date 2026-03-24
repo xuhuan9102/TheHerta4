@@ -1,10 +1,7 @@
 import bpy
 
 # 全局配置
-from .base.config import properties_import_model
-from .base.config import properties_generate_mod
-from .base.config import properties_wwmi
-from .base.config import properties_extract_model
+from .base.config import global_properties
 from .base.config.plugin_config import PluginConfig
 
 # UI界面
@@ -117,10 +114,7 @@ class HertaUpdatePreference(bpy.types.AddonPreferences):
 
 def register():
     # 1. Configs
-    properties_import_model.register()
-    properties_wwmi.register()
-    properties_generate_mod.register()
-    properties_extract_model.register()
+    global_properties.register()
     
     # 2. Addon Updater (local classes)
     addon_updater_ops.register(bl_info)
@@ -163,10 +157,7 @@ def unregister():
     addon_updater_ops.unregister()
 
     # 1. Configs
-    properties_extract_model.unregister()
-    properties_generate_mod.unregister()
-    properties_wwmi.unregister()
-    properties_import_model.unregister()
+    global_properties.unregister()
 
 
 

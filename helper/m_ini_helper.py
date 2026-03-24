@@ -4,7 +4,7 @@ import shutil
 from .m_ini_builder import *
 from ..utils.json_utils import JsonUtils
 from ..config.main_config import GlobalConfig,LogicName
-from ..config.properties_generate_mod import Properties_GenerateMod
+from ..config.global_properties import GlobalProterties
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
 
 from .draw_ib_model import DrawIBModel
@@ -94,7 +94,7 @@ class M_IniHelper:
         '''
         print("Generating Hash Style Texture INI...1")
 
-        if Properties_GenerateMod.forbid_auto_texture_ini():
+        if GlobalProterties.forbid_auto_texture_ini():
             return
         
         print("Generating Hash Style Texture INI...2")
@@ -189,7 +189,7 @@ class M_IniHelper:
         Move all textures from extracted game type folder to generate mod Texture folder.
         Only works in default slot style texture.
         '''
-        if Properties_GenerateMod.forbid_auto_texture_ini():
+        if GlobalProterties.forbid_auto_texture_ini():
             return
         
         for texture_markup_info_list in draw_ib_model.import_config.partname_texturemarkinfolist_dict.values():

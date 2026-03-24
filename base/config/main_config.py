@@ -3,7 +3,7 @@ import os
 import json
 
 
-from ..config.properties_generate_mod import Properties_GenerateMod
+from ..config.global_properties import GlobalProterties
 
 '''
 执行逻辑名称
@@ -131,8 +131,8 @@ class GlobalConfig:
     def path_generate_mod_folder(cls):
         # 如果用户勾选了使用指定文件夹，那就返回指定文件夹位置，否则返回我们的默认位置。
         # 但是这里有个问题就是SkipIB和VSCheck不会生成在指定位置。
-        if Properties_GenerateMod.use_specific_generate_mod_folder_path():
-            return Properties_GenerateMod.generate_mod_folder_path()
+        if GlobalProterties.use_specific_generate_mod_folder_path():
+            return GlobalProterties.generate_mod_folder_path()
         else:
             # 确保用的时候直接拿到的就是已经存在的目录
             ssmt_generated_mod_folder_path = os.path.join(GlobalConfig.path_mods_folder(),"SSMTGeneratedMod\\")
