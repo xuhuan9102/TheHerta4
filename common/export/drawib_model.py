@@ -3,7 +3,7 @@ from dataclasses import field, dataclass
 import os
 
 from ..d3d11.d3d11_gametype import D3D11GameType
-from ...helper.import_config import ImportConfig
+from ...helper.import_config import ImportConfig, TextureMarkUpInfo
 from ...base.config.main_config import GlobalConfig
 from ...base.utils.json_utils import JsonUtils
 
@@ -39,6 +39,7 @@ class DrawIBModel:
     category_hash_dict:dict = field(init=False,repr=False,default_factory=dict)
     part_name_list:list = field(init=False,repr=False,default_factory=list)
     match_first_index_list:list = field(init=False,repr=False,default_factory=list)
+    vshash_list:list = field(init=False,repr=False,default_factory=list)
     partname_texturemarkinfolist_dict:dict = field(init=False,repr=False,default_factory=dict)
     vertex_limit_hash:str = field(init=False,repr=False,default="")
     original_vertex_count:int = field(init=False,repr=False,default=0)
@@ -107,6 +108,7 @@ class DrawIBModel:
             self.category_hash_dict = dict(self.import_config.category_hash_dict)
             self.part_name_list = list(self.import_config.part_name_list)
             self.match_first_index_list = list(self.import_config.match_first_index_list)
+            self.vshash_list = list(self.import_config.vshash_list)
             self.partname_texturemarkinfolist_dict = dict(self.import_config.partname_texturemarkinfolist_dict)
             self.vertex_limit_hash = self.import_config.vertex_limit_hash
             self.original_vertex_count = self.import_config.original_vertex_count
@@ -115,9 +117,37 @@ class DrawIBModel:
         self.category_hash_dict = dict(self.import_json_dict.get("CategoryHash", {}))
         self.part_name_list = list(self.import_json_dict.get("PartNameList", []))
         self.match_first_index_list = list(self.import_json_dict.get("MatchFirstIndex", []))
-        self.partname_texturemarkinfolist_dict = dict(self.import_json_dict.get("ComponentTextureMarkUpInfoListDict", {}))
+        self.vshash_list = list(self.import_json_dict.get("VSHashList", []))
+        self.partname_texturemarkinfolist_dict = self._normalize_texture_markup_info_dict(
+            self.import_json_dict.get("ComponentTextureMarkUpInfoListDict", {})
+        )
         self.vertex_limit_hash = self.import_json_dict.get("VertexLimitVB", "")
         self.original_vertex_count = self.import_json_dict.get("OriginalVertexCount", 0)
+
+    def _normalize_texture_markup_info_dict(self, raw_texture_info_dict: dict) -> dict:
+        normalized_texture_info_dict = {}
+
+        for part_name, texture_info_list in raw_texture_info_dict.items():
+            normalized_texture_info_list = []
+            for texture_info in texture_info_list:
+                if isinstance(texture_info, TextureMarkUpInfo):
+                    normalized_texture_info_list.append(texture_info)
+                    continue
+
+                if not isinstance(texture_info, dict):
+                    continue
+
+                markup_info = TextureMarkUpInfo()
+                markup_info.mark_name = texture_info.get("MarkName", texture_info.get("mark_name", ""))
+                markup_info.mark_type = texture_info.get("MarkType", texture_info.get("mark_type", ""))
+                markup_info.mark_hash = texture_info.get("MarkHash", texture_info.get("mark_hash", ""))
+                markup_info.mark_slot = texture_info.get("MarkSlot", texture_info.get("mark_slot", ""))
+                markup_info.mark_filename = texture_info.get("MarkFileName", texture_info.get("mark_filename", ""))
+                normalized_texture_info_list.append(markup_info)
+
+            normalized_texture_info_dict[part_name] = normalized_texture_info_list
+
+        return normalized_texture_info_dict
 
     def _assemble_category_buffers(self) -> tuple[dict, dict, dict, int]:
         total_category_buffer_chunks = {}

@@ -275,9 +275,7 @@ class ExportUnity(DrawIBExportBase):
         vscheck_section = M_IniSection(M_SectionType.VertexShaderCheck)
         vs_hash_set = set()
         for drawib_model in self.drawib_model_list:
-            if drawib_model.import_config is None:
-                continue
-            for vs_hash in drawib_model.import_config.vshash_list:
+            for vs_hash in getattr(drawib_model, "vshash_list", []):
                 vs_hash_set.add(vs_hash)
 
         for vs_hash in vs_hash_set:

@@ -5,6 +5,7 @@ from ..common.migoto.m_ini_builder import *
 from ..common.migoto.m_key import M_Key
 from ..common.export.draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
 from ..common.export.drawib_model import DrawIBModel
+from ..helper.import_config import TextureMarkUpInfo
 from ..base.utils.json_utils import JsonUtils
 from ..base.utils.format_utils import Fatal
 from ..base.config.main_config import GlobalConfig,LogicName
@@ -14,6 +15,107 @@ from ..helper.workspace_helper import WorkSpaceHelper
 from ..helper.blueprint_export_helper import BlueprintExportHelper
 
 class M_IniHelper:
+    @classmethod
+    def _normalize_texture_markup_info_list(cls, texture_info_list: list) -> list:
+        normalized_texture_info_list = []
+
+        for texture_info in texture_info_list:
+            if isinstance(texture_info, TextureMarkUpInfo):
+                normalized_texture_info_list.append(texture_info)
+                continue
+
+            if not isinstance(texture_info, dict):
+                continue
+
+            markup_info = TextureMarkUpInfo()
+            markup_info.mark_name = texture_info.get("MarkName", texture_info.get("mark_name", ""))
+            markup_info.mark_type = texture_info.get("MarkType", texture_info.get("mark_type", ""))
+            markup_info.mark_hash = texture_info.get("MarkHash", texture_info.get("mark_hash", ""))
+            markup_info.mark_slot = texture_info.get("MarkSlot", texture_info.get("mark_slot", ""))
+            markup_info.mark_filename = texture_info.get("MarkFileName", texture_info.get("mark_filename", ""))
+            normalized_texture_info_list.append(markup_info)
+
+        return normalized_texture_info_list
+
+    @classmethod
+    def _get_partname_texturemarkinfolist_dict(cls, draw_ib_model: DrawIBModel) -> dict:
+        texture_info_dict = getattr(draw_ib_model, "partname_texturemarkinfolist_dict", None)
+        if texture_info_dict is not None:
+            return {
+                part_name: cls._normalize_texture_markup_info_list(texture_info_list)
+                for part_name, texture_info_list in texture_info_dict.items()
+            }
+
+        import_config = getattr(draw_ib_model, "import_config", None)
+        if import_config is not None:
+            return {
+                part_name: cls._normalize_texture_markup_info_list(texture_info_list)
+                for part_name, texture_info_list in getattr(import_config, "partname_texturemarkinfolist_dict", {}).items()
+            }
+
+        return {}
+
+    @classmethod
+    def _get_extract_gametype_folder_path(cls, draw_ib_model: DrawIBModel) -> str:
+        import_config = getattr(draw_ib_model, "import_config", None)
+        if import_config is not None:
+            extract_gametype_folder_path = getattr(import_config, "extract_gametype_folder_path", "")
+            if extract_gametype_folder_path:
+                return extract_gametype_folder_path
+
+        d3d11_game_type = getattr(draw_ib_model, "d3d11_game_type", getattr(draw_ib_model, "d3d11GameType", None))
+        if d3d11_game_type is None:
+            return ""
+
+        return GlobalConfig.path_extract_gametype_folder(
+            draw_ib=draw_ib_model.draw_ib,
+            gametype_name=d3d11_game_type.GameTypeName,
+        )
+
+    @classmethod
+    def _get_part_extract_gametype_folder_path(cls, draw_ib_model: DrawIBModel, part_name: str) -> str:
+        part_name_submesh_dict = getattr(draw_ib_model, "part_name_submesh_dict", {})
+        submesh_model = part_name_submesh_dict.get(part_name)
+        if submesh_model is None:
+            return ""
+
+        d3d11_game_type = getattr(submesh_model, "d3d11_game_type", None)
+        unique_str = getattr(submesh_model, "unique_str", "")
+        if d3d11_game_type is None or unique_str == "":
+            return ""
+
+        return os.path.join(
+            GlobalConfig.path_workspace_folder(),
+            unique_str,
+            "TYPE_" + d3d11_game_type.GameTypeName,
+            "",
+        )
+
+    @classmethod
+    def _get_slot_texture_source_path(cls, draw_ib_model: DrawIBModel, part_name: str, texture_markup_info) -> str:
+        extract_gametype_folder_path = cls._get_part_extract_gametype_folder_path(draw_ib_model, part_name)
+        if extract_gametype_folder_path:
+            source_path = extract_gametype_folder_path + texture_markup_info.mark_filename
+            if os.path.exists(source_path):
+                return source_path
+
+        for submesh_model in getattr(draw_ib_model, "submesh_model_list", []):
+            d3d11_game_type = getattr(submesh_model, "d3d11_game_type", None)
+            unique_str = getattr(submesh_model, "unique_str", "")
+            if d3d11_game_type is None or unique_str == "":
+                continue
+
+            candidate_source_path = os.path.join(
+                GlobalConfig.path_workspace_folder(),
+                unique_str,
+                "TYPE_" + d3d11_game_type.GameTypeName,
+                texture_markup_info.mark_filename,
+            )
+            if os.path.exists(candidate_source_path):
+                return candidate_source_path
+
+        return ""
+
     @classmethod
     def _get_drawindexed_obj(
         cls,
@@ -146,7 +248,7 @@ class M_IniHelper:
         # 先统计当前标记的具有Slot风格的Hash值，后续Render里搞图片的时候跳过这些
         slot_style_texture_hash_list = []
         for draw_ib_model in drawib_drawibmodel_dict.values():
-            for texture_markup_info_list in draw_ib_model.import_config.partname_texturemarkinfolist_dict.values():
+            for texture_markup_info_list in cls._get_partname_texturemarkinfolist_dict(draw_ib_model).values():
                 for texture_markup_info in texture_markup_info_list:
                     if texture_markup_info.mark_type == "Slot":
                         slot_style_texture_hash_list.append(texture_markup_info.mark_hash)
@@ -162,7 +264,7 @@ class M_IniHelper:
 
 
             # 添加标记的Hash风格贴图
-            for texture_markup_info_list in draw_ib_model.import_config.partname_texturemarkinfolist_dict.values():
+            for texture_markup_info_list in cls._get_partname_texturemarkinfolist_dict(draw_ib_model).values():
                 for texture_markup_info in texture_markup_info_list:
                     if texture_markup_info.mark_type != "Hash":
                         print("Skipping non-Hash style texture: " + texture_markup_info.mark_filename)
@@ -239,18 +341,21 @@ class M_IniHelper:
         '''
         if GlobalProterties.forbid_auto_texture_ini():
             return
-        
-        for texture_markup_info_list in draw_ib_model.import_config.partname_texturemarkinfolist_dict.values():
+
+        for part_name, texture_markup_info_list in cls._get_partname_texturemarkinfolist_dict(draw_ib_model).items():
             for texture_markup_info in texture_markup_info_list:
                 # 只有槽位风格会移动到目标位置
                 if texture_markup_info.mark_type != "Slot":
                     continue
 
                 target_path = GlobalConfig.path_generatemod_texture_folder(draw_ib=draw_ib_model.draw_ib) + texture_markup_info.mark_filename
-                source_path = draw_ib_model.import_config.extract_gametype_folder_path + texture_markup_info.mark_filename
+                source_path = cls._get_slot_texture_source_path(draw_ib_model, part_name, texture_markup_info)
                 
                 # only overwrite when there is no texture file exists.
                 if not os.path.exists(target_path):
+                    if source_path == "":
+                        print("Skip missing texture file: " + texture_markup_info.mark_filename)
+                        continue
                     print("Move Texture File: " + texture_markup_info.mark_filename)
                     shutil.copy2(source_path,target_path)
     
