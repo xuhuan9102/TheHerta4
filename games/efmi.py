@@ -1,10 +1,15 @@
 from ..common.export.blueprint_model import BluePrintModel
-from ..common.export.draw_call_model import DrawCallModel, M_DrawIndexedInstanced
+from ..common.export.draw_call_model import DrawCallModel
 from ..common.export.submesh_model import SubMeshModel
+from ..common.export.drawib_model import DrawIBModel
 from dataclasses import dataclass,field
 from ..base.config.main_config import GlobalConfig
+from ..base.config.global_properties import GlobalProterties
 
 from ..helper.buffer_export_helper import BufferExportHelper
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
+from ..helper.m_ini_helper import M_IniHelper
+from ..helper.m_ini_helper_gui import M_IniHelperGUI
 from ..common.migoto.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 
@@ -16,9 +21,11 @@ class ExportEFMI:
     blueprint_model:BluePrintModel
 
     submesh_model_list:list[SubMeshModel] = field(default_factory=list,init=False)
+    drawib_model_list:list[DrawIBModel] = field(default_factory=list,init=False)
 
     def __post_init__(self):
         self.submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(self.blueprint_model)
+        self.drawib_model_list = ExportHelper.parse_drawib_model_list_from_blueprint_model(self.blueprint_model, combine_ib=False)
         print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
     def generate_buffer_files(self):
@@ -42,10 +49,30 @@ class ExportEFMI:
 
     def generate_ini_file(self):
         ini_builder = M_IniBuilder()
+        drawib_drawibmodel_dict = {
+            drawib_model.draw_ib: drawib_model
+            for drawib_model in self.drawib_model_list
+        }
+        draw_ib_active_index_dict = {
+            drawib_model.draw_ib: index
+            for index, drawib_model in enumerate(self.drawib_model_list)
+        }
+
+        M_IniHelper.generate_hash_style_texture_ini(
+            ini_builder=ini_builder,
+            drawib_drawibmodel_dict=drawib_drawibmodel_dict,
+        )
 
         texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
 
         for submesh_model in self.submesh_model_list:
+            drawib_model = drawib_drawibmodel_dict.get(submesh_model.match_draw_ib)
+            active_index = draw_ib_active_index_dict.get(submesh_model.match_draw_ib, 0)
+            part_name = None
+            if drawib_model is not None and submesh_model.match_first_index in drawib_model.match_first_index_list:
+                part_index = drawib_model.match_first_index_list.index(submesh_model.match_first_index)
+                if part_index < len(drawib_model.part_name_list):
+                    part_name = drawib_model.part_name_list[part_index]
             
             texture_override_ib_section.append("[TextureOverride_" + submesh_model.unique_str.replace("-","_") + "]")
             texture_override_ib_section.append("hash = " + submesh_model.match_draw_ib)
@@ -63,12 +90,20 @@ class ExportEFMI:
                 category_resource_name = "Resource_" + submesh_model.unique_str.replace("-","_")  + "_" + category
                 texture_override_ib_section.append(category_slot + " = " + category_resource_name)
 
-            for drawcall_model in submesh_model.drawcall_model_list:
-                drawindexed_instanced = M_DrawIndexedInstanced()
-                drawindexed_instanced.IndexCountPerInstance = drawcall_model.index_count
-                drawindexed_instanced.StartIndexLocation = drawcall_model.index_offset
-                texture_override_ib_section.append("; " + drawcall_model.comment_alias_name)
-                texture_override_ib_section.append(drawindexed_instanced.get_draw_str())
+            if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None and part_name is not None:
+                texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, [])
+                for texture_markup_info in texture_markup_info_list:
+                    if getattr(texture_markup_info, "mark_type", "") != "Slot":
+                        continue
+                    texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+
+            for draw_line in M_IniHelper.get_drawindexed_instanced_str_list(submesh_model.drawcall_model_list):
+                texture_override_ib_section.append(draw_line)
+
+            if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
+                texture_override_ib_section.append("$active" + str(active_index) + " = 1")
+                if GlobalProterties.generate_branch_mod_gui():
+                    texture_override_ib_section.append("$ActiveCharacter = 1")
             
             texture_override_ib_section.new_line()
 
@@ -92,7 +127,33 @@ class ExportEFMI:
                 resource_buffer_section.append("stride = " + str(stride))
                 resource_buffer_section.append("filename = Buffer\\" + submesh_model.unique_str + "-" + category + ".buf")
                 resource_buffer_section.new_line()
+
+        if not GlobalProterties.forbid_auto_texture_ini():
+            resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)
+            for drawib_model in self.drawib_model_list:
+                for texture_markup_info_list in drawib_model.partname_texturemarkinfolist_dict.values():
+                    for texture_markup_info in texture_markup_info_list:
+                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
+                            continue
+                        resource_texture_section.append("[" + texture_markup_info.get_resource_name() + "]")
+                        resource_texture_section.append("filename = Texture/" + texture_markup_info.mark_filename)
+                        resource_texture_section.new_line()
+            ini_builder.append_section(resource_texture_section)
+
         ini_builder.append_section(resource_buffer_section)
+
+        for drawib_model in self.drawib_model_list:
+            M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
+
+        GlobalKeyCountHelper.generated_mod_number = len(self.drawib_model_list)
+        M_IniHelper.add_branch_key_sections(
+            ini_builder=ini_builder,
+            key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict,
+        )
+        M_IniHelperGUI.add_branch_mod_gui_section(
+            ini_builder=ini_builder,
+            key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict,
+        )
 
         
         ini_filepath = os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.workspacename + ".ini")

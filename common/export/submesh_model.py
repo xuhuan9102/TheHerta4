@@ -7,9 +7,10 @@ from ...base.utils.json_utils import JsonUtils
 from ..d3d11.d3d11_gametype import D3D11GameType
 from ...helper.obj_buffer_helper import ObjBufferHelper
 
-from ...base.config.main_config import GlobalConfig
+from ...base.config.main_config import GlobalConfig, LogicName
 
 import bpy
+import math
 import os
 '''
 一般DrawIB索引缓冲区是由多个SubMesh子网格构成的
@@ -64,6 +65,7 @@ class SubMeshModel:
     ib:list = field(init=False,repr=False,default_factory=list)
     category_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
     index_vertex_id_dict:dict = field(init=False,repr=False,default_factory=dict) 
+    shape_key_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
 
     def __post_init__(self):
 
@@ -80,14 +82,29 @@ class SubMeshModel:
     def calc_buffer(self):
         # 对每个obj都创建一个临时对象进行处理，这样不影响原本的对象
 
+        folder_name = self.unique_str
+
+        # 先读取Import.json拿到当前导入的是哪个数据类型文件夹名称
+        import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
+        import_json = JsonUtils.LoadFromFile(import_json_path)
+        gametype_name = import_json.get(folder_name, "")
+        gametype_foldername = "TYPE_" + gametype_name
+        import_folder_path = os.path.join(GlobalConfig.path_workspace_folder(), folder_name)
+        import_json_path = os.path.join(import_folder_path, gametype_foldername, "import.json")
+
+        # 根据import.json中的d3d11_element_list来获取当前SubMeshModel的D3D11GameType
+        self.d3d11_game_type = D3D11GameType(FilePath=import_json_path)
+
         index_offset = 0
         submesh_temp_obj_list = []
+        temp_collection_list = []
         for draw_call_model in self.drawcall_model_list:
             # 获取到原本的obj
             source_obj = ObjUtils.get_obj_by_name(draw_call_model.obj_name)
 
             temp_collection = CollectionUtils.create_new_collection("TEMP_SUBMESH_COLLECTION_" + self.unique_str)
             bpy.context.scene.collection.children.link(temp_collection)
+            temp_collection_list.append(temp_collection)
 
 
             # 创建一个新的obj
@@ -98,6 +115,10 @@ class SubMeshModel:
                 collection= temp_collection
             )
 
+            self._normalize_temp_obj_for_export(temp_obj)
+
+            # 因为导入时根据LogicName进行了翻转，所以导出时对临时对象进行翻转才能得到游戏原本坐标系
+            self._apply_export_rotation_for_logic(temp_obj)
 
             # 三角化obj
             ObjUtils.triangulate_object(bpy.context, temp_obj)
@@ -137,26 +158,8 @@ class SubMeshModel:
         submesh_merged_obj = submesh_temp_obj_list[0]
 
         # 重命名为指定名称，等待后续操作
-        merged_obj_name = "TEMP_SUBMESH_MERGED_" + draw_call_model.get_unique_str()
+        merged_obj_name = "TEMP_SUBMESH_MERGED_" + self.unique_str
         ObjUtils.rename_object(submesh_merged_obj, merged_obj_name)
-
-        # 这里我们需要拿到当前这个Obj的数据类型
-        # 此时需要去读取工作空间中对应import.json中的d3d11_element_list
-        # 此时定位到工作空间的文件夹，需要用unique_str
-        folder_name = draw_call_model.get_unique_str()
-
-        # 还需要定位到具体导入时导入的是哪个数据类型
-        # 这个在一键导入的时候记录到当前工作空间下的Import.json中了
-        # 先读取Import.json拿到当前导入的是哪个数据类型文件夹名称
-        import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
-        import_json = JsonUtils.LoadFromFile(import_json_path)
-        gametype_name = import_json.get(folder_name,"")
-        gametype_foldername = "TYPE_" + gametype_name
-        import_folder_path = os.path.join(GlobalConfig.path_workspace_folder(), folder_name)
-        import_json_path = os.path.join(import_folder_path, gametype_foldername, "import.json")
-
-        # 根据import.json中的d3d11_element_list来获取当前SubMeshModel的D3D11GameType
-        self.d3d11_game_type = D3D11GameType(FilePath=import_json_path)
 
         # 检查并校验是否有缺少的元素
         ObjBufferHelper.check_and_verify_attributes(obj=submesh_merged_obj, d3d11_game_type=self.d3d11_game_type)
@@ -168,12 +171,47 @@ class SubMeshModel:
         self.ib = obj_buffer_result.ib
         self.category_buffer_dict = obj_buffer_result.category_buffer_dict
         self.index_vertex_id_dict = obj_buffer_result.index_loop_id_dict
+        self.shape_key_buffer_dict = obj_buffer_result.shape_key_buffer_dict
 
         # 4.计算完成后，删除临时obj
         bpy.data.objects.remove(submesh_merged_obj, do_unlink=True)
 
         # 顺便把刚才创建的临时集合也删掉
-        bpy.context.scene.collection.children.unlink(temp_collection)
-        bpy.data.collections.remove(temp_collection)
+        for temp_collection in temp_collection_list:
+            if temp_collection.name in bpy.data.collections:
+                if temp_collection.name in bpy.context.scene.collection.children:
+                    bpy.context.scene.collection.children.unlink(temp_collection)
+                bpy.data.collections.remove(temp_collection)
 
         print("SubMeshModel: " + self.unique_str + " 计算完成，临时对象已删除")
+
+    def _normalize_temp_obj_for_export(self, temp_obj: bpy.types.Object):
+        if self.d3d11_game_type is None:
+            return
+
+        if "Blend" not in self.d3d11_game_type.OrderedCategoryNameList:
+            return
+
+        if ObjUtils.is_all_vertex_groups_locked(temp_obj):
+            return
+
+        ObjUtils.normalize_all(temp_obj)
+
+    def _apply_export_rotation_for_logic(self, temp_obj: bpy.types.Object):
+        if (GlobalConfig.logic_name == LogicName.SRMI
+            or GlobalConfig.logic_name == LogicName.GIMI
+            or GlobalConfig.logic_name == LogicName.HIMI
+            or GlobalConfig.logic_name == LogicName.YYSLS
+            or GlobalConfig.logic_name == LogicName.CTXMC
+            or GlobalConfig.logic_name == LogicName.IdentityV2):
+            ObjUtils.select_obj(temp_obj)
+            temp_obj.rotation_euler[0] = math.radians(-90)
+            temp_obj.rotation_euler[1] = 0
+            temp_obj.rotation_euler[2] = 0
+            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+        elif GlobalConfig.logic_name == LogicName.EFMI:
+            ObjUtils.select_obj(temp_obj)
+            temp_obj.rotation_euler[0] = 0
+            temp_obj.rotation_euler[1] = 0
+            temp_obj.rotation_euler[2] = 0
+            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)

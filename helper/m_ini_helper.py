@@ -1,23 +1,47 @@
 import os
 import shutil
 
-from .m_ini_builder import *
-from ..utils.json_utils import JsonUtils
-from ..config.main_config import GlobalConfig,LogicName
-from ..config.global_properties import GlobalProterties
+from ..common.migoto.m_ini_builder import *
+from ..common.migoto.m_key import M_Key
+from ..common.export.draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
+from ..common.export.drawib_model import DrawIBModel
+from ..base.utils.json_utils import JsonUtils
+from ..base.utils.format_utils import Fatal
+from ..base.config.main_config import GlobalConfig,LogicName
+from ..base.config.global_properties import GlobalProterties
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
-
-from .draw_ib_model import DrawIBModel
-from .m_key import M_Key
-from .draw_call_model import DrawCallModel
 from ..helper.workspace_helper import WorkSpaceHelper
-from ..utils.format_utils import Fatal
 from ..helper.blueprint_export_helper import BlueprintExportHelper
-from ..common.draw_call_model import M_DrawIndexed, M_DrawIndexedInstanced
 
 class M_IniHelper:
     @classmethod
-    def get_drawindexed_str_list(cls,ordered_draw_obj_model_list) -> list[str]:
+    def _get_drawindexed_obj(
+        cls,
+        obj_model: DrawCallModel,
+        obj_name_draw_offset_dict: dict[str, int] | None = None,
+    ) -> M_DrawIndexed:
+        drawindexed_obj = getattr(obj_model, "drawindexed_obj", None)
+        if drawindexed_obj is not None:
+            return drawindexed_obj
+
+        drawindexed_obj = M_DrawIndexed()
+        drawindexed_obj.DrawNumber = str(getattr(obj_model, "index_count", 0))
+
+        draw_offset = getattr(obj_model, "index_offset", 0)
+        if obj_name_draw_offset_dict is not None:
+            draw_offset = obj_name_draw_offset_dict.get(obj_model.obj_name, draw_offset)
+
+        drawindexed_obj.DrawOffsetIndex = str(draw_offset)
+        drawindexed_obj.UniqueVertexCount = getattr(obj_model, "vertex_count", 0)
+        drawindexed_obj.AliasName = getattr(obj_model, "comment_alias_name", obj_model.obj_name)
+        return drawindexed_obj
+
+    @classmethod
+    def get_drawindexed_str_list(
+        cls,
+        ordered_draw_obj_model_list,
+        obj_name_draw_offset_dict: dict[str, int] | None = None,
+    ) -> list[str]:
         # 传统的使用DrawIndexed方式调用这个
         # 在输出之前，我们需要根据condition对obj_model进行分组
         condition_str_obj_model_list_dict:dict[str,list[DrawCallModel]] = {}
@@ -33,21 +57,33 @@ class M_IniHelper:
             if condition_str != "":
                 drawindexed_str_list.append("if " + condition_str)
                 for obj_model in obj_model_list:
+                    drawindexed_obj = cls._get_drawindexed_obj(
+                        obj_model=obj_model,
+                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
+                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.drawindexed_obj.UniqueVertexCount) + "]" )
-                    drawindexed_str_list.append("  " + obj_model.drawindexed_obj.get_draw_str())
+                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
+                    drawindexed_str_list.append("  " + drawindexed_obj.get_draw_str())
                 drawindexed_str_list.append("endif")
             else:
                 for obj_model in obj_model_list:
+                    drawindexed_obj = cls._get_drawindexed_obj(
+                        obj_model=obj_model,
+                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
+                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.drawindexed_obj.UniqueVertexCount) + "]" )
-                    drawindexed_str_list.append(obj_model.drawindexed_obj.get_draw_str())
+                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
+                    drawindexed_str_list.append(drawindexed_obj.get_draw_str())
             drawindexed_str_list.append("")
 
         return drawindexed_str_list
     
     @classmethod
-    def get_drawindexed_instanced_str_list(cls,ordered_draw_obj_model_list) -> list[str]:
+    def get_drawindexed_instanced_str_list(
+        cls,
+        ordered_draw_obj_model_list,
+        obj_name_draw_offset_dict: dict[str, int] | None = None,
+    ) -> list[str]:
         # 使用DrawIndexedInstanced方式调用这个
         # 在输出之前，我们需要根据condition对obj_model进行分组
         condition_str_obj_model_list_dict:dict[str,list[DrawCallModel]] = {}
@@ -63,24 +99,32 @@ class M_IniHelper:
             if condition_str != "":
                 drawindexed_str_list.append("if " + condition_str)
                 for obj_model in obj_model_list:
+                    drawindexed_obj = cls._get_drawindexed_obj(
+                        obj_model=obj_model,
+                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
+                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.drawindexed_obj.UniqueVertexCount) + "]" )
+                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
                     
                     drawindexed_instanced_obj = M_DrawIndexedInstanced()
                     
-                    drawindexed_instanced_obj.IndexCountPerInstance = obj_model.drawindexed_obj.DrawNumber
-                    drawindexed_instanced_obj.StartIndexLocation = obj_model.drawindexed_obj.DrawOffsetIndex
+                    drawindexed_instanced_obj.IndexCountPerInstance = int(drawindexed_obj.DrawNumber)
+                    drawindexed_instanced_obj.StartIndexLocation = int(drawindexed_obj.DrawOffsetIndex)
 
                     drawindexed_str_list.append("  " + drawindexed_instanced_obj.get_draw_str())
                 drawindexed_str_list.append("endif")
             else:
                 for obj_model in obj_model_list:
+                    drawindexed_obj = cls._get_drawindexed_obj(
+                        obj_model=obj_model,
+                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
+                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.drawindexed_obj.UniqueVertexCount) + "]" )
+                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
                     
                     drawindexed_instanced_obj = M_DrawIndexedInstanced()
-                    drawindexed_instanced_obj.IndexCountPerInstance = obj_model.drawindexed_obj.DrawNumber
-                    drawindexed_instanced_obj.StartIndexLocation = obj_model.drawindexed_obj.DrawOffsetIndex
+                    drawindexed_instanced_obj.IndexCountPerInstance = int(drawindexed_obj.DrawNumber)
+                    drawindexed_instanced_obj.StartIndexLocation = int(drawindexed_obj.DrawOffsetIndex)
 
                     drawindexed_str_list.append("  " + drawindexed_instanced_obj.get_draw_str())
             drawindexed_str_list.append("")
@@ -130,7 +174,11 @@ class M_IniHelper:
                     else:
                         repeat_hash_list.append(texture_markup_info.mark_hash)
 
-                    original_texture_file_path = GlobalConfig.path_extract_gametype_folder(draw_ib=draw_ib,gametype_name=draw_ib_model.d3d11GameType.GameTypeName) + texture_markup_info.mark_filename
+                    d3d11_game_type = getattr(draw_ib_model, "d3d11_game_type", getattr(draw_ib_model, "d3d11GameType", None))
+                    if d3d11_game_type is None:
+                        continue
+
+                    original_texture_file_path = GlobalConfig.path_extract_gametype_folder(draw_ib=draw_ib,gametype_name=d3d11_game_type.GameTypeName) + texture_markup_info.mark_filename
                     if not os.path.exists(original_texture_file_path):
                         print("Skipping missing texture file: " + original_texture_file_path)
                         continue
@@ -231,9 +279,10 @@ class M_IniHelper:
 
         ib_number = 1
         for drawib, drawib_model in drawib_drawibmodel_dict.items():
+            shapekey_buffer_dict = getattr(drawib_model, "shapekey_name_bytelist_dict", {})
 
             # 如果当前DrawIB没有生成形态键数据，则跳过不处理
-            if not drawib_model.shapekey_name_bytelist_dict:
+            if not shapekey_buffer_dict:
                 continue
 
             original_position_buffer_resource_name ="Resource" + drawib + "Position"     
@@ -249,8 +298,10 @@ class M_IniHelper:
 
         ib_number = 1
         for drawib, drawib_model in drawib_drawibmodel_dict.items():
+            shapekey_buffer_dict = getattr(drawib_model, "shapekey_name_bytelist_dict", {})
+
             # 如果当前DrawIB没有生成形态键数据，则跳过不处理
-            if not drawib_model.shapekey_name_bytelist_dict:
+            if not shapekey_buffer_dict:
                 continue
 
             present_section.append("  run = CustomShaderComputeShapes" + str(ib_number))
@@ -263,8 +314,12 @@ class M_IniHelper:
 
         ib_number = 1
         for drawib, drawib_model in drawib_drawibmodel_dict.items():
+            shapekey_buffer_dict = getattr(drawib_model, "shapekey_name_bytelist_dict", {})
+            d3d11_game_type = getattr(drawib_model, "d3d11_game_type", getattr(drawib_model, "d3d11GameType", None))
+            draw_number = getattr(drawib_model, "draw_number", getattr(drawib_model, "vertex_count", 0))
+
             # 如果当前DrawIB没有生成形态键数据，则跳过不处理
-            if not drawib_model.shapekey_name_bytelist_dict:
+            if not shapekey_buffer_dict or d3d11_game_type is None:
                 continue
 
             customshader_section.append("[CustomShaderComputeShapes" + str(ib_number) + "]")
@@ -277,14 +332,14 @@ class M_IniHelper:
                 # 这里很显然有问题，如果一个DrawIB有这个形态键，另一个DrawIB没有这个形态键呢？
                 # 那这里就会导致游戏内没有这个形态键的模型出现异常
                 # 所以如果这个DrawIB内没有这个形态键的话，就不需要生成它的计算代码
-                if drawib_model.shapekey_name_bytelist_dict.get(shapekey_name,None) is None:
+                if shapekey_buffer_dict.get(shapekey_name, None) is None:
                     continue
 
                 customshader_section.append("x88 = " + m_key.key_name)
                 customshader_section.append("cs-t50 = copy " + "Resource" + drawib + "Position.1")
                 customshader_section.append("cs-t51 = copy " + "Resource" + drawib + "Position." + shapekey_name)
                 customshader_section.append("Resource" + drawib + "Position = ref cs-u5")
-                customshader_section.append("Dispatch = " + str(drawib_model.draw_number) + " ,1 ,1")
+                customshader_section.append("Dispatch = " + str(draw_number) + " ,1 ,1")
                 customshader_section.new_line()
 
             ib_number += 1
@@ -301,15 +356,17 @@ class M_IniHelper:
 
         ib_number = 1
         for drawib, drawib_model in drawib_drawibmodel_dict.items():
+            shapekey_buffer_dict = getattr(drawib_model, "shapekey_name_bytelist_dict", {})
+            d3d11_game_type = getattr(drawib_model, "d3d11_game_type", getattr(drawib_model, "d3d11GameType", None))
 
             # 如果当前DrawIB没有生成形态键数据，则跳过不处理
-            if not drawib_model.shapekey_name_bytelist_dict:
+            if not shapekey_buffer_dict or d3d11_game_type is None:
                 continue
 
             # 原本的Buffer
             resource_section.append("[Resource" + drawib + "Position.1]")
             resource_section.append("type = buffer")
-            resource_section.append("stride = " + str(drawib_model.d3d11GameType.CategoryStrideDict["Position"]))
+            resource_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict["Position"]))
             resource_section.append("filename = Buffer/" + drawib + "-" + "Position.buf")
             resource_section.new_line()
 
@@ -318,12 +375,12 @@ class M_IniHelper:
                 # 这里很显然有问题，如果一个DrawIB有这个形态键，另一个DrawIB没有这个形态键呢？
                 # 那这里就会导致游戏内没有这个形态键的模型出现异常
                 # 所以如果这个DrawIB内没有这个形态键的话，就不需要生成它的计算代码
-                if drawib_model.shapekey_name_bytelist_dict.get(shapekey_name,None) is None:
+                if shapekey_buffer_dict.get(shapekey_name, None) is None:
                     continue
                 
                 resource_section.append("[Resource" + drawib + "Position." + shapekey_name + "]")
                 resource_section.append("type = buffer")
-                resource_section.append("stride = " + str(drawib_model.d3d11GameType.CategoryStrideDict["Position"]))
+                resource_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict["Position"]))
                 resource_section.append("filename = Buffer/" + drawib + "-" + "Position." + shapekey_name + ".buf")
                 resource_section.new_line()
 

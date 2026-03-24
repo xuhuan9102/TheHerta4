@@ -2,12 +2,6 @@ import bpy
 
 
 class GlobalProterties(bpy.types.PropertyGroup):
-    only_match_gpu: bpy.props.BoolProperty(
-        name="Only Extract GPU-PreSkinning Models",
-        description="Only extract models that are pre-skinned by the GPU, skipping those that are not.",
-        default=True,
-    ) # type: ignore
-
     open_mod_folder_after_generate_mod: bpy.props.BoolProperty(
         name="生成后打开Mod文件夹",
         description="勾选后，在生成Mod完成后自动打开Mod文件夹",
@@ -38,18 +32,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=False,
     ) # type: ignore
 
-    add_rain_effect: bpy.props.BoolProperty(
-        name="添加雨水效果",
-        description="在生成的INI中添加vb3以实现雨水效果",
-        default=False,
-    ) # type: ignore
-
-    use_rabbitfx_slot: bpy.props.BoolProperty(
-        name="使用RabbitFX槽位写法",
-        description="对DiffuseMap/LightMap/NormalMap使用RabbitFX槽位写法，其他贴图类型仍使用PS-t槽位",
-        default=False,
-    ) # type: ignore
-
     recalculate_tangent: bpy.props.BoolProperty(
         name="向量归一化法线存入TANGENT(全局)",
         description="使用向量相加归一化重计算所有模型的TANGENT值，勾选此项后无法精细控制具体某个模型是否计算，是偷懒选项,在不勾选时默认使用右键菜单中标记的选项。\n用途:\n1.一般用于修复GI角色,HI3 1.0角色,HSR角色轮廓线。\n2.用于修复模型由于TANGENT不正确导致的黑色色块儿问题，比如HSR的薄裙子可能会出现此问题。",
@@ -59,18 +41,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
     recalculate_color: bpy.props.BoolProperty(
         name="算术平均归一化法线存入COLOR(全局)",
         description="使用算术平均归一化重计算所有模型的COLOR值，勾选此项后无法精细控制具体某个模型是否计算，是偷懒选项,在不勾选时默认使用右键菜单中标记的选项，仅用于HI3 2.0角色修复轮廓线",
-        default=False,
-    ) # type: ignore
-
-    enable_performance_stats: bpy.props.BoolProperty(
-        name="启用性能统计",
-        description="启用性能统计功能，记录各个操作的耗时并生成报告。关闭后可提升少量性能",
-        default=True,
-    ) # type: ignore
-
-    preview_export_only: bpy.props.BoolProperty(
-        name="配置表预导出",
-        description="只生成 INI 配置文件，不处理文件、物体等。用于快速预览生成的配置内容",
         default=False,
     ) # type: ignore
 
@@ -85,18 +55,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
         description="选择的生成Mod的文件夹路径",
         default="",
         subtype='DIR_PATH',
-    ) # type: ignore
-
-    credit_info_author_name: bpy.props.StringProperty(
-        name="作者名",
-        description="生成Mod时使用的作者名",
-        default="",
-    ) # type: ignore
-
-    credit_info_author_social_link: bpy.props.StringProperty(
-        name="作者链接",
-        description="生成Mod时使用的作者社交链接",
-        default="",
     ) # type: ignore
 
     use_mirror_workflow: bpy.props.BoolProperty(
@@ -146,10 +104,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
         return bpy.context.scene.global_properties
 
     @classmethod
-    def only_match_gpu(cls):
-        return cls._instance().only_match_gpu
-
-    @classmethod
     def open_mod_folder_after_generate_mod(cls):
         return cls._instance().open_mod_folder_after_generate_mod
 
@@ -170,14 +124,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
         return cls._instance().generate_branch_mod_gui
 
     @classmethod
-    def add_rain_effect(cls):
-        return cls._instance().add_rain_effect
-
-    @classmethod
-    def use_rabbitfx_slot(cls):
-        return cls._instance().use_rabbitfx_slot
-
-    @classmethod
     def recalculate_tangent(cls):
         return cls._instance().recalculate_tangent
 
@@ -186,28 +132,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         return cls._instance().recalculate_color
 
     @classmethod
-    def enable_performance_stats(cls):
-        return cls._instance().enable_performance_stats
-
-    @classmethod
-    def preview_export_only(cls):
-        return cls._instance().preview_export_only
-
-    @classmethod
     def use_specific_generate_mod_folder_path(cls):
         return cls._instance().use_specific_generate_mod_folder_path
 
     @classmethod
     def generate_mod_folder_path(cls):
         return cls._instance().generate_mod_folder_path
-
-    @classmethod
-    def author_name(cls):
-        return cls._instance().credit_info_author_name
-
-    @classmethod
-    def author_link(cls):
-        return cls._instance().credit_info_author_social_link
 
     @classmethod
     def use_mirror_workflow(cls):

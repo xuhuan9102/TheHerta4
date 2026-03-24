@@ -1,7 +1,11 @@
 
 from dataclasses import field, dataclass
+import os
 
 from ..d3d11.d3d11_gametype import D3D11GameType
+from ...helper.import_config import ImportConfig
+from ...base.config.main_config import GlobalConfig
+from ...base.utils.json_utils import JsonUtils
 
 import numpy
 
@@ -18,6 +22,7 @@ class DrawIBModel:
     combine_ib:bool = True
 
     draw_ib:str = field(init=False, default="")
+    draw_ib_alias:str = field(init=False, default="")
 
     vertex_count:int = field(init=False, default=0)
     index_count:int = field(init=False, default=0)
@@ -26,25 +31,39 @@ class DrawIBModel:
     # DrawIBModel一旦创建，就默认它里面的每个SubmeshModel的d3d11_game_type都是一样的
     # 否则不可能通过组合buffer数据来正确导出
     # 所以这里的d3d11_game_type可以直接取submesh_model_list中第一个SubMeshModel的d3d11_game_type
-    d3d11_game_type:D3D11GameType = field(init=False,repr=False,default="")
+    d3d11_game_type:D3D11GameType = field(init=False,repr=False,default=None)
+
+    import_json_path:str = field(init=False,repr=False,default="")
+    import_json_dict:dict = field(init=False,repr=False,default_factory=dict)
+    import_config:ImportConfig = field(init=False,repr=False,default=None)
+    category_hash_dict:dict = field(init=False,repr=False,default_factory=dict)
+    part_name_list:list = field(init=False,repr=False,default_factory=list)
+    match_first_index_list:list = field(init=False,repr=False,default_factory=list)
+    partname_texturemarkinfolist_dict:dict = field(init=False,repr=False,default_factory=dict)
+    vertex_limit_hash:str = field(init=False,repr=False,default="")
+    original_vertex_count:int = field(init=False,repr=False,default=0)
 
     ib:list = field(init=False,repr=False,default_factory=list)
     submesh_ib_dict:dict = field(init=False,repr=False,default_factory=dict)
     category_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
     index_vertex_id_dict:dict = field(init=False,repr=False,default_factory=dict)
     obj_name_draw_offset:dict = field(init=False,repr=False,default_factory=dict)
+    shapekey_name_bytelist_dict:dict = field(init=False,repr=False,default_factory=dict)
 
 
     def __post_init__(self):
         # 因为初始化时传入的SubMeshModel列表中的每个SubMeshModel的match_draw_ib都是一样的，所以直接取第一个就行了
         self.draw_ib = self.submesh_model_list[0].match_draw_ib if len(self.submesh_model_list) > 0 else ""
+        self.draw_ib_alias = self.draw_ib
         self.d3d11_game_type = self.submesh_model_list[0].d3d11_game_type if len(self.submesh_model_list) > 0 else None
+        self._load_import_metadata_from_first_submesh()
 
         category_buffer_dict, submesh_vertex_base_dict, index_vertex_id_dict, vertex_count = self._assemble_category_buffers()
 
         self.vertex_count = vertex_count
         self.category_buffer_dict = category_buffer_dict
         self.index_vertex_id_dict = index_vertex_id_dict
+        self.shapekey_name_bytelist_dict = self._assemble_shape_key_buffers()
 
         if self.combine_ib:
             total_ib, obj_name_draw_offset = self._assemble_combined_ib_and_draw_offset(submesh_vertex_base_dict)
@@ -58,6 +77,47 @@ class DrawIBModel:
             self.submesh_ib_dict = submesh_ib_dict
             self.obj_name_draw_offset = obj_name_draw_offset
             self.index_count = total_index_count
+
+    def _load_import_metadata_from_first_submesh(self):
+        if not self.submesh_model_list:
+            return
+
+        first_submesh = self.submesh_model_list[0]
+        folder_name = first_submesh.unique_str
+        workspace_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
+        workspace_import_json = JsonUtils.LoadFromFile(workspace_import_json_path) if os.path.exists(workspace_import_json_path) else {}
+        gametype_name = workspace_import_json.get(folder_name, "")
+
+        if gametype_name:
+            self.import_json_path = os.path.join(
+                GlobalConfig.path_workspace_folder(),
+                folder_name,
+                "TYPE_" + gametype_name,
+                "import.json",
+            )
+            if os.path.exists(self.import_json_path):
+                self.import_json_dict = JsonUtils.LoadFromFile(self.import_json_path)
+
+        try:
+            self.import_config = ImportConfig(draw_ib=self.draw_ib)
+        except Exception:
+            self.import_config = None
+
+        if self.import_config is not None:
+            self.category_hash_dict = dict(self.import_config.category_hash_dict)
+            self.part_name_list = list(self.import_config.part_name_list)
+            self.match_first_index_list = list(self.import_config.match_first_index_list)
+            self.partname_texturemarkinfolist_dict = dict(self.import_config.partname_texturemarkinfolist_dict)
+            self.vertex_limit_hash = self.import_config.vertex_limit_hash
+            self.original_vertex_count = self.import_config.original_vertex_count
+            return
+
+        self.category_hash_dict = dict(self.import_json_dict.get("CategoryHash", {}))
+        self.part_name_list = list(self.import_json_dict.get("PartNameList", []))
+        self.match_first_index_list = list(self.import_json_dict.get("MatchFirstIndex", []))
+        self.partname_texturemarkinfolist_dict = dict(self.import_json_dict.get("ComponentTextureMarkUpInfoListDict", {}))
+        self.vertex_limit_hash = self.import_json_dict.get("VertexLimitVB", "")
+        self.original_vertex_count = self.import_json_dict.get("OriginalVertexCount", 0)
 
     def _assemble_category_buffers(self) -> tuple[dict, dict, dict, int]:
         total_category_buffer_chunks = {}
@@ -118,6 +178,76 @@ class DrawIBModel:
 
         return submesh_ib_dict, obj_name_draw_offset, total_index_count
 
+    def _assemble_shape_key_buffers(self) -> dict:
+        if self.d3d11_game_type is None:
+            return {}
+
+        position_stride = self.d3d11_game_type.CategoryStrideDict.get("Position", 0)
+        if position_stride <= 0:
+            return {}
+
+        position_offset = self._get_category_byte_offset("Position")
+        ordered_shapekey_names = []
+        seen_shapekey_names = set()
+
+        for submesh_model in self.submesh_model_list:
+            for shapekey_name in submesh_model.shape_key_buffer_dict.keys():
+                if shapekey_name in seen_shapekey_names:
+                    continue
+                seen_shapekey_names.add(shapekey_name)
+                ordered_shapekey_names.append(shapekey_name)
+
+        if not ordered_shapekey_names:
+            return {}
+
+        shapekey_chunks = {shapekey_name: [] for shapekey_name in ordered_shapekey_names}
+
+        for submesh_model in self.submesh_model_list:
+            base_position_buffer = submesh_model.category_buffer_dict.get("Position")
+
+            for shapekey_name in ordered_shapekey_names:
+                shape_key_buffer_result = submesh_model.shape_key_buffer_dict.get(shapekey_name)
+
+                if shape_key_buffer_result is None:
+                    if base_position_buffer is not None:
+                        shapekey_chunks[shapekey_name].append(base_position_buffer)
+                    continue
+
+                position_bytes = self._extract_position_bytes_from_shape_key(
+                    shape_key_buffer_result.element_vertex_ndarray,
+                    position_offset,
+                    position_stride,
+                )
+                shapekey_chunks[shapekey_name].append(position_bytes)
+
+        return {
+            shapekey_name: numpy.concatenate(chunks)
+            for shapekey_name, chunks in shapekey_chunks.items()
+            if chunks
+        }
+
+    def _get_category_byte_offset(self, target_category: str) -> int:
+        byte_offset = 0
+
+        for category_name in self.d3d11_game_type.OrderedCategoryNameList:
+            if category_name == target_category:
+                return byte_offset
+            byte_offset += self.d3d11_game_type.CategoryStrideDict.get(category_name, 0)
+
+        return byte_offset
+
+    def _extract_position_bytes_from_shape_key(
+        self,
+        element_vertex_ndarray: numpy.ndarray,
+        position_offset: int,
+        position_stride: int,
+    ) -> numpy.ndarray:
+        if len(element_vertex_ndarray) == 0:
+            return numpy.array([], dtype=numpy.uint8)
+
+        full_byte_view = element_vertex_ndarray.view(numpy.uint8).reshape(len(element_vertex_ndarray), -1)
+        return full_byte_view[:, position_offset:position_offset + position_stride].reshape(-1)
+
     def _get_exported_vertex_count(self, submesh_model: SubMeshModel) -> int:
         if submesh_model.index_vertex_id_dict:
             return len(submesh_model.index_vertex_id_dict)
@@ -131,5 +261,50 @@ class DrawIBModel:
             return 0
 
         return int(len(position_buffer) / position_stride)
+
+    @property
+    def draw_number(self) -> int:
+        return self.vertex_count
+
+    @property
+    def d3d11GameType(self) -> D3D11GameType:
+        return self.d3d11_game_type
+
+    @property
+    def part_name_submesh_dict(self) -> dict:
+        mapping = {}
+
+        for submesh_model in self.submesh_model_list:
+            part_name = None
+            if submesh_model.match_first_index in self.match_first_index_list:
+                part_index = self.match_first_index_list.index(submesh_model.match_first_index)
+                if part_index < len(self.part_name_list):
+                    part_name = self.part_name_list[part_index]
+            if part_name is None:
+                continue
+            mapping[part_name] = submesh_model
+
+        return mapping
+
+    @property
+    def PartName_IBResourceName_Dict(self) -> dict:
+        return {
+            part_name: "Resource_" + self.draw_ib + "_Component" + part_name
+            for part_name in self.part_name_list
+        }
+
+    @property
+    def PartName_IBBufferFileName_Dict(self) -> dict:
+        result = {}
+        for part_name, submesh_model in self.part_name_submesh_dict.items():
+            result[part_name] = submesh_model.unique_str + "-Index.buf"
+        return result
+
+    @property
+    def componentname_ibbuf_dict(self) -> dict:
+        result = {}
+        for part_name, submesh_model in self.part_name_submesh_dict.items():
+            result["Component " + part_name] = self.submesh_ib_dict.get(submesh_model.unique_str, [])
+        return result
 
         
