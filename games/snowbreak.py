@@ -72,7 +72,7 @@ class ExportSnowBreak(DrawIBExportBase):
 
     def add_unity_vs_resource_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
         resource_vb_section = M_IniSection(M_SectionType.ResourceBuffer)
-        buffer_folder_name = GlobalConfig.get_buffer_folder_name()
+        buffer_folder_name = "Meshes"
         for category_name in drawib_model.d3d11GameType.OrderedCategoryNameList:
             resource_vb_section.append("[Resource" + drawib_model.draw_ib + category_name + "]")
             resource_vb_section.append("type = Buffer")

@@ -472,7 +472,7 @@ class M_IniHelper:
             resource_section.append("[Resource" + drawib + "Position.1]")
             resource_section.append("type = buffer")
             resource_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict["Position"]))
-            resource_section.append("filename = Buffer/" + drawib + "-" + "Position.buf")
+            resource_section.append("filename = Meshes\\" + drawib + "-" + "Position.buf")
             resource_section.new_line()
 
             # 各个形态键的Buffer
@@ -486,7 +486,7 @@ class M_IniHelper:
                 resource_section.append("[Resource" + drawib + "Position." + shapekey_name + "]")
                 resource_section.append("type = buffer")
                 resource_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict["Position"]))
-                resource_section.append("filename = Buffer/" + drawib + "-" + "Position." + shapekey_name + ".buf")
+                resource_section.append("filename = Meshes\\" + drawib + "-" + "Position." + shapekey_name + ".buf")
                 resource_section.new_line()
 
             ib_number += 1

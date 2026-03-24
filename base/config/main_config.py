@@ -47,7 +47,6 @@ class LogicName:
 
 
 # 全局配置类，使用字段默认为全局可访问的唯一静态变量的特性，来实现全局变量
-# 可减少从Main.json中读取的IO消耗
 class GlobalConfig:
     # 全局静态变量,任何地方访问到的值都是唯一的
     gamename = ""
@@ -156,23 +155,16 @@ class GlobalConfig:
     @classmethod
     def path_generatemod_buffer_folder(cls):
        
-        buffer_folder_name = "Buffer"
-        
+        buffer_folder_name = "Meshes"
         buffer_path = os.path.join(GlobalConfig.path_generate_mod_folder(), buffer_folder_name + "\\")
         if not os.path.exists(buffer_path):
             os.makedirs(buffer_path)
         return buffer_path
     
     @classmethod
-    def get_buffer_folder_name(cls):
-        """获取当前Buffer文件夹名称（用于INI文件中的路径引用）"""
-        buffer_folder_name = "Buffer"
-        return buffer_folder_name
-    
-    @classmethod
     def path_generatemod_texture_folder(cls,draw_ib:str):
 
-        texture_path = os.path.join(GlobalConfig.path_generate_mod_folder(),"Texture\\")
+        texture_path = os.path.join(GlobalConfig.path_generate_mod_folder(),"Textures\\")
         if not os.path.exists(texture_path):
             os.makedirs(texture_path)
         return texture_path

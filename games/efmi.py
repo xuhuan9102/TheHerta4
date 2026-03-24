@@ -116,7 +116,7 @@ class ExportEFMI:
             resource_buffer_section.append("[" + ib_resource_name + "]")
             resource_buffer_section.append("type = Buffer")
             resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")
-            resource_buffer_section.append("filename = Buffer\\" + submesh_model.unique_str + "-Index.buf")
+            resource_buffer_section.append("filename = Meshes\\" + submesh_model.unique_str + "-Index.buf")
             resource_buffer_section.new_line()
             
             for category in submesh_model.category_buffer_dict.keys():
@@ -125,7 +125,7 @@ class ExportEFMI:
                 resource_buffer_section.append("[" + category_resource_name + "]")
                 resource_buffer_section.append("type = Buffer")
                 resource_buffer_section.append("stride = " + str(stride))
-                resource_buffer_section.append("filename = Buffer\\" + submesh_model.unique_str + "-" + category + ".buf")
+                resource_buffer_section.append("filename = Meshes\\" + submesh_model.unique_str + "-" + category + ".buf")
                 resource_buffer_section.new_line()
 
         if not GlobalProterties.forbid_auto_texture_ini():

@@ -481,7 +481,7 @@ class ExportWWMI:
 
     def add_resource_buffer(self, ini_builder: M_IniBuilder, draw_ib_model: DrawIBModelWWMI):
         resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
-        buffer_folder_name = GlobalConfig.get_buffer_folder_name()
+        buffer_folder_name = "Meshes"
 
         resource_buffer_section.append("[ResourceIndexBuffer]")
         resource_buffer_section.append("type = Buffer")

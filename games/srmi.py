@@ -206,7 +206,7 @@ class ExportSRMI:
                 resource_buffer_section.append("[Resource" + draw_ib + category_name + "]")
                 resource_buffer_section.append("type = Buffer")
                 resource_buffer_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict.get(category_name, 0)))
-                resource_buffer_section.append("filename = Buffer/" + draw_ib + "-" + category_name + ".buf")
+                resource_buffer_section.append("filename = Meshes\\" + draw_ib + "-" + category_name + ".buf")
                 resource_buffer_section.new_line()
 
             for category_name in d3d11_game_type.OrderedCategoryNameList:
@@ -214,7 +214,7 @@ class ExportSRMI:
                     resource_buffer_section.append("[Resource" + draw_ib + category_name + "CS]")
                     resource_buffer_section.append("type = StructuredBuffer")
                     resource_buffer_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict.get(category_name, 0)))
-                    resource_buffer_section.append("filename = Buffer/" + draw_ib + "-" + category_name + ".buf")
+                    resource_buffer_section.append("filename = Meshes\\" + draw_ib + "-" + category_name + ".buf")
                     resource_buffer_section.new_line()
 
             for part_name in drawib_model.part_name_list:
@@ -226,7 +226,7 @@ class ExportSRMI:
                 resource_buffer_section.append("[" + ib_resource_name + "]")
                 resource_buffer_section.append("type = Buffer")
                 resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")
-                resource_buffer_section.append("filename = Buffer/" + submesh_model.unique_str + "-Index.buf")
+                resource_buffer_section.append("filename = Meshes\\" + submesh_model.unique_str + "-Index.buf")
                 resource_buffer_section.new_line()
 
             ini_builder.append_section(resource_buffer_section)
