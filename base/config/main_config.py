@@ -44,7 +44,7 @@ class LogicName:
     # 预留位置
     APMI = "APMI" # 还在内测的蓝色星原，已在测试服中测试过，完美支持3Dmigoto，预计发布就会被XXMI收录
     NEMI = "NEMI" # 还在内测的异环，已在测试服中测试过，完美支持3Dmigoto，预计发布就会被XXMI收录
-    
+
 
 # 全局配置类，使用字段默认为全局可访问的唯一静态变量的特性，来实现全局变量
 # 可减少从Main.json中读取的IO消耗
@@ -55,12 +55,6 @@ class GlobalConfig:
     dbmtlocation = ""
     current_game_migoto_folder = ""
     logic_name = ""
-
-    # 适配的SSMT最低版本号，读取settings.json的VersionNumber字段得到
-    ssmt_version_number = 0
-
-
-
 
     @classmethod
     def read_from_main_json_ssmt4(cls) :
@@ -76,7 +70,6 @@ class GlobalConfig:
                 cls.workspacename = main_setting_json.get("CurrentWorkSpace","")
                 cls.gamename = main_setting_json.get("CurrentGameName","")
                 cls.dbmtlocation = main_setting_json.get("DBMTWorkFolder","") + "\\"
-                cls.ssmt_version_number = main_setting_json.get("VersionNumber",0)
             else:
                 print("Can't find: " + main_json_path)
             

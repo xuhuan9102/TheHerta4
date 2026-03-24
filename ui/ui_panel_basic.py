@@ -25,18 +25,11 @@ class PanelBasicInformation(bpy.types.Panel):
         
         GlobalConfig.read_from_main_json_ssmt4()
 
-        self.bl_label =  "TheHerta4 V" +  PluginConfig.get_version_string() + "  SSMT4 V" + str(GlobalConfig.ssmt_version_number)
+        self.bl_label =  "TheHerta4 V" +  PluginConfig.get_version_string()
         layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.dbmtlocation)
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)
         layout.label(text=TR.translate("当前游戏预设: ") + GlobalConfig.logic_name)
         layout.label(text=TR.translate("当前工作空间: ") + GlobalConfig.workspacename)
-
-        if PluginConfig.get_min_ssmt_version() > GlobalConfig.ssmt_version_number:
-            layout.label(text=TR.translate("最低支持版本: " + str(PluginConfig.get_min_ssmt_version())),icon='ERROR')
-            layout.label(text=TR.translate("当前版本: " + str(GlobalConfig.ssmt_version_number)),icon='ERROR')
-
-            layout.label(text=TR.translate("当前SSMT4版本过低无法适配"),icon='ERROR')
-
         layout.prop(context.scene.global_properties,"use_mirror_workflow",text="使用非镜像工作流")
         
         if len(context.selected_objects) != 0:
