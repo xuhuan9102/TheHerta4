@@ -324,7 +324,7 @@ class M_IniHelper:
                         shutil.copy2(original_texture_file_path,target_texture_file_path)
 
             # 现在除了WWMI外都不使用全局Hash贴图风格，而是上面的标记的Hash风格贴图
-            if GlobalConfig.logic_name != LogicName.WWMI and GlobalConfig.logic_name != LogicName.WuWa:
+            if GlobalConfig.logic_name != LogicName.WWMI:
                 continue
 
 

@@ -133,7 +133,7 @@ class ModelDeleteLoosePoint(bpy.types.Operator):
 class ModelClearCustomSplitNormals(bpy.types.Operator):
     bl_idname = "panel_model.clear_custom_split_normals"
     bl_label = "清除自定义拆分法向"
-    bl_description = "WuWa 逆向得到的模型，有时顶点法线会歪，用这个处理一下就行。"
+    bl_description = "WWMI 逆向得到的模型，有时顶点法线会歪，用这个处理一下就行。"
     def execute(self, context):
         sel = context.selected_objects
         if not sel:
@@ -292,7 +292,7 @@ class MMTResetRotation(bpy.types.Operator):
 class SmoothNormalSaveToUV(bpy.types.Operator):
     bl_idname = "object.smooth_normal_save_to_uv"
     bl_label = "平滑法线存UV(近似)"
-    bl_description = "平滑法线存UV算法，可用于修复ZZZ,WuWa的某些UV(只是近似实现60%的效果)" 
+    bl_description = "平滑法线存UV算法，可用于修复ZZZ,WWMI的某些UV(只是近似实现60%的效果)" 
 
     def execute(self, context):
         AlgorithmUtils.smooth_normal_save_to_uv()

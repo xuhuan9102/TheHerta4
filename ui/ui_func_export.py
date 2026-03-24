@@ -42,7 +42,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         elif GlobalConfig.logic_name == LogicName.HIMI:
             export_himi = ExportHIMI(blueprint_model=blueprint_model)
             export_himi.export()
-        elif GlobalConfig.logic_name == LogicName.CTXMC or GlobalConfig.logic_name == LogicName.IdentityV2 or GlobalConfig.logic_name == LogicName.NierR:
+        elif GlobalConfig.logic_name == LogicName.IdentityVNeoX2 or GlobalConfig.logic_name == LogicName.IdentityVNeoX3:
             export_identityv = ExportIdentityV(blueprint_model=blueprint_model)
             export_identityv.export()
         elif GlobalConfig.logic_name == LogicName.SRMI:
@@ -51,7 +51,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         elif GlobalConfig.logic_name == LogicName.ZZMI:
             export_zzmi = ExportZZMI(blueprint_model=blueprint_model)
             export_zzmi.export()
-        elif GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
+        elif GlobalConfig.logic_name == LogicName.WWMI:
             export_wwmi = ExportWWMI(blueprint_model=blueprint_model)
             export_wwmi.export()
         elif GlobalConfig.logic_name == LogicName.SnowBreak:
@@ -60,7 +60,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         elif GlobalConfig.logic_name == LogicName.YYSLS:
             export_yysls = ExportYYSLS(blueprint_model=blueprint_model)
             export_yysls.export()
-        elif GlobalConfig.logic_name == LogicName.UnityVS or GlobalConfig.logic_name == LogicName.UnityCS or GlobalConfig.logic_name == LogicName.UnityCSM or GlobalConfig.logic_name == LogicName.UnityCPU or GlobalConfig.logic_name == LogicName.AILIMIT:
+        elif GlobalConfig.logic_name == LogicName.Naraka or GlobalConfig.logic_name == LogicName.NarakaM or GlobalConfig.logic_name == LogicName.GF2 or GlobalConfig.logic_name == LogicName.AILIMIT:
             export_unity = ExportUnity(blueprint_model=blueprint_model)
             export_unity.export()
         else:

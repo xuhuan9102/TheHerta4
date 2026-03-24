@@ -334,7 +334,7 @@ class ExportUnity(DrawIBExportBase):
 
     def export(self):
         self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
-        if GlobalConfig.logic_name in {LogicName.UnityCS, LogicName.UnityCSM, LogicName.AILIMIT}:
+        if GlobalConfig.logic_name in {LogicName.Naraka, LogicName.NarakaM, LogicName.AILIMIT}:
             self.generate_unity_cs_config_ini()
         else:
             self.generate_unity_vs_config_ini()

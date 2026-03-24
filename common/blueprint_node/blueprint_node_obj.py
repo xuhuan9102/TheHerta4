@@ -355,7 +355,7 @@ class SSMTNode_Result_Output(SSMTNodeBase):
     def draw_buttons(self, context, layout):
         layout.operator("ssmt.generate_mod_blueprint", text="Generate Mod", icon='EXPORT')
         
-        if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
+        if GlobalConfig.logic_name == LogicName.WWMI:
             layout.prop(context.scene.global_properties, "ignore_muted_shape_keys")
             layout.prop(context.scene.global_properties, "apply_all_modifiers")
             layout.prop(context.scene.global_properties, "export_add_missing_vertex_groups")
@@ -363,7 +363,7 @@ class SSMTNode_Result_Output(SSMTNodeBase):
         layout.prop(context.scene.global_properties, 
                     "forbid_auto_texture_ini",text="禁止自动贴图流程")
 
-        if GlobalConfig.logic_name != LogicName.UnityCPU:
+        if GlobalConfig.logic_name != LogicName.GF2:
             layout.prop(context.scene.global_properties,
                         "recalculate_tangent",text="向量归一化法线存入TANGENT(全局)")
 

@@ -60,7 +60,7 @@ class PanelBasicInformation(bpy.types.Panel):
         # 一键导入当前工作空间为蓝图架构
         layout.operator("ssmt.import_all_from_workspace_blueprint",icon='IMPORT')
 
-        if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
+        if GlobalConfig.logic_name == LogicName.WWMI:
             layout.prop(context.scene.global_properties,"import_merged_vgmap")
             layout.prop(context.scene.global_properties,"import_skip_empty_vertex_groups")
 

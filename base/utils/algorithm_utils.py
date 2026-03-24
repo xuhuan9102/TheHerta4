@@ -7,8 +7,8 @@ from mathutils import *
 class AlgorithmUtils:
     '''
     SmoothNormal Algorithm.
-    SupportedGame: GI,HI3,HSR,ZZZ,WuWa
-    Designed For: ZZZ,WuWa 
+    SupportedGame: GI,HI3,HSR,ZZZ,WWMI
+    Designed For: ZZZ,WWMI
 
     Nico：此方法不知道为什么只能近似还原TEXCOORD1中内容，猜测是缺少了加权平均？
     缺少相关知识太多了，暂时放着

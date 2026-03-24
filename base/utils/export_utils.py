@@ -162,7 +162,7 @@ class ExportUtils:
         dtype: numpy.dtype,
     ):
         if (
-            GlobalConfig.logic_name == LogicName.UnityCPU
+            GlobalConfig.logic_name == LogicName.GF2
             and "TANGENT" in d3d11_game_type.OrderedFullElementList
         ):
             return ObjBufferHelper.calc_index_vertex_buffer_girlsfrontline2(

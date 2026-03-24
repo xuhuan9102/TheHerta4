@@ -163,7 +163,7 @@ class MeshImportHelper:
 
         #  metadata.json, if contains then we can import merged vgmap.
         component = None
-        if GlobalProterties.import_merged_vgmap() and (GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa):
+        if GlobalProterties.import_merged_vgmap() and (GlobalConfig.logic_name == LogicName.WWMI):
             print("尝试读取Metadata.json")
             metadatajsonpath = os.path.join(os.path.dirname(mbf.fmt_path),'Metadata.json')
             if os.path.exists(metadatajsonpath):
@@ -194,7 +194,7 @@ class MeshImportHelper:
         
 
         # 通过fmt文件中标明的logic_name来进行预处理
-        if mbf.fmt_file.logic_name == LogicName.WWMI or mbf.fmt_file.logic_name == LogicName.WuWa:
+        if mbf.fmt_file.logic_name == LogicName.WWMI:
             # 鸣潮需要把旋转角度清零
             obj.rotation_euler[0] = 0
             obj.rotation_euler[1] = 0
@@ -204,7 +204,7 @@ class MeshImportHelper:
             obj.scale = (0.01,0.01,0.01)
         
         print("导入模型完成: " + mbf.fmt_file.logic_name)
-        if mbf.fmt_file.logic_name == LogicName.ZZMI or mbf.fmt_file.logic_name == LogicName.UnityCS:
+        if mbf.fmt_file.logic_name == LogicName.ZZMI or mbf.fmt_file.logic_name == LogicName.Naraka:
 
             # ZZMI需要清零旋转角度
             obj.rotation_euler[0] = 0
@@ -218,7 +218,7 @@ class MeshImportHelper:
             obj.rotation_euler[2] = 0
 
         # WWMI的Merged架构需要清理空顶点组，这里我们PerCompoennt也清理算了，不然做出区分后续优化太麻烦
-        if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.WuWa:
+        if GlobalConfig.logic_name == LogicName.WWMI:
             if GlobalProterties.import_skip_empty_vertex_groups():
                 VertexGroupUtils.remove_unused_vertex_groups(obj)
         
@@ -279,7 +279,6 @@ class MeshImportHelper:
 
         # 部分游戏模型导入时必须翻转面朝向，并在生成Mod时翻转面朝向
         if (mbf.fmt_file.logic_name == LogicName.WWMI 
-            or mbf.fmt_file.logic_name == LogicName.WuWa
             or mbf.fmt_file.logic_name == LogicName.YYSLS):
             flipped_indices = []
             for i in range(0, len(mbf.ib_data), 3):
