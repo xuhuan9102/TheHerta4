@@ -2,7 +2,6 @@ import bpy
 
 # 全局配置
 from .base.config import global_properties
-from .base.config.plugin_config import PluginConfig
 
 # UI界面
 from .ui import ui_panel_basic
@@ -34,9 +33,6 @@ bl_info = {
     "min_ssmt_version": 4020, # 确保TheHerta4正确工作的SSMT最低版本号
     "category": "Generic"
 }
-
-
-PluginConfig.set_bl_info(bl_info)
 
 
 class UpdaterPanel(bpy.types.Panel):
