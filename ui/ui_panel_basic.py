@@ -24,7 +24,7 @@ class PanelBasicInformation(bpy.types.Panel):
         
         GlobalConfig.read_from_main_json_ssmt4()
 
-        layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.dbmtlocation)
+        layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.ssmtlocation)
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)
         layout.label(text=TR.translate("当前游戏预设: ") + GlobalConfig.logic_name)
         layout.label(text=TR.translate("当前工作空间: ") + GlobalConfig.workspacename)
