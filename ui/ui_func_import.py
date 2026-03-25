@@ -63,7 +63,9 @@ def ImprotFromWorkSpaceFull(self, context):
             try:
                 print("尝试导入路径: " + import_folder_path)
                 fmt_file_path = os.path.join(import_folder_path, submesh_folder_name + ".fmt")
-                mbf = MigotoBinaryFile(fmt_path=fmt_file_path,mesh_name= submesh_folder_name + ".自定义名称")
+                draw_ib = submesh_folder_name.split("-")[0]
+                this_alias = "." + (drawib_aliasname_dict.get(draw_ib) or "自定义名称")
+                mbf = MigotoBinaryFile(fmt_path=fmt_file_path,mesh_name= submesh_folder_name + this_alias)
                 MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=workspace_collection)
 
                 # 如果能执行到这里，说明这个DrawIB成功导入了一个数据类型
