@@ -51,7 +51,7 @@ class GlobalConfig:
     # 全局静态变量,任何地方访问到的值都是唯一的
     gamename = ""
     workspacename = ""
-    dbmtlocation = ""
+    ssmtlocation = ""
     current_game_migoto_folder = ""
     logic_name = ""
 
@@ -60,7 +60,7 @@ class GlobalConfig:
         try:
             main_json_path = GlobalConfig.path_main_json_ssmt4()
             print("Reading SSMT4 main json from: " + main_json_path)
-            # 先从main_json_path里读取dbmt位置，也就是dbmt总工作空间的位置
+            # 先从main_json_path里读取ssmt位置，也就是ssmt总工作空间的位置
             # 在新架构中，总工作空间位置已不会再发生改变，所以用户只需要选择一次就可以了
             if os.path.exists(main_json_path):
                 main_setting_file = open(main_json_path)
@@ -68,7 +68,10 @@ class GlobalConfig:
                 main_setting_file.close()
                 cls.workspacename = main_setting_json.get("CurrentWorkSpace","")
                 cls.gamename = main_setting_json.get("CurrentGameName","")
-                cls.dbmtlocation = main_setting_json.get("DBMTWorkFolder","") + "\\"
+                cls.ssmtlocation = (
+                    main_setting_json.get("SSMTWorkFolder")
+                    or main_setting_json.get("DBMTWorkFolder", "")
+                ) + "\\" # 理论上应该绞杀所有旧时代孑遗, 然考虑到兼容性, 不得不保留 fallback.
             else:
                 print("Can't find: " + main_json_path)
             
@@ -85,7 +88,7 @@ class GlobalConfig:
             
     @classmethod
     def base_path(cls):
-        return cls.dbmtlocation
+        return cls.ssmtlocation
     
     @classmethod
     def path_drawib_config_json_path(cls):
@@ -102,7 +105,7 @@ class GlobalConfig:
     
     @classmethod
     def path_reverse_output_folder(cls):
-        # 先从main_json_path里读取dbmt位置，也就是dbmt总工作空间的位置
+        # 先从main_json_path里读取ssmt位置，也就是ssmt总工作空间的位置
         # 在新架构中，总工作空间位置已不会再发生改变，所以用户只需要选择一次就可以了
         if os.path.exists(cls.path_main_json_ssmt4()):
             main_setting_file = open(cls.path_main_json_ssmt4())
