@@ -1,51 +1,23 @@
 from dataclasses import dataclass, field
 from .draw_call_model import DrawCallModel
+
 from ...base.utils.export_utils import ExportUtils
 from ...base.utils.obj_utils import ObjUtils
 from ...base.utils.collection_utils import CollectionUtils
 from ...base.utils.json_utils import JsonUtils
+from ...base.config.main_config import GlobalConfig, LogicName
+
 from ..d3d11.d3d11_gametype import D3D11GameType
 from ...helper.obj_buffer_helper import ObjBufferHelper
 
-from ...base.config.main_config import GlobalConfig, LogicName
 
 import bpy
 import math
 import os
-'''
-一般DrawIB索引缓冲区是由多个SubMesh子网格构成的
-每个Submesh分别具有不同的材质和内容
-所以这里沿用术语Submesh
 
-因为我们可以通过DrawIndexed多次来绘制一个Submesh
-所以Submesh是由多个Blender中的obj组成的
 
-也就是在初始化的时候，遍历BlueprintModel中所有的obj
-按照first_index,index_count,draw_ib来组在一起变成一个个Submesh
-每个Submesh都包含1到多个obj
-最后BluePrintModel可以得到一个SubmeshModel列表
-
-然后就是数据的组合和数据的导出了
-IB、CategoryBuffer要先组合在一起
-
-然后在SubmeshModel之上，部分游戏还需要进行DrawIB级别的组合。
-EFMI这个游戏只需要SubmeshModel级别的组合就行了，然后直接生成Mod
-但是像GIMI这种游戏还需要在SubmeshModel之上进行DrawIB级别的组合，最后生成Mod
-
-所以基于这个架构才是比较清晰的，SubmeshModel只负责Submesh级别的组合和数据导出
-DrawIBModel负责DrawIB级别的组合和数据导出
-
-TODO 
-这里还有个问题，那就是在Blender中先组合出临时obj，再计算IB，VB，还是先计算IB，VB，再组合数据
-这是个问题。
-
-'''
 @dataclass
 class SubMeshModel:
-    '''
-    注意，所有的写出文件都是由具体的游戏逻辑负责的
-    这里只负责获取ib,category_buffer等数据
-    '''
     # 初始化时需要填入此属性
     drawcall_model_list:list[DrawCallModel] = field(default_factory=list)
 

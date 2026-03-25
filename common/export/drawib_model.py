@@ -14,9 +14,9 @@ from .submesh_model import SubMeshModel
 @dataclass
 class DrawIBModel:
     '''
-    DrawIBModel是一个更高层次的模型，包含一个或多个SubMeshModel
-    适用于米游、Unity等需要将多个SubMesh组合成一个DrawIB进行导出的游戏
-    要使用DrawIBModle，必须确保每个SubMesh的数据类型是相同的，才有可能组合在一起
+    - DrawIBModel是一个更高层次的模型，包含一个或多个SubMeshModel
+    - 适用于米游、Unity等需要将多个SubMesh组合成一个DrawIB进行导出的游戏
+    - 要使用DrawIBModle，必须确保每个SubMesh的数据类型是相同的，才能组合在一起
     '''
     submesh_model_list:list[SubMeshModel]
     combine_ib:bool = True

@@ -3,61 +3,6 @@ from ..migoto.m_key import M_Key
 
 from dataclasses import dataclass, field
 
-'''
-TODO
-
-这里的设计有问题
-例如对于WWMI来说，整个DrawIB级别的内容可以合并在一起计算
-得到一个总的IB和CategoryBuffer，然后直接写出就行了
-但是此时仍然需要得到SubMesh级别的偏移和索引
-
-对于GIMI来说，CategoryBuffer可以是DrawIB级别的
-但是IB可以是DrawIB级别的简单一个buffer，也可以是SubMesh级别的多个buffer来突破顶点索引限制
-所以理想的方法是先在SubMeshModel层级计算好IB和CategoryBuffer，然后在DrawIBModel层级进行合并，最后写出
-
-对于EFMI来说，IB和CategoryBuffer都是SubMesh级别的
-
-所以说最终的IndexBuffer和CategoryBuffer，应该是在SubMeshModel层级计算好，然后在DrawIBModel层级进行合并
-这样可以灵活应用，解决所有层面的问题
-所以不应该在ObjDataModel层级直接计算，而是在SubMesh级别上进行临时obj拼接，拼接后进行计算
-使用这个架构还能把WWMI、GIMI、EFMI等流程全部使用一套架构来完成，算是解决了之前遗留的架构设计问题。
-
-所以ObjDataModel它只能代表BluePrintModel解析出来的结果，然后交给下一层SubMesh来进行计算IB、VB等
-最后交由各个游戏的控制逻辑决定是否再提升到DrawIB层级
-
-ObjDataModel => SubMeshModel => DrawIBModel
-SubMeshModel必选，因为一个SubMeshModel里可以有1到多个ObjDataModel
-DrawIBModel可选，由各个游戏生成Mod逻辑控制
-
-SubMeshModel中进行临时obj的生成，以及计算每个obj的drawindexed
-
-但是在WWMI中，直接进行了DrawIB层级的obj合并？
-那么那种情况下，SubMeshModel还有存在的意义吗？
-也许SubMeshModel层级的属性计算也可以作为可选项
-如果是WWMI调用，就不计算SubMeshModel层级的IBVB，直接在DrawIBModel层级进行合并计算IBVB
-如果是GIMI调用，就先计算SubMeshModel层级的IBVB，再在DrawIBModel层级进行合并计算IBVB
-如果是EFMI调用，就只计算SubMeshModel层级的IBVB，直接生成Mod
-
-计算IB和VB不是必要的，SubMeshModel只起到一个把mesh聚集在一起的作用，真到了用到的时候再去计算
-也就是它只要维护一个ObjDataModel列表即可，其它都是可选项
-
-为了架构实现起来更加简单易懂，直接改为SubMeshModel层级进行IBVB的计算
-DrawIBModel层级只进行SubMeshModel的合并，最后写出
-
-此外M_DrawIndexed和M_DrawIndexedInstanced也可以直接放在ObjDataModel里
-他们的属性都是固定的，在合并obj并计算时，就可以得到，
-直接放在ObjDataModel中会让调用更加简单便捷，只需要提供get_drawindexed_str()和get_drawindexedinstanced_str()方法就行了
-
-这种情况下，每个Obj其实都是一个DrawCall
-所以ObjDataModel改名为DrawCallModel更合适
-
-每个SubMesh可以有多个DrawCall
-每个DrawIB可以有多个SubMesh
-对整个绘制流程进行了标准的抽象，在此基础上统一了所有游戏的绘制调用流程
-再由每个游戏的具体逻辑去处理具体的情况，比如要不要合并IB，VB到DrawIB层级等等
-'''
-
-
 
 class M_DrawIndexed:
     def __init__(self) -> None:

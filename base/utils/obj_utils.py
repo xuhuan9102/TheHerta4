@@ -452,7 +452,7 @@ class ObjUtils:
         '''
         Nico: 卧槽，居然用的是原始的join，我之前的思路是直接对每个obj获取buffer属性然后拼接
         怪不得之前的思路做出来有毛病呢
-        TODO 所以说后面WWMI的统计每个Component的顶点组部分得用这种join技术才行
+        所以说后面WWMI的统计每个Component的顶点组部分得用这种join技术才行
         '''
         if len(objects) == 1:
             return
