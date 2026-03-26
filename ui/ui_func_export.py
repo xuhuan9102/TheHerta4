@@ -42,7 +42,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         elif GlobalConfig.logic_name == LogicName.HIMI:
             export_himi = ExportHIMI(blueprint_model=blueprint_model)
             export_himi.export()
-        elif GlobalConfig.logic_name == LogicName.IdentityVNeoX2 or GlobalConfig.logic_name == LogicName.IdentityVNeoX3:
+        elif GlobalConfig.logic_name == LogicName.IdentityVNeoX3:
             export_identityv = ExportIdentityV(blueprint_model=blueprint_model)
             export_identityv.export()
         elif GlobalConfig.logic_name == LogicName.SRMI:
