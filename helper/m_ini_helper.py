@@ -13,57 +13,18 @@ from ..base.config.global_properties import GlobalProterties
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..helper.workspace_helper import WorkSpaceHelper
 from ..helper.blueprint_export_helper import BlueprintExportHelper
+from ..helper.texture_metadata_helper import TextureMetadataResolver
 
 class M_IniHelper:
     @classmethod
     def _count_marked_textures(cls, draw_ib_model: DrawIBModel, mark_type: str | None = None) -> int:
         count = 0
-        for texture_info_list in cls._get_partname_texturemarkinfolist_dict(draw_ib_model).values():
+        for texture_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).values():
             for texture_info in texture_info_list:
                 if mark_type is not None and getattr(texture_info, "mark_type", "") != mark_type:
                     continue
                 count += 1
         return count
-
-    @classmethod
-    def _normalize_texture_markup_info_list(cls, texture_info_list: list) -> list:
-        normalized_texture_info_list = []
-
-        for texture_info in texture_info_list:
-            if isinstance(texture_info, TextureMarkUpInfo):
-                normalized_texture_info_list.append(texture_info)
-                continue
-
-            if not isinstance(texture_info, dict):
-                continue
-
-            markup_info = TextureMarkUpInfo()
-            markup_info.mark_name = texture_info.get("MarkName", texture_info.get("mark_name", ""))
-            markup_info.mark_type = texture_info.get("MarkType", texture_info.get("mark_type", ""))
-            markup_info.mark_hash = texture_info.get("MarkHash", texture_info.get("mark_hash", ""))
-            markup_info.mark_slot = texture_info.get("MarkSlot", texture_info.get("mark_slot", ""))
-            markup_info.mark_filename = texture_info.get("MarkFileName", texture_info.get("mark_filename", ""))
-            normalized_texture_info_list.append(markup_info)
-
-        return normalized_texture_info_list
-
-    @classmethod
-    def _get_partname_texturemarkinfolist_dict(cls, draw_ib_model: DrawIBModel) -> dict:
-        texture_info_dict = getattr(draw_ib_model, "partname_texturemarkinfolist_dict", None)
-        if texture_info_dict is not None:
-            return {
-                part_name: cls._normalize_texture_markup_info_list(texture_info_list)
-                for part_name, texture_info_list in texture_info_dict.items()
-            }
-
-        import_config = getattr(draw_ib_model, "import_config", None)
-        if import_config is not None:
-            return {
-                part_name: cls._normalize_texture_markup_info_list(texture_info_list)
-                for part_name, texture_info_list in getattr(import_config, "partname_texturemarkinfolist_dict", {}).items()
-            }
-
-        return {}
 
     @classmethod
     def _get_extract_gametype_folder_path(cls, draw_ib_model: DrawIBModel) -> str:
@@ -312,7 +273,7 @@ class M_IniHelper:
         # 先统计当前标记的具有Slot风格的Hash值，后续Render里搞图片的时候跳过这些
         slot_style_texture_hash_list = []
         for draw_ib_model in drawib_drawibmodel_dict.values():
-            for texture_markup_info_list in cls._get_partname_texturemarkinfolist_dict(draw_ib_model).values():
+            for texture_markup_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).values():
                 for texture_markup_info in texture_markup_info_list:
                     if texture_markup_info.mark_type == "Slot":
                         slot_style_texture_hash_list.append(texture_markup_info.mark_hash)
@@ -327,7 +288,7 @@ class M_IniHelper:
             print("M_IniHelper: DrawIB " + draw_ib + " 的 Hash 标记数量: " + str(marked_hash_count))
 
             # 添加标记的Hash风格贴图
-            for part_name, texture_markup_info_list in cls._get_partname_texturemarkinfolist_dict(draw_ib_model).items():
+            for part_name, texture_markup_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).items():
                 submesh_folder_name = cls._get_part_submesh_folder_name(draw_ib_model, part_name)
                 if not submesh_folder_name:
                     print("M_IniHelper: 跳过 Hash 贴图处理，未找到 unique_str，Part: " + str(part_name))
@@ -447,7 +408,7 @@ class M_IniHelper:
         marked_slot_count = cls._count_marked_textures(draw_ib_model, mark_type="Slot")
         print("M_IniHelper: 开始复制 Slot 贴图，DrawIB: " + draw_ib_model.draw_ib + "，标记数量: " + str(marked_slot_count))
 
-        for part_name, texture_markup_info_list in cls._get_partname_texturemarkinfolist_dict(draw_ib_model).items():
+        for part_name, texture_markup_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).items():
             for texture_markup_info in texture_markup_info_list:
                 # 只有槽位风格会移动到目标位置
                 if texture_markup_info.mark_type != "Slot":
