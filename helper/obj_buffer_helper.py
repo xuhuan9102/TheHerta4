@@ -835,6 +835,113 @@ class ObjBufferHelper:
         return vb
 
     @staticmethod
+    def average_normal_tangent_xxmi(obj, indexed_vertices, flattened_ib, d3d11GameType, dtype, rounding_precision: int = 4):
+        '''
+        使用 XXMI 的角度加权 outline 思路重计算 TANGENT.xyz。
+        这里只替换 xyz，w 仍保持当前导出路径的处理习惯。
+        '''
+        if "TANGENT" not in d3d11GameType.OrderedFullElementList:
+            return indexed_vertices
+
+        allow_calc = False
+        if GlobalProterties.recalculate_tangent():
+            allow_calc = True
+        elif obj.get("3DMigoto:RecalculateTANGENT",False):
+            allow_calc = True
+
+        if not allow_calc:
+            return indexed_vertices
+
+        vb = bytearray()
+        for vertex in indexed_vertices:
+            vb += bytes(vertex)
+        vb = numpy.frombuffer(vb, dtype=dtype)
+
+        if len(vb) == 0 or len(flattened_ib) < 3 or "POSITION" not in vb.dtype.names or "TANGENT" not in vb.dtype.names:
+            return vb
+
+        positions = numpy.asarray(vb['POSITION'], dtype=numpy.float32)
+        tangents = numpy.asarray(vb['TANGENT'], dtype=numpy.float32)
+
+        if positions.ndim != 2 or positions.shape[1] < 3 or tangents.ndim != 2 or tangents.shape[1] < 3:
+            return vb
+
+        def unit_vector(vector_array: numpy.ndarray) -> numpy.ndarray:
+            norms = numpy.linalg.norm(vector_array, axis=1, keepdims=True)
+            norms = numpy.where(norms == 0, 1, norms)
+            return vector_array / norms
+
+        def calc_angle(edge_a: numpy.ndarray, edge_b: numpy.ndarray) -> numpy.ndarray:
+            vector_a = numpy.abs(unit_vector(edge_a))
+            vector_b = numpy.abs(unit_vector(edge_b))
+            return numpy.arccos(
+                numpy.clip(
+                    numpy.einsum("ij,ij->i", vector_a, vector_b),
+                    -1,
+                    1,
+                )
+            )
+
+        ib_data = numpy.asarray(flattened_ib, dtype=numpy.int32)
+        valid_triangle_index_count = (len(ib_data) // 3) * 3
+        if valid_triangle_index_count == 0:
+            return vb
+
+        ib_data = ib_data[:valid_triangle_index_count]
+        if ib_data.max(initial=-1) >= len(vb) or ib_data.min(initial=0) < 0:
+            return vb
+
+        loops_coord = positions[ib_data, 0:3]
+        triangles = loops_coord.reshape(-1, 3, 3)
+
+        edge0 = triangles[:, 1] - triangles[:, 2]
+        edge1 = triangles[:, 2] - triangles[:, 0]
+        edge2 = triangles[:, 0] - triangles[:, 1]
+
+        angle0 = calc_angle(edge2, edge1)
+        angle1 = calc_angle(edge0, edge2)
+        angle2 = calc_angle(edge1, edge0)
+
+        loops_angle = numpy.zeros((len(triangles), 3), dtype=numpy.float32)
+        loops_angle[:, 0] = angle0
+        loops_angle[:, 1] = angle1
+        loops_angle[:, 2] = angle2
+
+        faces_normal = unit_vector(numpy.cross(edge0, edge1))
+        loops_face_normal = faces_normal.repeat(3, axis=0)
+
+        loops_round_coord = numpy.round(loops_coord, rounding_precision)
+        loops_weighted_normal = loops_face_normal * loops_angle.reshape(-1, 1)
+
+        _, unique_indices, unique_inverse = numpy.unique(
+            loops_round_coord,
+            axis=0,
+            return_index=True,
+            return_inverse=True,
+        )
+
+        accumulated_normals = numpy.zeros((len(unique_indices), 3), dtype=numpy.float32)
+        numpy.add.at(accumulated_normals, unique_inverse, loops_weighted_normal)
+
+        accumulated_magnitudes = numpy.linalg.norm(accumulated_normals, axis=1, keepdims=True)
+        fallback_normals = loops_face_normal[unique_indices]
+        accumulated_normals = numpy.where(
+            accumulated_magnitudes < 1e-6,
+            fallback_normals,
+            accumulated_normals,
+        )
+
+        outline_vectors = tangents[:, 0:3].copy()
+        outline_vectors[ib_data] = unit_vector(accumulated_normals[unique_inverse])
+        vb['TANGENT'][:, :3] = outline_vectors
+
+        if tangents.shape[1] >= 4:
+            w = numpy.where(vb['TANGENT'][:, 3] >= 0, -1.0, 1.0)
+            vb['TANGENT'][:, 3] = w
+
+        return vb
+
+    @staticmethod
     def calc_index_vertex_buffer_universal(element_vertex_ndarray,mesh,obj,d3d11GameType,dtype):
         '''
         计算IndexBuffer和CategoryBufferDict并返回
@@ -858,7 +965,13 @@ class ObjBufferHelper:
         # TimerUtils.End("Calc IB VB")
 
         # 重计算TANGENT步骤
-        indexed_vertices = ObjBufferHelper.average_normal_tangent(obj=obj, indexed_vertices=indexed_vertices, d3d11GameType=d3d11GameType,dtype=dtype)
+        indexed_vertices = ObjBufferHelper.average_normal_tangent_xxmi(
+            obj=obj,
+            indexed_vertices=indexed_vertices,
+            flattened_ib=flattened_ib,
+            d3d11GameType=d3d11GameType,
+            dtype=dtype,
+        )
         
         # 重计算COLOR步骤
         indexed_vertices = ObjBufferHelper.average_normal_color(obj=obj, indexed_vertices=indexed_vertices, d3d11GameType=d3d11GameType,dtype=dtype)
@@ -1064,7 +1177,13 @@ class ObjBufferHelper:
         # TimerUtils.End("Calc IB VB")
 
         # 重计算TANGENT步骤
-        indexed_vertices = ObjBufferHelper.average_normal_tangent(obj=obj, indexed_vertices=vertex_data_list, d3d11GameType=d3d11_game_type,dtype=dtype)
+        indexed_vertices = ObjBufferHelper.average_normal_tangent_xxmi(
+            obj=obj,
+            indexed_vertices=vertex_data_list,
+            flattened_ib=flattened_ib,
+            d3d11GameType=d3d11_game_type,
+            dtype=dtype,
+        )
         
         # 重计算COLOR步骤
         indexed_vertices = ObjBufferHelper.average_normal_color(obj=obj, indexed_vertices=indexed_vertices, d3d11GameType=d3d11_game_type,dtype=dtype)
