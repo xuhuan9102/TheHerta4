@@ -23,7 +23,7 @@ from ..blueprint_node.blueprint_node_obj import SSMTNode_Object_Group, SSMTNode_
 class BluePrintModel:
 
     
-    def __init__(self):
+    def __init__(self, tree=None, context=None):
         # 全局按键名称和按键属性字典
         self.keyname_mkey_dict:dict[str,M_Key] = {} 
 
@@ -31,9 +31,15 @@ class BluePrintModel:
         self.ordered_draw_obj_data_model_list:list[DrawCallModel] = [] 
 
         # 从输出节点开始递归解析所有的节点
-        tree = BlueprintExportHelper.get_current_blueprint_tree()
+        tree = tree or BlueprintExportHelper.get_current_blueprint_tree(context=context)
+        if not tree:
+            raise ValueError("未找到当前蓝图树，请先打开正确的蓝图编辑器")
+
         print(tree)
         output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, SSMTNode_Result_Output.bl_idname)
+        if not output_node:
+            raise ValueError("当前蓝图缺少 Generate Mod 输出节点")
+
         print("BluePrintModel: 输出节点连接的节点数量: " + str(len(BlueprintExportHelper.get_connected_nodes(output_node))))
         self.parse_current_node(output_node, [])
 

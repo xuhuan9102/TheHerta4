@@ -87,9 +87,9 @@ class WorkSpaceHelper:
     
 
     @staticmethod
-    def get_hash_deduped_texture_info_dict(draw_ib:str) -> Dict[str,DedupedTextureInfo]:
+    def get_hash_deduped_texture_info_dict(submesh_folder_name:str) -> Dict[str,DedupedTextureInfo]:
 
-        draw_ib_folder_path = GlobalConfig.path_workspace_folder() + draw_ib + "\\"
+        draw_ib_folder_path = GlobalConfig.path_workspace_folder() + submesh_folder_name + "\\"
         # 接下来计算ComponentList，也就是当前DrawIB使用到这个贴图的所有Component的Count，从1开始
         component_name__drawcall_indexlist_json_path = os.path.join(draw_ib_folder_path,"ComponentName_DrawCallIndexList.json")
         trianglelist_deduped_filename_json_path = os.path.join(draw_ib_folder_path,"TrianglelistDedupedFileName.json")

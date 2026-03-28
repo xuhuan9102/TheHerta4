@@ -3,7 +3,7 @@ from dataclasses import field, dataclass
 import os
 
 from ..d3d11.d3d11_gametype import D3D11GameType
-from ...helper.import_config import ImportConfig, TextureMarkUpInfo
+from ...helper.import_config import TextureMarkUpInfo
 from ...base.config.main_config import GlobalConfig
 from ...base.utils.json_utils import JsonUtils
 
@@ -35,7 +35,7 @@ class DrawIBModel:
 
     import_json_path:str = field(init=False,repr=False,default="")
     import_json_dict:dict = field(init=False,repr=False,default_factory=dict)
-    import_config:ImportConfig = field(init=False,repr=False,default=None)
+    import_config:object = field(init=False,repr=False,default=None)
     category_hash_dict:dict = field(init=False,repr=False,default_factory=dict)
     part_name_list:list = field(init=False,repr=False,default_factory=list)
     match_first_index_list:list = field(init=False,repr=False,default_factory=list)
@@ -81,13 +81,19 @@ class DrawIBModel:
 
     def _load_import_metadata_from_first_submesh(self):
         if not self.submesh_model_list:
+            print("DrawIBModel: submesh_model_list 为空，无法读取导入元数据")
             return
 
         first_submesh = self.submesh_model_list[0]
         folder_name = first_submesh.unique_str
+        print("DrawIBModel: 开始读取导入元数据，DrawIB: " + self.draw_ib + "，unique_str: " + folder_name)
         workspace_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
         workspace_import_json = JsonUtils.LoadFromFile(workspace_import_json_path) if os.path.exists(workspace_import_json_path) else {}
         gametype_name = workspace_import_json.get(folder_name, "")
+        if gametype_name:
+            print("DrawIBModel: 命中工作空间 Import.json，GameType: " + gametype_name)
+        else:
+            print("DrawIBModel: 工作空间 Import.json 未记录 unique_str 对应的 GameType: " + folder_name)
 
         if gametype_name:
             self.import_json_path = os.path.join(
@@ -98,31 +104,102 @@ class DrawIBModel:
             )
             if os.path.exists(self.import_json_path):
                 self.import_json_dict = JsonUtils.LoadFromFile(self.import_json_path)
+                print("DrawIBModel: 已读取新结构 import.json: " + self.import_json_path)
+            else:
+                print("DrawIBModel: 未找到新结构 import.json: " + self.import_json_path)
 
-        try:
-            self.import_config = ImportConfig(draw_ib=self.draw_ib)
-        except Exception:
-            self.import_config = None
-
-        if self.import_config is not None:
-            self.category_hash_dict = dict(self.import_config.category_hash_dict)
-            self.part_name_list = list(self.import_config.part_name_list)
-            self.match_first_index_list = list(self.import_config.match_first_index_list)
-            self.vshash_list = list(self.import_config.vshash_list)
-            self.partname_texturemarkinfolist_dict = dict(self.import_config.partname_texturemarkinfolist_dict)
-            self.vertex_limit_hash = self.import_config.vertex_limit_hash
-            self.original_vertex_count = self.import_config.original_vertex_count
+        if self.import_json_dict:
+            self.category_hash_dict = dict(self.import_json_dict.get("CategoryHash", {}))
+            self.part_name_list = list(self.import_json_dict.get("PartNameList", []))
+            self.match_first_index_list = list(self.import_json_dict.get("MatchFirstIndex", []))
+            self.vshash_list = list(self.import_json_dict.get("VSHashList", []))
+            self.partname_texturemarkinfolist_dict = self._load_texture_markup_info_from_all_submeshes(workspace_import_json)
+            self.vertex_limit_hash = self.import_json_dict.get("VertexLimitVB", "")
+            self.original_vertex_count = self.import_json_dict.get("OriginalVertexCount", 0)
+            print(
+                "DrawIBModel: 已使用新结构元数据，Part数量: "
+                + str(len(self.part_name_list))
+                + "，贴图标记Part数量: "
+                + str(len(self.partname_texturemarkinfolist_dict))
+            )
             return
 
-        self.category_hash_dict = dict(self.import_json_dict.get("CategoryHash", {}))
-        self.part_name_list = list(self.import_json_dict.get("PartNameList", []))
-        self.match_first_index_list = list(self.import_json_dict.get("MatchFirstIndex", []))
-        self.vshash_list = list(self.import_json_dict.get("VSHashList", []))
-        self.partname_texturemarkinfolist_dict = self._normalize_texture_markup_info_dict(
-            self.import_json_dict.get("ComponentTextureMarkUpInfoListDict", {})
+        self.import_config = None
+        print("DrawIBModel: 未读取到新结构元数据，贴图标记信息为空，DrawIB: " + self.draw_ib)
+
+    def _get_import_json_path_by_unique_str(self, workspace_import_json: dict, unique_str: str) -> str:
+        gametype_name = workspace_import_json.get(unique_str, "")
+        if not gametype_name:
+            return ""
+
+        return os.path.join(
+            GlobalConfig.path_workspace_folder(),
+            unique_str,
+            "TYPE_" + gametype_name,
+            "import.json",
         )
-        self.vertex_limit_hash = self.import_json_dict.get("VertexLimitVB", "")
-        self.original_vertex_count = self.import_json_dict.get("OriginalVertexCount", 0)
+
+    def _get_part_name_for_submesh(self, submesh_model: SubMeshModel) -> str:
+        if submesh_model.match_first_index in self.match_first_index_list:
+            part_index = self.match_first_index_list.index(submesh_model.match_first_index)
+            if part_index < len(self.part_name_list):
+                return self.part_name_list[part_index]
+
+        return ""
+
+    def _load_texture_markup_info_from_all_submeshes(self, workspace_import_json: dict) -> dict:
+        merged_texture_markup_info_dict = {}
+
+        for submesh_model in self.submesh_model_list:
+            unique_str = submesh_model.unique_str
+            part_name = self._get_part_name_for_submesh(submesh_model)
+            import_json_path = self._get_import_json_path_by_unique_str(workspace_import_json, unique_str)
+
+            print(
+                "DrawIBModel: 读取贴图标记，unique_str: "
+                + unique_str
+                + "，part_name: "
+                + str(part_name)
+                + "，import.json: "
+                + import_json_path
+            )
+
+            if not import_json_path or not os.path.exists(import_json_path):
+                print("DrawIBModel: 跳过贴图标记读取，import.json 不存在: " + import_json_path)
+                continue
+
+            submesh_import_json_dict = JsonUtils.LoadFromFile(import_json_path)
+            raw_texture_markup_info_dict = submesh_import_json_dict.get("ComponentTextureMarkUpInfoListDict", {})
+            normalized_texture_markup_info_dict = self._normalize_texture_markup_info_dict(raw_texture_markup_info_dict)
+
+            if not normalized_texture_markup_info_dict:
+                print("DrawIBModel: 当前 submesh 没有贴图标记: " + unique_str)
+                continue
+
+            if part_name:
+                texture_markup_info_list = normalized_texture_markup_info_dict.get(part_name)
+                if texture_markup_info_list is None:
+                    texture_markup_info_list = normalized_texture_markup_info_dict.get(unique_str, [])
+
+                if texture_markup_info_list:
+                    merged_texture_markup_info_dict[part_name] = texture_markup_info_list
+                    print(
+                        "DrawIBModel: 已合并贴图标记到 Part "
+                        + part_name
+                        + "，数量: "
+                        + str(len(texture_markup_info_list))
+                    )
+                else:
+                    print(
+                        "DrawIBModel: 当前 submesh 的贴图标记键未匹配到 Part，unique_str: "
+                        + unique_str
+                        + "，可用键: "
+                        + str(list(normalized_texture_markup_info_dict.keys()))
+                    )
+            else:
+                print("DrawIBModel: 当前 submesh 未匹配到 PartName，unique_str: " + unique_str)
+
+        return merged_texture_markup_info_dict
 
     def _normalize_texture_markup_info_dict(self, raw_texture_info_dict: dict) -> dict:
         normalized_texture_info_dict = {}

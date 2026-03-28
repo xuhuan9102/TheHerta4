@@ -143,10 +143,7 @@ class GlobalConfig:
         else:
             # 确保用的时候直接拿到的就是已经存在的目录
             ssmt_generated_mod_folder_path = os.path.join(GlobalConfig.path_mods_folder(),"SSMTGeneratedMod\\")
-            ssmt_generated_mod_default_folder_path = os.path.join(ssmt_generated_mod_folder_path,"Default\\")
-
-            generate_mod_folder_path = os.path.join(ssmt_generated_mod_default_folder_path,"Mod_" + GlobalConfig.workspacename + "\\")
-
+            generate_mod_folder_path = os.path.join(ssmt_generated_mod_folder_path, GlobalConfig.workspacename + "\\")
             if not os.path.exists(generate_mod_folder_path):
                 os.makedirs(generate_mod_folder_path)
             return generate_mod_folder_path
@@ -170,6 +167,9 @@ class GlobalConfig:
         texture_path = os.path.join(GlobalConfig.path_generate_mod_folder(),"Textures\\")
         if not os.path.exists(texture_path):
             os.makedirs(texture_path)
+            print("GlobalConfig: 已创建贴图输出目录: " + texture_path + " (DrawIB: " + str(draw_ib) + ")")
+        else:
+            print("GlobalConfig: 使用已有贴图输出目录: " + texture_path + " (DrawIB: " + str(draw_ib) + ")")
         return texture_path
     
     @classmethod

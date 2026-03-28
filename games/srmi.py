@@ -25,10 +25,11 @@ class ExportSRMI:
 
     def generate_buffer_files(self):
         buf_output_folder = GlobalConfig.path_generatemod_buffer_folder()
+        print("ExportSRMI: 开始生成缓冲区文件，输出路径: " + buf_output_folder)
 
         for drawib_model in self.drawib_model_list:
             draw_ib = drawib_model.draw_ib
-            
+            print("ExportSRMI: 正在生成DrawIB " + draw_ib + " 的缓冲区文件...")
             if drawib_model.combine_ib:
                 ib_filename = draw_ib + "-Index.buf"
                 ib_filepath = os.path.join(buf_output_folder, ib_filename)
@@ -52,6 +53,16 @@ class ExportSRMI:
                 shapekey_buf_filepath = os.path.join(buf_output_folder, shapekey_buf_filename)
                 with open(shapekey_buf_filepath, 'wb') as f:
                     shapekey_buf.tofile(f)
+
+    def copy_texture_files(self):
+        if GlobalProterties.forbid_auto_texture_ini():
+            print("ExportSRMI: 已禁用自动贴图流程，跳过贴图复制")
+            return
+
+        print("ExportSRMI: 开始执行贴图复制流程，DrawIB 数量: " + str(len(self.drawib_model_list)))
+        for drawib_model in self.drawib_model_list:
+            print("ExportSRMI: 正在复制DrawIB " + drawib_model.draw_ib + " 的贴图文件...")
+            M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
             
     def generate_ini_file(self):
         ini_builder = M_IniBuilder()
@@ -68,6 +79,7 @@ class ExportSRMI:
             ini_builder=ini_builder,
             drawib_drawibmodel_dict=drawib_drawibmodel_dict,
         )
+        print("ExportSRMI: 已完成 Hash 风格贴图配置生成")
 
         for drawib_model in self.drawib_model_list:
             draw_ib = drawib_model.draw_ib
@@ -104,7 +116,7 @@ class ExportSRMI:
                         if getattr(texture_markup_info, "mark_type", "") != "Slot":
                             continue
                         resource_texture_section.append("[" + texture_markup_info.get_resource_name() + "]")
-                        resource_texture_section.append("filename = Texture/" + texture_markup_info.mark_filename)
+                        resource_texture_section.append("filename = Textures/" + texture_markup_info.mark_filename)
                         resource_texture_section.new_line()
                 ini_builder.append_section(resource_texture_section)
 
@@ -231,8 +243,6 @@ class ExportSRMI:
 
             ini_builder.append_section(resource_buffer_section)
 
-            M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
-
         GlobalKeyCountHelper.generated_mod_number = len(self.drawib_model_list)
         M_IniHelper.add_branch_key_sections(
             ini_builder=ini_builder,
@@ -258,6 +268,7 @@ class ExportSRMI:
     def export(self):
         self.generate_buffer_files()
         self.generate_ini_file()
+        self.copy_texture_files()
 
         
             

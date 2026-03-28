@@ -10,16 +10,71 @@ class BlueprintExportHelper:
     
     # 静态变量，存储最大导出次数
     max_export_count = 1
+
+    # 运行时记录当前操作对应的蓝图树，避免按钮触发后丢失上下文
+    runtime_blueprint_tree_name = ""
+
+    @staticmethod
+    def _is_valid_blueprint_tree(tree):
+        return tree is not None and getattr(tree, "bl_idname", "") == 'SSMTBlueprintTreeType'
+
+    @staticmethod
+    def set_runtime_blueprint_tree(tree):
+        if BlueprintExportHelper._is_valid_blueprint_tree(tree):
+            BlueprintExportHelper.runtime_blueprint_tree_name = tree.name
+
+    @staticmethod
+    def _get_blueprint_tree_from_context(context):
+        if not context:
+            return None
+
+        space_data = getattr(context, "space_data", None)
+        if space_data and getattr(space_data, "type", None) == 'NODE_EDITOR':
+            node_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+            if BlueprintExportHelper._is_valid_blueprint_tree(node_tree):
+                return node_tree
+
+        window_manager = getattr(context, "window_manager", None)
+        if not window_manager:
+            return None
+
+        for window in window_manager.windows:
+            for area in window.screen.areas:
+                if area.type != 'NODE_EDITOR':
+                    continue
+                for space in area.spaces:
+                    if space.type != 'NODE_EDITOR':
+                        continue
+                    node_tree = getattr(space, "edit_tree", None) or getattr(space, "node_tree", None)
+                    if BlueprintExportHelper._is_valid_blueprint_tree(node_tree):
+                        return node_tree
+
+        return None
     
     @staticmethod
-    def get_current_blueprint_tree():
+    def get_current_blueprint_tree(context=None):
         """获取当前工作空间对应的蓝图树"""
+        tree = BlueprintExportHelper._get_blueprint_tree_from_context(context)
+        if BlueprintExportHelper._is_valid_blueprint_tree(tree):
+            BlueprintExportHelper.set_runtime_blueprint_tree(tree)
+            return tree
+
+        runtime_tree_name = BlueprintExportHelper.runtime_blueprint_tree_name
+        if runtime_tree_name:
+            tree = bpy.data.node_groups.get(runtime_tree_name)
+            if BlueprintExportHelper._is_valid_blueprint_tree(tree):
+                return tree
+
         tree_name = GlobalConfig.workspacename
         if not tree_name:
             return None
         
         tree = bpy.data.node_groups.get(tree_name)
-        return tree
+        if BlueprintExportHelper._is_valid_blueprint_tree(tree):
+            BlueprintExportHelper.set_runtime_blueprint_tree(tree)
+            return tree
+
+        return None
 
     @staticmethod
     def find_node_in_all_blueprints(node_name):
@@ -121,9 +176,9 @@ class BlueprintExportHelper:
     
 
     @staticmethod
-    def get_current_shapekeyname_mkey_dict():
+    def get_current_shapekeyname_mkey_dict(context=None):
         """获取当前蓝图及所有嵌套蓝图中所有 ShapeKey 节点的形态键名称和按键列表"""
-        tree = BlueprintExportHelper.get_current_blueprint_tree()
+        tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
         if not tree:
             return {}
         
@@ -175,9 +230,9 @@ class BlueprintExportHelper:
         return shapekey_name_mkey_dict
 
     @staticmethod
-    def get_datatype_node_info():
+    def get_datatype_node_info(context=None):
         """获取当前蓝图及所有嵌套蓝图中连接到输出节点的数据类型节点信息"""
-        tree = BlueprintExportHelper.get_current_blueprint_tree()
+        tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
         if not tree:
             return None
         

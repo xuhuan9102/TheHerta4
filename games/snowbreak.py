@@ -97,7 +97,7 @@ class ExportSnowBreak(DrawIBExportBase):
             for texture_markup_info in texture_markup_info_list:
                 if texture_markup_info.mark_type == "Slot":
                     resource_texture_section.append("[" + texture_markup_info.get_resource_name() + "]")
-                    resource_texture_section.append("filename = Texture/" + texture_markup_info.mark_filename)
+                    resource_texture_section.append("filename = Textures/" + texture_markup_info.mark_filename)
                     resource_texture_section.new_line()
         ini_builder.append_section(resource_texture_section)
 

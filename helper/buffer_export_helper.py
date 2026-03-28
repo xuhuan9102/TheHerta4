@@ -14,8 +14,8 @@ class BufferExportHelper:
     我们规定生成的Mod文件夹结构如下:
 
     文件夹: Mod_工作空间名称
-    - 文件夹: Buffer                    存放所有二进制缓冲区文件,包括IB和VB文件
-    - 文件夹: Texture                   存放所有贴图文件
+    - 文件夹: Meshes                    存放所有二进制缓冲区文件,包括IB和VB文件
+    - 文件夹: Textures                   存放所有贴图文件
     - 文件:   工作空间名称.ini           所有ini内容要全部写在一起,如果写在多个ini里面通过namespace关联,则可能会导致Mod开启或关闭时有一瞬间的上贴图延迟
     '''
 

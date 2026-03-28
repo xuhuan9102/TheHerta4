@@ -18,6 +18,7 @@ from ..games.yysls import ExportYYSLS
 from ..games.zzmi import ExportZZMI
 
 from ..common.export.blueprint_model import BluePrintModel
+from ..helper.blueprint_export_helper import BlueprintExportHelper
 
 
 class SSMTGenerateModBlueprint(bpy.types.Operator):
@@ -30,7 +31,20 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         TimerUtils.Start("GenerateMod Mod")
 
         # 1.在这里直接解析蓝图，得到的蓝图对象用于初始化各个游戏对应的导出器
-        blueprint_model = BluePrintModel()
+        tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
+        if not tree:
+            self.report({'ERROR'}, "未找到当前蓝图，请在蓝图编辑器中点击 Generate Mod")
+            return {'CANCELLED'}
+
+        BlueprintExportHelper.set_runtime_blueprint_tree(tree)
+
+        try:
+            blueprint_model = BluePrintModel(tree=tree, context=context)
+        except ValueError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+
+        print("当前蓝图: " + str(blueprint_model))
 
         # 2.根据不同的逻辑进行不同的导出器初始化和调用
         if GlobalConfig.logic_name == LogicName.EFMI:
