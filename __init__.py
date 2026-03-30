@@ -26,11 +26,10 @@ importlib.reload(addon_updater_ops)
 
 bl_info = {
     "name": "TheHerta4",
-    "description": "SSMT3.0 Series's Blender Plugin.",
+    "description": "Blender Plugin of SSMT4",
     "blender": (4, 5, 0),
     "version": (4, 0, 1),
     "location": "View3D",
-    "min_ssmt_version": 4020, # 确保TheHerta4正确工作的SSMT最低版本号
     "category": "Generic"
 }
 
