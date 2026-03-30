@@ -174,7 +174,7 @@ class SubMeshModel:
             or GlobalConfig.logic_name == LogicName.GIMI
             or GlobalConfig.logic_name == LogicName.HIMI
             or GlobalConfig.logic_name == LogicName.YYSLS
-            or GlobalConfig.logic_name == LogicName.IdentityVNeoX3):
+            or GlobalConfig.logic_name == LogicName.IdentityV):
             ObjUtils.select_obj(temp_obj)
             temp_obj.rotation_euler[0] = math.radians(-90)
             temp_obj.rotation_euler[1] = 0
