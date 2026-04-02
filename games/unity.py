@@ -1,7 +1,7 @@
 import math
 import os
 
-from ..base.global_config import GlobalConfig, LogicName
+from ..base import GlobalConfig, LogicName
 from ..base.global_properties import GlobalProterties
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..helper.m_ini_helper import M_IniHelper

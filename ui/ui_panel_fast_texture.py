@@ -14,7 +14,7 @@ from bpy.types import Operator, Panel, PropertyGroup, UIList
 from bpy_extras.io_utils import ImportHelper
 import bpy.utils.previews
 
-from ..base.global_config import GlobalConfig
+from ..base import GlobalConfig
 
 from ..utils.translate_utils import TR
 from ..utils.json_utils import JsonUtils

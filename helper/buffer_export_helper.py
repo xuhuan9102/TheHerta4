@@ -2,7 +2,7 @@ import os
 import struct
 import numpy
 
-from ..base.global_config import GlobalConfig
+from ..base import *
 
 
 class BufferExportHelper:

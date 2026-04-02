@@ -1,5 +1,5 @@
 import bpy
-from ..base.global_config import GlobalConfig
+from ..base import *
 from ..common.migoto.m_key import M_Key
 
 class BlueprintExportHelper:

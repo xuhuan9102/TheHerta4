@@ -15,7 +15,7 @@ from ..utils.collection_utils import CollectionColor, CollectionUtils
 from ..utils.timer_utils import TimerUtils
 from ..utils.translate_utils import TR
 
-from ..base.global_config import GlobalConfig, LogicName
+from ..base import GlobalConfig, LogicName
 
 from ..helper.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
 import os
@@ -26,7 +26,7 @@ from ..utils.collection_utils import CollectionColor, CollectionUtils
 from ..utils.translate_utils import TR
 from ..utils.timer_utils import TimerUtils
 
-from ..base.global_config import GlobalConfig, LogicName
+from ..base import GlobalConfig, LogicName
 
 from ..helper.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
 from ..helper.workspace_helper import WorkSpaceHelper

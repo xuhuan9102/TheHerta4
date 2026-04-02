@@ -1,7 +1,7 @@
 import bpy
 import numpy
 
-from ..base.global_config import GlobalConfig, LogicName
+from ..base import GlobalConfig, LogicName
 
 class MeshUtils:
 
