@@ -15,9 +15,9 @@ from ..utils.collection_utils import CollectionColor, CollectionUtils
 from ..utils.timer_utils import TimerUtils
 from ..utils.translate_utils import TR
 
-from ..base import GlobalConfig, LogicName
+from ..common import GlobalConfig, LogicName
 
-from ..base.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
+from ..common.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
 import os
 import bpy
 
@@ -26,10 +26,10 @@ from ..utils.collection_utils import CollectionColor, CollectionUtils
 from ..utils.translate_utils import TR
 from ..utils.timer_utils import TimerUtils
 
-from ..base import GlobalConfig, LogicName
+from ..common import GlobalConfig, LogicName
 
-from ..base.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
-from ..base.workspace_helper import WorkSpaceHelper
+from ..common.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
+from ..common.workspace_helper import WorkSpaceHelper
 
 
 # 全量导入逻辑

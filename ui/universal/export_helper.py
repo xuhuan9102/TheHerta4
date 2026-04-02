@@ -1,14 +1,14 @@
 
-from ...base.blueprint_model import BluePrintModel
-from ...base.draw_call_model import DrawCallModel, M_DrawIndexedInstanced
-from ...base.submesh_model import SubMeshModel
-from ...base.drawib_model import DrawIBModel
+from ...common.blueprint_model import BluePrintModel
+from ...common.draw_call_model import DrawCallModel, M_DrawIndexedInstanced
+from ...common.submesh_model import SubMeshModel
+from ...common.drawib_model import DrawIBModel
 
 from dataclasses import dataclass,field
-from ...base import GlobalConfig
+from ...common import GlobalConfig
 
-from ...base.buffer_export_helper import BufferExportHelper
-from ...base.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
+from ...common.buffer_export_helper import BufferExportHelper
+from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 
 import os
 

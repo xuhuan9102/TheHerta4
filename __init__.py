@@ -1,21 +1,21 @@
 import bpy
 
 # 全局配置
-from .base import global_properties
+from .common import global_properties
 
 # UI界面
-from .games import ui_panel_basic
-from .games import ui_panel_model
-from .games import ui_panel_sword
-from .games import ui_func_import
-from .games import ui_panel_fast_texture
+from .ui import ui_panel_basic
+from .ui import ui_panel_model
+from .ui import ui_panel_sword
+from .ui import ui_func_import
+from .ui import ui_panel_fast_texture
 
-from .base import blueprint_node_obj
-from .base import blueprint_node_base
-from .base import blueprint_node_menu
-from .base import blueprint_node_shapekey
+from .common import blueprint_node_obj
+from .common import blueprint_node_base
+from .common import blueprint_node_menu
+from .common import blueprint_node_shapekey
 
-from .games import ui_func_export
+from .ui import ui_func_export
 
 # 自动更新功能
 from . import addon_updater_ops

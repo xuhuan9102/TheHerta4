@@ -8,8 +8,8 @@ import bpy.utils.previews
 
 from ..utils.obj_utils import ObjUtils
 
-from ..base.mesh_import_helper import MigotoBinaryFile, MeshImportHelper
-from ..base import GlobalConfig
+from ..common.mesh_import_helper import MigotoBinaryFile, MeshImportHelper
+from ..common import GlobalConfig
 
 from ..utils.translate_utils import TR
 from ..utils.json_utils import JsonUtils

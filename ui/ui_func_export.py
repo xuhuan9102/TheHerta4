@@ -4,7 +4,7 @@ from ..utils.timer_utils import TimerUtils
 from ..utils.translate_utils import TR
 from ..utils.command_utils import CommandUtils
 
-from ..base import GlobalConfig, LogicName
+from ..common import GlobalConfig, LogicName
 
 from .universal.efmi import ExportEFMI
 from .universal.gimi import ExportGIMI
@@ -17,8 +17,8 @@ from .wwmi.wwmi_export import ExportWWMI
 from .universal.yysls import ExportYYSLS
 from .universal.zzmi import ExportZZMI
 
-from ..base.blueprint_model import BluePrintModel
-from ..base.blueprint_export_helper import BlueprintExportHelper
+from ..common.blueprint_model import BluePrintModel
+from ..common.blueprint_export_helper import BlueprintExportHelper
 
 
 class SSMTGenerateModBlueprint(bpy.types.Operator):

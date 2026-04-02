@@ -4,14 +4,14 @@ import numpy
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ..base import GlobalConfig, LogicName
+from ..common import GlobalConfig, LogicName
 from .obj_utils import ObjUtils
 from .shapekey_utils import ShapeKeyUtils
 from .timer_utils import TimerUtils
 
-from ..base.d3d11_gametype import D3D11GameType
-from ..base.blueprint_export_helper import BlueprintExportHelper
-from ..base.obj_buffer_helper import ObjBufferHelper
+from ..common.d3d11_gametype import D3D11GameType
+from ..common.blueprint_export_helper import BlueprintExportHelper
+from ..common.obj_buffer_helper import ObjBufferHelper
 
 
 @dataclass
