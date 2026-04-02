@@ -1,12 +1,12 @@
 import math
 import os
 
-from ..base import GlobalConfig, LogicName
-from ..base.global_properties import GlobalProterties
-from ..helper.global_key_count_helper import GlobalKeyCountHelper
-from ..helper.m_ini_helper import M_IniHelper
-from ..helper.m_ini_helper_gui import M_IniHelperGUI
-from ..common.migoto.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
+from ...base import GlobalConfig, LogicName
+from ...base.global_properties import GlobalProterties
+from ...helper.global_key_count_helper import GlobalKeyCountHelper
+from ...helper.m_ini_helper import M_IniHelper
+from ...helper.m_ini_helper_gui import M_IniHelperGUI
+from ...common.migoto.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .drawib_export_base import DrawIBExportBase
 
 
