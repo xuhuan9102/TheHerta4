@@ -1,6 +1,6 @@
 from ...common.blueprint_model import BluePrintModel
 from ...common.drawib_model import DrawIBModel
-from ...helper.buffer_export_helper import BufferExportHelper
+from ...common.buffer_export_helper import BufferExportHelper
 from .export_helper import ExportHelper
 
 import os

@@ -18,7 +18,7 @@ from ..games.universal.yysls import ExportYYSLS
 from ..games.universal.zzmi import ExportZZMI
 
 from ..common.blueprint_model import BluePrintModel
-from ..helper.blueprint_export_helper import BlueprintExportHelper
+from ..common.blueprint_export_helper import BlueprintExportHelper
 
 
 class SSMTGenerateModBlueprint(bpy.types.Operator):

@@ -2,10 +2,10 @@
 import os
 import shutil
 
-from ..common.m_ini_builder import *
+from .m_ini_builder import *
 from ..base import *
-from ..common.m_key import M_Key
-from ..common.draw_call_model import DrawCallModel
+from .m_key import M_Key
+from .draw_call_model import DrawCallModel
 
 class M_IniHelperGUI:
     @classmethod

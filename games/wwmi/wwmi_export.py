@@ -5,9 +5,9 @@ from ...base import GlobalConfig, LogicName
 from .drawib_model_wwmi import DrawIBModelWWMI
 from ...common.blueprint_model import BluePrintModel
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
-from ...helper.global_key_count_helper import GlobalKeyCountHelper
-from ...helper.m_ini_helper import M_IniHelper
-from ...helper.m_ini_helper_gui import M_IniHelperGUI
+from ...common.global_key_count_helper import GlobalKeyCountHelper
+from ...common.m_ini_helper import M_IniHelper
+from ...common.m_ini_helper_gui import M_IniHelperGUI
 
 
 class ExportWWMI:

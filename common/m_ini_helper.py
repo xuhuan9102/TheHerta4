@@ -1,20 +1,20 @@
 import os
 import shutil
 
-from ..common.m_ini_builder import *
-from ..common.m_key import M_Key
-from ..common.draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
-from ..common.drawib_model import DrawIBModel
-from ..helper.import_config import TextureMarkUpInfo
+from .m_ini_builder import *
+from .m_key import M_Key
+from .draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
+from .drawib_model import DrawIBModel
+from .import_config import TextureMarkUpInfo
 from ..utils.json_utils import JsonUtils
 from ..utils.format_utils import Fatal
 
 from ..base import *
 
-from ..helper.global_key_count_helper import GlobalKeyCountHelper
-from ..helper.workspace_helper import WorkSpaceHelper
-from ..helper.blueprint_export_helper import BlueprintExportHelper
-from ..helper.texture_metadata_helper import TextureMetadataResolver
+from .global_key_count_helper import GlobalKeyCountHelper
+from .workspace_helper import WorkSpaceHelper
+from .blueprint_export_helper import BlueprintExportHelper
+from .texture_metadata_helper import TextureMetadataResolver
 
 class M_IniHelper:
     @classmethod

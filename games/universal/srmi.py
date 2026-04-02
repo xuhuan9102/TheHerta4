@@ -3,10 +3,10 @@ from dataclasses import dataclass,field
 from ...base import GlobalConfig
 from ...base.global_properties import GlobalProterties
 
-from ...helper.buffer_export_helper import BufferExportHelper
-from ...helper.global_key_count_helper import GlobalKeyCountHelper
-from ...helper.m_ini_helper import M_IniHelper
-from ...helper.m_ini_helper_gui import M_IniHelperGUI
+from ...common.buffer_export_helper import BufferExportHelper
+from ...common.global_key_count_helper import GlobalKeyCountHelper
+from ...common.m_ini_helper import M_IniHelper
+from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 from ...common.drawib_model import DrawIBModel

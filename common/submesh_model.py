@@ -8,7 +8,7 @@ from ..utils.json_utils import JsonUtils
 from ..base import GlobalConfig, LogicName
 
 from ..base.d3d11_gametype import D3D11GameType
-from ..helper.obj_buffer_helper import ObjBufferHelper
+from .obj_buffer_helper import ObjBufferHelper
 
 
 import bpy

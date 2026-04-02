@@ -17,7 +17,7 @@ from ..utils.translate_utils import TR
 
 from ..base import GlobalConfig, LogicName
 
-from ..helper.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
+from ..common.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
 import os
 import bpy
 
@@ -28,8 +28,8 @@ from ..utils.timer_utils import TimerUtils
 
 from ..base import GlobalConfig, LogicName
 
-from ..helper.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
-from ..helper.workspace_helper import WorkSpaceHelper
+from ..common.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
+from ..common.workspace_helper import WorkSpaceHelper
 
 
 # 全量导入逻辑

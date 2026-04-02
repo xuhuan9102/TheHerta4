@@ -7,7 +7,7 @@ from ...common.drawib_model import DrawIBModel
 from dataclasses import dataclass,field
 from ...base import GlobalConfig
 
-from ...helper.buffer_export_helper import BufferExportHelper
+from ...common.buffer_export_helper import BufferExportHelper
 from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 
 import os

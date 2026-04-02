@@ -97,7 +97,7 @@ class ImportConfig:
         self.extract_gametype_folder_path = extract_gametype_folder_path
         tmp_json_path = os.path.join(extract_gametype_folder_path,"tmp.json")
         
-        from ..helper.blueprint_export_helper import BlueprintExportHelper
+        from .blueprint_export_helper import BlueprintExportHelper
         datatype_node_info_list = BlueprintExportHelper.get_datatype_node_info()
         
         matched_datatype_node_info = None
