@@ -2,7 +2,7 @@ import os
 
 from ...base.global_properties import GlobalProterties
 from ...base import GlobalConfig, LogicName
-from ...common.export.drawib_model_wwmi import DrawIBModelWWMI
+from .drawib_model_wwmi import DrawIBModelWWMI
 from ...common.export.blueprint_model import BluePrintModel
 from ...common.migoto.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from ...helper.global_key_count_helper import GlobalKeyCountHelper

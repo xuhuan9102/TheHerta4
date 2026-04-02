@@ -24,14 +24,14 @@ from ...utils.obj_utils import (
 )
 from ...utils.shapekey_utils import ShapeKeyUtils
 from ...utils.vertexgroup_utils import VertexGroupUtils
-from ...games.wwmi.extracted_object import ExtractedObject, ExtractedObjectHelper
+from .extracted_object import ExtractedObject, ExtractedObjectHelper
 from ...helper.buffer_export_helper import BufferExportHelper
 from ...helper.import_config import ImportConfig
 from ...helper.obj_buffer_helper import ObjBufferHelper
 from ...helper.workspace_helper import WorkSpaceHelper
 from ...base.d3d11_gametype import D3D11GameType
-from .blueprint_model import BluePrintModel
-from .draw_call_model import DrawCallModel, M_DrawIndexed
+from ...common.export.blueprint_model import BluePrintModel
+from ...common.export.draw_call_model import DrawCallModel, M_DrawIndexed
 
 
 @dataclass
