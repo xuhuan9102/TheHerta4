@@ -3,7 +3,7 @@ from dataclasses import field, dataclass
 import os
 
 from ..d3d11.d3d11_gametype import D3D11GameType
-from ...base.config.main_config import GlobalConfig
+from ...base.config.global_config import GlobalConfig
 from ...utils.json_utils import JsonUtils
 from ...helper.texture_metadata_helper import TextureMetadataResolver
 

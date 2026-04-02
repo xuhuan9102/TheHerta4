@@ -8,7 +8,7 @@ from ..common.export.drawib_model import DrawIBModel
 from ..helper.import_config import TextureMarkUpInfo
 from ..utils.json_utils import JsonUtils
 from ..utils.format_utils import Fatal
-from ..base.config.main_config import GlobalConfig,LogicName
+from ..base.config.global_config import GlobalConfig,LogicName
 from ..base.config.global_properties import GlobalProterties
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..helper.workspace_helper import WorkSpaceHelper

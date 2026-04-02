@@ -6,7 +6,7 @@ import bpy
 import numpy
 
 from ...base.config.global_properties import GlobalProterties
-from ...base.config.main_config import GlobalConfig, LogicName
+from ...base.config.global_config import GlobalConfig, LogicName
 from ...utils.export_utils import ExportUtils, ObjElementContext, WWMIBufferBuildResult
 from ...utils.log_utils import LOG
 from ...utils.obj_utils import (

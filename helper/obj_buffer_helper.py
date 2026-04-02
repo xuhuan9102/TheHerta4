@@ -11,7 +11,7 @@ from ..utils.timer_utils import TimerUtils
 from ..utils.tbn_codec import TBNCodec
 from ..utils.ssmt_error_utils import SSMTErrorUtils
 
-from ..base.config.main_config import GlobalConfig, LogicName
+from ..base.config.global_config import GlobalConfig, LogicName
 from ..base.config.global_properties import GlobalProterties
 from ..utils.obj_utils import ObjUtils
 from ..utils.log_utils import LOG

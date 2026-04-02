@@ -9,7 +9,7 @@ import bpy.utils.previews
 from ..utils.obj_utils import ObjUtils
 
 from ..helper.mesh_import_helper import MigotoBinaryFile, MeshImportHelper
-from ..base.config.main_config import GlobalConfig
+from ..base.config.global_config import GlobalConfig
 
 from ..utils.translate_utils import TR
 from ..utils.json_utils import JsonUtils

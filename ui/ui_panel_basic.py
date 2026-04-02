@@ -3,7 +3,7 @@
 '''
 import bpy
 
-from ..base.config.main_config import GlobalConfig, LogicName
+from ..base.config.global_config import GlobalConfig, LogicName
 
 from ..utils.translate_utils import TR
 
