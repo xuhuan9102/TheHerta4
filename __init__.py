@@ -1,7 +1,8 @@
 import bpy
 
-# 全局配置
-from .common.global_properties import register as register_global_properties, unregister as unregister_global_properties
+
+from .common import global_properties
+
 
 # UI界面
 from .ui import ui_panel_basic
@@ -10,10 +11,10 @@ from .ui import ui_panel_sword
 from .ui import ui_func_import
 from .ui import ui_panel_fast_texture
 
-from .common.blueprint_node_base import register as register_blueprint_node_base, unregister as unregister_blueprint_node_base
-from .common.blueprint_node_menu import register as register_blueprint_node_menu, unregister as unregister_blueprint_node_menu
-from .common.blueprint_node_obj import register as register_blueprint_node_obj, unregister as unregister_blueprint_node_obj
-from .common.blueprint_node_shapekey import register as register_blueprint_node_shapekey, unregister as unregister_blueprint_node_shapekey
+from .common import blueprint_node_obj
+from .common import blueprint_node_base
+from .common import blueprint_node_menu
+from .common import blueprint_node_shapekey
 
 from .ui import ui_func_export
 
@@ -109,7 +110,7 @@ class HertaUpdatePreference(bpy.types.AddonPreferences):
 
 def register():
     # 1. Configs
-    register_global_properties()
+    global_properties.register()
     
     # 2. Addon Updater (local classes)
     addon_updater_ops.register(bl_info)
@@ -117,7 +118,7 @@ def register():
     bpy.utils.register_class(HertaUpdatePreference)
 
     # 3. UI Panels & Logic
-    register_blueprint_node_base()
+    blueprint_node_base.register()
     ui_panel_basic.register()
     ui_panel_model.register()
     ui_panel_sword.register()
@@ -125,20 +126,20 @@ def register():
     ui_panel_fast_texture.register()
 
     # 蓝图系统
-    register_blueprint_node_obj()
+    blueprint_node_obj.register()
     ui_func_export.register()
-    register_blueprint_node_menu()
-    register_blueprint_node_shapekey()
+    blueprint_node_menu.register()
+    blueprint_node_shapekey.register()
 
 
 
 def unregister():
     # 蓝图系统
-    unregister_blueprint_node_obj()
+    blueprint_node_obj.unregister()
     ui_func_export.unregister()
-    unregister_blueprint_node_menu()
-    unregister_blueprint_node_shapekey()
-    unregister_blueprint_node_base()
+    blueprint_node_menu.unregister()
+    blueprint_node_shapekey.unregister()
+    blueprint_node_base.unregister()
 
     ui_panel_fast_texture.unregister()
     ui_func_import.unregister()
@@ -152,7 +153,7 @@ def unregister():
     addon_updater_ops.unregister()
 
     # 1. Configs
-    unregister_global_properties()
+    global_properties.unregister()
 
 
 

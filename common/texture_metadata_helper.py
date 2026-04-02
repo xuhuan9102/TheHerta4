@@ -1,6 +1,7 @@
 import os
 
-from . import GlobalConfig
+from .global_config import GlobalConfig
+
 from ..utils.json_utils import JsonUtils
 from .import_config import TextureMarkUpInfo
 

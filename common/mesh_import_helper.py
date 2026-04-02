@@ -16,7 +16,8 @@ from ..utils.vertexgroup_utils import VertexGroupUtils
 from ..utils.obj_utils import ObjUtils
 from ..utils.tbn_codec import TBNCodec
 
-from . import GlobalConfig, LogicName
+from .logic_name import LogicName
+from .global_config import GlobalConfig
 from .global_properties import GlobalProterties
 
 from .d3d11_gametype import D3D11Element

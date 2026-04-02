@@ -1,7 +1,8 @@
 import bpy
 from bpy.types import NodeTree, Node, NodeSocket
 
-from . import GlobalConfig, LogicName
+from .logic_name import LogicName
+from .global_config import GlobalConfig
 from .global_properties import GlobalProterties
 from .blueprint_node_base import SSMTBlueprintTree, SSMTNodeBase
 

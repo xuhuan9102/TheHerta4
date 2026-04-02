@@ -10,8 +10,8 @@ from ..utils.vertexgroup_utils import VertexGroupUtils
 from ..utils.timer_utils import TimerUtils
 from ..utils.tbn_codec import TBNCodec
 from ..utils.ssmt_error_utils import SSMTErrorUtils
-
-from . import GlobalConfig, LogicName
+from .logic_name import LogicName
+from .global_config import GlobalConfig
 from .global_properties import GlobalProterties
 from ..utils.obj_utils import ObjUtils
 from ..utils.log_utils import LOG

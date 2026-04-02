@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, asdict
 from ..utils.json_utils import JsonUtils
 from ..utils.format_utils import Fatal
 
-from . import GlobalConfig
+from .global_config import GlobalConfig
 
 from .d3d11_gametype import D3D11GameType
 
