@@ -51,18 +51,16 @@ class ExportUnity(DrawIBExportBase):
         texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
         draw_ib = drawib_model.draw_ib
 
-        for count_i, part_name in enumerate(drawib_model.part_name_list):
-            match_first_index = str(drawib_model.match_first_index_list[count_i])
-            style_part_name = "Component" + part_name
-            texture_override_name_suffix = "IB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + style_part_name
-            ib_resource_name = drawib_model.PartName_IBResourceName_Dict.get(part_name, "")
+        for submesh_model in drawib_model.submesh_model_list:
+            texture_override_name_suffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
+            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
 
             texture_override_ib_section.append("[TextureOverride_" + texture_override_name_suffix + "]")
             texture_override_ib_section.append("hash = " + draw_ib)
-            texture_override_ib_section.append("match_first_index = " + match_first_index)
+            texture_override_ib_section.append("match_first_index = " + str(submesh_model.match_first_index))
             texture_override_ib_section.append("handling = skip")
 
-            ib_buf = drawib_model.componentname_ibbuf_dict.get("Component " + part_name, None)
+            ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, None)
             if ib_buf is None or len(ib_buf) == 0:
                 texture_override_ib_section.append("ib = null")
                 texture_override_ib_section.new_line()
@@ -71,19 +69,15 @@ class ExportUnity(DrawIBExportBase):
             texture_override_ib_section.append("ib = " + ib_resource_name)
 
             if not GlobalProterties.forbid_auto_texture_ini():
-                texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, None)
-                if texture_markup_info_list is not None:
-                    for texture_markup_info in texture_markup_info_list:
-                        if texture_markup_info.mark_type == "Slot":
-                            texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+                for texture_markup_info in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
+                    if texture_markup_info.mark_type == "Slot":
+                        texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
 
-            submesh_model = drawib_model.part_name_submesh_dict.get(part_name)
-            if submesh_model is not None:
-                for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
-                    submesh_model.drawcall_model_list,
-                    obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
-                ):
-                    texture_override_ib_section.append(drawindexed_str)
+            for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
+                submesh_model.drawcall_model_list,
+                obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+            ):
+                texture_override_ib_section.append(drawindexed_str)
 
         ini_builder.append_section(texture_override_ib_section)
 
@@ -114,12 +108,12 @@ class ExportUnity(DrawIBExportBase):
             resource_vb_section.append("filename = " + buffer_folder_name + "/" + drawib_model.draw_ib + "-" + category_name + ".buf")
             resource_vb_section.new_line()
 
-        for part_name, ib_filename in drawib_model.PartName_IBBufferFileName_Dict.items():
-            ib_resource_name = drawib_model.PartName_IBResourceName_Dict.get(part_name, None)
+        for submesh_model in drawib_model.submesh_model_list:
+            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
             resource_vb_section.append("[" + ib_resource_name + "]")
             resource_vb_section.append("type = Buffer")
             resource_vb_section.append("format = DXGI_FORMAT_R32_UINT")
-            resource_vb_section.append("filename = " + buffer_folder_name + "/" + ib_filename)
+            resource_vb_section.append("filename = " + buffer_folder_name + "/" + submesh_model.unique_str + "-Index.buf")
             resource_vb_section.new_line()
 
         ini_builder.append_section(resource_vb_section)
@@ -183,27 +177,23 @@ class ExportUnity(DrawIBExportBase):
         draw_ib = drawib_model.draw_ib
         d3d11_game_type = drawib_model.d3d11GameType
 
-        for count_i, part_name in enumerate(drawib_model.part_name_list):
-            match_first_index = str(drawib_model.match_first_index_list[count_i])
-            style_part_name = "Component" + part_name
-            ib_resource_name = "Resource_" + draw_ib + "_" + style_part_name
-            texture_override_ib_namesuffix = "IB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + style_part_name
+        for submesh_model in drawib_model.submesh_model_list:
+            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
+            texture_override_ib_namesuffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
 
             texture_override_ib_section.append("[TextureOverride_" + texture_override_ib_namesuffix + "]")
             texture_override_ib_section.append("hash = " + draw_ib)
-            texture_override_ib_section.append("match_first_index = " + match_first_index)
+            texture_override_ib_section.append("match_first_index = " + str(submesh_model.match_first_index))
             texture_override_ib_section.append("checktextureoverride = vb1")
 
             if not GlobalProterties.forbid_auto_texture_ini():
-                texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, None)
-                if texture_markup_info_list is not None:
-                    for texture_markup_info in texture_markup_info_list:
-                        if texture_markup_info.mark_type == "Hash":
-                            texture_override_ib_section.append("checktextureoverride = " + texture_markup_info.mark_slot)
+                for texture_markup_info in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
+                    if texture_markup_info.mark_type == "Hash":
+                        texture_override_ib_section.append("checktextureoverride = " + texture_markup_info.mark_slot)
 
             texture_override_ib_section.append("handling = skip")
 
-            ib_buf = drawib_model.componentname_ibbuf_dict.get("Component " + part_name, None)
+            ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, None)
             if ib_buf is None or len(ib_buf) == 0:
                 texture_override_ib_section.new_line()
                 continue
@@ -217,19 +207,15 @@ class ExportUnity(DrawIBExportBase):
             texture_override_ib_section.append("ib = " + ib_resource_name)
 
             if not GlobalProterties.forbid_auto_texture_ini():
-                texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, None)
-                if texture_markup_info_list is not None:
-                    for texture_markup_info in texture_markup_info_list:
-                        if texture_markup_info.mark_type == "Slot":
-                            texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+                for texture_markup_info in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
+                    if texture_markup_info.mark_type == "Slot":
+                        texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
 
-            submesh_model = drawib_model.part_name_submesh_dict.get(part_name)
-            if submesh_model is not None:
-                for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
-                    submesh_model.drawcall_model_list,
-                    obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
-                ):
-                    texture_override_ib_section.append(drawindexed_str)
+            for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
+                submesh_model.drawcall_model_list,
+                obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+            ):
+                texture_override_ib_section.append(drawindexed_str)
 
         ini_builder.append_section(texture_override_ib_section)
 
@@ -248,12 +234,8 @@ class ExportUnity(DrawIBExportBase):
             resource_vb_section.append("filename = " + buffer_folder_name + "/" + drawib_model.draw_ib + "-" + category_name + ".buf")
             resource_vb_section.new_line()
 
-        for part_name in drawib_model.part_name_list:
-            style_part_name = "Component" + part_name
-            ib_resource_name = "Resource_" + drawib_model.draw_ib + "_" + style_part_name
-            submesh_model = drawib_model.part_name_submesh_dict.get(part_name)
-            if submesh_model is None:
-                continue
+        for submesh_model in drawib_model.submesh_model_list:
+            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
             resource_vb_section.append("[" + ib_resource_name + "]")
             resource_vb_section.append("type = Buffer")
             resource_vb_section.append("format = DXGI_FORMAT_R32_UINT")

@@ -87,17 +87,6 @@ class ExportSRMI:
             d3d11_game_type = drawib_model.d3d11_game_type
             active_index = draw_ib_active_index_dict.get(draw_ib, 0)
 
-            part_name_to_submesh_dict = {}
-            for submesh_model in drawib_model.submesh_model_list:
-                part_name = None
-                if submesh_model.match_first_index in drawib_model.match_first_index_list:
-                    part_index = drawib_model.match_first_index_list.index(submesh_model.match_first_index)
-                    if part_index < len(drawib_model.part_name_list):
-                        part_name = drawib_model.part_name_list[part_index]
-                if part_name is None:
-                    part_name = str(len(part_name_to_submesh_dict))
-                part_name_to_submesh_dict[part_name] = submesh_model
-
             if d3d11_game_type.GPU_PreSkinning and drawib_model.vertex_limit_hash:
                 vertexlimit_section = M_IniSection(M_SectionType.TextureOverrideVertexLimitRaise)
                 vertexlimit_section.append("[TextureOverride_" + draw_ib + "_" + draw_ib_alias + "_Draw]")
@@ -167,27 +156,23 @@ class ExportSRMI:
                 ini_builder.append_section(texture_override_vb_section)
 
             texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
-            for count_i, part_name in enumerate(drawib_model.part_name_list):
-                match_first_index = ""
-                if count_i < len(drawib_model.match_first_index_list):
-                    match_first_index = str(drawib_model.match_first_index_list[count_i])
-                style_part_name = "Component" + part_name
-                ib_resource_name = "Resource_" + draw_ib + "_" + style_part_name
-                texture_override_ib_namesuffix = "IB_" + draw_ib + "_" + draw_ib_alias + "_" + style_part_name
+            for submesh_model in drawib_model.submesh_model_list:
+                ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
+                texture_override_ib_namesuffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
+                part_name = drawib_model.get_submesh_part_name(submesh_model)
                 texture_override_ib_section.append("[TextureOverride_" + texture_override_ib_namesuffix + "]")
                 texture_override_ib_section.append("hash = " + draw_ib)
-                texture_override_ib_section.append("match_first_index = " + match_first_index)
+                texture_override_ib_section.append("match_first_index = " + str(submesh_model.match_first_index))
                 texture_override_ib_section.append("handling = skip")
 
-                submesh_model = part_name_to_submesh_dict.get(part_name)
-                ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, []) if submesh_model is not None else []
+                ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, [])
                 if not ib_buf:
                     texture_override_ib_section.new_line()
                     continue
 
                 texture_override_ib_section.append("ib = " + ib_resource_name)
 
-                if not GlobalProterties.forbid_auto_texture_ini():
+                if not GlobalProterties.forbid_auto_texture_ini() and part_name is not None:
                     texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, [])
                     for texture_markup_info in texture_markup_info_list:
                         if getattr(texture_markup_info, "mark_type", "") != "Slot":
@@ -202,12 +187,11 @@ class ExportSRMI:
                         if category_original_slot:
                             texture_override_ib_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
 
-                if submesh_model is not None:
-                    for draw_line in M_IniHelper.get_drawindexed_str_list(
-                        submesh_model.drawcall_model_list,
-                        obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
-                    ):
-                        texture_override_ib_section.append(draw_line)
+                for draw_line in M_IniHelper.get_drawindexed_str_list(
+                    submesh_model.drawcall_model_list,
+                    obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+                ):
+                    texture_override_ib_section.append(draw_line)
 
                 texture_override_ib_section.new_line()
 
@@ -229,12 +213,8 @@ class ExportSRMI:
                     resource_buffer_section.append("filename = Meshes\\" + draw_ib + "-" + category_name + ".buf")
                     resource_buffer_section.new_line()
 
-            for part_name in drawib_model.part_name_list:
-                style_part_name = "Component" + part_name
-                submesh_model = part_name_to_submesh_dict.get(part_name)
-                if submesh_model is None:
-                    continue
-                ib_resource_name = "Resource_" + draw_ib + "_" + style_part_name
+            for submesh_model in drawib_model.submesh_model_list:
+                ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
                 resource_buffer_section.append("[" + ib_resource_name + "]")
                 resource_buffer_section.append("type = Buffer")
                 resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")

@@ -35,17 +35,15 @@ class ExportZZMI(ExportUnity):
         texture_override_ib_section.append("handling = skip")
         texture_override_ib_section.new_line()
 
-        for count_i, part_name in enumerate(drawib_model.part_name_list):
-            match_first_index = str(drawib_model.match_first_index_list[count_i])
-            style_part_name = "Component" + part_name
-            texture_override_name_suffix = "IB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + style_part_name
-            ib_resource_name = drawib_model.PartName_IBResourceName_Dict.get(part_name, "")
+        for submesh_model in drawib_model.submesh_model_list:
+            texture_override_name_suffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
+            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
 
             texture_override_ib_section.append("[TextureOverride_" + texture_override_name_suffix + "]")
             texture_override_ib_section.append("hash = " + draw_ib)
-            texture_override_ib_section.append("match_first_index = " + match_first_index)
+            texture_override_ib_section.append("match_first_index = " + str(submesh_model.match_first_index))
 
-            ib_buf = drawib_model.componentname_ibbuf_dict.get("Component " + part_name, None)
+            ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, None)
             if ib_buf is None or len(ib_buf) == 0:
                 texture_override_ib_section.append("ib = null")
                 texture_override_ib_section.new_line()
@@ -53,8 +51,8 @@ class ExportZZMI(ExportUnity):
 
             texture_override_ib_section.append("ib = " + ib_resource_name)
 
-            texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, None)
-            if not GlobalProterties.forbid_auto_texture_ini() and texture_markup_info_list is not None:
+            texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+            if not GlobalProterties.forbid_auto_texture_ini() and texture_markup_info_list:
                 slot_fix_enabled = GlobalProterties.zzz_use_slot_fix()
                 uses_slot_fix = False
 
@@ -76,16 +74,14 @@ class ExportZZMI(ExportUnity):
                 if uses_slot_fix:
                     texture_override_ib_section.append(r"run = CommandList\ZZMI\SetTextures")
 
-            if texture_markup_info_list is not None:
+            if texture_markup_info_list:
                 texture_override_ib_section.append("run = CommandListSkinTexture")
 
-            submesh_model = drawib_model.part_name_submesh_dict.get(part_name)
-            if submesh_model is not None:
-                for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
-                    submesh_model.drawcall_model_list,
-                    obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
-                ):
-                    texture_override_ib_section.append(drawindexed_str)
+            for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
+                submesh_model.drawcall_model_list,
+                obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+            ):
+                texture_override_ib_section.append(drawindexed_str)
 
         ini_builder.append_section(texture_override_ib_section)
 

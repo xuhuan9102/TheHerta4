@@ -18,23 +18,22 @@ class ExportSnowBreak(DrawIBExportBase):
         draw_ib = drawib_model.draw_ib
         d3d11_game_type = drawib_model.d3d11GameType
 
-        for count_i, part_name in enumerate(drawib_model.part_name_list):
-            match_first_index = str(drawib_model.match_first_index_list[count_i])
-            style_part_name = "Component" + part_name
-            texture_override_name_suffix = "IB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + style_part_name
-            ib_resource_name = drawib_model.PartName_IBResourceName_Dict.get(part_name, "")
+        for submesh_model in drawib_model.submesh_model_list:
+            texture_override_name_suffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
+            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
+            backup_resource_name = "Resource_IB_" + drawib_model.get_submesh_texture_override_suffix(submesh_model) + "_Bak"
 
-            texture_override_ib_section.append("[Resource_IB_Bak_" + str(count_i) + "]")
+            texture_override_ib_section.append("[" + backup_resource_name + "]")
             texture_override_ib_section.append("[TextureOverride_" + texture_override_name_suffix + "]")
             texture_override_ib_section.append("hash = " + draw_ib)
-            texture_override_ib_section.append("match_first_index = " + match_first_index)
+            texture_override_ib_section.append("match_first_index = " + str(submesh_model.match_first_index))
             texture_override_ib_section.append("handling = skip")
-            texture_override_ib_section.append("Resource_IB_Bak_" + str(count_i) + " = ref ib")
+            texture_override_ib_section.append(backup_resource_name + " = ref ib")
             texture_override_ib_section.append("checktextureoverride = vb0")
 
             if not GlobalProterties.forbid_auto_texture_ini():
-                texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, None)
-                if texture_markup_info_list is not None:
+                texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+                if texture_markup_info_list:
                     for texture_markup_info in texture_markup_info_list:
                         if texture_markup_info.mark_type == "Hash":
                             texture_override_ib_section.append("checktextureoverride = " + texture_markup_info.mark_slot)
@@ -46,8 +45,8 @@ class ExportSnowBreak(DrawIBExportBase):
                 texture_override_ib_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
 
             if not GlobalProterties.forbid_auto_texture_ini():
-                texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, None)
-                if texture_markup_info_list is not None:
+                texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+                if texture_markup_info_list:
                     for texture_markup_info in texture_markup_info_list:
                         if texture_markup_info.mark_type == "Slot":
                             texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
@@ -58,15 +57,13 @@ class ExportSnowBreak(DrawIBExportBase):
                         category_original_slot = d3d11_game_type.CategoryExtractSlotDict[original_category_name]
                         texture_override_ib_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
 
-            submesh_model = drawib_model.part_name_submesh_dict.get(part_name)
-            if submesh_model is not None:
-                for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
-                    submesh_model.drawcall_model_list,
-                    obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
-                ):
-                    texture_override_ib_section.append(drawindexed_str)
+            for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
+                submesh_model.drawcall_model_list,
+                obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+            ):
+                texture_override_ib_section.append(drawindexed_str)
 
-            texture_override_ib_section.append("ib = Resource_IB_Bak_" + str(count_i))
+            texture_override_ib_section.append("ib = " + backup_resource_name)
 
         ini_builder.append_section(texture_override_ib_section)
 
@@ -80,12 +77,12 @@ class ExportSnowBreak(DrawIBExportBase):
             resource_vb_section.append("filename = " + buffer_folder_name + "/" + drawib_model.draw_ib + "-" + category_name + ".buf")
             resource_vb_section.new_line()
 
-        for part_name, ib_filename in drawib_model.PartName_IBBufferFileName_Dict.items():
-            ib_resource_name = drawib_model.PartName_IBResourceName_Dict.get(part_name, None)
+        for submesh_model in drawib_model.submesh_model_list:
+            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
             resource_vb_section.append("[" + ib_resource_name + "]")
             resource_vb_section.append("type = Buffer")
             resource_vb_section.append("format = DXGI_FORMAT_R32_UINT")
-            resource_vb_section.append("filename = " + buffer_folder_name + "/" + ib_filename)
+            resource_vb_section.append("filename = " + buffer_folder_name + "/" + submesh_model.unique_str + "-Index.buf")
             resource_vb_section.new_line()
         ini_builder.append_section(resource_vb_section)
 

@@ -68,11 +68,7 @@ class ExportEFMI:
         for submesh_model in self.submesh_model_list:
             drawib_model = drawib_drawibmodel_dict.get(submesh_model.match_draw_ib)
             active_index = draw_ib_active_index_dict.get(submesh_model.match_draw_ib, 0)
-            part_name = None
-            if drawib_model is not None and submesh_model.match_first_index in drawib_model.match_first_index_list:
-                part_index = drawib_model.match_first_index_list.index(submesh_model.match_first_index)
-                if part_index < len(drawib_model.part_name_list):
-                    part_name = drawib_model.part_name_list[part_index]
+            part_name = drawib_model.get_submesh_part_name(submesh_model) if drawib_model is not None else None
             
             texture_override_ib_section.append("[TextureOverride_" + submesh_model.unique_str.replace("-","_") + "]")
             texture_override_ib_section.append("hash = " + submesh_model.match_draw_ib)

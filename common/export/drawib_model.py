@@ -279,26 +279,84 @@ class DrawIBModel:
     def d3d11GameType(self) -> D3D11GameType:
         return self.d3d11_game_type
 
+    def get_submesh_part_name(self, submesh_model: SubMeshModel) -> str | None:
+        if submesh_model.match_first_index in self.match_first_index_list:
+            part_index = self.match_first_index_list.index(submesh_model.match_first_index)
+            if part_index < len(self.part_name_list):
+                return self.part_name_list[part_index]
+        return None
+
+    def get_submesh_unique_key(self, submesh_model: SubMeshModel) -> str:
+        return submesh_model.unique_str.replace("-", "_")
+
+    def get_submesh_ib_resource_name(self, submesh_model: SubMeshModel) -> str:
+        unique_key = self.get_submesh_unique_key(submesh_model)
+        if unique_key:
+            return "Resource_" + unique_key + "_Index"
+
+        part_name = self.get_submesh_part_name(submesh_model)
+        if part_name is not None:
+            return "Resource_" + self.draw_ib + "_Component" + part_name
+
+        return ""
+
+    def get_submesh_texture_override_suffix(self, submesh_model: SubMeshModel) -> str:
+        unique_key = self.get_submesh_unique_key(submesh_model)
+        if unique_key:
+            return unique_key
+
+        part_name = self.get_submesh_part_name(submesh_model)
+        if part_name is not None:
+            return "IB_" + self.draw_ib + "_" + self.draw_ib_alias + "_Component" + part_name
+
+        return ""
+
+    def get_submesh_texture_markup_info_list(self, submesh_model: SubMeshModel) -> list:
+        part_name = self.get_submesh_part_name(submesh_model)
+        if part_name is None:
+            return []
+        return self.partname_texturemarkinfolist_dict.get(part_name, [])
+
     @property
     def part_name_submesh_dict(self) -> dict:
         mapping = {}
 
         for submesh_model in self.submesh_model_list:
-            part_name = None
-            if submesh_model.match_first_index in self.match_first_index_list:
-                part_index = self.match_first_index_list.index(submesh_model.match_first_index)
-                if part_index < len(self.part_name_list):
-                    part_name = self.part_name_list[part_index]
+            part_name = self.get_submesh_part_name(submesh_model)
             if part_name is None:
                 continue
             mapping[part_name] = submesh_model
 
         return mapping
 
+    def get_part_submesh(self, part_name: str) -> SubMeshModel | None:
+        return self.part_name_submesh_dict.get(part_name)
+
+    def get_part_unique_str(self, part_name: str) -> str:
+        submesh_model = self.get_part_submesh(part_name)
+        if submesh_model is None:
+            return ""
+        return submesh_model.unique_str
+
+    def get_part_unique_key(self, part_name: str) -> str:
+        return self.get_part_unique_str(part_name).replace("-", "_")
+
+    def get_part_ib_resource_name(self, part_name: str) -> str:
+        submesh_model = self.get_part_submesh(part_name)
+        if submesh_model is not None:
+            return self.get_submesh_ib_resource_name(submesh_model)
+        return "Resource_" + self.draw_ib + "_Component" + part_name
+
+    def get_part_texture_override_suffix(self, part_name: str) -> str:
+        submesh_model = self.get_part_submesh(part_name)
+        if submesh_model is not None:
+            return self.get_submesh_texture_override_suffix(submesh_model)
+        return "IB_" + self.draw_ib + "_" + self.draw_ib_alias + "_Component" + part_name
+
     @property
     def PartName_IBResourceName_Dict(self) -> dict:
         return {
-            part_name: "Resource_" + self.draw_ib + "_Component" + part_name
+            part_name: self.get_part_ib_resource_name(part_name)
             for part_name in self.part_name_list
         }
 
