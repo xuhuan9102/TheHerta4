@@ -1,6 +1,6 @@
 import bpy
 from ..base import *
-from ..common.migoto.m_key import M_Key
+from ..common.m_key import M_Key
 
 class BlueprintExportHelper:
 

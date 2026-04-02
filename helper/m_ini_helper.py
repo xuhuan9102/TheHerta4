@@ -1,8 +1,8 @@
 import os
 import shutil
 
-from ..common.migoto.m_ini_builder import *
-from ..common.migoto.m_key import M_Key
+from ..common.m_ini_builder import *
+from ..common.m_key import M_Key
 from ..common.draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
 from ..common.drawib_model import DrawIBModel
 from ..helper.import_config import TextureMarkUpInfo

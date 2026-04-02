@@ -10,7 +10,7 @@ from ...helper.buffer_export_helper import BufferExportHelper
 from ...helper.global_key_count_helper import GlobalKeyCountHelper
 from ...helper.m_ini_helper import M_IniHelper
 from ...helper.m_ini_helper_gui import M_IniHelperGUI
-from ...common.migoto.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
+from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 
 import os
