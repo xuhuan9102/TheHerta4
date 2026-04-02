@@ -16,16 +16,16 @@ from ..utils.vertexgroup_utils import VertexGroupUtils
 from ..utils.obj_utils import ObjUtils
 from ..utils.tbn_codec import TBNCodec
 
-from ..base import GlobalConfig, LogicName
-from ..base.global_properties import GlobalProterties
+from . import GlobalConfig, LogicName
+from .global_properties import GlobalProterties
 
-from ..base.d3d11_gametype import D3D11Element
+from .d3d11_gametype import D3D11Element
 from ..games.wwmi.extracted_object import ExtractedObjectHelper
 
 # 用于解决 AttributeError: 'IMPORT_MESH_OT_migoto_raw_buffers_mmt' object has no attribute 'filepath'
 from bpy_extras.io_utils import unpack_list, axis_conversion
 
-from ..base.migoto_binary_file import MigotoBinaryFile
+from .migoto_binary_file import MigotoBinaryFile
 
 
 class MeshImportHelper:

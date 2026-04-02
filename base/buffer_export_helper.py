@@ -2,7 +2,7 @@ import os
 import struct
 import numpy
 
-from ..base import *
+from . import *
 
 
 class BufferExportHelper:

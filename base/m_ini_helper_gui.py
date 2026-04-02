@@ -3,7 +3,7 @@ import os
 import shutil
 
 from .m_ini_builder import *
-from ..base import *
+from . import *
 from .m_key import M_Key
 from .draw_call_model import DrawCallModel
 

@@ -1,7 +1,7 @@
 import collections
 import copy
 import math
-from ..base.d3d11_gametype import D3D11GameType
+from .d3d11_gametype import D3D11GameType
 from .draw_call_model import DrawCallModel
 
 
@@ -11,8 +11,8 @@ from ..utils.timer_utils import TimerUtils
 from ..utils.tbn_codec import TBNCodec
 from ..utils.ssmt_error_utils import SSMTErrorUtils
 
-from ..base import GlobalConfig, LogicName
-from ..base.global_properties import GlobalProterties
+from . import GlobalConfig, LogicName
+from .global_properties import GlobalProterties
 from ..utils.obj_utils import ObjUtils
 from ..utils.log_utils import LOG
 

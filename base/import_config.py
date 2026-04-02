@@ -13,9 +13,9 @@ from dataclasses import dataclass, field, asdict
 from ..utils.json_utils import JsonUtils
 from ..utils.format_utils import Fatal
 
-from ..base import GlobalConfig
+from . import GlobalConfig
 
-from ..base.d3d11_gametype import D3D11GameType
+from .d3d11_gametype import D3D11GameType
 
 
 

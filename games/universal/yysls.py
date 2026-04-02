@@ -2,10 +2,10 @@ import os
 
 from ...base import GlobalConfig
 from ...base.global_properties import GlobalProterties
-from ...common.global_key_count_helper import GlobalKeyCountHelper
-from ...common.m_ini_helper import M_IniHelper
-from ...common.m_ini_helper_gui import M_IniHelperGUI
-from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
+from ...base.global_key_count_helper import GlobalKeyCountHelper
+from ...base.m_ini_helper import M_IniHelper
+from ...base.m_ini_helper_gui import M_IniHelperGUI
+from ...base.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .drawib_export_base import DrawIBExportBase
 
 

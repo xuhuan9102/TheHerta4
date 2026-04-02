@@ -1,4 +1,4 @@
-from ..base import GlobalConfig
+from . import GlobalConfig
 from ..utils.json_utils import JsonUtils
 from ..utils.collection_utils import CollectionUtils, CollectionColor
 import os

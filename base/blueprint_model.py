@@ -3,7 +3,7 @@ import math
 import bpy
 import copy
 
-from ..base import GlobalConfig, LogicName
+from . import GlobalConfig, LogicName
 
 from ..utils.obj_utils import ObjUtils
 from ..utils.log_utils import LOG
@@ -12,7 +12,7 @@ from ..utils.tips_utils import TipUtils
 
 from .m_key import M_Key
 from .draw_call_model import M_Condition
-from ..base.d3d11_gametype import D3D11GameType
+from .d3d11_gametype import D3D11GameType
 from .draw_call_model import DrawCallModel
 from .global_key_count_helper import GlobalKeyCountHelper
 from .blueprint_export_helper import BlueprintExportHelper

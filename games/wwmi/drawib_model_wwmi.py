@@ -25,13 +25,13 @@ from ...utils.obj_utils import (
 from ...utils.shapekey_utils import ShapeKeyUtils
 from ...utils.vertexgroup_utils import VertexGroupUtils
 from .extracted_object import ExtractedObject, ExtractedObjectHelper
-from ...common.buffer_export_helper import BufferExportHelper
-from ...common.import_config import ImportConfig
-from ...common.obj_buffer_helper import ObjBufferHelper
-from ...common.workspace_helper import WorkSpaceHelper
+from ...base.buffer_export_helper import BufferExportHelper
+from ...base.import_config import ImportConfig
+from ...base.obj_buffer_helper import ObjBufferHelper
+from ...base.workspace_helper import WorkSpaceHelper
 from ...base.d3d11_gametype import D3D11GameType
-from ...common.blueprint_model import BluePrintModel
-from ...common.draw_call_model import DrawCallModel, M_DrawIndexed
+from ...base.blueprint_model import BluePrintModel
+from ...base.draw_call_model import DrawCallModel, M_DrawIndexed
 
 
 @dataclass

@@ -10,8 +10,8 @@ from .shapekey_utils import ShapeKeyUtils
 from .timer_utils import TimerUtils
 
 from ..base.d3d11_gametype import D3D11GameType
-from ..common.blueprint_export_helper import BlueprintExportHelper
-from ..common.obj_buffer_helper import ObjBufferHelper
+from ..base.blueprint_export_helper import BlueprintExportHelper
+from ..base.obj_buffer_helper import ObjBufferHelper
 
 
 @dataclass
