@@ -4,7 +4,7 @@ from ..common.export.submesh_model import SubMeshModel
 from ..common.export.drawib_model import DrawIBModel
 from dataclasses import dataclass,field
 from ..base.global_config import GlobalConfig
-from ..base.config.global_properties import GlobalProterties
+from ..base.global_properties import GlobalProterties
 
 from ..helper.buffer_export_helper import BufferExportHelper
 from ..helper.global_key_count_helper import GlobalKeyCountHelper

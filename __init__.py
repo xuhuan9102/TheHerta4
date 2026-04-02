@@ -1,7 +1,7 @@
 import bpy
 
 # 全局配置
-from .base.config import global_properties
+from .base import global_properties
 
 # UI界面
 from .ui import ui_panel_basic

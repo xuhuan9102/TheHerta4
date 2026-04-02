@@ -17,7 +17,7 @@ from ..utils.obj_utils import ObjUtils
 from ..utils.tbn_codec import TBNCodec
 
 from ..base.global_config import GlobalConfig, LogicName
-from ..base.config.global_properties import GlobalProterties
+from ..base.global_properties import GlobalProterties
 
 from ..common.d3d11.d3d11_gametype import D3D11Element
 from ..games.wwmi.extracted_object import ExtractedObjectHelper

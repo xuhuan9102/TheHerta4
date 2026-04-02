@@ -2,7 +2,7 @@
 import subprocess
 
 from ..base.global_config import *
-from ..base.config.global_properties import GlobalProterties
+from ..base.global_properties import GlobalProterties
 
 class CommandUtils:
 

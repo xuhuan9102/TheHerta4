@@ -1,6 +1,6 @@
 import os
 
-from ...base.config.global_properties import GlobalProterties
+from ...base.global_properties import GlobalProterties
 from ...base.global_config import GlobalConfig, LogicName
 from ...common.export.drawib_model_wwmi import DrawIBModelWWMI
 from ...common.export.blueprint_model import BluePrintModel
