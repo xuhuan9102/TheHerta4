@@ -78,7 +78,7 @@ class ImportConfig:
     category_hash_dict: Dict[str, str] = field(init=False,default_factory=dict)
     import_model_list: List[str] = field(init=False,default_factory=list)
     match_first_index_list: List[int] = field(init=False,default_factory=list)
-    part_name_list: List[str] = field(init=False,default_factory=list)
+    match_first_index_partname_dict: Dict[int, str] = field(init=False,default_factory=dict)
     vshash_list: List[str] = field(init=False,default_factory=list)
     
     vertex_limit_hash: str = ""
@@ -150,7 +150,11 @@ class ImportConfig:
         self.category_hash_dict = tmp_json_dict["CategoryHash"]
         self.import_model_list = tmp_json_dict["ImportModelList"]
         self.match_first_index_list = tmp_json_dict["MatchFirstIndex"]
-        self.part_name_list = tmp_json_dict["PartNameList"]
+        raw_part_name_list = tmp_json_dict["PartNameList"]
+        self.match_first_index_partname_dict = {
+            int(match_first_index): part_name
+            for match_first_index, part_name in zip(self.match_first_index_list, raw_part_name_list)
+        }
         # print(self.partname_textureresourcereplace_dict)
         self.vertex_limit_hash = tmp_json_dict["VertexLimitVB"]
         self.work_game_type = tmp_json_dict["WorkGameType"]
@@ -178,6 +182,20 @@ class ImportConfig:
                 texture_markup_info_list.append(markup_info)
 
             self.partname_texturemarkinfolist_dict[partname] = texture_markup_info_list
+
+    def get_part_name_by_match_first_index(self, match_first_index: int | str) -> str:
+        try:
+            normalized_match_first_index = int(match_first_index)
+        except (TypeError, ValueError):
+            return ""
+
+        return self.match_first_index_partname_dict.get(normalized_match_first_index, "")
+
+    def iter_match_first_index_partname_pairs(self):
+        for match_first_index in self.match_first_index_list:
+            part_name = self.match_first_index_partname_dict.get(int(match_first_index), "")
+            if part_name:
+                yield int(match_first_index), part_name
 
 
 

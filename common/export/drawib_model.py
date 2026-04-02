@@ -36,10 +36,11 @@ class DrawIBModel:
     import_json_path:str = field(init=False,repr=False,default="")
     import_json_dict:dict = field(init=False,repr=False,default_factory=dict)
     category_hash_dict:dict = field(init=False,repr=False,default_factory=dict)
-    part_name_list:list = field(init=False,repr=False,default_factory=list)
     match_first_index_list:list = field(init=False,repr=False,default_factory=list)
+    match_first_index_partname_dict:dict = field(init=False,repr=False,default_factory=dict)
     vshash_list:list = field(init=False,repr=False,default_factory=list)
     partname_texturemarkinfolist_dict:dict = field(init=False,repr=False,default_factory=dict)
+    submesh_texturemarkinfolist_dict:dict = field(init=False,repr=False,default_factory=dict)
     vertex_limit_hash:str = field(init=False,repr=False,default="")
     original_vertex_count:int = field(init=False,repr=False,default=0)
 
@@ -109,9 +110,17 @@ class DrawIBModel:
 
         if self.import_json_dict:
             self.category_hash_dict = dict(self.import_json_dict.get("CategoryHash", {}))
-            self.part_name_list = list(self.import_json_dict.get("PartNameList", []))
             self.match_first_index_list = list(self.import_json_dict.get("MatchFirstIndex", []))
+            raw_part_name_list = list(self.import_json_dict.get("PartNameList", []))
+            self.match_first_index_partname_dict = {
+                int(match_first_index): part_name
+                for match_first_index, part_name in zip(self.match_first_index_list, raw_part_name_list)
+            }
             self.vshash_list = list(self.import_json_dict.get("VSHashList", []))
+            self.submesh_texturemarkinfolist_dict = TextureMetadataResolver.load_submesh_texture_markup_info_from_all_submeshes(
+                draw_ib_model=self,
+                workspace_import_json=workspace_import_json,
+            )
             self.partname_texturemarkinfolist_dict = TextureMetadataResolver.load_texture_markup_info_from_all_submeshes(
                 draw_ib_model=self,
                 workspace_import_json=workspace_import_json,
@@ -120,9 +129,11 @@ class DrawIBModel:
             self.original_vertex_count = self.import_json_dict.get("OriginalVertexCount", 0)
             print(
                 "DrawIBModel: 已使用新结构元数据，Part数量: "
-                + str(len(self.part_name_list))
+                + str(len(self.match_first_index_partname_dict))
                 + "，贴图标记Part数量: "
                 + str(len(self.partname_texturemarkinfolist_dict))
+                + "，贴图标记SubMesh数量: "
+                + str(len(self.submesh_texturemarkinfolist_dict))
             )
             return
 
@@ -280,11 +291,15 @@ class DrawIBModel:
         return self.d3d11_game_type
 
     def get_submesh_part_name(self, submesh_model: SubMeshModel) -> str | None:
-        if submesh_model.match_first_index in self.match_first_index_list:
-            part_index = self.match_first_index_list.index(submesh_model.match_first_index)
-            if part_index < len(self.part_name_list):
-                return self.part_name_list[part_index]
-        return None
+        return self.get_part_name_by_match_first_index(submesh_model.match_first_index)
+
+    def get_part_name_by_match_first_index(self, match_first_index: int | str) -> str | None:
+        try:
+            normalized_match_first_index = int(match_first_index)
+        except (TypeError, ValueError):
+            return None
+
+        return self.match_first_index_partname_dict.get(normalized_match_first_index)
 
     def get_submesh_unique_key(self, submesh_model: SubMeshModel) -> str:
         return submesh_model.unique_str.replace("-", "_")
@@ -312,6 +327,10 @@ class DrawIBModel:
         return ""
 
     def get_submesh_texture_markup_info_list(self, submesh_model: SubMeshModel) -> list:
+        texture_markup_info_list = self.submesh_texturemarkinfolist_dict.get(submesh_model.unique_str, None)
+        if texture_markup_info_list is not None:
+            return texture_markup_info_list
+
         part_name = self.get_submesh_part_name(submesh_model)
         if part_name is None:
             return []
@@ -357,7 +376,7 @@ class DrawIBModel:
     def PartName_IBResourceName_Dict(self) -> dict:
         return {
             part_name: self.get_part_ib_resource_name(part_name)
-            for part_name in self.part_name_list
+            for part_name in self.part_name_submesh_dict.keys()
         }
 
     @property

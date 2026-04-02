@@ -19,7 +19,8 @@ class M_IniHelper:
     @classmethod
     def _count_marked_textures(cls, draw_ib_model: DrawIBModel, mark_type: str | None = None) -> int:
         count = 0
-        for texture_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).values():
+        for submesh_model in getattr(draw_ib_model, "submesh_model_list", []):
+            texture_info_list = draw_ib_model.get_submesh_texture_markup_info_list(submesh_model)
             for texture_info in texture_info_list:
                 if mark_type is not None and getattr(texture_info, "mark_type", "") != mark_type:
                     continue
@@ -273,8 +274,8 @@ class M_IniHelper:
         # 先统计当前标记的具有Slot风格的Hash值，后续Render里搞图片的时候跳过这些
         slot_style_texture_hash_list = []
         for draw_ib_model in drawib_drawibmodel_dict.values():
-            for texture_markup_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).values():
-                for texture_markup_info in texture_markup_info_list:
+            for submesh_model in getattr(draw_ib_model, "submesh_model_list", []):
+                for texture_markup_info in draw_ib_model.get_submesh_texture_markup_info_list(submesh_model):
                     if texture_markup_info.mark_type == "Slot":
                         slot_style_texture_hash_list.append(texture_markup_info.mark_hash)
         
@@ -288,8 +289,13 @@ class M_IniHelper:
             print("M_IniHelper: DrawIB " + draw_ib + " 的 Hash 标记数量: " + str(marked_hash_count))
 
             # 添加标记的Hash风格贴图
-            for part_name, texture_markup_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).items():
-                submesh_folder_name = cls._get_part_submesh_folder_name(draw_ib_model, part_name)
+            for submesh_model in getattr(draw_ib_model, "submesh_model_list", []):
+                texture_markup_info_list = draw_ib_model.get_submesh_texture_markup_info_list(submesh_model)
+                if not texture_markup_info_list:
+                    continue
+
+                part_name = draw_ib_model.get_submesh_part_name(submesh_model)
+                submesh_folder_name = getattr(submesh_model, "unique_str", "")
                 if not submesh_folder_name:
                     print("M_IniHelper: 跳过 Hash 贴图处理，未找到 unique_str，Part: " + str(part_name))
                     continue
@@ -408,7 +414,12 @@ class M_IniHelper:
         marked_slot_count = cls._count_marked_textures(draw_ib_model, mark_type="Slot")
         print("M_IniHelper: 开始复制 Slot 贴图，DrawIB: " + draw_ib_model.draw_ib + "，标记数量: " + str(marked_slot_count))
 
-        for part_name, texture_markup_info_list in TextureMetadataResolver.get_partname_texturemarkinfolist_dict(draw_ib_model).items():
+        for submesh_model in getattr(draw_ib_model, "submesh_model_list", []):
+            texture_markup_info_list = draw_ib_model.get_submesh_texture_markup_info_list(submesh_model)
+            if not texture_markup_info_list:
+                continue
+
+            part_name = draw_ib_model.get_submesh_part_name(submesh_model) or submesh_model.unique_str
             for texture_markup_info in texture_markup_info_list:
                 # 只有槽位风格会移动到目标位置
                 if texture_markup_info.mark_type != "Slot":

@@ -98,12 +98,17 @@ class ExportSRMI:
                     vertexlimit_section.new_line()
                 ini_builder.append_section(vertexlimit_section)
 
-            if not GlobalProterties.forbid_auto_texture_ini() and drawib_model.partname_texturemarkinfolist_dict:
+            if not GlobalProterties.forbid_auto_texture_ini() and drawib_model.submesh_texturemarkinfolist_dict:
                 resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)
-                for part_name, texture_markup_info_list in drawib_model.partname_texturemarkinfolist_dict.items():
-                    for texture_markup_info in texture_markup_info_list:
+                appended_resource_names = set()
+                for submesh_model in drawib_model.submesh_model_list:
+                    for texture_markup_info in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
                         if getattr(texture_markup_info, "mark_type", "") != "Slot":
                             continue
+                        resource_name = texture_markup_info.get_resource_name()
+                        if resource_name in appended_resource_names:
+                            continue
+                        appended_resource_names.add(resource_name)
                         resource_texture_section.append("[" + texture_markup_info.get_resource_name() + "]")
                         resource_texture_section.append("filename = Textures/" + texture_markup_info.mark_filename)
                         resource_texture_section.new_line()
@@ -172,8 +177,8 @@ class ExportSRMI:
 
                 texture_override_ib_section.append("ib = " + ib_resource_name)
 
-                if not GlobalProterties.forbid_auto_texture_ini() and part_name is not None:
-                    texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, [])
+                if not GlobalProterties.forbid_auto_texture_ini():
+                    texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
                     for texture_markup_info in texture_markup_info_list:
                         if getattr(texture_markup_info, "mark_type", "") != "Slot":
                             continue

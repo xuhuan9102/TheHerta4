@@ -91,14 +91,11 @@ class DrawIBModelWWMI:
         self.component_model_list = []
         self.component_name_component_model_dict = {}
 
-        for part_index, part_name in enumerate(self.import_config.part_name_list):
+        for expected_first_index, part_name in self.import_config.iter_match_first_index_partname_pairs():
             component_drawcall_model_list = []
-            expected_first_index = ""
-            if part_index < len(self.import_config.match_first_index_list):
-                expected_first_index = str(self.import_config.match_first_index_list[part_index])
 
             for drawcall_model in self.ordered_drawcall_model_list:
-                if str(drawcall_model.match_first_index) != expected_first_index:
+                if int(drawcall_model.match_first_index) != expected_first_index:
                     continue
                 component_drawcall_model_list.append(drawcall_model)
 

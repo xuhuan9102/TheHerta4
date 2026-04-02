@@ -86,8 +86,8 @@ class ExportEFMI:
                 category_resource_name = "Resource_" + submesh_model.unique_str.replace("-","_")  + "_" + category
                 texture_override_ib_section.append(category_slot + " = " + category_resource_name)
 
-            if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None and part_name is not None:
-                texture_markup_info_list = drawib_model.partname_texturemarkinfolist_dict.get(part_name, [])
+            if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None:
+                texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
                 for texture_markup_info in texture_markup_info_list:
                     if getattr(texture_markup_info, "mark_type", "") != "Slot":
                         continue
@@ -126,11 +126,16 @@ class ExportEFMI:
 
         if not GlobalProterties.forbid_auto_texture_ini():
             resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)
+            appended_resource_names = set()
             for drawib_model in self.drawib_model_list:
-                for texture_markup_info_list in drawib_model.partname_texturemarkinfolist_dict.values():
-                    for texture_markup_info in texture_markup_info_list:
+                for submesh_model in drawib_model.submesh_model_list:
+                    for texture_markup_info in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
                         if getattr(texture_markup_info, "mark_type", "") != "Slot":
                             continue
+                        resource_name = texture_markup_info.get_resource_name()
+                        if resource_name in appended_resource_names:
+                            continue
+                        appended_resource_names.add(resource_name)
                         resource_texture_section.append("[" + texture_markup_info.get_resource_name() + "]")
                         resource_texture_section.append("filename = Textures/" + texture_markup_info.mark_filename)
                         resource_texture_section.new_line()
