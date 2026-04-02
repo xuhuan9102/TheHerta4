@@ -5,16 +5,16 @@ from ..common.d3d11.d3d11_gametype import D3D11GameType
 from ..common.export.draw_call_model import DrawCallModel
 
 
-from ..base.utils.format_utils import FormatUtils
-from ..base.utils.vertexgroup_utils import VertexGroupUtils
-from ..base.utils.timer_utils import TimerUtils
-from ..base.utils.tbn_codec import TBNCodec
-from ..base.utils.ssmt_error_utils import SSMTErrorUtils
+from ..utils.format_utils import FormatUtils
+from ..utils.vertexgroup_utils import VertexGroupUtils
+from ..utils.timer_utils import TimerUtils
+from ..utils.tbn_codec import TBNCodec
+from ..utils.ssmt_error_utils import SSMTErrorUtils
 
 from ..base.config.main_config import GlobalConfig, LogicName
 from ..base.config.global_properties import GlobalProterties
-from ..base.utils.obj_utils import ObjUtils
-from ..base.utils.log_utils import LOG
+from ..utils.obj_utils import ObjUtils
+from ..utils.log_utils import LOG
 
 
 import bpy

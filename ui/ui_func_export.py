@@ -1,8 +1,8 @@
 import bpy
 
-from ..base.utils.timer_utils import TimerUtils
-from ..base.utils.translate_utils import TR
-from ..base.utils.command_utils import CommandUtils
+from ..utils.timer_utils import TimerUtils
+from ..utils.translate_utils import TR
+from ..utils.command_utils import CommandUtils
 
 from ..base.config.main_config import GlobalConfig, LogicName
 
@@ -13,7 +13,7 @@ from ..games.identityv import ExportIdentityV
 from ..games.snowbreak import ExportSnowBreak
 from ..games.srmi import ExportSRMI
 from ..games.unity import ExportUnity
-from ..games.wwmi import ExportWWMI
+from ..games.wwmi.wwmi_export import ExportWWMI
 from ..games.yysls import ExportYYSLS
 from ..games.zzmi import ExportZZMI
 

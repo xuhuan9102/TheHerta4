@@ -1,13 +1,13 @@
 import os
 
-from ..base.config.global_properties import GlobalProterties
-from ..base.config.main_config import GlobalConfig, LogicName
-from ..common.export.drawib_model_wwmi import DrawIBModelWWMI
-from ..common.export.blueprint_model import BluePrintModel
-from ..common.migoto.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
-from ..helper.global_key_count_helper import GlobalKeyCountHelper
-from ..helper.m_ini_helper import M_IniHelper
-from ..helper.m_ini_helper_gui import M_IniHelperGUI
+from ...base.config.global_properties import GlobalProterties
+from ...base.config.main_config import GlobalConfig, LogicName
+from ...common.export.drawib_model_wwmi import DrawIBModelWWMI
+from ...common.export.blueprint_model import BluePrintModel
+from ...common.migoto.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
+from ...helper.global_key_count_helper import GlobalKeyCountHelper
+from ...helper.m_ini_helper import M_IniHelper
+from ...helper.m_ini_helper_gui import M_IniHelperGUI
 
 
 class ExportWWMI:

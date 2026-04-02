@@ -16,9 +16,9 @@ import bpy.utils.previews
 
 from ..base.config.main_config import GlobalConfig
 
-from ..base.utils.translate_utils import TR
-from ..base.utils.json_utils import JsonUtils
-from ..base.utils.collection_utils import CollectionUtils,CollectionColor
+from ..utils.translate_utils import TR
+from ..utils.json_utils import JsonUtils
+from ..utils.collection_utils import CollectionUtils,CollectionColor
 
 # 存储预览图集合
 fast_preview_collections = {}

@@ -1,10 +1,10 @@
 from dataclasses import dataclass, field
 from .draw_call_model import DrawCallModel
 
-from ...base.utils.export_utils import ExportUtils
-from ...base.utils.obj_utils import ObjUtils
-from ...base.utils.collection_utils import CollectionUtils
-from ...base.utils.json_utils import JsonUtils
+from ...utils.export_utils import ExportUtils
+from ...utils.obj_utils import ObjUtils
+from ...utils.collection_utils import CollectionUtils
+from ...utils.json_utils import JsonUtils
 from ...base.config.main_config import GlobalConfig, LogicName
 
 from ..d3d11.d3d11_gametype import D3D11GameType

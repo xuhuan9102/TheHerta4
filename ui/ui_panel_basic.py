@@ -5,7 +5,7 @@ import bpy
 
 from ..base.config.main_config import GlobalConfig, LogicName
 
-from ..base.utils.translate_utils import TR
+from ..utils.translate_utils import TR
 
 
 class PanelBasicInformation(bpy.types.Panel):

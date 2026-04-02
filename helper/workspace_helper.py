@@ -1,6 +1,6 @@
 from ..base.config.main_config import GlobalConfig
-from ..base.utils.json_utils import JsonUtils
-from ..base.utils.collection_utils import CollectionUtils, CollectionColor
+from ..utils.json_utils import JsonUtils
+from ..utils.collection_utils import CollectionUtils, CollectionColor
 import os
 import bpy
 from typing import List, Dict, Union

@@ -4,7 +4,7 @@ import json
 from typing import List, Dict, Union
 from dataclasses import dataclass, field, asdict
 
-from ...base.utils.format_utils import Fatal
+from ...utils.format_utils import Fatal
 from enum import Enum
 
     

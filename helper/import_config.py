@@ -10,8 +10,8 @@ import os
 from typing import List, Dict, Union, Optional
 from dataclasses import dataclass, field, asdict
 
-from ..base.utils.json_utils import JsonUtils
-from ..base.utils.format_utils import Fatal
+from ..utils.json_utils import JsonUtils
+from ..utils.format_utils import Fatal
 
 from ..base.config.main_config import GlobalConfig
 

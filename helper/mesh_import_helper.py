@@ -6,15 +6,15 @@ import numpy
 import itertools
 import math
 
-from ..base.utils.timer_utils import TimerUtils
-from ..base.utils.translate_utils import TR
-from ..base.utils.format_utils import Fatal,FormatUtils
-from ..base.utils.texture_utils import TextureUtils
-from ..base.utils.mesh_utils import MeshUtils
-from ..base.utils.log_utils import LOG
-from ..base.utils.vertexgroup_utils import VertexGroupUtils
-from ..base.utils.obj_utils import ObjUtils
-from ..base.utils.tbn_codec import TBNCodec
+from ..utils.timer_utils import TimerUtils
+from ..utils.translate_utils import TR
+from ..utils.format_utils import Fatal,FormatUtils
+from ..utils.texture_utils import TextureUtils
+from ..utils.mesh_utils import MeshUtils
+from ..utils.log_utils import LOG
+from ..utils.vertexgroup_utils import VertexGroupUtils
+from ..utils.obj_utils import ObjUtils
+from ..utils.tbn_codec import TBNCodec
 
 from ..base.config.main_config import GlobalConfig, LogicName
 from ..base.config.global_properties import GlobalProterties

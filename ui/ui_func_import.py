@@ -8,12 +8,12 @@ import bpy
 # 用于解决 AttributeError: 'IMPORT_MESH_OT_migoto_raw_buffers_mmt' object has no attribute 'filepath'
 from bpy_extras.io_utils import ImportHelper
 
-from ..base.utils.obj_utils import ObjUtils 
+from ..utils.obj_utils import ObjUtils 
 
-from ..base.utils.json_utils import JsonUtils
-from ..base.utils.collection_utils import CollectionColor, CollectionUtils
-from ..base.utils.timer_utils import TimerUtils
-from ..base.utils.translate_utils import TR
+from ..utils.json_utils import JsonUtils
+from ..utils.collection_utils import CollectionColor, CollectionUtils
+from ..utils.timer_utils import TimerUtils
+from ..utils.translate_utils import TR
 
 from ..base.config.main_config import GlobalConfig, LogicName
 
@@ -21,10 +21,10 @@ from ..helper.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
 import os
 import bpy
 
-from ..base.utils.json_utils import JsonUtils
-from ..base.utils.collection_utils import CollectionColor, CollectionUtils
-from ..base.utils.translate_utils import TR
-from ..base.utils.timer_utils import TimerUtils
+from ..utils.json_utils import JsonUtils
+from ..utils.collection_utils import CollectionColor, CollectionUtils
+from ..utils.translate_utils import TR
+from ..utils.timer_utils import TimerUtils
 
 from ..base.config.main_config import GlobalConfig, LogicName
 

@@ -5,10 +5,10 @@ import copy
 
 from ...base.config.main_config import GlobalConfig, LogicName
 
-from ...base.utils.obj_utils import ObjUtils
-from ...base.utils.log_utils import LOG
-from ...base.utils.collection_utils import CollectionUtils, CollectionColor
-from ...base.utils.tips_utils import TipUtils
+from ...utils.obj_utils import ObjUtils
+from ...utils.log_utils import LOG
+from ...utils.collection_utils import CollectionUtils, CollectionColor
+from ...utils.tips_utils import TipUtils
 
 from ..migoto.m_key import M_Key
 from .draw_call_model import M_Condition

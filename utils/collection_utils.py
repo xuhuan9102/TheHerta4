@@ -1,6 +1,6 @@
 import bpy
 
-from ..config.main_config import GlobalConfig
+from ..base.config.main_config import GlobalConfig
 
 class CollectionColor:
     '''

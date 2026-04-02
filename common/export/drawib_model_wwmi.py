@@ -7,9 +7,9 @@ import numpy
 
 from ...base.config.global_properties import GlobalProterties
 from ...base.config.main_config import GlobalConfig, LogicName
-from ...base.utils.export_utils import ExportUtils, ObjElementContext, WWMIBufferBuildResult
-from ...base.utils.log_utils import LOG
-from ...base.utils.obj_utils import (
+from ...utils.export_utils import ExportUtils, ObjElementContext, WWMIBufferBuildResult
+from ...utils.log_utils import LOG
+from ...utils.obj_utils import (
     MergedObject,
     MergedObjectComponent,
     MergedObjectShapeKeys,
@@ -22,8 +22,8 @@ from ...base.utils.obj_utils import (
     select_object,
     set_active_object,
 )
-from ...base.utils.shapekey_utils import ShapeKeyUtils
-from ...base.utils.vertexgroup_utils import VertexGroupUtils
+from ...utils.shapekey_utils import ShapeKeyUtils
+from ...utils.vertexgroup_utils import VertexGroupUtils
 from ...games.wwmi.extracted_object import ExtractedObject, ExtractedObjectHelper
 from ...helper.buffer_export_helper import BufferExportHelper
 from ...helper.import_config import ImportConfig
