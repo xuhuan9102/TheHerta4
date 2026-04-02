@@ -5,6 +5,7 @@ import json
 
 from .global_properties import GlobalProterties
 
+
 # 全局配置类，使用字段默认为全局可访问的唯一静态变量的特性，来实现全局变量
 class GlobalConfig:
     # 全局静态变量,任何地方访问到的值都是唯一的

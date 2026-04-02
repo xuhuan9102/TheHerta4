@@ -1,8 +1,8 @@
 import bpy
 from bpy.types import NodeTree, Node, NodeSocket
 
-from ...base import GlobalConfig, LogicName
-from ...base.global_properties import GlobalProterties
+from ..base import GlobalConfig, LogicName
+from ..base.global_properties import GlobalProterties
 from .blueprint_node_base import SSMTBlueprintTree, SSMTNodeBase
 
 BLENDER_VERSION = bpy.app.version[:2]

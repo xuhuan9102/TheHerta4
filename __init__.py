@@ -10,10 +10,10 @@ from .ui import ui_panel_sword
 from .ui import ui_func_import
 from .ui import ui_panel_fast_texture
 
-from .common.blueprint_node import blueprint_node_obj
-from .common.blueprint_node import blueprint_node_base
-from .common.blueprint_node import blueprint_node_menu
-from .common.blueprint_node import blueprint_node_shapekey
+from .blueprint_node import blueprint_node_obj
+from .blueprint_node import blueprint_node_base
+from .blueprint_node import blueprint_node_menu
+from .blueprint_node import blueprint_node_shapekey
 
 from .ui import ui_func_export
 
