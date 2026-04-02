@@ -6,16 +6,16 @@ from ..utils.command_utils import CommandUtils
 
 from ..base import GlobalConfig, LogicName
 
-from ..games.universal.efmi import ExportEFMI
-from ..games.universal.gimi import ExportGIMI
-from ..games.universal.himi import ExportHIMI
-from ..games.universal.identityv import ExportIdentityV
-from ..games.universal.snowbreak import ExportSnowBreak
-from ..games.universal.srmi import ExportSRMI
-from ..games.universal.unity import ExportUnity
-from ..games.wwmi.wwmi_export import ExportWWMI
-from ..games.universal.yysls import ExportYYSLS
-from ..games.universal.zzmi import ExportZZMI
+from .universal.efmi import ExportEFMI
+from .universal.gimi import ExportGIMI
+from .universal.himi import ExportHIMI
+from .universal.identityv import ExportIdentityV
+from .universal.snowbreak import ExportSnowBreak
+from .universal.srmi import ExportSRMI
+from .universal.unity import ExportUnity
+from .wwmi.wwmi_export import ExportWWMI
+from .universal.yysls import ExportYYSLS
+from .universal.zzmi import ExportZZMI
 
 from ..base.blueprint_model import BluePrintModel
 from ..base.blueprint_export_helper import BlueprintExportHelper
