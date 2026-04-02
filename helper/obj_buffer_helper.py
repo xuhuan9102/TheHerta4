@@ -2,7 +2,7 @@ import collections
 import copy
 import math
 from ..base.d3d11_gametype import D3D11GameType
-from ..common.export.draw_call_model import DrawCallModel
+from ..common.draw_call_model import DrawCallModel
 
 
 from ..utils.format_utils import FormatUtils

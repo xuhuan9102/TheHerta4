@@ -17,7 +17,7 @@ from ..games.wwmi.wwmi_export import ExportWWMI
 from ..games.universal.yysls import ExportYYSLS
 from ..games.universal.zzmi import ExportZZMI
 
-from ..common.export.blueprint_model import BluePrintModel
+from ..common.blueprint_model import BluePrintModel
 from ..helper.blueprint_export_helper import BlueprintExportHelper
 
 

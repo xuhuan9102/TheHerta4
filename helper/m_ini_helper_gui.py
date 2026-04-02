@@ -5,7 +5,7 @@ import shutil
 from ..common.migoto.m_ini_builder import *
 from ..base import *
 from ..common.migoto.m_key import M_Key
-from ..common.export.draw_call_model import DrawCallModel
+from ..common.draw_call_model import DrawCallModel
 
 class M_IniHelperGUI:
     @classmethod

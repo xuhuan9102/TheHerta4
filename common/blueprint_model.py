@@ -3,21 +3,21 @@ import math
 import bpy
 import copy
 
-from ...base import GlobalConfig, LogicName
+from ..base import GlobalConfig, LogicName
 
-from ...utils.obj_utils import ObjUtils
-from ...utils.log_utils import LOG
-from ...utils.collection_utils import CollectionUtils, CollectionColor
-from ...utils.tips_utils import TipUtils
+from ..utils.obj_utils import ObjUtils
+from ..utils.log_utils import LOG
+from ..utils.collection_utils import CollectionUtils, CollectionColor
+from ..utils.tips_utils import TipUtils
 
-from ..migoto.m_key import M_Key
+from .migoto.m_key import M_Key
 from .draw_call_model import M_Condition
-from ...base.d3d11_gametype import D3D11GameType
+from ..base.d3d11_gametype import D3D11GameType
 from .draw_call_model import DrawCallModel
-from ...helper.global_key_count_helper import GlobalKeyCountHelper
-from ...helper.blueprint_export_helper import BlueprintExportHelper
+from ..helper.global_key_count_helper import GlobalKeyCountHelper
+from ..helper.blueprint_export_helper import BlueprintExportHelper
 
-from ...blueprint_node.blueprint_node_obj import SSMTNode_Object_Group, SSMTNode_SwitchKey, SSMTNode_Object_Info, SSMTNode_Result_Output
+from ..blueprint_node.blueprint_node_obj import SSMTNode_Object_Group, SSMTNode_SwitchKey, SSMTNode_Object_Info, SSMTNode_Result_Output
 
 
 class BluePrintModel:

@@ -3,8 +3,8 @@ import shutil
 
 from ..common.migoto.m_ini_builder import *
 from ..common.migoto.m_key import M_Key
-from ..common.export.draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
-from ..common.export.drawib_model import DrawIBModel
+from ..common.draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
+from ..common.drawib_model import DrawIBModel
 from ..helper.import_config import TextureMarkUpInfo
 from ..utils.json_utils import JsonUtils
 from ..utils.format_utils import Fatal

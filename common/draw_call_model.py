@@ -1,5 +1,5 @@
-from ...utils.ssmt_error_utils import SSMTErrorUtils
-from ..migoto.m_key import M_Key
+from ..utils.ssmt_error_utils import SSMTErrorUtils
+from .migoto.m_key import M_Key
 
 from dataclasses import dataclass, field
 

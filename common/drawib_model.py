@@ -2,10 +2,10 @@
 from dataclasses import field, dataclass
 import os
 
-from ...base.d3d11_gametype import D3D11GameType
-from ...base import GlobalConfig
-from ...utils.json_utils import JsonUtils
-from ...helper.texture_metadata_helper import TextureMetadataResolver
+from ..base.d3d11_gametype import D3D11GameType
+from ..base import GlobalConfig
+from ..utils.json_utils import JsonUtils
+from ..helper.texture_metadata_helper import TextureMetadataResolver
 
 import numpy
 
