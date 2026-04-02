@@ -1,8 +1,8 @@
-from ...utils.format_utils import FormatUtils
-from ...utils.format_utils import Fatal
-from ...utils.log_utils import LOG
+from ..utils.format_utils import FormatUtils
+from ..utils.format_utils import Fatal
+from ..utils.log_utils import LOG
 
-from ...base.d3d11_gametype import D3D11Element
+from .d3d11_gametype import D3D11Element
 
 import os
 import numpy
