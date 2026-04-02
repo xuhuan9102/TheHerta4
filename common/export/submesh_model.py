@@ -7,7 +7,7 @@ from ...utils.collection_utils import CollectionUtils
 from ...utils.json_utils import JsonUtils
 from ...base import GlobalConfig, LogicName
 
-from ..d3d11.d3d11_gametype import D3D11GameType
+from ...base.d3d11_gametype import D3D11GameType
 from ...helper.obj_buffer_helper import ObjBufferHelper
 
 

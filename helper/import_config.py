@@ -15,7 +15,7 @@ from ..utils.format_utils import Fatal
 
 from ..base import GlobalConfig
 
-from ..common.d3d11.d3d11_gametype import D3D11GameType
+from ..base.d3d11_gametype import D3D11GameType
 
 
 

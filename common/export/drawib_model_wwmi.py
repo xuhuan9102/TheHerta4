@@ -29,7 +29,7 @@ from ...helper.buffer_export_helper import BufferExportHelper
 from ...helper.import_config import ImportConfig
 from ...helper.obj_buffer_helper import ObjBufferHelper
 from ...helper.workspace_helper import WorkSpaceHelper
-from ..d3d11.d3d11_gametype import D3D11GameType
+from ...base.d3d11_gametype import D3D11GameType
 from .blueprint_model import BluePrintModel
 from .draw_call_model import DrawCallModel, M_DrawIndexed
 
