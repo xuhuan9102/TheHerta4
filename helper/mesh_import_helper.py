@@ -20,7 +20,7 @@ from ..base.config.main_config import GlobalConfig, LogicName
 from ..base.config.global_properties import GlobalProterties
 
 from ..common.d3d11.d3d11_gametype import D3D11Element
-from ..base.wwmi_config.extracted_object import ExtractedObjectHelper
+from ..games.wwmi.extracted_object import ExtractedObjectHelper
 
 # 用于解决 AttributeError: 'IMPORT_MESH_OT_migoto_raw_buffers_mmt' object has no attribute 'filepath'
 from bpy_extras.io_utils import unpack_list, axis_conversion

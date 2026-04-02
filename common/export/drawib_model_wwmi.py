@@ -24,7 +24,7 @@ from ...base.utils.obj_utils import (
 )
 from ...base.utils.shapekey_utils import ShapeKeyUtils
 from ...base.utils.vertexgroup_utils import VertexGroupUtils
-from ...base.wwmi_config.extracted_object import ExtractedObject, ExtractedObjectHelper
+from ...games.wwmi.extracted_object import ExtractedObject, ExtractedObjectHelper
 from ...helper.buffer_export_helper import BufferExportHelper
 from ...helper.import_config import ImportConfig
 from ...helper.obj_buffer_helper import ObjBufferHelper
