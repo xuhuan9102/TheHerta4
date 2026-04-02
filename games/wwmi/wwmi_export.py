@@ -1,7 +1,7 @@
 import os
 
 from ...base.config.global_properties import GlobalProterties
-from ...base.config.global_config import GlobalConfig, LogicName
+from ...base.global_config import GlobalConfig, LogicName
 from ...common.export.drawib_model_wwmi import DrawIBModelWWMI
 from ...common.export.blueprint_model import BluePrintModel
 from ...common.migoto.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType

@@ -5,7 +5,7 @@ from ..common.export.submesh_model import SubMeshModel
 from ..common.export.drawib_model import DrawIBModel
 
 from dataclasses import dataclass,field
-from ..base.config.global_config import GlobalConfig
+from ..base.global_config import GlobalConfig
 
 from ..helper.buffer_export_helper import BufferExportHelper
 from ..common.migoto.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType

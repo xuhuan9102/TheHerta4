@@ -1,6 +1,6 @@
 import os
 
-from ..base.config.global_config import GlobalConfig
+from ..base.global_config import GlobalConfig
 from ..base.config.global_properties import GlobalProterties
 from ..helper.global_key_count_helper import GlobalKeyCountHelper
 from ..helper.m_ini_helper import M_IniHelper

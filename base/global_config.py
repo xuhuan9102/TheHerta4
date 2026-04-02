@@ -3,7 +3,7 @@ import os
 import json
 
 
-from .global_properties import GlobalProterties
+from .config.global_properties import GlobalProterties
 
 '''
 执行逻辑名称

@@ -3,7 +3,7 @@ import os
 import shutil
 
 from ..common.migoto.m_ini_builder import *
-from ..base.config.global_config import GlobalConfig
+from ..base.global_config import GlobalConfig
 from ..base.config.global_properties import GlobalProterties
 from ..common.migoto.m_key import M_Key
 from ..common.export.draw_call_model import DrawCallModel

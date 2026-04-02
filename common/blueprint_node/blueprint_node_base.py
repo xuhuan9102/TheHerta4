@@ -7,7 +7,7 @@ import bpy
 from bpy.types import NodeTree, Node, NodeSocket
 
 from ...utils.translate_utils import TR
-from ...base.config.global_config import GlobalConfig
+from ...base.global_config import GlobalConfig
 
 
 
