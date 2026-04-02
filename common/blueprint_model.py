@@ -3,7 +3,8 @@ import math
 import bpy
 import copy
 
-from ..common import GlobalConfig, LogicName
+from .global_config import GlobalConfig
+from .logic_name import LogicName
 
 from ..utils.obj_utils import ObjUtils
 from ..utils.log_utils import LOG

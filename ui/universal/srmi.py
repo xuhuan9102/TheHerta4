@@ -1,6 +1,6 @@
 from ...common.blueprint_model import BluePrintModel
 from dataclasses import dataclass,field
-from ...common import GlobalConfig
+from ...common.global_config import GlobalConfig
 from ...common.global_properties import GlobalProterties
 
 from ...common.buffer_export_helper import BufferExportHelper

@@ -1,7 +1,8 @@
 # The helper class helps us to execute outside programs.
+import os
 import subprocess
 
-from ..common import *
+from ..common.global_config import GlobalConfig
 from ..common.global_properties import GlobalProterties
 
 class CommandUtils:

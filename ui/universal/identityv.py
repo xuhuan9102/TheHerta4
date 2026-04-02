@@ -1,6 +1,6 @@
 import os
 
-from ...common import GlobalConfig
+from ...common.global_config import GlobalConfig
 from ...common.global_properties import GlobalProterties
 from ...common.global_key_count_helper import GlobalKeyCountHelper
 from ...common.m_ini_helper import M_IniHelper

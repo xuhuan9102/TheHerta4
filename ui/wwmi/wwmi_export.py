@@ -1,7 +1,8 @@
 import os
 
 from ...common.global_properties import GlobalProterties
-from ...common import GlobalConfig, LogicName
+from ...common.global_config import GlobalConfig
+from ...common.logic_name import LogicName
 from .drawib_model_wwmi import DrawIBModelWWMI
 from ...common.blueprint_model import BluePrintModel
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType

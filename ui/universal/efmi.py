@@ -3,7 +3,7 @@ from ...common.draw_call_model import DrawCallModel
 from ...common.submesh_model import SubMeshModel
 from ...common.drawib_model import DrawIBModel
 from dataclasses import dataclass,field
-from ...common import GlobalConfig
+from ...common.global_config import GlobalConfig
 from ...common.global_properties import GlobalProterties
 
 from ...common.buffer_export_helper import BufferExportHelper

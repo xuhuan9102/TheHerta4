@@ -5,7 +5,7 @@ from ...common.submesh_model import SubMeshModel
 from ...common.drawib_model import DrawIBModel
 
 from dataclasses import dataclass,field
-from ...common import GlobalConfig
+from ...common.global_config import GlobalConfig
 
 from ...common.buffer_export_helper import BufferExportHelper
 from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType

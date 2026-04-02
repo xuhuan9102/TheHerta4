@@ -4,7 +4,8 @@ from ..utils.timer_utils import TimerUtils
 from ..utils.translate_utils import TR
 from ..utils.command_utils import CommandUtils
 
-from ..common import GlobalConfig, LogicName
+from ..common.global_config import GlobalConfig
+from ..common.logic_name import LogicName
 
 from .universal.efmi import ExportEFMI
 from .universal.gimi import ExportGIMI

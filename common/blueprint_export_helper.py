@@ -1,5 +1,5 @@
 import bpy
-from . import *
+from .global_config import GlobalConfig
 from .m_key import M_Key
 
 class BlueprintExportHelper:

@@ -4,7 +4,8 @@ import numpy
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ..common import GlobalConfig, LogicName
+from ..common.global_config import GlobalConfig
+from ..common.logic_name import LogicName
 from .obj_utils import ObjUtils
 from .shapekey_utils import ShapeKeyUtils
 from .timer_utils import TimerUtils
