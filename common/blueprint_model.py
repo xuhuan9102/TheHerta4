@@ -12,7 +12,7 @@ from ..utils.collection_utils import CollectionUtils, CollectionColor
 from ..utils.tips_utils import TipUtils
 
 from .m_key import M_Key
-from .draw_call_model import M_Condition
+from .m_condition import M_Condition
 from .d3d11_gametype import D3D11GameType
 from .draw_call_model import DrawCallModel
 from .global_key_count_helper import GlobalKeyCountHelper

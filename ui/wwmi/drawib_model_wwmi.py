@@ -1,6 +1,7 @@
 import math
 import os
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 import bpy
 import numpy
@@ -32,7 +33,12 @@ from ...common.obj_buffer_helper import ObjBufferHelper
 from ...common.workspace_helper import WorkSpaceHelper
 from ...common.d3d11_gametype import D3D11GameType
 from ...common.blueprint_model import BluePrintModel
-from ...common.draw_call_model import DrawCallModel, M_DrawIndexed
+from ...common.draw_call_model import DrawCallModel
+
+
+class BlendRemapEntry(TypedDict):
+    forward: list[int]
+    reverse: dict[int, int]
 
 
 @dataclass
@@ -57,12 +63,10 @@ class DrawIBModelWWMI:
 
     mesh_vertex_count: int = field(init=False, default=0)
     merged_object: MergedObject | None = field(init=False, default=None, repr=False)
-    obj_name_drawindexed_dict: dict[str, M_DrawIndexed] = field(init=False, default_factory=dict, repr=False)
-
     blend_remap: bool = field(init=False, default=False)
     obj_buffer_model_wwmi: WWMIBufferBuildResult | None = field(init=False, default=None, repr=False)
-    blend_remap_maps: dict = field(init=False, default_factory=dict, repr=False)
-    blend_remap_used: dict = field(init=False, default_factory=dict, repr=False)
+    blend_remap_maps: dict[str, BlendRemapEntry] = field(init=False, default_factory=dict, repr=False)
+    blend_remap_used: dict[str, bool] = field(init=False, default_factory=dict, repr=False)
     component_real_vg_count_dict: dict[int, int] = field(init=False, default_factory=dict, repr=False)
 
     blend_remap_forward_buffer: numpy.ndarray | None = field(init=False, default=None, repr=False)
@@ -70,12 +74,12 @@ class DrawIBModelWWMI:
     blend_remap_vertex_vg_buffer: numpy.ndarray | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self):
-        drawib_aliasname_dict = WorkSpaceHelper.get_drawib_aliasname_dict()
+        drawib_aliasname_dict: dict[str, str] = WorkSpaceHelper.get_drawib_aliasname_dict()
         self.draw_ib_alias = drawib_aliasname_dict.get(self.draw_ib, self.draw_ib)
 
         self.import_config = ImportConfig(draw_ib=self.draw_ib)
         self.d3d11GameType = self.import_config.d3d11GameType
-        metadata_path = os.path.join(
+        metadata_path: str = os.path.join(
             GlobalConfig.path_extract_gametype_folder(
                 draw_ib=self.draw_ib,
                 gametype_name=self.d3d11GameType.GameTypeName,
@@ -93,7 +97,7 @@ class DrawIBModelWWMI:
         self.component_name_component_model_dict = {}
 
         for expected_first_index, part_name in self.import_config.iter_match_first_index_partname_pairs():
-            component_drawcall_model_list = []
+            component_drawcall_model_list: list[DrawCallModel] = []
 
             for drawcall_model in self.ordered_drawcall_model_list:
                 if int(drawcall_model.match_first_index) != expected_first_index:
@@ -111,19 +115,19 @@ class DrawIBModelWWMI:
 
         self.merged_object = self.build_merged_object(extracted_object=self.extracted_object)
 
-        self.obj_name_drawindexed_dict = {}
+        obj_name_temp_object_dict: dict[str, TempObject] = {}
         for component in self.merged_object.components:
-            for component_obj in component.objects:
-                draw_indexed_obj = M_DrawIndexed()
-                draw_indexed_obj.DrawNumber = str(component_obj.index_count)
-                draw_indexed_obj.DrawOffsetIndex = str(component_obj.index_offset)
-                draw_indexed_obj.AliasName = component_obj.name
-                self.obj_name_drawindexed_dict[component_obj.name] = draw_indexed_obj
+            for temp_object in component.objects:
+                obj_name_temp_object_dict[temp_object.name] = temp_object
 
         for component_model in self.component_model_list:
-            updated_drawcall_model_list = []
+            updated_drawcall_model_list: list[DrawCallModel] = []
             for drawcall_model in component_model.final_ordered_draw_obj_model_list:
-                drawcall_model.drawindexed_obj = self.obj_name_drawindexed_dict.get(drawcall_model.obj_name)
+                temp_object = obj_name_temp_object_dict.get(drawcall_model.obj_name)
+                if temp_object is not None:
+                    drawcall_model.index_count = temp_object.index_count
+                    drawcall_model.index_offset = temp_object.index_offset
+                    drawcall_model.vertex_count = temp_object.vertex_count
                 updated_drawcall_model_list.append(drawcall_model)
             component_model.final_ordered_draw_obj_model_list = updated_drawcall_model_list
             self.component_name_component_model_dict[component_model.component_name] = component_model
@@ -147,8 +151,8 @@ class DrawIBModelWWMI:
 
         self.obj_buffer_model_wwmi = ExportUtils.build_wwmi_obj_buffer_result(element_context)
 
-        position_stride = self.d3d11GameType.CategoryStrideDict["Position"]
-        position_bytelength = len(self.obj_buffer_model_wwmi.category_buffer_dict["Position"])
+        position_stride: int = self.d3d11GameType.CategoryStrideDict["Position"]
+        position_bytelength: int = len(self.obj_buffer_model_wwmi.category_buffer_dict["Position"])
         self.mesh_vertex_count = int(position_bytelength / position_stride)
 
         if self.blend_remap:
@@ -200,7 +204,7 @@ class DrawIBModelWWMI:
             BufferExportHelper.write_buf_blendindices_uint16(self.blend_remap_vertex_vg_buffer, self.draw_ib + "-BlendRemapVertexVG.buf")
 
     def build_merged_object(self, extracted_object: ExtractedObject) -> MergedObject:
-        components = []
+        components: list[MergedObjectComponent] = []
         for _component in extracted_object.components:
             components.append(MergedObjectComponent(objects=[], index_count=0))
 
@@ -283,10 +287,10 @@ class DrawIBModelWWMI:
                 component.vertex_count += temp_object.vertex_count
                 component.index_count += temp_object.index_count
 
-        drawib_merged_object = []
-        drawib_vertex_count = 0
-        drawib_index_count = 0
-        component_obj_list = []
+        drawib_merged_object: list[bpy.types.Object] = []
+        drawib_vertex_count: int = 0
+        drawib_index_count: int = 0
+        component_obj_list: list[bpy.types.Object] = []
 
         for component_index, component in enumerate(components):
             component_merged_object = [temp_object.object for temp_object in component.objects]
@@ -368,13 +372,13 @@ class DrawIBModelWWMI:
     def export_blendremap_forward_and_reverse(self, component_objects: list[bpy.types.Object]):
         num_vgs = self.d3d11GameType.get_blendindices_count_wwmi()
 
-        blend_remap_forward = numpy.empty(0, dtype=numpy.uint16)
-        blend_remap_reverse = numpy.empty(0, dtype=numpy.uint16)
-        remap_maps = {}
-        remap_used = {}
+        blend_remap_forward: numpy.ndarray = numpy.empty(0, dtype=numpy.uint16)
+        blend_remap_reverse: numpy.ndarray = numpy.empty(0, dtype=numpy.uint16)
+        remap_maps: dict[str, BlendRemapEntry] = {}
+        remap_used: dict[str, bool] = {}
 
         for component_obj in component_objects:
-            used_vg_set = set()
+            used_vg_set: set[int] = set()
 
             for vertex in component_obj.data.vertices:
                 groups = [(group.group, group.weight) for group in vertex.groups]
@@ -405,7 +409,7 @@ class DrawIBModelWWMI:
             blend_remap_reverse = numpy.concatenate((blend_remap_reverse, reverse), axis=0)
 
             forward_list = [int(value) for value in obj_vg_ids.tolist()]
-            reverse_map = {int(value): int(index) for index, value in enumerate(forward_list)}
+            reverse_map: dict[int, int] = {int(value): int(index) for index, value in enumerate(forward_list)}
             remap_maps[component_obj.name] = {"forward": forward_list, "reverse": reverse_map}
             remap_used[component_obj.name] = True
 
@@ -427,7 +431,7 @@ class DrawIBModelWWMI:
             end = start + poly.loop_total
             loop_to_poly[start:end] = poly.index
 
-        arr = None
+        arr: numpy.ndarray | None = None
         if "BLENDINDICES" in getattr(element_context, "original_elementname_data_dict", {}):
             arr = element_context.original_elementname_data_dict["BLENDINDICES"].copy()
         elif element_context.element_vertex_ndarray is not None and "BLENDINDICES" in element_context.element_vertex_ndarray.dtype.names:
@@ -437,7 +441,7 @@ class DrawIBModelWWMI:
             return
 
         poly_count = len(mesh.polygons)
-        polygon_to_objname = [None] * poly_count
+        polygon_to_objname: list[str | None] = [None] * poly_count
 
         for component in self.merged_object.components:
             component_remap_key_name = getattr(component, "remap_key_name", None)

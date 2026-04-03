@@ -3,13 +3,14 @@ import shutil
 
 from .m_ini_builder import *
 from .m_key import M_Key
-from .draw_call_model import DrawCallModel, M_DrawIndexed, M_DrawIndexedInstanced
+from .draw_call_model import DrawCallModel
 from .drawib_model import DrawIBModel
 from .import_config import TextureMarkUpInfo
 from ..utils.json_utils import JsonUtils
 from ..utils.format_utils import Fatal
-
-from . import *
+from .global_config import GlobalConfig
+from .global_properties import GlobalProterties
+from .logic_name import LogicName
 
 from .global_key_count_helper import GlobalKeyCountHelper
 from .workspace_helper import WorkSpaceHelper
@@ -147,31 +148,9 @@ class M_IniHelper:
         return None
 
     @classmethod
-    def _get_drawindexed_obj(
-        cls,
-        obj_model: DrawCallModel,
-        obj_name_draw_offset_dict: dict[str, int] | None = None,
-    ) -> M_DrawIndexed:
-        drawindexed_obj = getattr(obj_model, "drawindexed_obj", None)
-        if drawindexed_obj is not None:
-            return drawindexed_obj
-
-        drawindexed_obj = M_DrawIndexed()
-        drawindexed_obj.DrawNumber = str(getattr(obj_model, "index_count", 0))
-
-        draw_offset = getattr(obj_model, "index_offset", 0)
-        if obj_name_draw_offset_dict is not None:
-            draw_offset = obj_name_draw_offset_dict.get(obj_model.obj_name, draw_offset)
-
-        drawindexed_obj.DrawOffsetIndex = str(draw_offset)
-        drawindexed_obj.UniqueVertexCount = getattr(obj_model, "vertex_count", 0)
-        drawindexed_obj.AliasName = getattr(obj_model, "comment_alias_name", obj_model.obj_name)
-        return drawindexed_obj
-
-    @classmethod
     def get_drawindexed_str_list(
         cls,
-        ordered_draw_obj_model_list,
+        ordered_draw_obj_model_list: list[DrawCallModel],
         obj_name_draw_offset_dict: dict[str, int] | None = None,
     ) -> list[str]:
         # 传统的使用DrawIndexed方式调用这个
@@ -189,23 +168,15 @@ class M_IniHelper:
             if condition_str != "":
                 drawindexed_str_list.append("if " + condition_str)
                 for obj_model in obj_model_list:
-                    drawindexed_obj = cls._get_drawindexed_obj(
-                        obj_model=obj_model,
-                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
-                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
-                    drawindexed_str_list.append("  " + drawindexed_obj.get_draw_str())
+                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
+                    drawindexed_str_list.append("  " + obj_model.get_drawindexed_str(obj_name_draw_offset_dict))
                 drawindexed_str_list.append("endif")
             else:
                 for obj_model in obj_model_list:
-                    drawindexed_obj = cls._get_drawindexed_obj(
-                        obj_model=obj_model,
-                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
-                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
-                    drawindexed_str_list.append(drawindexed_obj.get_draw_str())
+                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
+                    drawindexed_str_list.append(obj_model.get_drawindexed_str(obj_name_draw_offset_dict))
             drawindexed_str_list.append("")
 
         return drawindexed_str_list
@@ -213,7 +184,7 @@ class M_IniHelper:
     @classmethod
     def get_drawindexed_instanced_str_list(
         cls,
-        ordered_draw_obj_model_list,
+        ordered_draw_obj_model_list: list[DrawCallModel],
         obj_name_draw_offset_dict: dict[str, int] | None = None,
     ) -> list[str]:
         # 使用DrawIndexedInstanced方式调用这个
@@ -231,34 +202,15 @@ class M_IniHelper:
             if condition_str != "":
                 drawindexed_str_list.append("if " + condition_str)
                 for obj_model in obj_model_list:
-                    drawindexed_obj = cls._get_drawindexed_obj(
-                        obj_model=obj_model,
-                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
-                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
-                    
-                    drawindexed_instanced_obj = M_DrawIndexedInstanced()
-                    
-                    drawindexed_instanced_obj.IndexCountPerInstance = int(drawindexed_obj.DrawNumber)
-                    drawindexed_instanced_obj.StartIndexLocation = int(drawindexed_obj.DrawOffsetIndex)
-
-                    drawindexed_str_list.append("  " + drawindexed_instanced_obj.get_draw_str())
+                    drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
+                    drawindexed_str_list.append("  " + obj_model.get_drawindexed_instanced_str(obj_name_draw_offset_dict))
                 drawindexed_str_list.append("endif")
             else:
                 for obj_model in obj_model_list:
-                    drawindexed_obj = cls._get_drawindexed_obj(
-                        obj_model=obj_model,
-                        obj_name_draw_offset_dict=obj_name_draw_offset_dict,
-                    )
                     display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
-                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(drawindexed_obj.UniqueVertexCount) + "]" )
-                    
-                    drawindexed_instanced_obj = M_DrawIndexedInstanced()
-                    drawindexed_instanced_obj.IndexCountPerInstance = int(drawindexed_obj.DrawNumber)
-                    drawindexed_instanced_obj.StartIndexLocation = int(drawindexed_obj.DrawOffsetIndex)
-
-                    drawindexed_str_list.append("  " + drawindexed_instanced_obj.get_draw_str())
+                    drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
+                    drawindexed_str_list.append("  " + obj_model.get_drawindexed_instanced_str(obj_name_draw_offset_dict))
             drawindexed_str_list.append("")
 
         return drawindexed_str_list
