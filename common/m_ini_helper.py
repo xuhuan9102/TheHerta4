@@ -157,11 +157,12 @@ class M_IniHelper:
         # 在输出之前，我们需要根据condition对obj_model进行分组
         condition_str_obj_model_list_dict:dict[str,list[DrawCallModel]] = {}
         for obj_model in ordered_draw_obj_model_list:
+            condition_str = obj_model.get_condition_str()
 
-            obj_model_list = condition_str_obj_model_list_dict.get(obj_model.condition.condition_str,[])
+            obj_model_list = condition_str_obj_model_list_dict.get(condition_str,[])
             
             obj_model_list.append(obj_model)
-            condition_str_obj_model_list_dict[obj_model.condition.condition_str] = obj_model_list
+            condition_str_obj_model_list_dict[condition_str] = obj_model_list
         
         drawindexed_str_list:list[str] = []
         for condition_str, obj_model_list in condition_str_obj_model_list_dict.items():
@@ -191,11 +192,12 @@ class M_IniHelper:
         # 在输出之前，我们需要根据condition对obj_model进行分组
         condition_str_obj_model_list_dict:dict[str,list[DrawCallModel]] = {}
         for obj_model in ordered_draw_obj_model_list:
+            condition_str = obj_model.get_condition_str()
 
-            obj_model_list = condition_str_obj_model_list_dict.get(obj_model.condition.condition_str,[])
+            obj_model_list = condition_str_obj_model_list_dict.get(condition_str,[])
             
             obj_model_list.append(obj_model)
-            condition_str_obj_model_list_dict[obj_model.condition.condition_str] = obj_model_list
+            condition_str_obj_model_list_dict[condition_str] = obj_model_list
         
         drawindexed_str_list:list[str] = []
         for condition_str, obj_model_list in condition_str_obj_model_list_dict.items():

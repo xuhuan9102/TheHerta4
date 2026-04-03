@@ -12,7 +12,6 @@ from ..utils.collection_utils import CollectionUtils, CollectionColor
 from ..utils.tips_utils import TipUtils
 
 from .m_key import M_Key
-from .m_condition import M_Condition
 from .d3d11_gametype import D3D11GameType
 from .draw_call_model import DrawCallModel
 from .global_key_count_helper import GlobalKeyCountHelper
@@ -147,7 +146,7 @@ class BluePrintModel:
             if hasattr(unknown_node, 'original_object_name') and unknown_node.original_object_name:
                 obj_model.display_name = unknown_node.original_object_name
 
-            obj_model.condition = M_Condition(work_key_list=copy.deepcopy(chain_key_list))
+            obj_model.work_key_list = copy.deepcopy(chain_key_list)
             
             self.ordered_draw_obj_data_model_list.append(obj_model)
 
