@@ -77,35 +77,42 @@ class DrawIBModelWWMI:
         drawib_aliasname_dict: dict[str, str] = WorkSpaceHelper.get_drawib_aliasname_dict()
         self.draw_ib_alias = drawib_aliasname_dict.get(self.draw_ib, self.draw_ib)
 
-        self.import_config = ImportConfig(draw_ib=self.draw_ib)
-        self.d3d11GameType = self.import_config.d3d11GameType
-        metadata_path: str = os.path.join(
-            GlobalConfig.path_extract_gametype_folder(
-                draw_ib=self.draw_ib,
-                gametype_name=self.d3d11GameType.GameTypeName,
-            ),
-            "Metadata.json",
-        )
-        self.extracted_object = ExtractedObjectHelper.read_metadata(metadata_path)
-
         self.ordered_drawcall_model_list = ObjBufferHelper.get_obj_data_model_list_by_draw_ib(
             ordered_draw_obj_data_model_list=self.blueprint_model.ordered_draw_obj_data_model_list,
             draw_ib=self.draw_ib,
         )
 
+        if len(self.ordered_drawcall_model_list) == 0:
+            raise ValueError("当前 DrawIB 没有可导出的 DrawCallModel")
+
+        primary_unique_str = self.ordered_drawcall_model_list[0].get_unique_str()
+        self.import_config = ImportConfig(unique_str=primary_unique_str)
+        self.d3d11GameType = self.import_config.d3d11GameType
+        metadata_path: str = os.path.join(self.import_config.extract_gametype_folder_path, "Metadata.json")
+        self.extracted_object = ExtractedObjectHelper.read_metadata(metadata_path)
+
         self.component_model_list = []
         self.component_name_component_model_dict = {}
 
-        for expected_first_index, part_name in self.import_config.iter_match_first_index_partname_pairs():
-            component_drawcall_model_list: list[DrawCallModel] = []
+        unique_str_import_config_dict: dict[str, ImportConfig] = {primary_unique_str: self.import_config}
+        component_name_drawcall_model_dict: dict[str, list[DrawCallModel]] = {}
 
-            for drawcall_model in self.ordered_drawcall_model_list:
-                if int(drawcall_model.match_first_index) != expected_first_index:
-                    continue
-                component_drawcall_model_list.append(drawcall_model)
+        for drawcall_model in self.ordered_drawcall_model_list:
+            unique_str = drawcall_model.get_unique_str()
+            drawcall_import_config = unique_str_import_config_dict.get(unique_str)
+            if drawcall_import_config is None:
+                drawcall_import_config = ImportConfig(unique_str=unique_str)
+                unique_str_import_config_dict[unique_str] = drawcall_import_config
 
+            part_name = drawcall_import_config.part_name or unique_str
+            component_name = "Component " + part_name
+            component_drawcall_model_list = component_name_drawcall_model_dict.get(component_name, [])
+            component_drawcall_model_list.append(drawcall_model)
+            component_name_drawcall_model_dict[component_name] = component_drawcall_model_list
+
+        for component_name, component_drawcall_model_list in component_name_drawcall_model_dict.items():
             component_model = ComponentModel(
-                component_name="Component " + part_name,
+                component_name=component_name,
                 final_ordered_draw_obj_model_list=component_drawcall_model_list,
             )
             self.component_model_list.append(component_model)

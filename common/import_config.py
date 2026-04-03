@@ -19,37 +19,43 @@ from .d3d11_gametype import D3D11GameType
 
 
 
-def check_and_get_import_json_path(draw_ib: str, gametypename: str) -> tuple[bool, str, Optional[str]]:
+def check_and_get_import_json_path(unique_str: str) -> tuple[bool, str, Optional[str]]:
     '''
-    检查 tmp.json 是否存在
-    返回: (是否存在, 错误信息, 找到的tmp.json路径)
+    检查 unique_str 对应的 import.json 是否存在
+    返回: (是否存在, 错误信息, 找到的import.json路径)
     '''
-    if not gametypename:
-        workspace_folder = GlobalConfig.path_workspace_folder()
-        draw_ib_folder = os.path.join(workspace_folder, draw_ib)
-        
-        if os.path.exists(draw_ib_folder):
-            dirs = os.listdir(draw_ib_folder)
-            found_types = []
-            for dirname in dirs:
-                if dirname.startswith("TYPE_"):
-                    type_folder = os.path.join(draw_ib_folder, dirname)
-                    tmp_json_path = os.path.join(type_folder, "import.json")
-                    if os.path.exists(tmp_json_path):
-                        found_types.append(dirname.replace("TYPE_", ""))
-            
-            if found_types:
-                return False, f"DrawIB '{draw_ib}' 找到以下数据类型但没有在 Import.json 中记录: {', '.join(found_types)}\n请尝试重新执行「一键导入当前工作空间内容」操作。", None
-        
-        return False, f"DrawIB '{draw_ib}' 没有找到对应的提取数据。\n请确保已从游戏中提取模型并执行「一键导入当前工作空间内容」操作。", None
-    
-    extract_gametype_folder_path = GlobalConfig.path_extract_gametype_folder(draw_ib=draw_ib, gametype_name=gametypename)
-    tmp_json_path = os.path.join(extract_gametype_folder_path, "tmp.json")
-    
-    if os.path.exists(tmp_json_path):
-        return True, "", tmp_json_path
-    
-    return False, f"找不到 tmp.json 文件: {tmp_json_path}\n请确保已从游戏中提取模型并执行「一键导入当前工作空间内容」操作。", None
+    workspace_folder = GlobalConfig.path_workspace_folder()
+    unique_str_folder = os.path.join(workspace_folder, unique_str)
+    if not os.path.exists(unique_str_folder):
+        return False, f"unique_str '{unique_str}' 没有找到对应的提取数据。\n请确保已从游戏中提取模型并执行「一键导入当前工作空间内容」操作。", None
+
+    workspace_import_json_path = os.path.join(workspace_folder, "Import.json")
+    workspace_import_json = JsonUtils.LoadFromFile(workspace_import_json_path) if os.path.exists(workspace_import_json_path) else {}
+    gametypename = workspace_import_json.get(unique_str, "")
+
+    if gametypename:
+        import_json_path = os.path.join(unique_str_folder, "TYPE_" + gametypename, "import.json")
+        if os.path.exists(import_json_path):
+            return True, "", import_json_path
+
+    found_type_paths = []
+    found_types = []
+    for dirname in os.listdir(unique_str_folder):
+        if not dirname.startswith("TYPE_"):
+            continue
+
+        import_json_path = os.path.join(unique_str_folder, dirname, "import.json")
+        if os.path.exists(import_json_path):
+            found_type_paths.append(import_json_path)
+            found_types.append(dirname.replace("TYPE_", ""))
+
+    if len(found_type_paths) == 1:
+        return True, "", found_type_paths[0]
+
+    if len(found_type_paths) > 1:
+        return False, f"unique_str '{unique_str}' 找到以下数据类型但没有在 Import.json 中记录: {', '.join(found_types)}\n请尝试重新执行「一键导入当前工作空间内容」操作。", None
+
+    return False, f"unique_str '{unique_str}' 没有找到对应的 import.json。\n请确保已从游戏中提取模型并执行「一键导入当前工作空间内容」操作。", None
 
 @dataclass
 class TextureMarkUpInfo:
@@ -72,30 +78,20 @@ class ImportConfig:
     所以这里我们读取Import.json来确定要从哪个提取出来的数据类型文件夹中读取
     然后读取tmp.json来初始化D3D11GameType
     '''
-    draw_ib: str  # DrawIB
-    
-    # 使用field(default_factory)来初始化可变默认值
-    category_hash_dict: Dict[str, str] = field(init=False,default_factory=dict)
-    import_model_list: List[str] = field(init=False,default_factory=list)
-    match_first_index_list: List[int] = field(init=False,default_factory=list)
-    match_first_index_partname_dict: Dict[int, str] = field(init=False,default_factory=dict)
-    vshash_list: List[str] = field(init=False,default_factory=list)
-    
-    vertex_limit_hash: str = ""
-    work_game_type: str = ""
-    
-    # 全新的贴图标记设计
-    partname_texturemarkinfolist_dict:Dict[str,list[TextureMarkUpInfo]] = field(init=False,default_factory=dict)
+    unique_str: str
+
+    draw_ib: str = field(init=False, default="")
+    extract_gametype_folder_path: str = field(init=False, default="")
+    d3d11GameType: D3D11GameType = field(init=False, repr=False)
+    part_name: str = field(init=False, default="")
 
     def __post_init__(self):
-        exists, error_msg, tmp_json_path = check_and_get_import_json_path(self.draw_ib, "")
+        self.draw_ib = self.unique_str.split("-")[0] if "-" in self.unique_str else self.unique_str
+
+        exists, error_msg, import_json_path = check_and_get_import_json_path(self.unique_str)
         if not exists:
             raise Fatal(error_msg)
-        gametypename = tmp_json_path.split(os.sep)[-2].replace("TYPE_", "")
-
-        extract_gametype_folder_path = GlobalConfig.path_extract_gametype_folder(draw_ib=self.draw_ib,gametype_name=gametypename)
-        self.extract_gametype_folder_path = extract_gametype_folder_path
-        tmp_json_path = os.path.join(extract_gametype_folder_path,"tmp.json")
+        self.extract_gametype_folder_path = os.path.join(os.path.dirname(import_json_path), "")
         
         from .blueprint_export_helper import BlueprintExportHelper
         datatype_node_info_list = BlueprintExportHelper.get_datatype_node_info()
@@ -108,16 +104,9 @@ class ImportConfig:
                     matched_datatype_node_info = node_info
                     print(f"找到匹配的数据类型节点，DrawIB: {self.draw_ib}, 节点: {node.name}")
                     break
-        
-        if not os.path.exists(tmp_json_path):
-            exists, error_msg, found_path = check_and_get_import_json_path(self.draw_ib, gametypename)
-            if not exists:
-                raise Fatal(error_msg)
-            if found_path:
-                tmp_json_path = found_path
-        
+
         if matched_datatype_node_info and matched_datatype_node_info.get("tmp_json_path") and os.path.exists(matched_datatype_node_info["tmp_json_path"]):
-            with open(tmp_json_path, 'r', encoding='utf-8') as f:
+            with open(import_json_path, 'r', encoding='utf-8') as f:
                 base_tmp_json_dict = json.load(f)
             with open(matched_datatype_node_info["tmp_json_path"], 'r', encoding='utf-8') as f:
                 datatype_tmp_json_dict = json.load(f)
@@ -139,63 +128,18 @@ class ImportConfig:
             except:
                 pass
         else:
-            self.d3d11GameType:D3D11GameType = D3D11GameType(tmp_json_path)
-            tmp_json_dict = JsonUtils.LoadFromFile(tmp_json_path)
+            self.d3d11GameType:D3D11GameType = D3D11GameType(import_json_path)
+            tmp_json_dict = JsonUtils.LoadFromFile(import_json_path)
         
         '''
-        读取tmp.json中的内容，后续会用于生成Mod的ini文件
+        读取 import.json 中的内容，后续会用于生成Mod的 ini 文件
         需要在确定了D3D11GameType之后再执行
         注意：这里使用已经确定的 tmp_json_dict
         '''
-        self.category_hash_dict = tmp_json_dict["CategoryHash"]
-        self.import_model_list = tmp_json_dict["ImportModelList"]
-        self.match_first_index_list = tmp_json_dict["MatchFirstIndex"]
         raw_part_name_list = tmp_json_dict["PartNameList"]
-        self.match_first_index_partname_dict = {
-            int(match_first_index): part_name
-            for match_first_index, part_name in zip(self.match_first_index_list, raw_part_name_list)
-        }
-        # print(self.partname_textureresourcereplace_dict)
-        self.vertex_limit_hash = tmp_json_dict["VertexLimitVB"]
-        self.work_game_type = tmp_json_dict["WorkGameType"]
-        self.vshash_list = tmp_json_dict.get("VSHashList",[])
-        self.original_vertex_count = tmp_json_dict.get("OriginalVertexCount",0)
+        self.part_name = str(raw_part_name_list[0]) if raw_part_name_list else ""
 
-        # 自动贴图依赖于这个字典
-        partname_texturemarkupinfolist_jsondict = tmp_json_dict["ComponentTextureMarkUpInfoListDict"]
-
-
-        print("读取配置: " + tmp_json_path)
-        # print(partname_textureresourcereplace_dict)
-        for partname, texture_markup_info_dict_list in partname_texturemarkupinfolist_jsondict.items():
-
-            texture_markup_info_list = []
-
-            for texture_markup_info_dict in texture_markup_info_dict_list:
-                markup_info = TextureMarkUpInfo()
-                markup_info.mark_name = texture_markup_info_dict["MarkName"]
-                markup_info.mark_type = texture_markup_info_dict["MarkType"]
-                markup_info.mark_slot = texture_markup_info_dict["MarkSlot"]
-                markup_info.mark_hash = texture_markup_info_dict["MarkHash"]
-                markup_info.mark_filename = texture_markup_info_dict["MarkFileName"]
-
-                texture_markup_info_list.append(markup_info)
-
-            self.partname_texturemarkinfolist_dict[partname] = texture_markup_info_list
-
-    def get_part_name_by_match_first_index(self, match_first_index: int | str) -> str:
-        try:
-            normalized_match_first_index = int(match_first_index)
-        except (TypeError, ValueError):
-            return ""
-
-        return self.match_first_index_partname_dict.get(normalized_match_first_index, "")
-
-    def iter_match_first_index_partname_pairs(self):
-        for match_first_index in self.match_first_index_list:
-            part_name = self.match_first_index_partname_dict.get(int(match_first_index), "")
-            if part_name:
-                yield int(match_first_index), part_name
+        print("读取配置: " + import_json_path)
 
 
 

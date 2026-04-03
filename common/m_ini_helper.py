@@ -37,6 +37,19 @@ class M_IniHelper:
             if extract_gametype_folder_path:
                 return extract_gametype_folder_path
 
+        submesh_model_list = getattr(draw_ib_model, "submesh_model_list", [])
+        if submesh_model_list:
+            first_submesh_model = submesh_model_list[0]
+            unique_str = getattr(first_submesh_model, "unique_str", "")
+            d3d11_game_type = getattr(first_submesh_model, "d3d11_game_type", None)
+            if unique_str and d3d11_game_type is not None:
+                return os.path.join(
+                    GlobalConfig.path_workspace_folder(),
+                    unique_str,
+                    "TYPE_" + d3d11_game_type.GameTypeName,
+                    "",
+                )
+
         d3d11_game_type = getattr(draw_ib_model, "d3d11_game_type", getattr(draw_ib_model, "d3d11GameType", None))
         if d3d11_game_type is None:
             return ""
