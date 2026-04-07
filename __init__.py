@@ -9,6 +9,7 @@ from .ui import ui_panel_basic
 from .ui import ui_panel_model
 from .ui import ui_panel_sword
 from .ui import ui_func_import
+from .ui import ui_func_import_ssmt
 from .ui import ui_panel_fast_texture
 
 from .common import blueprint_node_obj
@@ -122,6 +123,7 @@ def register():
     ui_panel_basic.register()
     ui_panel_model.register()
     ui_panel_sword.register()
+    ui_func_import_ssmt.register()
     ui_func_import.register()
     ui_panel_fast_texture.register()
 
@@ -143,6 +145,7 @@ def unregister():
 
     ui_panel_fast_texture.unregister()
     ui_func_import.unregister()
+    ui_func_import_ssmt.unregister()
     ui_panel_sword.unregister()
     ui_panel_model.unregister()
     ui_panel_basic.unregister()

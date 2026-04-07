@@ -8,6 +8,8 @@ from ..common.logic_name import LogicName
 
 from ..utils.translate_utils import TR
 
+from .ui_func_import_ssmt import SSMT4ImportAllFromCurrentWorkSpaceBlueprint, SSMT4ImportRaw
+
 
 class PanelBasicInformation(bpy.types.Panel):
     '''
@@ -58,6 +60,10 @@ class PanelBasicInformation(bpy.types.Panel):
 
         # 决定导入时是否调用法线贴图
         layout.prop(context.scene.global_properties, "use_normal_map")
+
+        layout.operator(SSMT4ImportRaw.bl_idname,icon='IMPORT')
+        layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname,icon='IMPORT')
+
 
 
 def register():
