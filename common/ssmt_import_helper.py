@@ -2,6 +2,7 @@ import bpy
 import numpy
 import os
 
+from .d3d11_element import D3D11Element
 from .mesh_create_helper import MeshCreateHelper
 from .submesh_json import SubmeshJson, SubmeshCategoryBuffer
 from ..utils.format_utils import Fatal, FormatUtils
@@ -63,10 +64,10 @@ class SSMTImportHelper:
 		vb_vertex_count = 0
 
 		for category_buffer in submesh_json.CategoryBufferList:
-			if category_buffer.Type == "Normal":
-				category_elements, category_vb_data, category_vertex_count = SSMTImportHelper.parse_normal_category_buffer(category_buffer)
-			else:
-				category_elements, category_vb_data, category_vertex_count = SSMTImportHelper.parse_special_category_buffer(category_buffer)
+			if category_buffer.Type != "Normal":
+				continue
+
+			category_elements, category_vb_data, category_vertex_count = SSMTImportHelper.parse_normal_category_buffer(category_buffer)
 
 			if category_vertex_count > 0:
 				if vb_vertex_count == 0:
@@ -78,6 +79,26 @@ class SSMTImportHelper:
 						+ " expected " + str(vb_vertex_count)
 						+ " actual " + str(category_vertex_count)
 					)
+
+			elements.extend(category_elements)
+			vb_data.update(category_vb_data)
+
+		for category_buffer in submesh_json.CategoryBufferList:
+			if category_buffer.Type == "Normal":
+				continue
+
+			category_elements, category_vb_data, category_vertex_count = SSMTImportHelper.parse_special_category_buffer(
+				category_buffer=category_buffer,
+				vb_vertex_count=vb_vertex_count,
+			)
+
+			if category_vertex_count > 0 and category_vertex_count != vb_vertex_count:
+				raise Fatal(
+					"Vertex count mismatch between category buffers: "
+					+ category_buffer.FileName
+					+ " expected " + str(vb_vertex_count)
+					+ " actual " + str(category_vertex_count)
+				)
 
 			elements.extend(category_elements)
 			vb_data.update(category_vb_data)
@@ -114,9 +135,102 @@ class SSMTImportHelper:
 		return category_buffer.D3D11ElementList, category_vb_data, vertex_count
 
 	@staticmethod
-	def parse_special_category_buffer(category_buffer:SubmeshCategoryBuffer):
+	def parse_special_category_buffer(category_buffer:SubmeshCategoryBuffer, vb_vertex_count:int):
+		if category_buffer.Type == "DynamicBlend":
+			return SSMTImportHelper.parse_dynamic_blend_category_buffer(
+				category_buffer=category_buffer,
+				vb_vertex_count=vb_vertex_count,
+			)
+
 		print("预留特殊 Buffer 解析路线, 当前 Type: " + category_buffer.Type + ", FileName: " + category_buffer.FileName)
 		return [], {}, 0
+
+	@staticmethod
+	def parse_dynamic_blend_category_buffer(category_buffer:SubmeshCategoryBuffer, vb_vertex_count:int):
+		if vb_vertex_count <= 0:
+			raise Fatal("DynamicBlend parsing requires a valid vb_vertex_count.")
+
+		if not os.path.exists(category_buffer.FilePath):
+			raise Fatal("Unable to find matching .buf file for: " + category_buffer.FileName)
+
+		file_size = os.path.getsize(category_buffer.FilePath)
+		if file_size == 0:
+			raise Fatal("Current Import " + category_buffer.FileName + " file is empty, skip import.")
+		if file_size % 4 != 0:
+			raise Fatal("DynamicBlend buffer size must be aligned to uint32: " + category_buffer.FileName)
+
+		raw_u32 = numpy.fromfile(category_buffer.FilePath, dtype=numpy.uint32)
+		offset_count = vb_vertex_count + 1
+		if len(raw_u32) <= offset_count:
+			raise Fatal("DynamicBlend buffer is too short to contain offset table and packed entries: " + category_buffer.FileName)
+
+		offsets = raw_u32[:offset_count].astype(numpy.uint64)
+		packed_start_index = offset_count
+		packed_end_index = len(raw_u32)
+
+		if numpy.any(offsets < packed_start_index):
+			raise Fatal("DynamicBlend offset table points before packed entry stream: " + category_buffer.FileName)
+		if numpy.any(offsets > packed_end_index):
+			raise Fatal("DynamicBlend offset table points past buffer end: " + category_buffer.FileName)
+		if numpy.any(offsets[1:] < offsets[:-1]):
+			raise Fatal("DynamicBlend offset table is not monotonically increasing: " + category_buffer.FileName)
+
+		max_influence_count = int(numpy.max(offsets[1:] - offsets[:-1])) if vb_vertex_count > 0 else 0
+		semantic_group_count = max(1, (max_influence_count + 3) // 4)
+
+		blend_indices_dict = {}
+		blend_weights_dict = {}
+		for semantic_index in range(semantic_group_count):
+			blend_indices_dict[semantic_index] = numpy.zeros((vb_vertex_count, 4), dtype=numpy.uint32)
+			blend_weights_dict[semantic_index] = numpy.zeros((vb_vertex_count, 4), dtype=numpy.float32)
+
+		for vertex_index in range(vb_vertex_count):
+			start = int(offsets[vertex_index])
+			end = int(offsets[vertex_index + 1])
+			if end < start:
+				raise Fatal("DynamicBlend offset table contains inverted range at vertex: " + str(vertex_index))
+
+			packed_values = raw_u32[start:end]
+			for influence_index, packed_value in enumerate(packed_values):
+				semantic_index = influence_index // 4
+				channel_index = influence_index % 4
+				blend_indices_dict[semantic_index][vertex_index, channel_index] = packed_value & 0xFFFF
+				blend_weights_dict[semantic_index][vertex_index, channel_index] = ((packed_value >> 16) & 0xFFFF) / 65535.0
+
+		category_elements = []
+		category_vb_data = {}
+		aligned_byte_offset = 0
+		for semantic_index in range(semantic_group_count):
+			blendindices_element = D3D11Element(
+				SemanticName="BLENDINDICES",
+				SemanticIndex=semantic_index,
+				Format="R32G32B32A32_UINT",
+				ByteWidth=16,
+				ExtractSlot="cs-t1",
+				ExtractTechnique="compute",
+				Category="Blend",
+				AlignedByteOffset=aligned_byte_offset,
+			)
+			aligned_byte_offset += blendindices_element.ByteWidth
+
+			blendweight_element = D3D11Element(
+				SemanticName="BLENDWEIGHT",
+				SemanticIndex=semantic_index,
+				Format="R32G32B32A32_FLOAT",
+				ByteWidth=16,
+				ExtractSlot="cs-t1",
+				ExtractTechnique="compute",
+				Category="Blend",
+				AlignedByteOffset=aligned_byte_offset,
+			)
+			aligned_byte_offset += blendweight_element.ByteWidth
+
+			category_elements.append(blendindices_element)
+			category_elements.append(blendweight_element)
+			category_vb_data[blendindices_element.ElementName] = blend_indices_dict[semantic_index]
+			category_vb_data[blendweight_element.ElementName] = blend_weights_dict[semantic_index]
+
+		return category_elements, category_vb_data, vb_vertex_count
 
 	@staticmethod
 	def create_dtype_from_elements(d3d11_element_list:list):
