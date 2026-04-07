@@ -8,30 +8,13 @@ import bpy
 # 用于解决 AttributeError: 'IMPORT_MESH_OT_migoto_raw_buffers_mmt' object has no attribute 'filepath'
 from bpy_extras.io_utils import ImportHelper
 
-
-from ..utils.obj_utils import ObjUtils 
-
 from ..utils.json_utils import JsonUtils
-from ..utils.collection_utils import CollectionColor, CollectionUtils
+from ..utils.collection_utils import CollectionUtils
 from ..utils.timer_utils import TimerUtils
 from ..utils.translate_utils import TR
 
 from ..common.global_config import GlobalConfig
-from ..common.logic_name import LogicName
-
-from ..common.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
-import os
-import bpy
-
-from ..utils.json_utils import JsonUtils
-from ..utils.collection_utils import CollectionColor, CollectionUtils
-from ..utils.translate_utils import TR
-from ..utils.timer_utils import TimerUtils
-
-from ..common.global_config import GlobalConfig
-from ..common.logic_name import LogicName
-
-from ..common.mesh_import_helper import MeshImportHelper,MigotoBinaryFile
+from ..common.ssmt_import_helper import SSMTImportHelper
 from ..common.workspace_helper import WorkSpaceHelper
 
 
@@ -65,11 +48,16 @@ def ImprotFromWorkSpaceFull(self, context):
 
             try:
                 print("尝试导入路径: " + import_folder_path)
-                fmt_file_path = os.path.join(import_folder_path, submesh_folder_name + ".fmt")
                 draw_ib = submesh_folder_name.split("-")[0]
                 this_alias = "." + (drawib_aliasname_dict.get(draw_ib) or "自定义名称")
-                mbf = MigotoBinaryFile(fmt_path=fmt_file_path,mesh_name= submesh_folder_name + this_alias)
-                MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=workspace_collection)
+                json_file_path = os.path.join(import_folder_path, submesh_folder_name + ".json")
+                imported_obj = SSMTImportHelper.create_mesh_from_json(
+                    json_file_path=json_file_path,
+                    import_collection=workspace_collection,
+                )
+                if imported_obj is not None:
+                    imported_obj.name = submesh_folder_name + this_alias
+                    imported_obj.data.name = imported_obj.name
 
                 # 如果能执行到这里，说明这个DrawIB成功导入了一个数据类型
                 # 然后要把这个DrawIB对应的GameType名称保存下来
@@ -269,9 +257,11 @@ class SSMT4ImportRaw(bpy.types.Operator, ImportHelper):
 
         # 逐个json文件导入
         for json_file_name in import_filename_list:
-            json_file_path = os.path.join(dirname, json_file_name)
-            mbf = MigotoBinaryFile(fmt_path=json_file_path)
-            MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=collection)
+            if os.path.isabs(json_file_name):
+                json_file_path = json_file_name
+            else:
+                json_file_path = os.path.join(dirname, json_file_name)
+            SSMTImportHelper.create_mesh_from_json(json_file_path=json_file_path, import_collection=collection)
 
         # Select all objects under collection (因为用户习惯了导入后就是全部选中的状态). 
         CollectionUtils.select_collection_objects(collection)
