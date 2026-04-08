@@ -1,9 +1,22 @@
 import os
+from dataclasses import dataclass, field
 
-from .global_config import GlobalConfig
+from .submesh_metadata import SubmeshMetadataResolver
 
-from ..utils.json_utils import JsonUtils
-from .import_config import TextureMarkUpInfo
+
+@dataclass
+class TextureMarkUpInfo:
+    mark_name:str = field(default="",init=False)
+    mark_type:str = field(default="",init=False)
+    mark_hash:str = field(default="",init=False)
+    mark_slot:str = field(default="",init=False)
+    mark_filename:str = field(default="",init=False)
+
+    def get_resource_name(self):
+        return "Resource-" + self.mark_filename.split(".")[0]
+
+    def get_hash_style_filename(self):
+        return self.mark_hash + "-" + self.mark_name + "." + self.mark_filename.split(".")[1]
 
 
 class TextureMetadataResolver:
@@ -82,19 +95,6 @@ class TextureMetadataResolver:
         }
 
     @staticmethod
-    def get_import_json_path_by_unique_str(workspace_import_json: dict, unique_str: str) -> str:
-        gametype_name = workspace_import_json.get(unique_str, "")
-        if not gametype_name:
-            return ""
-
-        return os.path.join(
-            GlobalConfig.path_workspace_folder(),
-            unique_str,
-            "TYPE_" + gametype_name,
-            "import.json",
-        )
-
-    @staticmethod
     def get_part_name_for_submesh(draw_ib_model, submesh_model) -> str:
         get_part_name = getattr(draw_ib_model, "get_part_name_by_match_first_index", None)
         if callable(get_part_name):
@@ -107,41 +107,33 @@ class TextureMetadataResolver:
             return ""
 
     @staticmethod
-    def load_texture_markup_info_for_submesh(draw_ib_model, submesh_model, workspace_import_json: dict) -> tuple[str, list]:
+    def load_texture_markup_info_for_submesh(draw_ib_model, submesh_model) -> tuple[str, list]:
         unique_str = submesh_model.unique_str
         part_name = TextureMetadataResolver.get_part_name_for_submesh(draw_ib_model, submesh_model)
-        import_json_path = TextureMetadataResolver.get_import_json_path_by_unique_str(workspace_import_json, unique_str)
+
+        try:
+            submesh_metadata = SubmeshMetadataResolver.resolve(unique_str)
+        except Exception as ex:
+            print("TextureMetadataResolver: 跳过贴图标记读取，无法解析 SubmeshJson: " + unique_str + "，错误: " + str(ex))
+            return part_name, []
 
         print(
             "TextureMetadataResolver: 读取贴图标记，unique_str: "
             + unique_str
             + "，part_name: "
             + str(part_name)
-            + "，import.json: "
-            + import_json_path
+            + "，submesh_json: "
+            + submesh_metadata.submesh_json_path
         )
 
-        if not import_json_path or not os.path.exists(import_json_path):
-            print("TextureMetadataResolver: 跳过贴图标记读取，import.json 不存在: " + import_json_path)
-            return part_name, []
+        texture_markup_info_list = TextureMetadataResolver.normalize_texture_markup_info_list(
+            submesh_metadata.texture_markup_info_list
+        )
+        texture_markup_info_list = TextureMetadataResolver._dedupe_texture_markup_info_list(texture_markup_info_list)
 
-        submesh_import_json_dict = JsonUtils.LoadFromFile(import_json_path)
-        raw_texture_markup_info_dict = submesh_import_json_dict.get("ComponentTextureMarkUpInfoListDict", {})
-        normalized_texture_markup_info_dict = TextureMetadataResolver.normalize_texture_markup_info_dict(raw_texture_markup_info_dict)
-
-        if not normalized_texture_markup_info_dict:
+        if not texture_markup_info_list:
             print("TextureMetadataResolver: 当前 submesh 没有贴图标记: " + unique_str)
             return part_name, []
-
-        texture_markup_info_list = []
-        if part_name:
-            texture_markup_info_list = normalized_texture_markup_info_dict.get(part_name)
-            if texture_markup_info_list is None:
-                texture_markup_info_list = normalized_texture_markup_info_dict.get(unique_str, [])
-        else:
-            texture_markup_info_list = normalized_texture_markup_info_dict.get(unique_str, [])
-
-        texture_markup_info_list = TextureMetadataResolver._dedupe_texture_markup_info_list(texture_markup_info_list)
 
         if texture_markup_info_list:
             print(
@@ -150,25 +142,17 @@ class TextureMetadataResolver:
                 + "，数量: "
                 + str(len(texture_markup_info_list))
             )
-        else:
-            print(
-                "TextureMetadataResolver: 当前 submesh 的贴图标记键未匹配成功，unique_str: "
-                + unique_str
-                + "，可用键: "
-                + str(list(normalized_texture_markup_info_dict.keys()))
-            )
 
         return part_name, texture_markup_info_list
 
     @staticmethod
-    def load_submesh_texture_markup_info_from_all_submeshes(draw_ib_model, workspace_import_json: dict) -> dict:
+    def load_submesh_texture_markup_info_from_all_submeshes(draw_ib_model, workspace_import_json: dict | None = None) -> dict:
         submesh_texture_markup_info_dict = {}
 
         for submesh_model in draw_ib_model.submesh_model_list:
             _, texture_markup_info_list = TextureMetadataResolver.load_texture_markup_info_for_submesh(
                 draw_ib_model=draw_ib_model,
                 submesh_model=submesh_model,
-                workspace_import_json=workspace_import_json,
             )
             if texture_markup_info_list:
                 submesh_texture_markup_info_dict[submesh_model.unique_str] = texture_markup_info_list
@@ -176,14 +160,13 @@ class TextureMetadataResolver:
         return submesh_texture_markup_info_dict
 
     @staticmethod
-    def load_texture_markup_info_from_all_submeshes(draw_ib_model, workspace_import_json: dict) -> dict:
+    def load_texture_markup_info_from_all_submeshes(draw_ib_model, workspace_import_json: dict | None = None) -> dict:
         merged_texture_markup_info_dict = {}
 
         for submesh_model in draw_ib_model.submesh_model_list:
             part_name, texture_markup_info_list = TextureMetadataResolver.load_texture_markup_info_for_submesh(
                 draw_ib_model=draw_ib_model,
                 submesh_model=submesh_model,
-                workspace_import_json=workspace_import_json,
             )
 
             if not part_name or not texture_markup_info_list:

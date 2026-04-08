@@ -28,12 +28,12 @@ from ...utils.shapekey_utils import ShapeKeyUtils
 from ...utils.vertexgroup_utils import VertexGroupUtils
 from .extracted_object import ExtractedObject, ExtractedObjectHelper
 from ...common.buffer_export_helper import BufferExportHelper
-from ...common.import_config import ImportConfig
 from ...common.obj_buffer_helper import ObjBufferHelper
 from ...common.workspace_helper import WorkSpaceHelper
 from ...common.d3d11_gametype import D3D11GameType
 from ...common.blueprint_model import BluePrintModel
 from ...common.draw_call_model import DrawCallModel
+from ...common.submesh_metadata import SubmeshMetadata, SubmeshMetadataResolver
 
 
 class BlendRemapEntry(TypedDict):
@@ -53,7 +53,7 @@ class DrawIBModelWWMI:
     blueprint_model: BluePrintModel
 
     draw_ib_alias: str = field(init=False, default="")
-    import_config: ImportConfig = field(init=False, repr=False)
+    primary_submesh_metadata: SubmeshMetadata = field(init=False, repr=False)
     d3d11GameType: D3D11GameType = field(init=False, repr=False)
     extracted_object: ExtractedObject = field(init=False, repr=False)
 
@@ -86,26 +86,28 @@ class DrawIBModelWWMI:
             raise ValueError("当前 DrawIB 没有可导出的 DrawCallModel")
 
         primary_unique_str = self.ordered_drawcall_model_list[0].get_unique_str()
-        self.import_config = ImportConfig(unique_str=primary_unique_str)
-        self.d3d11GameType = self.import_config.d3d11GameType
-        metadata_path: str = os.path.join(self.import_config.extract_gametype_folder_path, "Metadata.json")
+        self.primary_submesh_metadata = SubmeshMetadataResolver.resolve(primary_unique_str)
+        self.d3d11GameType = self.primary_submesh_metadata.d3d11_game_type
+        metadata_path: str = os.path.join(self.primary_submesh_metadata.extract_gametype_folder_path, "Metadata.json")
         self.extracted_object = ExtractedObjectHelper.read_metadata(metadata_path)
 
         self.component_model_list = []
         self.component_name_component_model_dict = {}
 
-        unique_str_import_config_dict: dict[str, ImportConfig] = {primary_unique_str: self.import_config}
+        unique_str_metadata_dict: dict[str, SubmeshMetadata] = {primary_unique_str: self.primary_submesh_metadata}
         component_name_drawcall_model_dict: dict[str, list[DrawCallModel]] = {}
+        component_index_by_unique_str: dict[str, int] = {}
 
         for drawcall_model in self.ordered_drawcall_model_list:
             unique_str = drawcall_model.get_unique_str()
-            drawcall_import_config = unique_str_import_config_dict.get(unique_str)
-            if drawcall_import_config is None:
-                drawcall_import_config = ImportConfig(unique_str=unique_str)
-                unique_str_import_config_dict[unique_str] = drawcall_import_config
+            drawcall_metadata = unique_str_metadata_dict.get(unique_str)
+            if drawcall_metadata is None:
+                drawcall_metadata = SubmeshMetadataResolver.resolve(unique_str)
+                unique_str_metadata_dict[unique_str] = drawcall_metadata
 
-            part_name = drawcall_import_config.part_name or unique_str
-            component_name = "Component " + part_name
+            component_index = component_index_by_unique_str.setdefault(unique_str, len(component_index_by_unique_str) + 1)
+            part_name = drawcall_metadata.part_name or str(component_index)
+            component_name = "Component " + str(component_index if not str(part_name).isdigit() else part_name)
             component_drawcall_model_list = component_name_drawcall_model_dict.get(component_name, [])
             component_drawcall_model_list.append(drawcall_model)
             component_name_drawcall_model_dict[component_name] = component_drawcall_model_list

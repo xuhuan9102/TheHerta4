@@ -47,7 +47,8 @@ def ImprotFromWorkSpaceFull(self, context):
     # 空列表也没关系，下面会赋予默认名称
     drawib_aliasname_dict = WorkSpaceHelper.get_drawib_aliasname_dict()
 
-    # 读取时保存每个导入文件夹里导入的GameType名称到工作空间文件夹下面的Import.json，在导出时使用
+    # 读取时保存每个导入文件夹里导入的 GameType 名称到工作空间根目录的 Import.json
+    # 生成 Mod 时会用它来确定应该进入哪个 TYPE_xxx 目录读取 SubmeshJson
     foldername_gametypename_dict = {}
 
     for submesh_folder_path in workspace_subfolders:
@@ -85,7 +86,7 @@ def ImprotFromWorkSpaceFull(self, context):
 
             
 
-    # 保存Import.json文件
+    # 保存工作空间级 Import.json 选择记录
     save_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(),"Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict,filepath=save_import_json_path)
     

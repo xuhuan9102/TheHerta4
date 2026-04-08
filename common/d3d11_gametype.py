@@ -44,8 +44,13 @@ class D3D11GameType:
     def __post_init__(self):
         self.FileName = os.path.basename(self.FilePath)
         self.GameTypeName = os.path.splitext(self.FileName)[0]
-        
 
+        with open(self.FilePath, 'r', encoding='utf-8') as f:
+            game_type_json = json.load(f)
+
+        self._load_from_json_dict(game_type_json)
+
+    def _load_from_json_dict(self, game_type_json: dict):
         self.OrderedFullElementList = []
         self.OrderedCategoryNameList = []
         self.D3D11ElementList = []
@@ -56,15 +61,8 @@ class D3D11GameType:
         self.CategoryStrideDict = {}
         self.ElementNameD3D11ElementDict = {}
 
-        # read config from json file.
-        with open(self.FilePath, 'r', encoding='utf-8') as f:
-            game_type_json = json.load(f)
-        
         self.GPU_PreSkinning = game_type_json.get("GPU-PreSkinning",False)
-
         self.GameTypeName = game_type_json.get("WorkGameType","")
-
-        # self.OrderedFullElementList = game_type_json.get("OrderedFullElementList",[])
         self.CategoryDrawCategoryDict = game_type_json.get("CategoryDrawCategoryMap",{})
         d3d11_element_list_json = game_type_json.get("D3D11ElementList",[])
         aligned_byte_offset = 0
@@ -92,6 +90,35 @@ class D3D11GameType:
             self.CategoryExtractTechniqueDict[d3d11_element.Category] = d3d11_element.ExtractTechnique
             self.CategoryStrideDict[d3d11_element.Category] = self.CategoryStrideDict.get(d3d11_element.Category,0) + d3d11_element.ByteWidth
             self.ElementNameD3D11ElementDict[d3d11_element.ElementName] = d3d11_element
+
+    @classmethod
+    def from_submesh_json_dict(
+        cls,
+        submesh_json_dict: dict,
+        file_path: str = "",
+        override_d3d11_element_list: list[dict] | None = None,
+    ):
+        game_type_json = {
+            "GPU-PreSkinning": submesh_json_dict.get("GPU-PreSkinning", False),
+            "WorkGameType": submesh_json_dict.get("WorkGameType", ""),
+            "CategoryDrawCategoryMap": submesh_json_dict.get("CategoryDrawCategoryMap", {}),
+            "D3D11ElementList": override_d3d11_element_list or cls._collect_element_list_from_submesh_json(submesh_json_dict),
+        }
+
+        instance = cls.__new__(cls)
+        instance.FilePath = file_path or submesh_json_dict.get("WorkGameType", "")
+        instance.FileName = os.path.basename(instance.FilePath) if instance.FilePath else ""
+        instance.GameTypeName = game_type_json.get("WorkGameType", "")
+        instance._load_from_json_dict(game_type_json)
+        return instance
+
+    @staticmethod
+    def _collect_element_list_from_submesh_json(submesh_json_dict: dict) -> list[dict]:
+        d3d11_element_list_json = []
+        for category_buffer_json in submesh_json_dict.get("CategoryBufferList", []):
+            for d3d11_element_json in category_buffer_json.get("D3D11ElementList", []):
+                d3d11_element_list_json.append(dict(d3d11_element_json))
+        return d3d11_element_list_json
     
     def get_real_category_stride_dict(self) -> dict:
         new_dict = {}

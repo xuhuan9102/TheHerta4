@@ -46,6 +46,7 @@ class SubmeshJson:
 	GPU_PreSkinning:bool = field(init=False, default=False)
 	IndexBufferList:list[SubmeshIndexBuffer] = field(init=False, default_factory=list)
 	CategoryBufferList:list[SubmeshCategoryBuffer] = field(init=False, default_factory=list)
+	TextureMarkUpInfoList:list = field(init=False, default_factory=list)
 
 	def __post_init__(self):
 		self.FileName = os.path.basename(self.JsonFilePath)
@@ -60,6 +61,7 @@ class SubmeshJson:
 		self.CategoryDrawCategoryMap = self.JsonDict.get("CategoryDrawCategoryMap", {})
 		self.WorkGameType = self.JsonDict.get("WorkGameType", "")
 		self.GPU_PreSkinning = self.JsonDict.get("GPU-PreSkinning", False)
+		self.TextureMarkUpInfoList = list(self.JsonDict.get("TextureMarkUpInfoList", []))
 
 		self.IndexBufferList = []
 		for index_buffer_json in self.JsonDict.get("IndexBufferList", []):
@@ -96,3 +98,10 @@ class SubmeshJson:
 			category_buffer.bind_dir_path(self.DirPath)
 			category_buffer.calc_stride()
 			self.CategoryBufferList.append(category_buffer)
+
+	def get_d3d11_element_json_list(self) -> list[dict]:
+		d3d11_element_json_list = []
+		for category_buffer_json in self.JsonDict.get("CategoryBufferList", []):
+			for d3d11_element_json in category_buffer_json.get("D3D11ElementList", []):
+				d3d11_element_json_list.append(dict(d3d11_element_json))
+		return d3d11_element_json_list

@@ -5,7 +5,6 @@ from .m_ini_builder import *
 from .m_key import M_Key
 from .draw_call_model import DrawCallModel
 from .drawib_model import DrawIBModel
-from .import_config import TextureMarkUpInfo
 from ..utils.json_utils import JsonUtils
 from ..utils.format_utils import Fatal
 from .global_config import GlobalConfig
@@ -15,7 +14,7 @@ from .logic_name import LogicName
 from .global_key_count_helper import GlobalKeyCountHelper
 from .workspace_helper import WorkSpaceHelper
 from .blueprint_export_helper import BlueprintExportHelper
-from .texture_metadata_helper import TextureMetadataResolver
+from .texture_metadata_helper import TextureMetadataResolver, TextureMarkUpInfo
 
 class M_IniHelper:
     @classmethod
@@ -31,9 +30,9 @@ class M_IniHelper:
 
     @classmethod
     def _get_extract_gametype_folder_path(cls, draw_ib_model: DrawIBModel) -> str:
-        import_config = getattr(draw_ib_model, "import_config", None)
-        if import_config is not None:
-            extract_gametype_folder_path = getattr(import_config, "extract_gametype_folder_path", "")
+        primary_submesh_metadata = getattr(draw_ib_model, "primary_submesh_metadata", None)
+        if primary_submesh_metadata is not None:
+            extract_gametype_folder_path = getattr(primary_submesh_metadata, "extract_gametype_folder_path", "")
             if extract_gametype_folder_path:
                 return extract_gametype_folder_path
 

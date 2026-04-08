@@ -7,6 +7,7 @@ from .global_config import GlobalConfig
 
 from ..utils.json_utils import JsonUtils
 from .texture_metadata_helper import TextureMetadataResolver
+from .submesh_metadata import SubmeshMetadataResolver
 
 import numpy
 
@@ -87,44 +88,26 @@ class DrawIBModel:
 
         first_submesh = self.submesh_model_list[0]
         folder_name = first_submesh.unique_str
-        print("DrawIBModel: 开始读取导入元数据，DrawIB: " + self.draw_ib + "，unique_str: " + folder_name)
-        workspace_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
-        workspace_import_json = JsonUtils.LoadFromFile(workspace_import_json_path) if os.path.exists(workspace_import_json_path) else {}
-        gametype_name = workspace_import_json.get(folder_name, "")
-        if gametype_name:
-            print("DrawIBModel: 命中工作空间 Import.json，GameType: " + gametype_name)
-        else:
-            print("DrawIBModel: 工作空间 Import.json 未记录 unique_str 对应的 GameType: " + folder_name)
+        print("DrawIBModel: 开始读取导出元数据，DrawIB: " + self.draw_ib + "，unique_str: " + folder_name)
 
-        if gametype_name:
-            self.import_json_path = os.path.join(
-                GlobalConfig.path_workspace_folder(),
-                folder_name,
-                "TYPE_" + gametype_name,
-                "import.json",
-            )
-            if os.path.exists(self.import_json_path):
-                self.import_json_dict = JsonUtils.LoadFromFile(self.import_json_path)
-                print("DrawIBModel: 已读取新结构 import.json: " + self.import_json_path)
-            else:
-                print("DrawIBModel: 未找到新结构 import.json: " + self.import_json_path)
+        first_submesh_metadata = SubmeshMetadataResolver.resolve(folder_name)
+        self.import_json_path = first_submesh_metadata.submesh_json_path
+        self.import_json_dict = dict(first_submesh_metadata.submesh_json_dict)
+        print("DrawIBModel: 已读取 SubmeshJson: " + self.import_json_path)
 
         if self.import_json_dict:
             self.category_hash_dict = dict(self.import_json_dict.get("CategoryHash", {}))
-            self.match_first_index_list = list(self.import_json_dict.get("MatchFirstIndex", []))
-            raw_part_name_list = list(self.import_json_dict.get("PartNameList", []))
-            self.match_first_index_partname_dict = {
-                int(match_first_index): part_name
-                for match_first_index, part_name in zip(self.match_first_index_list, raw_part_name_list)
-            }
+            self.match_first_index_list = [submesh_model.match_first_index for submesh_model in self.submesh_model_list]
+            self.match_first_index_partname_dict = {}
+            for submesh_model in self.submesh_model_list:
+                submesh_metadata = SubmeshMetadataResolver.resolve(submesh_model.unique_str)
+                self.match_first_index_partname_dict[int(submesh_model.match_first_index)] = submesh_metadata.part_name or submesh_model.unique_str
             self.vshash_list = list(self.import_json_dict.get("VSHashList", []))
             self.submesh_texturemarkinfolist_dict = TextureMetadataResolver.load_submesh_texture_markup_info_from_all_submeshes(
                 draw_ib_model=self,
-                workspace_import_json=workspace_import_json,
             )
             self.partname_texturemarkinfolist_dict = TextureMetadataResolver.load_texture_markup_info_from_all_submeshes(
                 draw_ib_model=self,
-                workspace_import_json=workspace_import_json,
             )
             self.vertex_limit_hash = self.import_json_dict.get("VertexLimitVB", "")
             self.original_vertex_count = self.import_json_dict.get("OriginalVertexCount", 0)
@@ -138,7 +121,7 @@ class DrawIBModel:
             )
             return
 
-        print("DrawIBModel: 未读取到新结构元数据，贴图标记信息为空，DrawIB: " + self.draw_ib)
+        print("DrawIBModel: 未读取到 SubmeshJson 元数据，贴图标记信息为空，DrawIB: " + self.draw_ib)
 
     def _assemble_category_buffers(self) -> tuple[dict, dict, dict, int]:
         total_category_buffer_chunks = {}

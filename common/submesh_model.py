@@ -9,6 +9,7 @@ from .logic_name import LogicName
 from .global_config import GlobalConfig
 from .d3d11_gametype import D3D11GameType
 from .obj_buffer_helper import ObjBufferHelper
+from .submesh_metadata import SubmeshMetadataResolver
 
 
 import bpy
@@ -31,7 +32,7 @@ class SubMeshModel:
     vertex_count:int = field(init=False, default=0)
     index_count:int = field(init=False, default=0)
 
-    # 读取工作空间中的import.json来获取d3d11GameType
+    # 读取工作空间中的 Import.json 选择数据类型目录，再从对应的 SubmeshJson 获取 d3d11GameType
     d3d11_game_type:D3D11GameType = field(init=False,repr=False,default=None)
 
     ib:list = field(init=False,repr=False,default_factory=list)
@@ -56,16 +57,8 @@ class SubMeshModel:
 
         folder_name = self.unique_str
 
-        # 先读取Import.json拿到当前导入的是哪个数据类型文件夹名称
-        import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
-        import_json = JsonUtils.LoadFromFile(import_json_path)
-        gametype_name = import_json.get(folder_name, "")
-        gametype_foldername = "TYPE_" + gametype_name
-        import_folder_path = os.path.join(GlobalConfig.path_workspace_folder(), folder_name)
-        import_json_path = os.path.join(import_folder_path, gametype_foldername, "import.json")
-
-        # 根据import.json中的d3d11_element_list来获取当前SubMeshModel的D3D11GameType
-        self.d3d11_game_type = D3D11GameType(FilePath=import_json_path)
+        submesh_metadata = SubmeshMetadataResolver.resolve(folder_name)
+        self.d3d11_game_type = submesh_metadata.d3d11_game_type
 
         index_offset = 0
         submesh_temp_obj_list = []
