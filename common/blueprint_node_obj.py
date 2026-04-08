@@ -420,10 +420,12 @@ class SSMT_OT_View_Group_Objects(bpy.types.Operator):
              return {'CANCELLED'}
 
         view_3d_area = None
+        view_3d_window = None
         for window in context.window_manager.windows:
             for area in window.screen.areas:
                 if area.type == 'VIEW_3D':
                     view_3d_area = area
+                    view_3d_window = window
                     break
             if view_3d_area:
                 break
@@ -439,9 +441,12 @@ class SSMT_OT_View_Group_Objects(bpy.types.Operator):
                 break
         
         if in_local_view:
-            with context.temp_override(area=view_3d_area):
-                bpy.ops.view3d.localview()
-            self.report({'INFO'}, "Exited local view")
+            try:
+                with context.temp_override(window=view_3d_window, area=view_3d_area):
+                    bpy.ops.view3d.localview()
+                self.report({'INFO'}, "Exited local view")
+            except Exception as e:
+                self.report({'WARNING'}, f"Could not exit local view: {e}")
             return {'FINISHED'}
 
         objects_to_show = set()
@@ -486,15 +491,15 @@ class SSMT_OT_View_Group_Objects(bpy.types.Operator):
 
         region = next((r for r in view_3d_area.regions if r.type == 'WINDOW'), None)
         if region:
-            with context.temp_override(area=view_3d_area, region=region):
-                try:
+            try:
+                with context.temp_override(window=view_3d_window, area=view_3d_area, region=region):
                     bpy.ops.view3d.localview()
                     bpy.ops.view3d.view_axis(type='FRONT')
                     bpy.ops.view3d.view_selected()
                     if view_3d_area.spaces.active:
                         view_3d_area.spaces.active.shading.type = 'SOLID'
-                except Exception as e:
-                    print(f"View setup warning: {e}")
+            except Exception as e:
+                print(f"View setup warning: {e}")
 
         self.report({'INFO'}, f"Showing {len(objects_to_show)} objects in local view")
         return {'FINISHED'}

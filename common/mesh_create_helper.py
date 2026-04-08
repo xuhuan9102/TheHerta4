@@ -204,10 +204,6 @@ class MeshCreateHelper:
 
         bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
 
-        if GlobalProterties.use_mirror_workflow():
-            print(f"非镜像工作流：对 {obj.name} 应用镜像变换和面朝向翻转")
-            ObjUtils.apply_mirror_workflow(obj)
-
         bpy.context.view_layer.update()
         bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
@@ -364,7 +360,6 @@ class MeshCreateHelper:
         texture_prefix = mesh_name_split[0] + "-" + mesh_name_split[1] + "-"
 
         texture_path = TextureUtils.find_texture(texture_prefix, "-DiffuseMap.dds", directory)
-        normal_path = TextureUtils.find_texture(texture_prefix, "-NormalMap.dds", directory)
 
         if texture_path is not None:
             material = bpy.data.materials.new(name=material_name)
@@ -385,86 +380,7 @@ class MeshCreateHelper:
                 material.node_tree.links.new(bsdf.inputs['Base Color'], tex_image.outputs['Color'])
                 material.node_tree.links.new(bsdf.inputs['Alpha'], tex_image.outputs['Alpha'])
 
-                if normal_path is not None and GlobalProterties.use_normal_map():
-                    if (GlobalConfig.logic_name != LogicName.ZZMI) and (GlobalConfig.logic_name != LogicName.GIMI):
-                        norm_image = material.node_tree.nodes.new('ShaderNodeTexImage')
-                        norm_image.image = bpy.data.images.load(normal_path)
-                        norm_image.location.x = bsdf.location.x - 800
-                        norm_image.location.y = bsdf.location.y - 400
-                        norm_image.image.colorspace_settings.is_data = True
-                        norm_image.image.colorspace_settings.name = 'Non-Color'
-
-                        norm_map = material.node_tree.nodes.new('ShaderNodeNormalMap')
-                        norm_map.location.x = bsdf.location.x - 400
-                        norm_map.location.y = bsdf.location.y - 400
-                        norm_map.uv_map = "TEXCOORD.xy"
-                        material.node_tree.links.new(norm_map.inputs['Color'], norm_image.outputs['Color'])
-                        material.node_tree.links.new(bsdf.inputs['Normal'], norm_map.outputs['Normal'])
-                    else:
-                        norm_image = material.node_tree.nodes.new('ShaderNodeTexImage')
-                        norm_image.image = bpy.data.images.load(normal_path)
-                        norm_image.location.x = bsdf.location.x - 1200
-                        norm_image.location.y = bsdf.location.y - 400
-                        norm_image.image.colorspace_settings.is_data = True
-                        norm_image.image.colorspace_settings.name = 'Non-Color'
-
-                        norm_separate = material.node_tree.nodes.new('ShaderNodeSeparateColor')
-                        norm_separate.location.x = bsdf.location.x - 800
-                        norm_separate.location.y = bsdf.location.y - 400
-                        material.node_tree.links.new(norm_separate.inputs['Color'], norm_image.outputs['Color'])
-
-                        norm_combine = material.node_tree.nodes.new('ShaderNodeCombineColor')
-                        norm_combine.location.x = bsdf.location.x - 600
-                        norm_combine.location.y = bsdf.location.y - 400
-                        material.node_tree.links.new(norm_combine.inputs['Red'], norm_separate.outputs['Red'])
-                        material.node_tree.links.new(norm_combine.inputs['Green'], norm_separate.outputs['Green'])
-
-                        norm_math = material.node_tree.nodes.new('ShaderNodeMath')
-                        norm_math.location.x = bsdf.location.x - 400
-                        norm_math.location.y = bsdf.location.y - 600
-                        norm_math.operation = 'SQRT'
-                        norm_math.use_clamp = True
-
-                        norm_math_2 = material.node_tree.nodes.new('ShaderNodeMath')
-                        norm_math_2.location.x = bsdf.location.x - 600
-                        norm_math_2.location.y = bsdf.location.y - 800
-                        norm_math_2.operation = 'SUBTRACT'
-                        norm_math_2.inputs[0].default_value = 1.0
-                        norm_math_2.use_clamp = True
-
-                        norm_math_r2 = material.node_tree.nodes.new('ShaderNodeMath')
-                        norm_math_r2.location.x = bsdf.location.x - 800
-                        norm_math_r2.location.y = bsdf.location.y - 600
-                        norm_math_r2.operation = 'POWER'
-                        norm_math_r2.inputs[1].default_value = 2.0
-
-                        norm_math_g2 = material.node_tree.nodes.new('ShaderNodeMath')
-                        norm_math_g2.location.x = bsdf.location.x - 800
-                        norm_math_g2.location.y = bsdf.location.y - 800
-                        norm_math_g2.operation = 'POWER'
-                        norm_math_g2.inputs[1].default_value = 2.0
-
-                        norm_math_add_r_g = material.node_tree.nodes.new('ShaderNodeMath')
-                        norm_math_add_r_g.location.x = bsdf.location.x - 600
-                        norm_math_add_r_g.location.y = bsdf.location.y - 600
-                        norm_math_add_r_g.operation = 'ADD'
-
-                        material.node_tree.links.new(norm_math_r2.inputs[0], norm_separate.outputs['Red'])
-                        material.node_tree.links.new(norm_math_g2.inputs[0], norm_separate.outputs['Green'])
-                        material.node_tree.links.new(norm_math_add_r_g.inputs[0], norm_math_r2.outputs['Value'])
-                        material.node_tree.links.new(norm_math_add_r_g.inputs[1], norm_math_g2.outputs['Value'])
-                        material.node_tree.links.new(norm_math_2.inputs[1], norm_math_add_r_g.outputs['Value'])
-                        material.node_tree.links.new(norm_math.inputs[0], norm_math_2.outputs['Value'])
-                        material.node_tree.links.new(norm_combine.inputs['Blue'], norm_math.outputs['Value'])
-
-                        norm_map = material.node_tree.nodes.new('ShaderNodeNormalMap')
-                        norm_map.location.x = bsdf.location.x - 400
-                        norm_map.location.y = bsdf.location.y - 400
-                        norm_map.uv_map = "TEXCOORD.xy"
-                        material.node_tree.links.new(norm_map.inputs['Color'], norm_combine.outputs['Color'])
-                        material.node_tree.links.new(bsdf.inputs['Normal'], norm_map.outputs['Normal'])
-
-                if obj.data.materials:
-                    obj.data.materials[0] = material
-                else:
-                    obj.data.materials.append(material)
+            if obj.data.materials:
+                obj.data.materials[0] = material
+            else:
+                obj.data.materials.append(material)

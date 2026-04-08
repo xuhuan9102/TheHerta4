@@ -57,18 +57,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
         subtype='DIR_PATH',
     ) # type: ignore
 
-    use_mirror_workflow: bpy.props.BoolProperty(
-        name="使用非镜像工作流",
-        description="默认为False, 启用后导入和导出模型将不再是镜像的，目前3Dmigoto的模型导入后是镜像存粹是由于历史遗留问题是错误的，但是当错误积累成粑粑山，人的习惯和旧的工程很难被改变，所以只有勾选后才能使用非镜像工作流",
-        default=False,
-    ) # type: ignore
-
-    use_normal_map: bpy.props.BoolProperty(
-        name="自动上贴图时使用法线贴图",
-        description="启用后在导入模型时自动附加法线贴图节点, 在材质预览模式下得到略微更好的视觉效果",
-        default=False,
-    ) # type: ignore
-
     import_merged_vgmap: bpy.props.BoolProperty(
         name="使用融合统一顶点组",
         description="导入时是否导入融合后的顶点组 (Unreal的合并顶点组技术会用到)，一般鸣潮Mod需要勾选来降低制作Mod的复杂度",
@@ -138,14 +126,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def generate_mod_folder_path(cls):
         return cls._instance().generate_mod_folder_path
-
-    @classmethod
-    def use_mirror_workflow(cls):
-        return cls._instance().use_mirror_workflow
-
-    @classmethod
-    def use_normal_map(cls):
-        return cls._instance().use_normal_map
 
     @classmethod
     def import_merged_vgmap(cls):

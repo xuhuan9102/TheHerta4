@@ -31,12 +31,10 @@ class PanelBasicInformation(bpy.types.Panel):
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)
         layout.label(text=TR.translate("当前游戏预设: ") + GlobalConfig.logic_name)
         layout.label(text=TR.translate("当前工作空间: ") + GlobalConfig.workspacename)
-        layout.prop(context.scene.global_properties,"use_mirror_workflow",text="使用非镜像工作流")
         
         if len(context.selected_objects) != 0:
             obj = context.selected_objects[0]
 
-            # 获取自定义属性
             gametypename = obj.get("3DMigoto:GameTypeName", "")
             recalculate_tangent = obj.get("3DMigoto:RecalculateTANGENT", False)
             recalculate_color = obj.get("3DMigoto:RecalculateCOLOR", False)
@@ -45,25 +43,19 @@ class PanelBasicInformation(bpy.types.Panel):
             layout.label(text="RecalculateTANGENT: " + str(recalculate_tangent))
             layout.label(text="RecalculateCOLOR: " + str(recalculate_color))
             
-        # SSMT蓝图
         layout.operator("theherta3.open_persistent_blueprint", icon='NODETREE')
         
-        # 导入 ib vb fmt格式文件
-        layout.operator("import_mesh.migoto_raw_buffers_mmt",icon='IMPORT')
+        layout.operator("import_mesh.migoto_raw_buffers_mmt", text="导入.fmt .ib .vb格式模型", icon='IMPORT')
 
-        # 一键导入当前工作空间为蓝图架构
-        layout.operator("ssmt.import_all_from_workspace_blueprint",icon='IMPORT')
+        layout.operator(SSMT4ImportRaw.bl_idname, text="导入SSMT格式模型", icon='IMPORT')
+
+        layout.separator()
+
+        layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
 
         if GlobalConfig.logic_name == LogicName.WWMI:
             layout.prop(context.scene.global_properties,"import_merged_vgmap")
             layout.prop(context.scene.global_properties,"import_skip_empty_vertex_groups")
-
-        # 决定导入时是否调用法线贴图
-        layout.prop(context.scene.global_properties, "use_normal_map")
-
-        layout.operator(SSMT4ImportRaw.bl_idname,icon='IMPORT')
-        layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname,icon='IMPORT')
-
 
 
 def register():
