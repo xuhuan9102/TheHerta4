@@ -12,7 +12,8 @@ class DrawCallModel:
     从对象名称中解析出 DrawIB、IndexCount、FirstIndex 等信息。
     
     Attributes:
-        obj_name: 对象名称，格式为 "DrawIB-IndexCount-FirstIndex.AliasName"
+        obj_name: 对象名称（可能被重命名节点修改），格式为 "DrawIB-IndexCount-FirstIndex.AliasName"
+        source_obj_name: 原始对象名称（用于获取 Blender 对象），如果未被重命名则为空
         match_draw_ib: 用于匹配的 DrawIB 哈希值
         match_index_count: 用于匹配的 IndexCount
         match_first_index: 用于匹配的 FirstIndex
@@ -23,6 +24,7 @@ class DrawCallModel:
         index_offset: 索引偏移，在 SubMeshModel 层级计算得到
     """
     obj_name:str
+    source_obj_name:str = ""  # 原始对象名称（用于获取 Blender 对象），如果未被重命名则为空
 
     match_draw_ib:str = field(init=False,repr=False,default="")  # 用于匹配的DrawIB哈希值
     match_index_count:str = field(init=False,repr=False,default="")  # 用于匹配的IndexCount
@@ -34,6 +36,16 @@ class DrawCallModel:
     index_count:int = field(init=False,repr=False,default=0)  # 索引数量
     vertex_count:int = field(init=False,repr=False,default=0)  # 顶点数量
     index_offset:int = field(init=False,repr=False,default=0)  # 索引偏移
+    
+    def get_blender_obj_name(self) -> str:
+        """获取用于查找 Blender 对象的名称
+        
+        如果对象被重命名，返回原始名称；否则返回当前名称。
+        
+        Returns:
+            str: 用于查找 Blender 对象的名称
+        """
+        return self.source_obj_name if self.source_obj_name else self.obj_name
 
 
     def __post_init__(self) -> None:

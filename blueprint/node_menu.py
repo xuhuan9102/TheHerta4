@@ -12,6 +12,13 @@ try:
 except ImportError:
     HAS_OBJECT_SWAP = False
 
+# 检查重命名节点是否可用
+try:
+    from .node_rename import SSMTNode_Object_Rename
+    HAS_OBJECT_RENAME = True
+except ImportError:
+    HAS_OBJECT_RENAME = False
+
 
 class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
     '''Create nodes from selected objects and group them under a new Group node'''
@@ -186,8 +193,11 @@ class SSMT_MT_NodeMenu_Branch(bpy.types.Menu):
             layout.separator()
             layout.operator("node.add_node", text="Object Swap", icon='SHADERFX').type = "SSMTNode_ObjectSwap"
         
-        layout.separator()
-        layout.operator("node.add_node", text="Rename Object", icon='OUTLINER').type = "SSMTNode_Object_Rename"
+        # 重命名节点 - 仅在模块可用时显示
+        if HAS_OBJECT_RENAME:
+            layout.separator()
+            layout.operator("node.add_node", text="Rename Object", icon='OUTLINER').type = "SSMTNode_Object_Rename"
+        
         layout.separator()
         layout.operator("node.add_node", text="Mod Output", icon='EXPORT').type = "SSMTNode_Result_Output"
 

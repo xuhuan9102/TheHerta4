@@ -64,8 +64,9 @@ class SubMeshModel:
         submesh_temp_obj_list = []
         temp_collection_list = []
         for draw_call_model in self.drawcall_model_list:
-            # 获取到原本的obj
-            source_obj = ObjUtils.get_obj_by_name(draw_call_model.obj_name)
+            # 获取到原本的obj（使用原始名称，因为重命名节点只修改了处理链中的名称）
+            blender_obj_name = draw_call_model.get_blender_obj_name()
+            source_obj = ObjUtils.get_obj_by_name(blender_obj_name)
 
             temp_collection = CollectionUtils.create_new_collection("TEMP_SUBMESH_COLLECTION_" + self.unique_str)
             bpy.context.scene.collection.children.link(temp_collection)

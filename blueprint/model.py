@@ -105,20 +105,14 @@ class ProcessingChain:
             return f"ShapeKey[{','.join(params)}]" if params else "ShapeKey[]"
         
         elif node_type == 'Object_Rename':
-            from .node_rename import SSMTNode_Object_Rename
-
-            rules_list = []
-            if hasattr(node, 'rename_rules'):
-                for rule in node.rename_rules:
-                    rule_data = {
-                        'search_str': getattr(rule, 'search_str', ''),
-                        'replace_str': getattr(rule, 'replace_str', '')
-                    }
-                    rules_list.append(rule_data)
-
-            reverse_mapping = getattr(node, 'reverse_mapping', False)
-
-            return SSMTNode_Object_Rename.generate_signature(rules_list, reverse_mapping)
+            try:
+                from .node_rename import SSMTNode_Object_Rename
+                return SSMTNode_Object_Rename.generate_signature(
+                    [{'search_str': r.search_str, 'replace_str': r.replace_str} for r in getattr(node, 'rename_rules', [])],
+                    getattr(node, 'reverse_mapping', False)
+                )
+            except ImportError:
+                return "Object_Rename[unavailable]"
         
         elif node_type == 'Result_Output':
             return "ResultOutput[unique]"
@@ -206,8 +200,9 @@ class ProcessingChain:
         """
         obj_model = DrawCallModel(obj_name=self.object_name)
         
-        if self.source_node and hasattr(self.source_node, 'original_object_name') and self.source_node.original_object_name:
-            obj_model.display_name = self.source_node.original_object_name
+        # 如果对象被重命名过，设置原始名称用于获取 Blender 对象
+        if self.original_object_name:
+            obj_model.source_obj_name = self.original_object_name
         
         # 每个 M_Key 都有自己的 condition_operator，不再需要单独设置
         obj_model.work_key_list = copy.deepcopy(self.shapekey_params)
@@ -400,33 +395,38 @@ class BluePrintModel:
                 LOG.debug(f"   🔑 收集形态键参数: {shapekey_param.key_name}")
         
         elif current_node.bl_idname == 'SSMTNode_Object_Rename':
-            from .node_rename import SSMTNode_Object_Rename
+            try:
+                from .node_rename import SSMTNode_Object_Rename
 
-            old_name = chain.object_name
-            new_name, was_modified, history, signature = SSMTNode_Object_Rename.apply_to_object_name(
-                chain.object_name,
-                current_node
-            )
+                old_name = chain.object_name
+                new_name, was_modified, history, signature = SSMTNode_Object_Rename.apply_to_object_name(
+                    chain.object_name,
+                    current_node
+                )
 
-            if was_modified:
-                if not chain.original_object_name:
-                    chain.original_object_name = old_name
+                if was_modified:
+                    if not chain.original_object_name:
+                        chain.original_object_name = old_name
 
-                chain.object_name = new_name
+                    chain.object_name = new_name
 
-                for record in history:
-                    operation = {
-                        'operation_index': len(chain.rename_history) + 1,
-                        **record
-                    }
-                    chain.rename_history.append(operation)
+                    for record in history:
+                        operation = {
+                            'operation_index': len(chain.rename_history) + 1,
+                            **record
+                        }
+                        chain.rename_history.append(operation)
 
-                LOG.debug(f"   ✏️ 名称修改: '{old_name}' → '{new_name}' ({len(history)}条规则生效)")
-            else:
-                LOG.debug(f"   ✏️ Rename 节点未修改名称: {old_name}")
+                    LOG.debug(f"   ✏️ 名称修改: '{old_name}' → '{new_name}' ({len(history)}条规则生效)")
+                else:
+                    LOG.debug(f"   ✏️ Rename 节点未修改名称: {old_name}")
 
-            chain.node_path.append(current_node)
-            chain.node_param_signatures.append(signature)
+                chain.node_path.append(current_node)
+                chain.node_param_signatures.append(signature)
+            except ImportError:
+                LOG.warning(f"   ⚠️ Rename 节点模块不可用，跳过: {current_node.name}")
+                chain.node_path.append(current_node)
+                chain.node_param_signatures.append("Object_Rename[unavailable]")
         
         elif node_type == SSMTNode_Result_Output.bl_idname:
             chain.reached_output = True
@@ -627,8 +627,11 @@ class BluePrintModel:
         debug_lines.append(f"处理链组数: {len(self.chain_groups)}")
         debug_lines.append(f"合并的组数: {sum(1 for g in self.chain_groups if g.object_count > 1)}")
         
-        from .node_rename import SSMTNode_Object_Rename
-        debug_lines.append(SSMTNode_Object_Rename.generate_debug_summary(self.processing_chains))
+        try:
+            from .node_rename import SSMTNode_Object_Rename
+            debug_lines.append(SSMTNode_Object_Rename.generate_debug_summary(self.processing_chains))
+        except ImportError:
+            pass
         debug_lines.append("")
         
         debug_lines.append("\n🔗 处理链详情（按物体列出）")
@@ -657,8 +660,11 @@ class BluePrintModel:
                 debug_lines.extend(SSMTNode_ShapeKey.generate_debug_detail(chain.shapekey_params, self.keyname_mkey_dict))
             
             if chain.rename_history:
-                from .node_rename import SSMTNode_Object_Rename
-                debug_lines.extend(SSMTNode_Object_Rename.generate_debug_detail(chain.rename_history))
+                try:
+                    from .node_rename import SSMTNode_Object_Rename
+                    debug_lines.extend(SSMTNode_Object_Rename.generate_debug_detail(chain.rename_history))
+                except ImportError:
+                    pass
             
             if chain.node_path:
                 debug_lines.append(f"\n节点路径 (含完整参数):")

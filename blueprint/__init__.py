@@ -19,6 +19,13 @@ try:
 except ImportError:
     HAS_OBJECT_SWAP = False
 
+# 检查重命名节点模块是否可用
+try:
+    from .node_rename import SSMTNode_Object_Rename
+    HAS_OBJECT_RENAME = True
+except ImportError:
+    HAS_OBJECT_RENAME = False
+
 def register():
     from . import node_base
     from . import node_obj
@@ -36,10 +43,20 @@ def register():
         from . import node_swap
         node_swap.register()
     
+    # 重命名节点 - 可选模块
+    if HAS_OBJECT_RENAME:
+        from . import node_rename
+        node_rename.register()
+    
     sync.register()
 
 def unregister():
     from . import sync
+    
+    # 重命名节点 - 可选模块
+    if HAS_OBJECT_RENAME:
+        from . import node_rename
+        node_rename.unregister()
     
     # 物体切换节点 - 可选模块
     if HAS_OBJECT_SWAP:

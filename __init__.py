@@ -14,7 +14,6 @@ from .blueprint import node_obj as blueprint_node_obj
 from .blueprint import node_base as blueprint_node_base
 from .blueprint import node_menu as blueprint_node_menu
 from .blueprint import node_shapekey as blueprint_node_shapekey
-from .blueprint import node_rename as blueprint_node_rename
 from .blueprint import sync as blueprint_sync
 
 # 物体切换节点 - 可选模块（删除后系统仍可正常运行）
@@ -23,6 +22,13 @@ try:
     HAS_OBJECT_SWAP = True
 except ImportError:
     HAS_OBJECT_SWAP = False
+
+# 重命名节点 - 可选模块（删除后系统仍可正常运行）
+try:
+    from .blueprint import node_rename as blueprint_node_rename
+    HAS_OBJECT_RENAME = True
+except ImportError:
+    HAS_OBJECT_RENAME = False
 
 from .ui import ui_func_export
 
@@ -42,6 +48,8 @@ importlib.reload(blueprint_node_menu)
 importlib.reload(blueprint_node_shapekey)
 if HAS_OBJECT_SWAP:
     importlib.reload(blueprint_node_swap)
+if HAS_OBJECT_RENAME:
+    importlib.reload(blueprint_node_rename)
 importlib.reload(blueprint_sync)
 
 bl_info = {
@@ -185,7 +193,8 @@ def register():
     blueprint_node_shapekey.register()
     if HAS_OBJECT_SWAP:
         blueprint_node_swap.register()
-    blueprint_node_rename.register()
+    if HAS_OBJECT_RENAME:
+        blueprint_node_rename.register()
     blueprint_sync.register()
     
     # Toolkit 工具集
@@ -199,7 +208,8 @@ def unregister():
     
     # 蓝图系统
     blueprint_sync.unregister()
-    blueprint_node_rename.unregister()
+    if HAS_OBJECT_RENAME:
+        blueprint_node_rename.unregister()
     if HAS_OBJECT_SWAP:
         blueprint_node_swap.unregister()
     blueprint_node_shapekey.unregister()
