@@ -29,12 +29,14 @@ except ImportError:
 def register():
     from . import node_base
     from . import node_obj
+    from . import node_preset
     from . import node_menu
     from . import node_shapekey
     from . import sync
     
     node_base.register()
     node_obj.register()
+    node_preset.register()
     node_menu.register()
     node_shapekey.register()
     
@@ -63,12 +65,14 @@ def unregister():
         from . import node_swap
         node_swap.unregister()
     
+    from . import node_preset
     from . import node_shapekey
     from . import node_menu
     from . import node_obj
     from . import node_base
     
     sync.unregister()
+    node_preset.unregister()
     node_shapekey.unregister()
     node_menu.unregister()
     node_obj.unregister()

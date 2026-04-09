@@ -566,12 +566,16 @@ class SSMT_OT_BatchConnectNodes(bpy.types.Operator):
 def draw_node_add_menu(self, context):
     if not isinstance(context.space_data, bpy.types.SpaceNodeEditor):
         return
-    if context.space_data.tree_type != 'SSMTBlueprintTreeType':
+    
+    node_tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+    if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
         return
     
     layout = self.layout
     layout.menu("SSMT_MT_NodeMenu_Branch", text="分支", icon='RNA')
     layout.menu("SSMT_MT_NodeMenu_ShapeKey", text="形态键", icon='SHAPEKEY_DATA')
+    layout.separator()
+    layout.menu("SSMT_MT_NodePresetMenu", text="添加预设", icon='PRESET')
     layout.separator()
 
     layout.operator("node.add_node", text="Frame", icon='FILE_PARENT').type = "NodeFrame"
@@ -582,13 +586,19 @@ def draw_node_add_menu(self, context):
 def draw_node_context_menu(self, context):
     if not isinstance(context.space_data, bpy.types.SpaceNodeEditor):
         return
-    if context.space_data.tree_type != 'SSMTBlueprintTreeType':
+    
+    node_tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+    if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
         return
     
     layout = self.layout
     layout.separator()
     layout.operator("ssmt.align_nodes", text="矩阵对齐节点", icon='GRID')
     layout.operator("ssmt.batch_connect_nodes", text="批量连接节点", icon='LINKED')
+    layout.separator()
+    layout.operator_context = 'INVOKE_DEFAULT'
+    layout.operator("ssmt.save_node_preset", text="保存预设", icon='PRESET')
+    layout.operator_context = 'EXEC_DEFAULT'
     layout.separator()
     layout.operator("ssmt.update_all_node_references", text="更新所有节点引用", icon='FILE_REFRESH')
 
