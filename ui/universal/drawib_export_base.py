@@ -1,4 +1,4 @@
-from ...common.blueprint_model import BluePrintModel
+from ...blueprint.model import BluePrintModel
 from ...common.drawib_model import DrawIBModel
 from ...common.buffer_export_helper import BufferExportHelper
 from .export_helper import ExportHelper

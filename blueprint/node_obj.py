@@ -1,10 +1,10 @@
 import bpy
 from bpy.types import NodeTree, Node, NodeSocket
 
-from .logic_name import LogicName
-from .global_config import GlobalConfig
-from .global_properties import GlobalProterties
-from .blueprint_node_base import SSMTBlueprintTree, SSMTNodeBase
+from ..common.logic_name import LogicName
+from ..common.global_config import GlobalConfig
+from ..common.global_properties import GlobalProterties
+from .node_base import SSMTBlueprintTree, SSMTNodeBase
 
 BLENDER_VERSION = bpy.app.version[:2]
 
@@ -71,7 +71,7 @@ class SSMT_OT_SelectNodeObject(bpy.types.Operator):
     bl_idname = "ssmt.select_node_object"
     bl_label = "Select Object"
     
-    object_name: bpy.props.StringProperty() # type: ignore
+    object_name: bpy.props.StringProperty()
 
     def execute(self, context):
         obj_name = self.object_name
@@ -100,7 +100,7 @@ class SSMT_OT_StartPickObject(bpy.types.Operator):
     bl_label = "Pick Object"
     bl_description = "点击后在3D视图中选择一个物体"
     
-    node_name: bpy.props.StringProperty() # type: ignore
+    node_name: bpy.props.StringProperty()
     
     def execute(self, context):
         global _picking_node_name, _picking_tree_name
@@ -200,7 +200,6 @@ class SSMTNode_Object_Info(SSMTNodeBase):
                 self.index_count = obj_name_split[1]
                 self.first_index = obj_name_split[2]
 
-                # alias_name should be everything after the first '.'
                 if len(obj_name_total_split) >= 2:
                     self.alias_name = ".".join(obj_name_total_split[1:])
                 else:
@@ -214,15 +213,15 @@ class SSMTNode_Object_Info(SSMTNodeBase):
             self.object_id = ""
         
         self.update_node_width([self.object_name, self.draw_ib, self.index_count, self.first_index, self.alias_name])
-    object_name: bpy.props.StringProperty(name="Object Name", default="", update=update_object_name) #type: ignore
-    object_id: bpy.props.StringProperty(name="Object ID", default="") #type: ignore
-    original_object_name: bpy.props.StringProperty(name="Original Object Name", default="") #type: ignore
+    object_name: bpy.props.StringProperty(name="Object Name", default="", update=update_object_name)
+    object_id: bpy.props.StringProperty(name="Object ID", default="")
+    original_object_name: bpy.props.StringProperty(name="Original Object Name", default="")
 
 
-    draw_ib: bpy.props.StringProperty(name="DrawIB", default="") # type: ignore
-    index_count: bpy.props.StringProperty(name="IndexCount", default="") # type: ignore
-    first_index: bpy.props.StringProperty(name="FirstIndex", default="") # type: ignore
-    alias_name: bpy.props.StringProperty(name="Alias Name", default="") # type: ignore
+    draw_ib: bpy.props.StringProperty(name="DrawIB", default="")
+    index_count: bpy.props.StringProperty(name="IndexCount", default="")
+    first_index: bpy.props.StringProperty(name="FirstIndex", default="")
+    alias_name: bpy.props.StringProperty(name="Alias Name", default="")
 
     def init(self, context):
         self.outputs.new('SSMTSocketObject', "Object")
@@ -236,10 +235,16 @@ class SSMTNode_Object_Info(SSMTNodeBase):
         op.node_name = self.name
 
         if self.object_name:
-            op = row.operator("ssmt.select_node_object", text="", icon='RESTRICT_SELECT_OFF')
-            op.object_name = self.object_name
+            obj = bpy.data.objects.get(self.object_name)
+            if obj:
+                op = row.operator("ssmt.select_node_object", text="", icon='RESTRICT_SELECT_OFF')
+                op.object_name = self.object_name
+                
+                if not self.object_id:
+                    self.object_id = str(obj.as_pointer())
+            else:
+                row.label(text="", icon='ERROR')
 
-        # Display as read-only labels to prevent user edits in the UI
         layout.label(text=f"DrawIB: {self.draw_ib}")
         layout.label(text=f"IndexCount: {self.index_count}")
         layout.label(text=f"FirstIndex: {self.first_index}")
@@ -266,80 +271,6 @@ class SSMTNode_Object_Group(SSMTNodeBase):
         
         if len(self.inputs) > 1 and not self.inputs[-1].is_linked and not self.inputs[-2].is_linked:
              self.inputs.remove(self.inputs[-1])
-
-
-
-
-class SSMT_OT_SwitchKey_AddSocket(bpy.types.Operator):
-    '''Add a new socket to the switch node'''
-    bl_idname = "ssmt.switch_add_socket"
-    bl_label = "Add Socket"
-    
-    node_name: bpy.props.StringProperty() # type: ignore
-
-    def execute(self, context):
-        tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
-        if not tree:
-             return {'CANCELLED'}
-        node = tree.nodes.get(self.node_name)
-        if node:
-             node.inputs.new('SSMTSocketObject', f"Status {len(node.inputs)}")
-        return {'FINISHED'}
-
-
-class SSMT_OT_SwitchKey_RemoveSocket(bpy.types.Operator):
-    '''Remove the last socket from the switch node'''
-    bl_idname = "ssmt.switch_remove_socket"
-    bl_label = "Remove Socket"
-    
-    node_name: bpy.props.StringProperty() # type: ignore
-
-    def execute(self, context):
-        tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
-        if not tree:
-             return {'CANCELLED'}
-        node = tree.nodes.get(self.node_name)
-        if node and len(node.inputs) > 0:
-            node.inputs.remove(node.inputs[-1])
-        return {'FINISHED'}
-
-
-class SSMTNode_SwitchKey(SSMTNodeBase):
-    '''【按键切换】会把每个连入的分支分配到单独的变量'''
-    bl_idname = 'SSMTNode_SwitchKey'
-    bl_label = 'Switch Key'
-    bl_icon = 'GROUP'
-
-    def update_key_name(self, context):
-        self.update_node_width([self.key_name, self.comment])
-    
-    def update_comment(self, context):
-        self.update_node_width([self.key_name, self.comment])
-    
-    key_name: bpy.props.StringProperty(name="Key Name", default="", update=update_key_name) # type: ignore
-    comment: bpy.props.StringProperty(name="备注", description="备注信息，会以注释形式生成到配置表中", default="", update=update_comment) # type: ignore
-    
-    def init(self, context):
-        self.label = "按键切换"
-        self.inputs.new('SSMTSocketObject', "Status 0")
-        self.outputs.new('SSMTSocketObject', "Output")
-        self.width = 200
-        self.use_custom_color = True
-        self.color = (0.34, 0.54, 0.34)
-
-    def draw_buttons(self, context, layout):
-        row = layout.row(align=True)
-        row.prop(self, "key_name", text="按键")
-        row.operator("wm.url_open", text="", icon='HELP').url = "https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes"
-        
-        layout.prop(self, "comment", text="备注")
-        
-        row = layout.row(align=True)
-        op_add = row.operator("ssmt.switch_add_socket", text="Add", icon='ADD')
-        op_add.node_name = self.name
-        
-        op_rem = row.operator("ssmt.switch_remove_socket", text="Remove", icon='REMOVE')
-        op_rem.node_name = self.name
 
 
 class SSMTNode_Result_Output(SSMTNodeBase):
@@ -390,11 +321,6 @@ class SSMTNode_Result_Output(SSMTNodeBase):
             box.label(text=context.scene.global_properties.generate_mod_folder_path)
 
             layout.operator("ssmt.select_generate_mod_folder", icon='FILE_FOLDER')
-        
-        # 添加返回上一层级按钮
-        layout.separator()
-        row = layout.row(align=True)
-        row.operator("ssmt.blueprint_nest_navigate", text="返回上一层级", icon='BACK')
 
     def update(self):
         if self.inputs and self.inputs[-1].is_linked:
@@ -409,7 +335,7 @@ class SSMT_OT_View_Group_Objects(bpy.types.Operator):
     bl_idname = "ssmt.view_group_objects"
     bl_label = "View Group Objects"
     
-    node_name: bpy.props.StringProperty() # type: ignore
+    node_name: bpy.props.StringProperty()
 
     def execute(self, context):
         tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
@@ -514,9 +440,6 @@ classes = (
     SSMTNode_Object_Info,
     SSMTNode_Object_Group,
     SSMTNode_Result_Output,
-    SSMTNode_SwitchKey,
-    SSMT_OT_SwitchKey_AddSocket,
-    SSMT_OT_SwitchKey_RemoveSocket,
 )
 
 def register():

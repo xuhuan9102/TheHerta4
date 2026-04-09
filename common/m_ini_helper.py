@@ -13,7 +13,7 @@ from .logic_name import LogicName
 
 from .global_key_count_helper import GlobalKeyCountHelper
 from .workspace_helper import WorkSpaceHelper
-from .blueprint_export_helper import BlueprintExportHelper
+from ..blueprint.export_helper import BlueprintExportHelper
 from .texture_metadata_helper import TextureMetadataResolver, TextureMarkUpInfo
 
 class M_IniHelper:

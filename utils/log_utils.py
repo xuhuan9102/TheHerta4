@@ -40,6 +40,10 @@ class LOG:
         cls.newline()
 
     @classmethod
+    def debug(cls, input: str):
+        print("\033[36m" + "Debug: " + input + "\033[0m")
+
+    @classmethod
     def newline(cls):
         print("\033[32m" +"------------------------------------------------------------------------------------------------------------------------------" + "\033[0m")
 

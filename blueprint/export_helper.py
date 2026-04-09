@@ -1,17 +1,15 @@
 import bpy
-from .global_config import GlobalConfig
-from .m_key import M_Key
+from bpy.types import NodeTree, Node, NodeSocket
+
+from ..common.global_config import GlobalConfig
+from ..common.m_key import M_Key
 
 class BlueprintExportHelper:
 
-    # 静态变量，用于多文件导出功能
-    # 存储当前导出次数（从1开始）
     current_export_index = 1
     
-    # 静态变量，存储最大导出次数
     max_export_count = 1
 
-    # 运行时记录当前操作对应的蓝图树，避免按钮触发后丢失上下文
     runtime_blueprint_tree_name = ""
 
     @staticmethod
@@ -53,7 +51,6 @@ class BlueprintExportHelper:
     
     @staticmethod
     def get_current_blueprint_tree(context=None):
-        """获取当前工作空间对应的蓝图树"""
         tree = BlueprintExportHelper._get_blueprint_tree_from_context(context)
         if BlueprintExportHelper._is_valid_blueprint_tree(tree):
             BlueprintExportHelper.set_runtime_blueprint_tree(tree)
@@ -78,7 +75,6 @@ class BlueprintExportHelper:
 
     @staticmethod
     def find_node_in_all_blueprints(node_name):
-        """在所有蓝图中查找指定名称的节点"""
         for node_group in bpy.data.node_groups:
             if node_group.bl_idname == 'SSMTBlueprintTreeType':
                 node = node_group.nodes.get(node_name)
@@ -88,7 +84,6 @@ class BlueprintExportHelper:
 
     @staticmethod
     def get_node_from_bl_idname(tree, node_type:str):
-        """在树中查找输出节点 (假设只有一个)"""
         if not tree:
             return None
         for node in tree.nodes:
@@ -98,7 +93,6 @@ class BlueprintExportHelper:
     
     @staticmethod
     def get_nodes_from_bl_idname(tree, node_type:str):
-        """在树中查找所有匹配的节点"""
         if not tree:
             return []
         nodes = []
@@ -109,21 +103,14 @@ class BlueprintExportHelper:
     
     @staticmethod
     def get_connected_groups(output_node):
-        """
-        获取连接到输出节点的所有 Group 节点。
-        按照 Input 插槽的顺序返回列表。
-        """
         connected_groups = []
         if not output_node:
             return connected_groups
             
-        # 遍历 Output 节点的所有输入插槽
         for socket in output_node.inputs:
             if socket.is_linked:
-                # 遍历连线 (通常一个插槽只有一个连线，但数据结构是列表)
                 for link in socket.links:
                     source_node = link.from_node
-                    # 确保来源是 Group 节点
                     if source_node.bl_idname == 'SSMTNode_Object_Group':
                          connected_groups.append(source_node)
         
@@ -131,17 +118,12 @@ class BlueprintExportHelper:
     
     @staticmethod
     def get_connected_nodes(current_node):
-        """
-        按照插槽顺序返回所有连接的节点
-        """
         connected_groups = []
         if not current_node:
             return connected_groups
             
-        # 遍历 Output 节点的所有输入插槽
         for socket in current_node.inputs:
             if socket.is_linked:
-                # 遍历连线 (通常一个插槽只有一个连线，但数据结构是列表)
                 for link in socket.links:
                     source_node = link.from_node
                     connected_groups.append(source_node)
@@ -150,9 +132,6 @@ class BlueprintExportHelper:
     
     @staticmethod
     def get_objects_from_group(group_node):
-        """
-        获取连接到某个 Group 节点的所有 Object Info 节点中的物体名称信息。
-        """
         objects_info = []
         if not group_node:
             return objects_info
@@ -161,10 +140,7 @@ class BlueprintExportHelper:
             if socket.is_linked:
                 for link in socket.links:
                     source_node = link.from_node
-                    # 确保来源是 Object Info 节点
                     if source_node.bl_idname == 'SSMTNode_Object_Info':
-                        # 这里您可以返回整个节点对象，或者只返回需要的属性
-                        # 比如: (ObjName, DrawIB, Component)
                         info = {
                             "object_name": source_node.object_name,
                             "draw_ib": source_node.draw_ib,
@@ -177,7 +153,6 @@ class BlueprintExportHelper:
 
     @staticmethod
     def get_current_shapekeyname_mkey_dict(context=None):
-        """获取当前蓝图及所有嵌套蓝图中所有 ShapeKey 节点的形态键名称和按键列表"""
         tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
         if not tree:
             return {}
@@ -187,7 +162,6 @@ class BlueprintExportHelper:
         key_index = 0
         
         def collect_shapekey_nodes(current_tree):
-            """递归收集形态键节点"""
             nonlocal key_index
             
             if current_tree.name in visited_blueprints:
@@ -231,7 +205,6 @@ class BlueprintExportHelper:
 
     @staticmethod
     def get_datatype_node_info(context=None):
-        """获取当前蓝图及所有嵌套蓝图中连接到输出节点的数据类型节点信息"""
         tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
         if not tree:
             return None
@@ -240,7 +213,6 @@ class BlueprintExportHelper:
         datatype_nodes = []
         
         def collect_datatype_nodes(current_tree):
-            """递归收集数据类型节点"""
             if current_tree.name in visited_blueprints:
                 return
             visited_blueprints.add(current_tree.name)
@@ -274,7 +246,6 @@ class BlueprintExportHelper:
     
     @staticmethod
     def _find_datatype_nodes_connected_to_output(node, visited=None):
-        """递归查找连接到输出节点的所有数据类型节点"""
         if visited is None:
             visited = set()
         
@@ -287,19 +258,11 @@ class BlueprintExportHelper:
         visited.add(node.name)
         datatype_nodes = []
         
-        # 如果当前节点是数据类型节点，添加到列表
         if node.bl_idname == 'SSMTNode_DataType':
             datatype_nodes.append(node)
         
-        # 递归查找连接的节点
         connected_nodes = BlueprintExportHelper.get_connected_nodes(node)
         for connected_node in connected_nodes:
             datatype_nodes.extend(BlueprintExportHelper._find_datatype_nodes_connected_to_output(connected_node, visited))
         
         return datatype_nodes
-    
-
-
-
-            
-        

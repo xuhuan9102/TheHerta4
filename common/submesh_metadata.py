@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 from ..utils.format_utils import Fatal
 from ..utils.json_utils import JsonUtils
-from .blueprint_export_helper import BlueprintExportHelper
+from ..blueprint.export_helper import BlueprintExportHelper
 from .d3d11_gametype import D3D11GameType
 from .global_config import GlobalConfig
 from .submesh_json import SubmeshJson

@@ -14,13 +14,16 @@ from .ui_func_import_ssmt import SSMT4ImportAllFromCurrentWorkSpaceBlueprint, SS
 class PanelBasicInformation(bpy.types.Panel):
     '''
     基础信息面板
-    此面板实时刷新并读取全局配置文件中的路径
     '''
-    bl_label = TR.translate("基础信息面板")
-    bl_idname = "VIEW3D_PT_CATTER_Buttons_panel"
+    bl_label = "基础信息"
+    bl_idname = "VIEW3D_PT_SSMT4_Basic_Information"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'TheHerta4'
+
+    @classmethod
+    def poll(cls, context):
+        return not getattr(context.scene, 'herta_show_toolkit', False)
 
     def draw(self, context):
         layout = self.layout
@@ -52,6 +55,12 @@ class PanelBasicInformation(bpy.types.Panel):
         layout.separator()
 
         layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
+
+        layout.separator()
+        
+        layout.prop(context.scene, "herta_show_toolkit", text="工具集模式", icon='TOOL_SETTINGS')
+        if context.scene.herta_show_toolkit:
+            layout.operator("model.switch_to_main_panel", text="返回主面板", icon='BACK')
 
         if GlobalConfig.logic_name == LogicName.WWMI:
             layout.prop(context.scene.global_properties,"import_merged_vgmap")

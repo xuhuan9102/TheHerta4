@@ -11,7 +11,7 @@ from .shapekey_utils import ShapeKeyUtils
 from .timer_utils import TimerUtils
 
 from ..common.d3d11_gametype import D3D11GameType
-from ..common.blueprint_export_helper import BlueprintExportHelper
+from ..blueprint.export_helper import BlueprintExportHelper
 from ..common.obj_buffer_helper import ObjBufferHelper
 
 

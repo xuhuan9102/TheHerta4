@@ -6,24 +6,34 @@ from .common import global_properties
 
 # UI界面
 from .ui import ui_panel_basic
-from .ui import ui_panel_model
 from .ui import ui_panel_sword
 from .ui import ui_func_import
 from .ui import ui_func_import_ssmt
 
-from .common import blueprint_node_obj
-from .common import blueprint_node_base
-from .common import blueprint_node_menu
-from .common import blueprint_node_shapekey
+from .blueprint import node_obj as blueprint_node_obj
+from .blueprint import node_base as blueprint_node_base
+from .blueprint import node_menu as blueprint_node_menu
+from .blueprint import node_shapekey as blueprint_node_shapekey
+from .blueprint import node_rename as blueprint_node_rename
+from .blueprint import sync as blueprint_sync
 
 from .ui import ui_func_export
+
+# Toolkit 工具集
+from . import toolkit
 
 # 自动更新功能
 from . import addon_updater_ops
 
-# 开发时确保同时自动更新 addon_updater_ops
+# 开发时确保同时自动更新所有模块
 import importlib
 importlib.reload(addon_updater_ops)
+importlib.reload(global_properties)
+importlib.reload(blueprint_node_base)
+importlib.reload(blueprint_node_obj)
+importlib.reload(blueprint_node_menu)
+importlib.reload(blueprint_node_shapekey)
+importlib.reload(blueprint_sync)
 
 bl_info = {
     "name": "TheHerta4",
@@ -33,6 +43,26 @@ bl_info = {
     "location": "View3D",
     "category": "Generic"
 }
+
+
+class HERTT_OT_SwitchToMainPanel(bpy.types.Operator):
+    """切换回主面板"""
+    bl_idname = "model.switch_to_main_panel"
+    bl_label = "切换回主面板"
+    
+    def execute(self, context):
+        context.scene.herta_show_toolkit = False
+        return {'FINISHED'}
+
+
+class HERTT_OT_SwitchToToolkit(bpy.types.Operator):
+    """切换到工具集面板"""
+    bl_idname = "model.switch_to_toolkit"
+    bl_label = "切换到工具集面板"
+    
+    def execute(self, context):
+        context.scene.herta_show_toolkit = True
+        return {'FINISHED'}
 
 
 class UpdaterPanel(bpy.types.Panel):
@@ -45,6 +75,10 @@ class UpdaterPanel(bpy.types.Panel):
     bl_category = "TheHerta4"
     bl_order = 99
     bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return not getattr(context.scene, 'herta_show_toolkit', False)
 
     def draw(self, context):
         layout = self.layout
@@ -112,6 +146,17 @@ def register():
     # 1. Configs
     global_properties.register()
     
+    # 注册 toolkit 切换属性
+    bpy.types.Scene.herta_show_toolkit = bpy.props.BoolProperty(
+        name="显示工具集",
+        description="切换显示工具集面板",
+        default=False
+    )
+    
+    # 注册切换操作符
+    bpy.utils.register_class(HERTT_OT_SwitchToMainPanel)
+    bpy.utils.register_class(HERTT_OT_SwitchToToolkit)
+    
     # 2. Addon Updater (local classes)
     addon_updater_ops.register(bl_info)
     bpy.utils.register_class(UpdaterPanel)
@@ -120,7 +165,6 @@ def register():
     # 3. UI Panels & Logic
     blueprint_node_base.register()
     ui_panel_basic.register()
-    ui_panel_model.register()
     ui_panel_sword.register()
     ui_func_import_ssmt.register()
     ui_func_import.register()
@@ -130,27 +174,43 @@ def register():
     ui_func_export.register()
     blueprint_node_menu.register()
     blueprint_node_shapekey.register()
+    blueprint_node_rename.register()
+    blueprint_sync.register()
+    
+    # Toolkit 工具集
+    toolkit.register()
 
 
 
 def unregister():
+    # Toolkit 工具集
+    toolkit.unregister()
+    
     # 蓝图系统
-    blueprint_node_obj.unregister()
-    ui_func_export.unregister()
-    blueprint_node_menu.unregister()
+    blueprint_sync.unregister()
+    blueprint_node_rename.unregister()
     blueprint_node_shapekey.unregister()
+    blueprint_node_menu.unregister()
+    ui_func_export.unregister()
+    blueprint_node_obj.unregister()
     blueprint_node_base.unregister()
 
     ui_func_import.unregister()
     ui_func_import_ssmt.unregister()
     ui_panel_sword.unregister()
-    ui_panel_model.unregister()
     ui_panel_basic.unregister()
 
     # 2. Addon Updater (local classes)
     bpy.utils.unregister_class(HertaUpdatePreference)
     bpy.utils.unregister_class(UpdaterPanel)
     addon_updater_ops.unregister()
+    
+    # 注销切换操作符
+    bpy.utils.unregister_class(HERTT_OT_SwitchToToolkit)
+    bpy.utils.unregister_class(HERTT_OT_SwitchToMainPanel)
+    
+    # 删除 toolkit 切换属性
+    del bpy.types.Scene.herta_show_toolkit
 
     # 1. Configs
     global_properties.unregister()

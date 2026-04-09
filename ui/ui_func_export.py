@@ -3,6 +3,7 @@ import bpy
 from ..utils.timer_utils import TimerUtils
 from ..utils.translate_utils import TR
 from ..utils.command_utils import CommandUtils
+from ..utils.log_utils import LOG
 
 from ..common.global_config import GlobalConfig
 from ..common.logic_name import LogicName
@@ -18,8 +19,8 @@ from .wwmi.wwmi_export import ExportWWMI
 from .universal.yysls import ExportYYSLS
 from .universal.zzmi import ExportZZMI
 
-from ..common.blueprint_model import BluePrintModel
-from ..common.blueprint_export_helper import BlueprintExportHelper
+from ..blueprint.model import BluePrintModel
+from ..blueprint.export_helper import BlueprintExportHelper
 
 
 class SSMTGenerateModBlueprint(bpy.types.Operator):
@@ -45,7 +46,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
 
-        print("当前蓝图: " + str(blueprint_model))
+        LOG.info(f"📋 蓝图解析完成: {len(blueprint_model.ordered_draw_obj_data_model_list)} 个物体待导出")
 
         # 2.根据不同的逻辑进行不同的导出器初始化和调用
         if GlobalConfig.logic_name == LogicName.EFMI:
