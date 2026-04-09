@@ -5,6 +5,13 @@ from ..common.global_config import GlobalConfig
 
 from .node_base import SSMTBlueprintTree, SSMTNodeBase
 
+# 检查物体切换节点是否可用
+try:
+    from .node_swap import SSMTNode_ObjectSwap
+    HAS_OBJECT_SWAP = True
+except ImportError:
+    HAS_OBJECT_SWAP = False
+
 
 class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
     '''Create nodes from selected objects and group them under a new Group node'''
@@ -173,6 +180,12 @@ class SSMT_MT_NodeMenu_Branch(bpy.types.Menu):
         layout = self.layout
         layout.operator("node.add_node", text="Object Info", icon='OBJECT_DATAMODE').type = "SSMTNode_Object_Info"
         layout.operator("node.add_node", text="Group", icon='GROUP').type = "SSMTNode_Object_Group"
+        
+        # 物体切换节点 - 仅在模块可用时显示
+        if HAS_OBJECT_SWAP:
+            layout.separator()
+            layout.operator("node.add_node", text="Object Swap", icon='SHADERFX').type = "SSMTNode_ObjectSwap"
+        
         layout.separator()
         layout.operator("node.add_node", text="Rename Object", icon='OUTLINER').type = "SSMTNode_Object_Rename"
         layout.separator()

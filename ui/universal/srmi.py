@@ -81,6 +81,9 @@ class ExportSRMI:
         )
         print("ExportSRMI: 已完成 Hash 风格贴图配置生成")
 
+        # 【钩子】集成物体切换节点的配置生成
+        self._integrate_object_swap_ini_hook(ini_builder)
+
         for drawib_model in self.drawib_model_list:
             draw_ib = drawib_model.draw_ib
             draw_ib_alias = drawib_model.draw_ib_alias
@@ -151,10 +154,8 @@ class ExportSRMI:
                                 texture_override_vb_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
 
                     if category_name == d3d11_game_type.CategoryDrawCategoryDict.get("Position"):
-                        if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
-                            texture_override_vb_section.append("$active" + str(active_index) + " = 1")
-                            if GlobalProterties.generate_branch_mod_gui():
-                                texture_override_vb_section.append("$ActiveCharacter = 1")
+                        # $active 应该在 IB 块中添加，而不是在这里
+                        pass
 
                     texture_override_vb_section.new_line()
 
@@ -197,6 +198,12 @@ class ExportSRMI:
                     obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
                 ):
                     texture_override_ib_section.append(draw_line)
+
+                # 添加 $active 激活参数（当存在条件键时）
+                if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
+                    texture_override_ib_section.append("$active" + str(active_index) + " = 1")
+                    if GlobalProterties.generate_branch_mod_gui():
+                        texture_override_ib_section.append("$ActiveCharacter = 1")
 
                 texture_override_ib_section.new_line()
 
@@ -245,6 +252,36 @@ class ExportSRMI:
         
         ini_filepath = os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.workspacename + ".ini")
         ini_builder.save_to_file(ini_filepath)
+
+    def _integrate_object_swap_ini_hook(self, ini_builder):
+        """
+        【钩子方法】自动集成物体切换节点的 INI 配置
+        
+        这是一个钩子方法，用于在 INI 生成流程中自动检测并添加物体切换节点的配置。
+        不需要用户显式调用，导出流程会自动检测和集成。
+        """
+        try:
+            from ...blueprint.node_swap_ini import SwapKeyINIIntegrator
+            from ...blueprint.export_helper import BlueprintExportHelper
+            
+            # 获取蓝图树
+            blueprint_tree = BlueprintExportHelper.get_current_blueprint_tree()
+            if not blueprint_tree:
+                return
+            
+            # 调用钩子集成器
+            SwapKeyINIIntegrator.integrate_to_export(ini_builder, blueprint_tree)
+            
+        except ImportError:
+            # 物体切换模块未找到，跳过
+            pass
+        except Exception as e:
+            # 错误处理，记录但不中断导出
+            try:
+                from ...utils.log_utils import LOG
+                LOG.warning(f"⚠️ 물体切换 节点 INI 集成钩子执行失败: {e}")
+            except:
+                pass
                 
 
 

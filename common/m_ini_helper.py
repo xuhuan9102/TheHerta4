@@ -17,8 +17,27 @@ from ..blueprint.export_helper import BlueprintExportHelper
 from .texture_metadata_helper import TextureMetadataResolver, TextureMarkUpInfo
 
 class M_IniHelper:
+    """INI 辅助工具类
+    
+    提供生成 INI 配置的各种辅助方法，包括：
+    - drawindexed 命令生成
+    - Hash 风格贴图配置
+    - Slot 风格贴图复制
+    - 形态键配置生成
+    - 分支按键配置生成
+    """
+    
     @classmethod
     def _count_marked_textures(cls, draw_ib_model: DrawIBModel, mark_type: str | None = None) -> int:
+        """统计标记的贴图数量
+        
+        Args:
+            draw_ib_model: DrawIB 模型实例
+            mark_type: 贴图标记类型（Slot 或 Hash），为 None 时统计所有类型
+            
+        Returns:
+            int: 标记的贴图数量
+        """
         count = 0
         for submesh_model in getattr(draw_ib_model, "submesh_model_list", []):
             texture_info_list = draw_ib_model.get_submesh_texture_markup_info_list(submesh_model)
@@ -165,6 +184,18 @@ class M_IniHelper:
         ordered_draw_obj_model_list: list[DrawCallModel],
         obj_name_draw_offset_dict: dict[str, int] | None = None,
     ) -> list[str]:
+        """获取 drawindexed 命令字符串列表
+        
+        根据 DrawCallModel 列表生成 drawindexed 命令，支持条件判断。
+        会根据 condition_str 对 obj_model 进行分组，相同条件的放在同一个 if 块中。
+        
+        Args:
+            ordered_draw_obj_model_list: DrawCallModel 列表，按绘制顺序排列
+            obj_name_draw_offset_dict: 对象名称到绘制偏移的映射字典
+            
+        Returns:
+            list[str]: drawindexed 命令字符串列表
+        """
         # 传统的使用DrawIndexed方式调用这个
         # 在输出之前，我们需要根据condition对obj_model进行分组
         condition_str_obj_model_list_dict:dict[str,list[DrawCallModel]] = {}
@@ -573,45 +604,73 @@ class M_IniHelper:
 
 
     @classmethod
-    def add_branch_key_sections(cls,ini_builder:M_IniBuilder,key_name_mkey_dict:dict[str,M_Key]):
-
+    def add_branch_key_sections(cls, ini_builder:M_IniBuilder, key_name_mkey_dict:dict[str,M_Key]):
+        """添加分支按键配置段落
+        
+        在 INI 中添加物体切换相关的配置，包括：
+        - [Constants] 中声明 $active0 变量
+        - [Present] 中初始化 $active0 = 0
+        - [KeySwap_N] 段落用于按键切换
+        
+        注意：$swapkey 相关的配置由 node_swap_ini.py 模块单独处理，
+        此方法只处理非 swapkey 的按键配置。
+        
+        Args:
+            ini_builder: INI 构建器
+            key_name_mkey_dict: 按键名称到 M_Key 的映射字典
+        """
         if len(key_name_mkey_dict.keys()) != 0:
-            constants_section = M_IniSection(M_SectionType.Constants)
-            constants_section.SectionName = "Constants"
+            constants_section = None
+            for section in ini_builder.ini_section_list:
+                if section.SectionType == M_SectionType.Constants:
+                    constants_section = section
+                    break
+            
+            if constants_section is None:
+                constants_section = M_IniSection(M_SectionType.Constants)
+                constants_section.SectionName = "Constants"
+                ini_builder.append_section(constants_section)
 
-            for i in range(GlobalKeyCountHelper.generated_mod_number):
-                constants_section.append("global $active" + str(i))
+            # 声明 $active0 变量，用于物体切换功能的激活控制
+            active_line = "global $active0"
+            already_exists = any(active_line in line for line in constants_section.SectionLineList)
+            if not already_exists:
+                constants_section.append(active_line)
 
             for mkey in key_name_mkey_dict.values():
+                # 跳过 swapkey，它们由 node_swap_ini.py 单独处理
+                if getattr(mkey, 'key_name', '').startswith('$swapkey'):
+                    continue
+                
                 key_str = "global persist " + mkey.key_name + " = " + str(mkey.initialize_value)
-                constants_section.append(key_str) 
-
-            ini_builder.append_section(constants_section)
+                already_exists = any(key_str in line for line in constants_section.SectionLineList)
+                if not already_exists:
+                    constants_section.append(key_str)
 
 
         if len(key_name_mkey_dict.keys()) != 0:
             present_section = M_IniSection(M_SectionType.Present)
             present_section.SectionName = "Present"
-
-            for i in range(GlobalKeyCountHelper.generated_mod_number):
-                present_section.append("post $active" + str(i) + " = 0")
+            
+            # 在 Present 中重置 $active0，确保每次帧开始时为 0
+            present_section.append("post $active0 = 0")
             ini_builder.append_section(present_section)
         
         key_number = 0
         if len(key_name_mkey_dict.keys()) != 0:
 
             for mkey in key_name_mkey_dict.values():
+                # 跳过 swapkey，它们由 node_swap_ini.py 单独处理
+                if getattr(mkey, 'key_name', '').startswith('$swapkey'):
+                    continue
+                
                 key_section = M_IniSection(M_SectionType.Key)
                 key_section.append("[KeySwap_" + str(key_number) + "]")
                 
-                # 添加备注信息
                 comment = getattr(mkey, 'comment', '')
                 if comment:
                     key_section.append("; " + comment)
                 
-                # key_section.append("condition = $active" + str(key_number) + " == 1")
-
-                # XXX 这里由于有BUG，我们固定用$active0来检测激活，不搞那么复杂了。
                 key_section.append("condition = $active0 == 1")
 
                 if mkey.initialize_vk_str != "":

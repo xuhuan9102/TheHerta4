@@ -41,5 +41,38 @@ class DrawIBExportBase:
                 with open(shapekey_buf_filepath, 'wb') as file_obj:
                     shapekey_buf.tofile(file_obj)
 
+    def _integrate_object_swap_ini_hook(self, ini_builder):
+        """【钩子方法】自动集成物体切换节点的 INI 配置
+        
+        这是一个钩子方法，用于在 INI 生成流程中自动检测并添加物体切换节点的配置。
+        不需要用户显式调用，导出流程会自动检测和集成。
+        """
+        try:
+            from ...blueprint.node_swap_ini import SwapKeyINIIntegrator
+            
+            # 优先使用 blueprint_model 中保存的蓝图树引用
+            blueprint_tree = getattr(self.blueprint_model, '_tree', None)
+            if not blueprint_tree:
+                # 如果没有保存的引用，尝试从上下文获取
+                from ...blueprint.export_helper import BlueprintExportHelper
+                blueprint_tree = BlueprintExportHelper.get_current_blueprint_tree()
+            
+            if not blueprint_tree:
+                return
+            
+            # 调用钩子集成器
+            SwapKeyINIIntegrator.integrate_to_export(ini_builder, blueprint_tree)
+            
+        except ImportError:
+            # 物体切换模块未找到，跳过
+            pass
+        except Exception as e:
+            # 错误处理，记录但不中断导出
+            try:
+                from ...utils.log_utils import LOG
+                LOG.warning(f"⚠️ 物体切换节点 INI 集成钩子执行失败: {e}")
+            except:
+                pass
+
     def export(self):
         raise NotImplementedError()

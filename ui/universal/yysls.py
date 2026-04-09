@@ -122,6 +122,8 @@ class ExportYYSLS(DrawIBExportBase):
         ini_builder = M_IniBuilder()
         drawib_drawibmodel_dict = {drawib_model.draw_ib: drawib_model for drawib_model in self.drawib_model_list}
         M_IniHelper.generate_hash_style_texture_ini(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
+        # 【钩子】集成物体切换节点的配置生成
+        self._integrate_object_swap_ini_hook(ini_builder)
         for drawib_model in self.drawib_model_list:
             self.add_unity_vs_texture_override_ib_sections(ini_builder=ini_builder, drawib_model=drawib_model)
             self.add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)

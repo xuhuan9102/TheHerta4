@@ -12,10 +12,31 @@ from .drawib_export_base import DrawIBExportBase
 
 
 class ExportUnity(DrawIBExportBase):
+    """Unity 游戏导出器
+    
+    负责将蓝图模型导出为 3DMigoto/XXMI 格式的 INI 配置文件。
+    支持顶点着色器（VS）和计算着色器（CS）两种导出模式。
+    """
+    
     def __init__(self, blueprint_model):
+        """初始化 Unity 导出器
+        
+        Args:
+            blueprint_model: 蓝图模型实例，包含所有导出所需的模型数据
+        """
         super().__init__(blueprint_model=blueprint_model, combine_ib=False)
 
     def add_unity_vs_texture_override_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        """添加顶点着色器模式的 TextureOverride VB 段落
+        
+        生成用于顶点着色器模式的 TextureOverride 配置，包括：
+        - 各类别的 VB 资源绑定
+        - $active 参数设置（用于物体切换功能）
+        
+        Args:
+            ini_builder: INI 构建器
+            drawib_model: DrawIB 模型实例
+        """
         d3d11_game_type = drawib_model.d3d11GameType
         draw_ib = drawib_model.draw_ib
 
@@ -38,9 +59,11 @@ class ExportUnity(DrawIBExportBase):
                 texture_override_vb_section.append("handling = skip")
                 texture_override_vb_section.append("draw = " + str(drawib_model.draw_number) + ", 0")
 
+            # 在 Position 类别中设置 $active 参数，用于激活物体切换功能
+            # 使用 $active0 作为统一的激活参数，所有物体切换节点共享此参数
             if category_name == d3d11_game_type.CategoryDrawCategoryDict["Position"]:
                 if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
-                    texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
+                    texture_override_vb_section.append("$active0 = 1")
                     if GlobalProterties.generate_branch_mod_gui():
                         texture_override_vb_section.append("$ActiveCharacter = 1")
 
@@ -49,6 +72,16 @@ class ExportUnity(DrawIBExportBase):
         ini_builder.append_section(texture_override_vb_section)
 
     def add_unity_vs_texture_override_ib_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        """添加顶点着色器模式的 TextureOverride IB 段落
+        
+        生成用于顶点着色器模式的 IndexBuffer 相关配置，包括：
+        - IB 资源绑定
+        - drawindexed 命令（带条件判断）
+        
+        Args:
+            ini_builder: INI 构建器
+            drawib_model: DrawIB 模型实例
+        """
         texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
         draw_ib = drawib_model.draw_ib
 
@@ -139,6 +172,17 @@ class ExportUnity(DrawIBExportBase):
         ini_builder.append_section(resource_texture_section)
 
     def add_unity_cs_texture_override_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        """添加计算着色器模式的 TextureOverride VB 段落
+        
+        生成用于计算着色器模式的 TextureOverride 配置，包括：
+        - GPU 预蒙皮相关的资源绑定
+        - dispatch 命令
+        - $active 参数设置（用于物体切换功能）
+        
+        Args:
+            ini_builder: INI 构建器
+            drawib_model: DrawIB 模型实例
+        """
         d3d11_game_type = drawib_model.d3d11GameType
         draw_ib = drawib_model.draw_ib
 
@@ -168,9 +212,11 @@ class ExportUnity(DrawIBExportBase):
                     category_original_slot = d3d11_game_type.CategoryExtractSlotDict[original_category_name]
                     texture_override_vb_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
 
+            # 在 Position 类别中设置 $active 参数，用于激活物体切换功能
+            # 使用 $active0 作为统一的激活参数，所有物体切换节点共享此参数
             if category_name == d3d11_game_type.CategoryDrawCategoryDict["Position"]:
                 if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
-                    texture_override_vb_section.append("$active" + str(GlobalKeyCountHelper.generated_mod_number) + " = 1")
+                    texture_override_vb_section.append("$active0 = 1")
                     if GlobalProterties.generate_branch_mod_gui():
                         texture_override_vb_section.append("$ActiveCharacter = 1")
 
@@ -278,10 +324,22 @@ class ExportUnity(DrawIBExportBase):
         ini_builder.append_section(vscheck_section)
 
     def generate_unity_cs_config_ini(self):
+        """生成计算着色器模式的 INI 配置文件
+        
+        适用于需要 GPU 预蒙皮的游戏（如 Naraka）。
+        生成完整的 INI 配置，包括：
+        - TextureOverride 段落
+        - Resource 段落
+        - 物体切换相关配置
+        - 形态键相关配置
+        """
         ini_builder = M_IniBuilder()
         drawib_drawibmodel_dict = {drawib_model.draw_ib: drawib_model for drawib_model in self.drawib_model_list}
 
         M_IniHelper.generate_hash_style_texture_ini(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
+
+        # 【钩子】集成物体切换节点的配置生成
+        self._integrate_object_swap_ini_hook(ini_builder)
 
         for drawib_model in self.drawib_model_list:
             if GlobalConfig.logic_name != LogicName.SRMI:
@@ -301,10 +359,22 @@ class ExportUnity(DrawIBExportBase):
         ini_builder.save_to_file(os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.workspacename + ".ini"))
 
     def generate_unity_vs_config_ini(self):
+        """生成顶点着色器模式的 INI 配置文件
+        
+        适用于大多数 Unity 游戏。
+        生成完整的 INI 配置，包括：
+        - TextureOverride 段落
+        - Resource 段落
+        - 物体切换相关配置
+        - 形态键相关配置
+        """
         ini_builder = M_IniBuilder()
         drawib_drawibmodel_dict = {drawib_model.draw_ib: drawib_model for drawib_model in self.drawib_model_list}
 
         M_IniHelper.generate_hash_style_texture_ini(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
+
+        # 【钩子】集成物体切换节点的配置生成
+        self._integrate_object_swap_ini_hook(ini_builder)
 
         for drawib_model in self.drawib_model_list:
             self.add_unity_vs_texture_override_vlr_section(ini_builder=ini_builder, drawib_model=drawib_model)
@@ -321,6 +391,12 @@ class ExportUnity(DrawIBExportBase):
         ini_builder.save_to_file(os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.workspacename + ".ini"))
 
     def export(self):
+        """执行导出操作
+        
+        根据游戏类型选择合适的导出模式：
+        - Naraka、NarakaM、AILIMIT：使用计算着色器模式
+        - 其他游戏：使用顶点着色器模式
+        """
         self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
         if GlobalConfig.logic_name in {LogicName.Naraka, LogicName.NarakaM, LogicName.AILIMIT}:
             self.generate_unity_cs_config_ini()

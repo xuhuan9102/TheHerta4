@@ -40,7 +40,12 @@ class ProcessingChain:
     shapekey_params: List[M_Key] = field(default_factory=list)  # 收集的形态键参数
     group_stack: List[str] = field(default_factory=list)  # 经过的 Group 名称栈（用于调试显示）
     
+    condition_operator: str = " && "  # 条件运算符（用于控制多个条件间的逻辑关系）
+    
     rename_history: List[dict] = field(default_factory=list)  # 名称修改历史记录
+    
+    # 记录每个 ObjectSwap 节点的选项值（节点名称 -> 选项索引）
+    swap_node_option_values: Dict[str, int] = field(default_factory=dict)
     
     reached_output: bool = False  # 是否成功到达输出节点
     is_valid: bool = True  # 链是否有效（未遇到静音/断开等）
@@ -204,6 +209,7 @@ class ProcessingChain:
         if self.source_node and hasattr(self.source_node, 'original_object_name') and self.source_node.original_object_name:
             obj_model.display_name = self.source_node.original_object_name
         
+        # 每个 M_Key 都有自己的 condition_operator，不再需要单独设置
         obj_model.work_key_list = copy.deepcopy(self.shapekey_params)
         
         return obj_model
@@ -271,6 +277,9 @@ class BluePrintModel:
         if not tree:
             raise ValueError("未找到当前蓝图树，请先打开正确的蓝图编辑器")
 
+        # 保存蓝图树引用，供后续 INI 生成使用
+        self._tree = tree
+
         LOG.debug(f"   🌳 当前蓝图树: {tree.name if hasattr(tree, 'name') else '未命名'}")
         
         output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, SSMTNode_Result_Output.bl_idname)
@@ -325,6 +334,9 @@ class BluePrintModel:
         LOG.info(f"   ✅ 正向解析完成，共构建 {len(self.processing_chains)} 条处理链")
         
         self._merge_processing_chains()
+        
+        # 先集成物体切换节点条件，然后再构建 DrawCallModel
+        self._integrate_object_swap_nodes()
         
         self._build_draw_call_models_from_chains()
         
@@ -427,27 +439,32 @@ class BluePrintModel:
             chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
             LOG.debug(f"   📍 经过其他节点: {current_node.bl_idname}")
 
-        output_connections = self._get_forward_connections(current_node)
+        output_connections = self._get_forward_connections_with_socket_index(current_node)
         
         if not output_connections:
             if node_type != SSMTNode_Result_Output.bl_idname:
                 LOG.debug(f"   🔚 节点无输出连接，终止遍历: {current_node.name}")
             return
 
-        for next_node in output_connections:
+        for next_node, socket_index in output_connections:
+            # 检查下一个节点是否是 ObjectSwap，如果是，记录选项值
+            if next_node.bl_idname == 'SSMTNode_ObjectSwap':
+                chain.swap_node_option_values[next_node.name] = socket_index
+                LOG.debug(f"   🔄 ObjectSwap 节点 '{next_node.name}' 选项值: {socket_index}")
+            
             self._traverse_forward(chain, next_node, visited_nodes_copy, current_group_name)
 
-    def _get_forward_connections(self, node: bpy.types.Node) -> List[bpy.types.Node]:
-        """
-        获取节点的正向连接（输出方向）
+    def _get_forward_connections_with_socket_index(self, node: bpy.types.Node) -> List[Tuple[bpy.types.Node, int]]:
+        """获取节点的正向连接（输出方向），包含目标 socket 索引
         
-        从当前节点的输出 socket 找到连接的下游节点
+        从当前节点的输出 socket 找到连接的下游节点，并返回目标 socket 的索引。
+        对于 ObjectSwap 节点，socket 索引表示选项值。
         
         Args:
             node: 当前节点
             
         Returns:
-            List[Node]: 下游节点列表
+            List[Tuple[Node, int]]: (下游节点, 目标 socket 索引) 的列表
         """
         connected_nodes = []
         
@@ -455,8 +472,15 @@ class BluePrintModel:
             if output_socket.is_linked:
                 for link in output_socket.links:
                     to_node = link.to_node
+                    to_socket = link.to_socket
                     if to_node and to_node != node:
-                        connected_nodes.append(to_node)
+                        # 获取目标 socket 的索引
+                        socket_index = 0
+                        for idx, inp in enumerate(to_node.inputs):
+                            if inp == to_socket:
+                                socket_index = idx
+                                break
+                        connected_nodes.append((to_node, socket_index))
         
         return connected_nodes
 
@@ -554,6 +578,22 @@ class BluePrintModel:
             valid_chain_count += 1
         
         LOG.info(f"   ✅ 构建完成: {valid_chain_count} 个有效 / {invalid_chain_count} 个无效")
+
+    def _integrate_object_swap_nodes(self):
+        """
+        集成物体切换节点到处理链中
+        
+        调用物体切换节点的处理器，将节点条件添加到处理链中
+        """
+        try:
+            from .node_swap_processor import integrate_object_swap_to_blueprint_model
+            
+            integrate_object_swap_to_blueprint_model(self)
+            LOG.info("✓ 物体切换节点集成完成")
+        except ImportError:
+            LOG.debug("⊘ 物体切换节点模块未找到（可选功能）")
+        except Exception as e:
+            LOG.warning(f"⚠️ 物体切换节点集成遇到错误: {e}")
 
     def _output_debug_info_to_text_editor(self):
         """

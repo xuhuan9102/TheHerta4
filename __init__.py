@@ -17,6 +17,13 @@ from .blueprint import node_shapekey as blueprint_node_shapekey
 from .blueprint import node_rename as blueprint_node_rename
 from .blueprint import sync as blueprint_sync
 
+# 物体切换节点 - 可选模块（删除后系统仍可正常运行）
+try:
+    from .blueprint import node_swap as blueprint_node_swap
+    HAS_OBJECT_SWAP = True
+except ImportError:
+    HAS_OBJECT_SWAP = False
+
 from .ui import ui_func_export
 
 # Toolkit 工具集
@@ -33,6 +40,8 @@ importlib.reload(blueprint_node_base)
 importlib.reload(blueprint_node_obj)
 importlib.reload(blueprint_node_menu)
 importlib.reload(blueprint_node_shapekey)
+if HAS_OBJECT_SWAP:
+    importlib.reload(blueprint_node_swap)
 importlib.reload(blueprint_sync)
 
 bl_info = {
@@ -174,6 +183,8 @@ def register():
     ui_func_export.register()
     blueprint_node_menu.register()
     blueprint_node_shapekey.register()
+    if HAS_OBJECT_SWAP:
+        blueprint_node_swap.register()
     blueprint_node_rename.register()
     blueprint_sync.register()
     
@@ -189,6 +200,8 @@ def unregister():
     # 蓝图系统
     blueprint_sync.unregister()
     blueprint_node_rename.unregister()
+    if HAS_OBJECT_SWAP:
+        blueprint_node_swap.unregister()
     blueprint_node_shapekey.unregister()
     blueprint_node_menu.unregister()
     ui_func_export.unregister()
