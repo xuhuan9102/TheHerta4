@@ -3,6 +3,7 @@ from ...blueprint.model import BluePrintModel
 from ...common.draw_call_model import DrawCallModel
 from ...common.submesh_model import SubMeshModel
 from ...common.drawib_model import DrawIBModel
+from ...blueprint.node_datatype import reset_datatype_override_log
 
 
 import os
@@ -47,6 +48,8 @@ class ExportHelper:
         从蓝图中解析出一个DrawIB Model列表
         适用于米游、Unity等等常见的需要将多个SubMesh组合成一个DrawIB进行导出的游戏
         '''
+        reset_datatype_override_log()
+
         drawib_model_list:list[DrawIBModel] = []
 
         # 先把Submesh Model按照DrawIB分在一起

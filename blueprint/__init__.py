@@ -1,6 +1,11 @@
 from .node_base import SSMTBlueprintTree, SSMTNodeBase, SSMTSocketObject, SSMTSocketPostProcess, THEHERTA3_OT_OpenPersistentBlueprint
 from .node_obj import SSMTNode_Object_Info, SSMTNode_Object_Group, SSMTNode_Result_Output
 from .node_shapekey import SSMTNode_ShapeKey, SSMTNode_ShapeKey_Output
+try:
+    from .node_datatype import SSMTNode_DataType
+    HAS_DATA_TYPE_NODE = True
+except ImportError:
+    HAS_DATA_TYPE_NODE = False
 from .model import BluePrintModel
 from .export_helper import BlueprintExportHelper
 from .sync import (
@@ -39,6 +44,9 @@ def register():
     node_preset.register()
     node_menu.register()
     node_shapekey.register()
+    if HAS_DATA_TYPE_NODE:
+        from . import node_datatype
+        node_datatype.register()
     
     # 物体切换节点 - 可选模块
     if HAS_OBJECT_SWAP:
@@ -64,6 +72,10 @@ def unregister():
     if HAS_OBJECT_SWAP:
         from . import node_swap
         node_swap.unregister()
+    
+    if HAS_DATA_TYPE_NODE:
+        from . import node_datatype
+        node_datatype.unregister()
     
     from . import node_preset
     from . import node_shapekey

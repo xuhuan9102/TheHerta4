@@ -238,7 +238,7 @@ class BlueprintExportHelper:
             node_info_list.append({
                 "draw_ib_match": node.draw_ib_match,
                 "tmp_json_path": node.tmp_json_path,
-                "loaded_data": node.loaded_data,
+                "loaded_data": getattr(node, 'loaded_data', {}),
                 "node": node
             })
         

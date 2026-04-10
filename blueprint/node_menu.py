@@ -11,7 +11,12 @@ try:
     HAS_OBJECT_SWAP = True
 except ImportError:
     HAS_OBJECT_SWAP = False
-
+# 检查数据类型节点模块是否可用
+try:
+    from .node_datatype import SSMTNode_DataType
+    HAS_DATA_TYPE_NODE = True
+except ImportError:
+    HAS_DATA_TYPE_NODE = False
 # 检查重命名节点是否可用
 try:
     from .node_rename import SSMTNode_Object_Rename
@@ -192,6 +197,9 @@ class SSMT_MT_NodeMenu_Branch(bpy.types.Menu):
         if HAS_OBJECT_SWAP:
             layout.separator()
             layout.operator("node.add_node", text="Object Swap", icon='SHADERFX').type = "SSMTNode_ObjectSwap"
+        
+        if HAS_DATA_TYPE_NODE:
+            layout.operator("node.add_node", text="Data Type", icon='FILE_FOLDER').type = "SSMTNode_DataType"
         
         # 重命名节点 - 仅在模块可用时显示
         if HAS_OBJECT_RENAME:

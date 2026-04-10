@@ -1,15 +1,28 @@
 import os
+import bpy
 from dataclasses import dataclass, field
 
 from ..utils.format_utils import Fatal
 from ..utils.json_utils import JsonUtils
 from ..blueprint.export_helper import BlueprintExportHelper
+from ..blueprint.node_datatype import (
+    reset_datatype_override_log,
+    build_override_element_list,
+)
 from .d3d11_gametype import D3D11GameType
 from .global_config import GlobalConfig
 from .submesh_json import SubmeshJson
 
 
 def check_and_get_submesh_json_path(unique_str: str) -> tuple[bool, str, str]:
+    """检查并获取 submesh JSON 文件路径
+
+    Args:
+        unique_str: 唯一标识符
+
+    Returns:
+        (是否存在, 错误信息, JSON 文件路径)
+    """
     workspace_folder = GlobalConfig.path_workspace_folder()
     unique_str_folder = os.path.join(workspace_folder, unique_str)
     if not os.path.exists(unique_str_folder):
@@ -55,6 +68,10 @@ def check_and_get_submesh_json_path(unique_str: str) -> tuple[bool, str, str]:
 
 @dataclass
 class SubmeshMetadata:
+    """Submesh 元数据类
+
+    用于存储和管理 submesh 的元数据信息，包括 JSON 配置、数据类型等。
+    """
     unique_str: str
 
     submesh_json_path: str = field(init=False, default="")
@@ -69,6 +86,7 @@ class SubmeshMetadata:
     part_name: str = field(init=False, default="")
 
     def __post_init__(self):
+        """初始化后处理"""
         exists, error_msg, submesh_json_path = check_and_get_submesh_json_path(self.unique_str)
         if not exists:
             raise Fatal(error_msg)
@@ -89,24 +107,55 @@ class SubmeshMetadata:
         self.d3d11_game_type = self._build_d3d11_game_type()
 
     def _build_d3d11_game_type(self) -> D3D11GameType:
+        """构建 D3D11GameType 对象
+
+        检查是否有数据类型节点需要覆盖，如果有则使用节点配置替换原始数据类型。
+
+        Returns:
+            D3D11GameType 对象
+        """
+        # 从 unique_str 中提取 draw_ib
         draw_ib = self.unique_str.split("-")[0] if "-" in self.unique_str else self.unique_str
+
+        # 获取数据类型节点信息
         datatype_node_info_list = BlueprintExportHelper.get_datatype_node_info()
         override_d3d11_element_list = None
 
         if datatype_node_info_list:
             for node_info in datatype_node_info_list:
                 node = node_info["node"]
+
+                # 检查节点是否匹配当前 draw_ib
                 if not node.is_draw_ib_matched(draw_ib):
                     continue
 
+                # 获取配置文件路径
                 tmp_json_path = node_info.get("tmp_json_path")
-                if not tmp_json_path or not os.path.exists(tmp_json_path):
+                if not tmp_json_path:
                     break
 
-                datatype_tmp_json_dict = JsonUtils.LoadFromFile(tmp_json_path)
-                override_d3d11_element_list = datatype_tmp_json_dict.get("D3D11ElementList")
-                if override_d3d11_element_list:
-                    print("使用数据类型节点的 D3D11ElementList 覆盖 SubmeshJson 配置")
+                # 处理文件路径
+                raw_path = tmp_json_path.strip()
+                if os.path.isabs(raw_path):
+                    abs_json_path = raw_path
+                else:
+                    abs_json_path = bpy.path.abspath(raw_path)
+
+                if not os.path.exists(abs_json_path):
+                    break
+
+                # 获取加载的配置数据
+                loaded_data = node_info.get("loaded_data", {})
+                if not loaded_data:
+                    break
+
+                # 调用节点模块的函数构建覆盖后的 D3D11ElementList
+                original_category_buffers = self.submesh_json_dict.get("CategoryBufferList", [])
+                override_d3d11_element_list = build_override_element_list(
+                    original_category_buffers,
+                    loaded_data,
+                    draw_ib
+                )
                 break
 
         return D3D11GameType.from_submesh_json_dict(
@@ -117,6 +166,16 @@ class SubmeshMetadata:
 
 
 class SubmeshMetadataResolver:
+    """Submesh 元数据解析器"""
+
     @staticmethod
     def resolve(unique_str: str) -> SubmeshMetadata:
+        """解析 submesh 元数据
+
+        Args:
+            unique_str: 唯一标识符
+
+        Returns:
+            SubmeshMetadata 对象
+        """
         return SubmeshMetadata(unique_str=unique_str)

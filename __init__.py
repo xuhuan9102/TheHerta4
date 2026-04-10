@@ -31,6 +31,13 @@ try:
 except ImportError:
     HAS_OBJECT_RENAME = False
 
+# 数据类型节点 - 可选模块（删除后系统仍可正常运行）
+try:
+    from .blueprint import node_datatype as blueprint_node_datatype
+    HAS_DATA_TYPE_NODE = True
+except ImportError:
+    HAS_DATA_TYPE_NODE = False
+
 from .ui import ui_func_export
 
 # Toolkit 工具集
@@ -48,6 +55,8 @@ importlib.reload(blueprint_node_obj)
 importlib.reload(blueprint_node_menu)
 importlib.reload(blueprint_node_shapekey)
 importlib.reload(blueprint_node_preset)
+if HAS_DATA_TYPE_NODE:
+    importlib.reload(blueprint_node_datatype)
 if HAS_OBJECT_SWAP:
     importlib.reload(blueprint_node_swap)
 if HAS_OBJECT_RENAME:
@@ -194,6 +203,8 @@ def register():
     blueprint_node_preset.register()
     blueprint_node_menu.register()
     blueprint_node_shapekey.register()
+    if HAS_DATA_TYPE_NODE:
+        blueprint_node_datatype.register()
     if HAS_OBJECT_SWAP:
         blueprint_node_swap.register()
     if HAS_OBJECT_RENAME:
@@ -215,6 +226,8 @@ def unregister():
         blueprint_node_rename.unregister()
     if HAS_OBJECT_SWAP:
         blueprint_node_swap.unregister()
+    if HAS_DATA_TYPE_NODE:
+        blueprint_node_datatype.unregister()
     blueprint_node_shapekey.unregister()
     blueprint_node_menu.unregister()
     blueprint_node_preset.unregister()
