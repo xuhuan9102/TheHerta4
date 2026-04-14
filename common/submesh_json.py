@@ -44,6 +44,9 @@ class SubmeshJson:
 	CategoryDrawCategoryMap:dict = field(init=False, default_factory=dict)
 	WorkGameType:str = field(init=False, default="")
 	GPU_PreSkinning:bool = field(init=False, default=False)
+	LocalBoundingBoxMin:list = field(init=False, default_factory=list)
+	LocalBoundingBoxMax:list = field(init=False, default_factory=list)
+	VertexCompressionParams:list = field(init=False, default_factory=list)
 	IndexBufferList:list[SubmeshIndexBuffer] = field(init=False, default_factory=list)
 	CategoryBufferList:list[SubmeshCategoryBuffer] = field(init=False, default_factory=list)
 	TextureMarkUpInfoList:list = field(init=False, default_factory=list)
@@ -61,6 +64,9 @@ class SubmeshJson:
 		self.CategoryDrawCategoryMap = self.JsonDict.get("CategoryDrawCategoryMap", {})
 		self.WorkGameType = self.JsonDict.get("WorkGameType", "")
 		self.GPU_PreSkinning = self.JsonDict.get("GPU-PreSkinning", False)
+		self.LocalBoundingBoxMin = list(self.JsonDict.get("LocalBoundingBoxMin", []))
+		self.LocalBoundingBoxMax = list(self.JsonDict.get("LocalBoundingBoxMax", []))
+		self.VertexCompressionParams = list(self.JsonDict.get("VertexCompressionParams", []))
 		self.TextureMarkUpInfoList = list(self.JsonDict.get("TextureMarkUpInfoList", []))
 
 		self.IndexBufferList = []

@@ -37,8 +37,12 @@ class ObjBufferHelper:
             d3d11_element = d3d11_game_type.ElementNameD3D11ElementDict[d3d11_element_name]
             # 校验并补全所有COLOR的存在
             if d3d11_element_name.startswith("COLOR"):
-                if d3d11_element_name not in obj.data.vertex_colors:
-                    obj.data.vertex_colors.new(name=d3d11_element_name)
+                color_coll = obj.data.color_attributes if hasattr(obj.data, 'color_attributes') else obj.data.vertex_colors
+                if d3d11_element_name not in color_coll:
+                    if hasattr(obj.data, 'color_attributes'):
+                        obj.data.color_attributes.new(name=d3d11_element_name, type='FLOAT_COLOR', domain='CORNER')
+                    else:
+                        obj.data.vertex_colors.new(name=d3d11_element_name)
                     print("当前obj ["+ obj.name +"] 缺少游戏渲染所需的COLOR: ["+  "COLOR" + "]，已自动补全")
             
             # 校验TEXCOORD是否存在
@@ -286,12 +290,17 @@ class ObjBufferHelper:
 
     @staticmethod
     def _parse_color(mesh, mesh_loops_length, d3d11_element_name, d3d11_element):
-        if d3d11_element_name in mesh.vertex_colors:
-            # 因为COLOR属性存储在Blender里固定是float32类型所以这里只能用numpy.float32
-            result = numpy.zeros(mesh_loops_length, dtype=(numpy.float32, 4))
-            # result = numpy.zeros((mesh_loops_length,4), dtype=(numpy.float32))
+        if hasattr(mesh, 'color_attributes') and d3d11_element_name in mesh.color_attributes:
+            color_data = mesh.color_attributes[d3d11_element_name].data
+        elif d3d11_element_name in mesh.vertex_colors:
+            color_data = mesh.vertex_colors[d3d11_element_name].data
+        else:
+            color_data = None
 
-            mesh.vertex_colors[d3d11_element_name].data.foreach_get("color", result.ravel())
+        if color_data is not None:
+            result = numpy.zeros(mesh_loops_length, dtype=(numpy.float32, 4))
+
+            color_data.foreach_get("color", result.ravel())
             
             if d3d11_element.Format == 'R16G16B16A16_FLOAT':
                 result = result.astype(numpy.float16)

@@ -33,6 +33,9 @@ class MeshCreateHelper:
         vb_vertex_count:int,
         ib_count:int,
         ib_polygon_count:int,
+        local_bounding_box_min:list | None = None,
+        local_bounding_box_max:list | None = None,
+        vertex_compression_params:list | None = None,
         import_collection:bpy.types.Collection | None = None,
     ):
         TimerUtils.Start("Import 3Dmigoto Raw")
@@ -83,10 +86,23 @@ class MeshCreateHelper:
                 positions = [(x[0], x[1], x[2]) for x in data]
                 mesh.vertices.foreach_set('co', unpack_list(positions))
             elif element.SemanticName.startswith("COLOR"):
-                mesh.vertex_colors.new(name=element.ElementName)
-                color_layer = mesh.vertex_colors[element.ElementName].data
-                for loop in mesh.loops:
-                    color_layer[loop.index].color = list(data[loop.vertex_index]) + [0] * (4 - len(data[loop.vertex_index]))
+                num_loops = len(mesh.loops)
+                loop_vertex_indices = numpy.empty(num_loops, dtype=numpy.int32)
+                mesh.loops.foreach_get('vertex_index', loop_vertex_indices)
+
+                colors_flat = numpy.zeros((num_loops, 4), dtype=numpy.float32)
+                if data.ndim > 1:
+                    actual_channels = min(data.shape[1], 4)
+                    colors_flat[:, :actual_channels] = data[loop_vertex_indices, :actual_channels].astype(numpy.float32)
+                else:
+                    colors_flat[:, 0] = data[loop_vertex_indices].astype(numpy.float32)
+
+                if hasattr(mesh, 'color_attributes'):
+                    color_attr = mesh.color_attributes.new(name=element.ElementName, type='FLOAT_COLOR', domain='CORNER')
+                    color_attr.data.foreach_set('color', colors_flat.ravel())
+                else:
+                    mesh.vertex_colors.new(name=element.ElementName)
+                    mesh.vertex_colors[element.ElementName].data.foreach_set('color', colors_flat.ravel())
             elif element.SemanticName == "BLENDINDICES":
                 if data.ndim == 1:
                     blend_indices[element.SemanticIndex] = numpy.array([(x,) for x in data])
@@ -100,7 +116,7 @@ class MeshCreateHelper:
                 shapekeys[element.SemanticIndex] = data
             elif element.SemanticName.startswith("NORMAL"):
                 use_normals = True
-                if GlobalConfig.logic_name == LogicName.YYSLS:
+                if logic_name == LogicName.YYSLS:
                     print("燕云十六声法线处理")
                     normals = [(x[0] * 2 - 1, x[1] * 2 - 1, x[2] * 2 - 1) for x in data]
                 elif logic_name == LogicName.EFMI and element.Format == "R32_UINT":

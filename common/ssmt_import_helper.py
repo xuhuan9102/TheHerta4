@@ -31,6 +31,9 @@ class SSMTImportHelper:
 			vb_vertex_count=vb_vertex_count,
 			ib_count=ib_count,
 			ib_polygon_count=ib_polygon_count,
+			local_bounding_box_min=submesh_json.LocalBoundingBoxMin,
+			local_bounding_box_max=submesh_json.LocalBoundingBoxMax,
+			vertex_compression_params=submesh_json.VertexCompressionParams,
 			import_collection=import_collection,
 		)
 
