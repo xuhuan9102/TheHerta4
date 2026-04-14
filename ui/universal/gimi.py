@@ -7,6 +7,7 @@ from ...common.m_ini_helper import M_IniHelper
 from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .unity import ExportUnity
+from ...utils.timer_utils import TimerUtils
 
 
 class GIMITextureMarkName:
@@ -98,7 +99,11 @@ class ExportGIMI(ExportUnity):
         ini_builder.append_section(texture_override_ib_section)
 
     def export(self):
+        TimerUtils.start_stage("缓冲文件生成")
         self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
+        TimerUtils.end_stage("缓冲文件生成")
+
+        TimerUtils.start_stage("INI配置生成")
         ini_builder = M_IniBuilder()
         drawib_drawibmodel_dict = {drawib_model.draw_ib: drawib_model for drawib_model in self.drawib_model_list}
 
@@ -116,3 +121,4 @@ class ExportGIMI(ExportUnity):
         M_IniHelper.add_shapekey_ini_sections(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
         M_IniHelperGUI.add_branch_mod_gui_section(ini_builder=ini_builder, key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict)
         ini_builder.save_to_file(os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.workspacename + ".ini"))
+        TimerUtils.end_stage("INI配置生成")

@@ -26,6 +26,8 @@ class VGProperties(bpy.types.PropertyGroup):
     vg_rename_old_name: bpy.props.StringProperty(name="旧名称", default="OldName")
     vg_rename_new_name: bpy.props.StringProperty(name="新名称", default="NewName")
 
+    vg_merge_sync_bones: bpy.props.BoolProperty(name="同步合并骨骼", default=False)
+
     vg_adjust_selected_groups: bpy.props.CollectionProperty(type=VGAdjustItem)
     vg_adjust_selected_groups_index: bpy.props.IntProperty(name="选中顶点组索引", default=0)
     vg_adjust_available_groups: bpy.props.CollectionProperty(type=VGAdjustItem)

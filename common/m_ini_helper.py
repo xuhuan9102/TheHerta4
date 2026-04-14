@@ -557,11 +557,13 @@ class M_IniHelper:
             if not shapekey_buffer_dict or d3d11_game_type is None:
                 continue
 
+            buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
+
             # 原本的Buffer
             resource_section.append("[Resource" + drawib + "Position.1]")
             resource_section.append("type = buffer")
             resource_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict["Position"]))
-            resource_section.append("filename = Meshes\\" + drawib + "-" + "Position.buf")
+            resource_section.append("filename = " + buffer_folder_name + "\\" + drawib + "-" + "Position.buf")
             resource_section.new_line()
 
             # 各个形态键的Buffer
@@ -575,7 +577,7 @@ class M_IniHelper:
                 resource_section.append("[Resource" + drawib + "Position." + shapekey_name + "]")
                 resource_section.append("type = buffer")
                 resource_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict["Position"]))
-                resource_section.append("filename = Meshes\\" + drawib + "-" + "Position." + shapekey_name + ".buf")
+                resource_section.append("filename = " + buffer_folder_name + "\\" + drawib + "-" + "Position." + shapekey_name + ".buf")
                 resource_section.new_line()
 
             ib_number += 1

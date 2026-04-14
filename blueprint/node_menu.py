@@ -5,28 +5,67 @@ from ..common.global_config import GlobalConfig
 
 from .node_base import SSMTBlueprintTree, SSMTNodeBase
 
-# 检查物体切换节点是否可用
-try:
-    from .node_swap import SSMTNode_ObjectSwap
-    HAS_OBJECT_SWAP = True
-except ImportError:
-    HAS_OBJECT_SWAP = False
-# 检查数据类型节点模块是否可用
-try:
-    from .node_datatype import SSMTNode_DataType
-    HAS_DATA_TYPE_NODE = True
-except ImportError:
-    HAS_DATA_TYPE_NODE = False
-# 检查重命名节点是否可用
-try:
-    from .node_rename import SSMTNode_Object_Rename
-    HAS_OBJECT_RENAME = True
-except ImportError:
-    HAS_OBJECT_RENAME = False
+
+def _get_active_blueprint_tree(context):
+    """获取当前活动的蓝图节点树
+    
+    使用多种检测方式确定用户当前正在操作的蓝图：
+    1. 检查当前窗口中是否有节点编辑器区域（优先）
+    2. 检查所有窗口中有激活区域的节点编辑器
+    3. 检查任何窗口中正在编辑的节点树
+    4. 回退到 GlobalConfig 配置的默认蓝图
+    
+    Returns:
+        NodeTree or None: 当前活动的蓝图节点树
+    """
+    def is_valid_blueprint(tree):
+        return tree and tree.bl_idname == 'SSMTBlueprintTreeType'
+    
+    def get_tree_from_space(space):
+        if space.type != 'NODE_EDITOR':
+            return None
+        tree = getattr(space, "edit_tree", None)
+        if is_valid_blueprint(tree):
+            return tree
+        tree = getattr(space, "node_tree", None)
+        if is_valid_blueprint(tree):
+            return tree
+        return None
+    
+    current_window = getattr(context, 'window', None)
+    if current_window:
+        for area in current_window.screen.areas:
+            if area.type == 'NODE_EDITOR':
+                for space in area.spaces:
+                    tree = get_tree_from_space(space)
+                    if tree:
+                        return tree
+    
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'NODE_EDITOR':
+                for space in area.spaces:
+                    tree = get_tree_from_space(space)
+                    if tree:
+                        return tree
+    
+    GlobalConfig.read_from_main_json_ssmt4()
+    workspace_name = f"{GlobalConfig.workspacename}" if GlobalConfig.workspacename else "SSMT_Mod_Logic"
+    fallback_tree = bpy.data.node_groups.get(workspace_name)
+    if is_valid_blueprint(fallback_tree):
+        return fallback_tree
+    
+    return None
+
+
+def _add_node_entry(layout, text, icon, node_type):
+    try:
+        layout.operator("node.add_node", text=text, icon=icon).type = node_type
+    except Exception:
+        pass
 
 
 class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
-    '''Create nodes from selected objects and group them under a new Group node'''
     bl_idname = "ssmt.create_group_from_selection"
     bl_label = "将所选物体新建到组节点"
     bl_options = {'REGISTER', 'UNDO'}
@@ -37,34 +76,10 @@ class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
             self.report({'WARNING'}, "没有选择任何物体")
             return {'CANCELLED'}
 
-        node_tree = None
-        
-        space_data = getattr(context, "space_data", None)
-        if space_data and space_data.type == 'NODE_EDITOR':
-            node_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
-        
+        node_tree = _get_active_blueprint_tree(context)
+
         if not node_tree:
-            for window in context.window_manager.windows:
-                for area in window.screen.areas:
-                    if area.type == 'NODE_EDITOR':
-                        for space in area.spaces:
-                            if space.type == 'NODE_EDITOR':
-                                tree = getattr(space, "edit_tree", None) or getattr(space, "node_tree", None)
-                                if tree and tree.bl_idname == 'SSMTBlueprintTreeType':
-                                    node_tree = tree
-                                    break
-                        if node_tree:
-                            break
-                if node_tree:
-                    break
-        
-        if not node_tree:
-            GlobalConfig.read_from_main_json_ssmt4()
-            workspace_name = f"{GlobalConfig.workspacename}" if GlobalConfig.workspacename else "SSMT_Mod_Logic"
-            node_tree = bpy.data.node_groups.get(workspace_name)
-        
-        if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
-            self.report({'WARNING'}, "未找到有效的蓝图树，请先打开蓝图编辑器")
+            self.report({'WARNING'}, "未找到当前活动的蓝图，请先在节点编辑器中打开蓝图")
             return {'CANCELLED'}
 
         base_x = 0
@@ -78,27 +93,27 @@ class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
         group_node = node_tree.nodes.new(type='SSMTNode_Object_Group')
         group_node.location = (base_x + 400, base_y)
         group_node.select = True
-        
+
         for i, obj in enumerate(selected_objects):
             obj_node = node_tree.nodes.new(type='SSMTNode_Object_Info')
             obj_node.location = (base_x, base_y - i * 150)
             obj_node.select = True
-            
+
             obj_node.object_name = obj.name
-            
+
             target_socket = None
             if len(group_node.inputs) > 0:
                  target_socket = group_node.inputs[-1]
-            
+
             if target_socket:
                 node_tree.links.new(obj_node.outputs[0], target_socket)
                 group_node.update()
 
+        self.report({'INFO'}, f"已将 {len(selected_objects)} 个物体添加到蓝图 '{node_tree.name}'")
         return {'FINISHED'}
 
 
 class SSMT_OT_CreateInternalSwitch(bpy.types.Operator):
-    '''Create Object Info nodes from selected objects and connect them to a Group node'''
     bl_idname = "ssmt.create_internal_switch"
     bl_label = "创建内部切换"
     bl_options = {'REGISTER', 'UNDO'}
@@ -108,52 +123,28 @@ class SSMT_OT_CreateInternalSwitch(bpy.types.Operator):
         if not selected_objects:
             self.report({'WARNING'}, "没有选择任何物体")
             return {'CANCELLED'}
-        
-        node_tree = None
-        
-        space_data = getattr(context, "space_data", None)
-        if space_data and space_data.type == 'NODE_EDITOR':
-            node_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
-        
+
+        node_tree = _get_active_blueprint_tree(context)
+
         if not node_tree:
-            for window in context.window_manager.windows:
-                for area in window.screen.areas:
-                    if area.type == 'NODE_EDITOR':
-                        for space in area.spaces:
-                            if space.type == 'NODE_EDITOR':
-                                tree = getattr(space, "edit_tree", None) or getattr(space, "node_tree", None)
-                                if tree and tree.bl_idname == 'SSMTBlueprintTreeType':
-                                    node_tree = tree
-                                    break
-                        if node_tree:
-                            break
-                if node_tree:
-                    break
-        
-        if not node_tree:
-            GlobalConfig.read_from_main_json_ssmt4()
-            workspace_name = f"{GlobalConfig.workspacename}" if GlobalConfig.workspacename else "SSMT_Mod_Logic"
-            node_tree = bpy.data.node_groups.get(workspace_name)
-        
-        if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
-            self.report({'WARNING'}, "未找到有效的蓝图树，请先打开蓝图编辑器")
+            self.report({'WARNING'}, "未找到当前活动的蓝图，请先在节点编辑器中打开蓝图")
             return {'CANCELLED'}
-        
+
         nodes = node_tree.nodes
         links = node_tree.links
-        
+
         base_x = 0
         base_y = 0
         if nodes:
             max_x = max([node.location.x + node.width for node in nodes])
             base_x = max_x + 200
-        
+
         for node in nodes:
             node.select = False
-        
+
         group_node = nodes.new(type='SSMTNode_Object_Group')
         group_node.location = (base_x + 600, base_y)
-        
+
         obj_nodes = []
         for i, obj in enumerate(selected_objects):
             obj_node = nodes.new(type='SSMTNode_Object_Info')
@@ -161,13 +152,13 @@ class SSMT_OT_CreateInternalSwitch(bpy.types.Operator):
             obj_node.object_name = obj.name
             obj_node.select = True
             obj_nodes.append(obj_node)
-            
+
             if i < len(group_node.inputs):
                 links.new(obj_node.outputs[0], group_node.inputs[i])
-        
+
         group_node.select = True
-        
-        self.report({'INFO'}, f"已创建 {len(obj_nodes)} 个物体节点并连接到组节点")
+
+        self.report({'INFO'}, f"已在蓝图 '{node_tree.name}' 中创建 {len(obj_nodes)} 个物体节点并连接到组节点")
         return {'FINISHED'}
 
 
@@ -178,48 +169,78 @@ def draw_objects_context_menu_add(self, context):
 
 class SSMT_MT_ObjectContextMenuSub(bpy.types.Menu):
     bl_label = "SSMT蓝图架构"
-    
+
     def draw(self, context):
         layout = self.layout
         layout.operator("ssmt.create_group_from_selection", text="将所选物体新建到组节点", icon='GROUP')
         layout.operator("ssmt.create_internal_switch", text="创建内部切换", icon='ARROW_LEFTRIGHT')
 
 
-class SSMT_MT_NodeMenu_Branch(bpy.types.Menu):
-    bl_label = "分支"
-    
+class SSMT_MT_NodeMenu_Object(bpy.types.Menu):
+    bl_label = "物体"
+
     def draw(self, context):
         layout = self.layout
-        layout.operator("node.add_node", text="Object Info", icon='OBJECT_DATAMODE').type = "SSMTNode_Object_Info"
-        layout.operator("node.add_node", text="Group", icon='GROUP').type = "SSMTNode_Object_Group"
-        
-        # 物体切换节点 - 仅在模块可用时显示
-        if HAS_OBJECT_SWAP:
-            layout.separator()
-            layout.operator("node.add_node", text="Object Swap", icon='SHADERFX').type = "SSMTNode_ObjectSwap"
-        
-        if HAS_DATA_TYPE_NODE:
-            layout.operator("node.add_node", text="Data Type", icon='FILE_FOLDER').type = "SSMTNode_DataType"
-        
-        # 重命名节点 - 仅在模块可用时显示
-        if HAS_OBJECT_RENAME:
-            layout.separator()
-            layout.operator("node.add_node", text="Rename Object", icon='OUTLINER').type = "SSMTNode_Object_Rename"
-        
-        layout.separator()
-        layout.operator("node.add_node", text="Mod Output", icon='EXPORT').type = "SSMTNode_Result_Output"
+        _add_node_entry(layout, "物体信息", 'OBJECT_DATAMODE', "SSMTNode_Object_Info")
+        _add_node_entry(layout, "物体组", 'GROUP', "SSMTNode_Object_Group")
+        _add_node_entry(layout, "Mod输出", 'EXPORT', "SSMTNode_Result_Output")
+        _add_node_entry(layout, "重命名物体", 'FONT_DATA', "SSMTNode_Object_Rename")
+        _add_node_entry(layout, "物体切换", 'ARROW_LEFTRIGHT', "SSMTNode_ObjectSwap")
+
 
 class SSMT_MT_NodeMenu_ShapeKey(bpy.types.Menu):
     bl_label = "形态键"
-    
+
     def draw(self, context):
         layout = self.layout
-        layout.operator("node.add_node", text="Shape Key", icon='SHAPEKEY_DATA').type = "SSMTNode_ShapeKey"
-        layout.operator("node.add_node", text="Generate ShapeKey Buffer", icon='EXPORT').type = "SSMTNode_ShapeKey_Output"
+        _add_node_entry(layout, "形态键", 'SHAPEKEY_DATA', "SSMTNode_ShapeKey")
+        _add_node_entry(layout, "形态键输出", 'FILE_SCRIPT', "SSMTNode_ShapeKey_Output")
+
+
+class SSMT_MT_NodeMenu_DataType(bpy.types.Menu):
+    bl_label = "数据类型"
+
+    def draw(self, context):
+        layout = self.layout
+        _add_node_entry(layout, "数据类型替换", 'TEXT', "SSMTNode_DataType")
+
+
+class SSMT_MT_NodeMenu_VertexGroup(bpy.types.Menu):
+    bl_label = "顶点组"
+
+    def draw(self, context):
+        layout = self.layout
+        _add_node_entry(layout, "顶点组匹配", 'GROUP', "SSMTNode_VertexGroupMatch")
+        _add_node_entry(layout, "顶点组处理", 'MESH_DATA', "SSMTNode_VertexGroupProcess")
+        _add_node_entry(layout, "映射表输入", 'TEXT', "SSMTNode_VertexGroupMappingInput")
+
+
+class SSMT_MT_NodeMenu_Blueprint(bpy.types.Menu):
+    bl_label = "蓝图"
+
+    def draw(self, context):
+        layout = self.layout
+        _add_node_entry(layout, "蓝图嵌套", 'NODETREE', "SSMTNode_Blueprint_Nest")
+        _add_node_entry(layout, "跨IB节点", 'ARROW_LEFTRIGHT', "SSMTNode_CrossIB")
+        _add_node_entry(layout, "多文件导出", 'FILE', "SSMTNode_MultiFile_Export")
+
+
+class SSMT_MT_NodeMenu_PostProcess(bpy.types.Menu):
+    bl_label = "后处理"
+
+    def draw(self, context):
+        layout = self.layout
+        _add_node_entry(layout, "顶点属性定义", 'PROPERTIES', "SSMTNode_PostProcess_VertexAttrs")
+        _add_node_entry(layout, "形态键配置", 'SHAPEKEY_DATA', "SSMTNode_PostProcess_ShapeKey")
+        _add_node_entry(layout, "材质转资源", 'MATERIAL', "SSMTNode_PostProcess_Material")
+        _add_node_entry(layout, "血量检测", 'HEART', "SSMTNode_PostProcess_HealthDetection")
+        _add_node_entry(layout, "滑块面板", 'GRIP', "SSMTNode_PostProcess_SliderPanel")
+        _add_node_entry(layout, "贴图资源去重", 'PACKAGE', "SSMTNode_PostProcess_ResourceMerge")
+        _add_node_entry(layout, "缓冲区清理", 'TRASH', "SSMTNode_PostProcess_BufferCleanup")
+        _add_node_entry(layout, "多文件配置", 'FILE_FOLDER', "SSMTNode_PostProcess_MultiFile")
 
 
 class SSMT_OT_AlignNodes(bpy.types.Operator):
-    '''将选中的节点按照矩阵对齐'''
     bl_idname = "ssmt.align_nodes"
     bl_label = "矩阵对齐节点"
     bl_options = {'REGISTER', 'UNDO'}
@@ -241,30 +262,30 @@ class SSMT_OT_AlignNodes(bpy.types.Operator):
             return {'CANCELLED'}
 
         columns = self.group_nodes_by_columns(selected_nodes)
-        
+
         for column in columns:
             self.align_column_vertically(column)
-        
+
         self.align_columns_horizontally(columns)
-        
+
         self.adjust_node_order_by_connections(selected_nodes, node_tree)
-        
+
         self.report({'INFO'}, f"已将 {len(selected_nodes)} 个节点结构化对齐，分为 {len(columns)} 列")
         return {'FINISHED'}
-    
+
     def group_nodes_by_columns(self, nodes):
         if not nodes:
             return []
-        
+
         avg_width = sum(node.width for node in nodes) / len(nodes)
         column_threshold = avg_width * 1.1
-        
+
         sorted_nodes = sorted(nodes, key=lambda n: n.location.x)
-        
+
         columns = []
         current_column = [sorted_nodes[0]]
         current_x = sorted_nodes[0].location.x
-        
+
         for node in sorted_nodes[1:]:
             if abs(node.location.x - current_x) > column_threshold:
                 columns.append(current_column)
@@ -272,48 +293,48 @@ class SSMT_OT_AlignNodes(bpy.types.Operator):
                 current_x = node.location.x
             else:
                 current_column.append(node)
-        
+
         if current_column:
             columns.append(current_column)
-        
+
         return columns
-    
+
     def align_column_vertically(self, column):
         if len(column) <= 1:
             return
-        
+
         column.sort(key=lambda n: -n.location.y)
-        
+
         start_x = column[0].location.x
         start_y = column[0].location.y
-        
+
         vertical_spacing = 80.0
-        
+
         current_y = start_y
         for node in column:
             node.location = (start_x, current_y)
             current_y -= (node.height + vertical_spacing)
-    
+
     def align_columns_horizontally(self, columns):
         if len(columns) <= 1:
             return
-        
+
         all_nodes = [node for column in columns for node in column]
         avg_width = sum(node.width for node in all_nodes) / len(all_nodes)
         column_spacing = avg_width * 0.3
-        
+
         column_bounds = []
         for i, column in enumerate(columns):
             if not column:
                 continue
-            
+
             x_min = min(node.location.x for node in column)
             x_max = max(node.location.x + node.width for node in column)
-            
+
             center_x = (x_min + x_max) / 2
-            
+
             width = x_max - x_min + 10
-            
+
             column_bounds.append({
                 'index': i,
                 'column': column,
@@ -322,37 +343,37 @@ class SSMT_OT_AlignNodes(bpy.types.Operator):
                 'x_min': x_min,
                 'x_max': x_max
             })
-        
+
         column_bounds.sort(key=lambda b: b['center_x'])
-        
+
         current_x = column_bounds[0]['x_min']
         for bound in column_bounds:
             offset_x = current_x - bound['x_min']
             for node in bound['column']:
                 node.location.x += offset_x
-            
+
             current_x += bound['width'] + column_spacing
-    
+
     def adjust_node_order_by_connections(self, nodes, node_tree):
         if len(nodes) < 2:
             return
-        
+
         connection_graph = {}
         for node in nodes:
             connection_graph[node] = {'inputs': [], 'outputs': []}
-        
+
         for link in node_tree.links:
             from_node = link.from_node
             to_node = link.to_node
-            
+
             if from_node in connection_graph and to_node in connection_graph:
                 connection_graph[from_node]['outputs'].append(to_node)
                 connection_graph[to_node]['inputs'].append(from_node)
-        
+
         for column in self.group_nodes_by_columns(nodes):
             if len(column) <= 1:
                 continue
-            
+
             column.sort(key=lambda n: (
                 len(connection_graph[n]['inputs']),
                 -n.location.y
@@ -360,7 +381,6 @@ class SSMT_OT_AlignNodes(bpy.types.Operator):
 
 
 class SSMT_OT_BatchConnectNodes(bpy.types.Operator):
-    '''批量连接选中的节点：支持一对一或多对一连接'''
     bl_idname = "ssmt.batch_connect_nodes"
     bl_label = "批量连接节点"
     bl_options = {'REGISTER', 'UNDO'}
@@ -396,7 +416,7 @@ class SSMT_OT_BatchConnectNodes(bpy.types.Operator):
         else:
             type_items = list(type_count_dict.items())
             type_items.sort(key=lambda x: x[1], reverse=True)
-            
+
             majority_type, majority_count = type_items[0]
             minority_type, minority_count = type_items[1]
 
@@ -494,7 +514,7 @@ class SSMT_OT_BatchConnectNodes(bpy.types.Operator):
     def connect_many_to_one(self, selected_nodes, type_count_dict, node_tree):
         type_items = list(type_count_dict.items())
         type_items.sort(key=lambda x: x[1], reverse=True)
-        
+
         majority_type, majority_count = type_items[0]
         minority_type, minority_count = type_items[1]
 
@@ -570,35 +590,36 @@ class SSMT_OT_BatchConnectNodes(bpy.types.Operator):
         return {'FINISHED'}
 
 
-
 def draw_node_add_menu(self, context):
     if not isinstance(context.space_data, bpy.types.SpaceNodeEditor):
         return
-    
+
     node_tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
     if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
         return
-    
+
     layout = self.layout
-    layout.menu("SSMT_MT_NodeMenu_Branch", text="分支", icon='RNA')
+    layout.menu("SSMT_MT_NodeMenu_Object", text="物体", icon='OBJECT_DATAMODE')
     layout.menu("SSMT_MT_NodeMenu_ShapeKey", text="形态键", icon='SHAPEKEY_DATA')
+    layout.menu("SSMT_MT_NodeMenu_DataType", text="数据类型", icon='FILE_FOLDER')
+    layout.menu("SSMT_MT_NodeMenu_VertexGroup", text="顶点组", icon='GROUP_VERTEX')
+    layout.menu("SSMT_MT_NodeMenu_Blueprint", text="蓝图", icon='NODETREE')
+    layout.menu("SSMT_MT_NodeMenu_PostProcess", text="后处理", icon='MODIFIER')
     layout.separator()
     layout.menu("SSMT_MT_NodePresetMenu", text="添加预设", icon='PRESET')
     layout.separator()
-
-    layout.operator("node.add_node", text="Frame", icon='FILE_PARENT').type = "NodeFrame"
+    layout.operator("node.add_node", text="框架", icon='FILE_PARENT').type = "NodeFrame"
     layout.separator()
-
 
 
 def draw_node_context_menu(self, context):
     if not isinstance(context.space_data, bpy.types.SpaceNodeEditor):
         return
-    
+
     node_tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
     if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
         return
-    
+
     layout = self.layout
     layout.separator()
     layout.operator("ssmt.align_nodes", text="矩阵对齐节点", icon='GRID')
@@ -617,8 +638,12 @@ def register():
     bpy.utils.register_class(SSMT_OT_AlignNodes)
     bpy.utils.register_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.register_class(SSMT_MT_ObjectContextMenuSub)
-    bpy.utils.register_class(SSMT_MT_NodeMenu_Branch)
+    bpy.utils.register_class(SSMT_MT_NodeMenu_Object)
     bpy.utils.register_class(SSMT_MT_NodeMenu_ShapeKey)
+    bpy.utils.register_class(SSMT_MT_NodeMenu_DataType)
+    bpy.utils.register_class(SSMT_MT_NodeMenu_VertexGroup)
+    bpy.utils.register_class(SSMT_MT_NodeMenu_Blueprint)
+    bpy.utils.register_class(SSMT_MT_NodeMenu_PostProcess)
 
     bpy.types.NODE_MT_add.prepend(draw_node_add_menu)
     bpy.types.VIEW3D_MT_object_context_menu.append(draw_objects_context_menu_add)
@@ -629,8 +654,12 @@ def unregister():
     bpy.types.NODE_MT_add.remove(draw_node_add_menu)
     bpy.types.VIEW3D_MT_object_context_menu.remove(draw_objects_context_menu_add)
 
+    bpy.utils.unregister_class(SSMT_MT_NodeMenu_PostProcess)
+    bpy.utils.unregister_class(SSMT_MT_NodeMenu_Blueprint)
+    bpy.utils.unregister_class(SSMT_MT_NodeMenu_VertexGroup)
+    bpy.utils.unregister_class(SSMT_MT_NodeMenu_DataType)
     bpy.utils.unregister_class(SSMT_MT_NodeMenu_ShapeKey)
-    bpy.utils.unregister_class(SSMT_MT_NodeMenu_Branch)
+    bpy.utils.unregister_class(SSMT_MT_NodeMenu_Object)
     bpy.utils.unregister_class(SSMT_MT_ObjectContextMenuSub)
     bpy.utils.unregister_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.unregister_class(SSMT_OT_AlignNodes)

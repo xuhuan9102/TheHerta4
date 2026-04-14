@@ -318,6 +318,44 @@ class ObjectSwapDebugger:
     """
     
     @staticmethod
+    def generate_chain_detail(chain, registry=None) -> list[str]:
+        """为处理链生成物体切换节点的调试信息
+        
+        Args:
+            chain: ProcessingChain 实例
+            registry: SwapKeyRegistry 实例（可选）
+        
+        Returns:
+            list[str]: 调试文本行列表
+        """
+        if not chain.swap_node_option_values:
+            return []
+        
+        lines = []
+        for swap_name, option_val in chain.swap_node_option_values.items():
+            swap_node = None
+            for node in chain.node_path:
+                if node.name == swap_name:
+                    swap_node = node
+                    break
+            
+            if swap_node is not None:
+                swap_key_index = 0
+                if registry and hasattr(registry, 'node_swapkey_map'):
+                    swap_key_index = registry.node_swapkey_map.get(swap_name, 0)
+                node_index = 0
+                for idx, n in enumerate(chain.node_path):
+                    if n.name == swap_name:
+                        node_index = idx
+                        break
+                detail = ObjectSwapDebugger.generate_debug_detail(swap_node, node_index, swap_key_index)
+                lines.extend(detail)
+            else:
+                lines.append(f"🔄 物体切换: {swap_name} → 选项 {option_val + 1} (索引 {option_val})")
+        
+        return lines
+
+    @staticmethod
     def generate_debug_detail(swap_node: bpy.types.Node, node_index: int, swap_key_index: int) -> list[str]:
         """为处理链生成该节点的调试信息
         

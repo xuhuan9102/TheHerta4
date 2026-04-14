@@ -22,8 +22,9 @@ def get_mode(context):
 def set_mode(context, mode):
     active_object = get_active_object(context)
     if active_object is not None and mode is not None:
-        if not object_is_hidden(active_object):
-            bpy.ops.object.mode_set(mode=mode)
+        if object_is_hidden(active_object):
+            unhide_object(active_object)
+        bpy.ops.object.mode_set(mode=mode)
 
 
 @dataclass
@@ -117,7 +118,11 @@ def set_active_object(context, obj):
 
 
 def object_is_hidden(obj):
-    return obj.hide_get()
+    if obj.hide_get():
+        return True
+    if hasattr(obj, 'hide_viewport') and obj.hide_viewport:
+        return True
+    return False
 
 
 def hide_object(obj):
@@ -128,6 +133,13 @@ def hide_object(obj):
 def unhide_object(obj):
     obj = ObjUtils.assert_object(obj)
     obj.hide_set(False)
+    if hasattr(obj, 'hide_viewport'):
+        obj.hide_viewport = False
+    for layer_col in bpy.context.view_layer.layer_collection.children:
+        if obj.name in layer_col.collection.objects:
+            if layer_col.hide_viewport:
+                layer_col.hide_viewport = False
+            break
 
 
 def set_custom_property(obj, property, value):

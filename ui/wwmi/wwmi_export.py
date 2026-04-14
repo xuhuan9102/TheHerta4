@@ -5,10 +5,12 @@ from ...common.global_config import GlobalConfig
 from ...common.logic_name import LogicName
 from .drawib_model_wwmi import DrawIBModelWWMI
 from ...blueprint.model import BluePrintModel
+from ...blueprint.export_helper import BlueprintExportHelper
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from ...common.global_key_count_helper import GlobalKeyCountHelper
 from ...common.m_ini_helper import M_IniHelper
 from ...common.m_ini_helper_gui import M_IniHelperGUI
+from ...utils.timer_utils import TimerUtils
 
 
 class ExportWWMI:
@@ -482,7 +484,7 @@ class ExportWWMI:
 
     def add_resource_buffer(self, ini_builder: M_IniBuilder, draw_ib_model: DrawIBModelWWMI):
         resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
-        buffer_folder_name = "Meshes"
+        buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
 
         resource_buffer_section.append("[ResourceIndexBuffer]")
         resource_buffer_section.append("type = Buffer")
@@ -587,9 +589,21 @@ class ExportWWMI:
             config_ini_builder.clear()
 
     def export(self):
+        TimerUtils.start_stage("缓冲文件生成")
         for draw_ib_model in self.drawib_drawibmodel_dict.values():
             draw_ib_model.write_buffer_files()
+        TimerUtils.end_stage("缓冲文件生成")
+
+        TimerUtils.start_stage("INI配置生成")
         self.generate_unreal_vs_config_ini()
+        TimerUtils.end_stage("INI配置生成")
+
+    def export_buffers_only(self):
+        """只导出 Buffer 文件，不生成 INI 配置"""
+        TimerUtils.start_stage("缓冲文件生成")
+        for draw_ib_model in self.drawib_drawibmodel_dict.values():
+            draw_ib_model.write_buffer_files()
+        TimerUtils.end_stage("缓冲文件生成")
 
 
 ModModelWWMI = ExportWWMI

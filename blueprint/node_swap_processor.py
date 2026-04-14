@@ -335,11 +335,14 @@ def integrate_object_swap_to_blueprint_model(blueprint_model):
     """
     
     registry = SwapKeyRegistry()
+    logged_conditions = set()
+    chains_with_swap = 0
     
     for chain in blueprint_model.processing_chains:
         swap_nodes = ObjectSwapChainProcessor.collect_swap_nodes_from_chain(chain.node_path)
         
         if swap_nodes:
+            chains_with_swap += 1
             swap_keys = ObjectSwapChainProcessor.build_swap_conditions_for_chain(
                 chain.node_path,
                 registry,
@@ -351,9 +354,10 @@ def integrate_object_swap_to_blueprint_model(blueprint_model):
                     chain.shapekey_params = []
                 chain.shapekey_params.extend(swap_keys)
                 
-                LOG.debug(f"   🔗 添加了 {len(swap_keys)} 个条件")
                 for k in swap_keys:
-                    LOG.debug(f"      - {k.key_name} == {k.tmp_value} (运算符: {k.condition_operator})")
+                    condition_str = f"{k.key_name} == {k.tmp_value}"
+                    if condition_str not in logged_conditions:
+                        logged_conditions.add(condition_str)
                 
                 for m_key in swap_keys:
                     if m_key.key_name not in blueprint_model.keyname_mkey_dict:
@@ -361,10 +365,16 @@ def integrate_object_swap_to_blueprint_model(blueprint_model):
     
     blueprint_model._swap_key_registry = registry
     
-    if registry.next_index > 0:
-        debug_lines = DebugOutputGenerator.generate_swap_chain_debug(
-            blueprint_model.processing_chains,
-            registry
-        )
-        LOG.info("\n".join(debug_lines))
+    if logged_conditions:
+        LOG.info("🔧 物体切换节点开始执行")
+        LOG.info(f"   条件: {', '.join([f'{c} (&&)' for c in logged_conditions])}")
+        LOG.info(f"   ✅ 物体切换节点执行完成: {chains_with_swap} 条处理链, {len(logged_conditions)} 个条件")
+
+
+def register():
+    pass
+
+
+def unregister():
+    pass
 

@@ -33,6 +33,7 @@ class VGToolsPanel(bpy.types.Panel):
         layout = self.layout
         self._draw_vertex_group_rename(layout, context)
         self._draw_vertex_group_create(layout, context)
+        self._draw_vertex_group_numeric(layout, context)
 
     def _draw_vertex_group_rename(self, layout, context):
         box = layout.box()
@@ -69,6 +70,21 @@ class VGToolsPanel(bpy.types.Panel):
         sub_box.label(text="清理工具:")
         sub_box.prop(props, "vg_cleanup_remove_zero")
         sub_box.operator("toolkit.clean_vertex_groups", text="执行清理")
+
+    def _draw_vertex_group_numeric(self, layout, context):
+        props = context.scene.vg_props
+
+        box = layout.box()
+        box.label(text="数字格式化工具", icon='LINENUMBERS_ON')
+
+        sub_box = box.box()
+        row = sub_box.row()
+        row.prop(props, "vg_merge_sync_bones")
+        row.operator("toolkit.merge_vg_by_prefix", icon='AUTOMERGE_ON', text="按数字前缀合并")
+
+        sub_box = box.box()
+        sub_box.operator("toolkit.remove_non_numeric_vg", icon='REMOVE')
+        sub_box.operator("toolkit.fill_vg_number_gaps", icon='LINENUMBERS_ON')
 
 
 class BMTP_MainPanel(bpy.types.Panel):

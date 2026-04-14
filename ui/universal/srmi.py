@@ -2,6 +2,7 @@ from ...blueprint.model import BluePrintModel
 from dataclasses import dataclass,field
 from ...common.global_config import GlobalConfig
 from ...common.global_properties import GlobalProterties
+from ...blueprint.export_helper import BlueprintExportHelper
 
 from ...common.buffer_export_helper import BufferExportHelper
 from ...common.global_key_count_helper import GlobalKeyCountHelper
@@ -10,6 +11,7 @@ from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 from ...common.drawib_model import DrawIBModel
+from ...utils.timer_utils import TimerUtils
 
 import os
 
@@ -210,11 +212,12 @@ class ExportSRMI:
             ini_builder.append_section(texture_override_ib_section)
 
             resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
+            buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
             for category_name in d3d11_game_type.OrderedCategoryNameList:
                 resource_buffer_section.append("[Resource" + draw_ib + category_name + "]")
                 resource_buffer_section.append("type = Buffer")
                 resource_buffer_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict.get(category_name, 0)))
-                resource_buffer_section.append("filename = Meshes\\" + draw_ib + "-" + category_name + ".buf")
+                resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + draw_ib + "-" + category_name + ".buf")
                 resource_buffer_section.new_line()
 
             for category_name in d3d11_game_type.OrderedCategoryNameList:
@@ -222,7 +225,7 @@ class ExportSRMI:
                     resource_buffer_section.append("[Resource" + draw_ib + category_name + "CS]")
                     resource_buffer_section.append("type = StructuredBuffer")
                     resource_buffer_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict.get(category_name, 0)))
-                    resource_buffer_section.append("filename = Meshes\\" + draw_ib + "-" + category_name + ".buf")
+                    resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + draw_ib + "-" + category_name + ".buf")
                     resource_buffer_section.new_line()
 
             for submesh_model in drawib_model.submesh_model_list:
@@ -230,7 +233,7 @@ class ExportSRMI:
                 resource_buffer_section.append("[" + ib_resource_name + "]")
                 resource_buffer_section.append("type = Buffer")
                 resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")
-                resource_buffer_section.append("filename = Meshes\\" + submesh_model.unique_str + "-Index.buf")
+                resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + submesh_model.unique_str + "-Index.buf")
                 resource_buffer_section.new_line()
 
             ini_builder.append_section(resource_buffer_section)
@@ -288,9 +291,23 @@ class ExportSRMI:
         
 
     def export(self):
+        TimerUtils.start_stage("缓冲文件生成")
         self.generate_buffer_files()
+        TimerUtils.end_stage("缓冲文件生成")
+
+        TimerUtils.start_stage("INI配置生成")
         self.generate_ini_file()
+        TimerUtils.end_stage("INI配置生成")
+
+        TimerUtils.start_stage("贴图复制")
         self.copy_texture_files()
+        TimerUtils.end_stage("贴图复制")
+
+    def export_buffers_only(self):
+        """只导出 Buffer 文件，不生成 INI 配置"""
+        TimerUtils.start_stage("缓冲文件生成")
+        self.generate_buffer_files()
+        TimerUtils.end_stage("缓冲文件生成")
 
         
             

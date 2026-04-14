@@ -7,6 +7,7 @@ from ...common.m_ini_helper import M_IniHelper
 from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .drawib_export_base import DrawIBExportBase
+from ...utils.timer_utils import TimerUtils
 
 
 class ExportIdentityV(DrawIBExportBase):
@@ -98,8 +99,9 @@ class ExportIdentityV(DrawIBExportBase):
         ini_builder.append_section(texture_override_ib_section)
 
     def add_unity_vs_resource_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        from ...blueprint.export_helper import BlueprintExportHelper
         resource_vb_section = M_IniSection(M_SectionType.ResourceBuffer)
-        buffer_folder_name = "Meshes"
+        buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
         for category_name in drawib_model.d3d11GameType.OrderedCategoryNameList:
             resource_vb_section.append("[Resource" + drawib_model.draw_ib + category_name + "]")
             resource_vb_section.append("type = Buffer")
@@ -136,12 +138,15 @@ class ExportIdentityV(DrawIBExportBase):
         ini_builder.append_section(resource_texture_section)
 
     def export(self):
+        TimerUtils.start_stage("缓冲文件生成")
         self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
+        TimerUtils.end_stage("缓冲文件生成")
+
+        TimerUtils.start_stage("INI配置生成")
         ini_builder = M_IniBuilder()
         drawib_drawibmodel_dict = {drawib_model.draw_ib: drawib_model for drawib_model in self.drawib_model_list}
         M_IniHelper.generate_hash_style_texture_ini(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
 
-        # 【钩子】集成物体切换节点的配置生成
         self._integrate_object_swap_ini_hook(ini_builder)
 
         for drawib_model in self.drawib_model_list:
@@ -156,3 +161,4 @@ class ExportIdentityV(DrawIBExportBase):
         M_IniHelper.add_shapekey_ini_sections(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
         M_IniHelperGUI.add_branch_mod_gui_section(ini_builder=ini_builder, key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict)
         ini_builder.save_to_file(os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.workspacename + ".ini"))
+        TimerUtils.end_stage("INI配置生成")

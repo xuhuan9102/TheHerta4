@@ -5,6 +5,7 @@ import os
 import shutil
 import time
 import traceback
+import numpy
 from collections import defaultdict
 
 
@@ -130,8 +131,65 @@ class SKE_AutomationPipeline:
             if obj.data and obj.data.shape_keys:
                 for kb in obj.data.shape_keys.key_blocks:
                     if kb != obj.data.shape_keys.reference_key:
-                        kb.value = value
+                        try:
+                            kb.value = value
+                        except Exception:
+                            pass
     
+    def _clean_corrupted_shape_keys(self):
+        """主动检测并清理所有物体上损坏的形态键数据块
+        
+        遍历所有目标物体，尝试访问每个形态键的关键属性，
+        如果访问失败则判定为损坏并直接移除。
+        
+        Returns:
+            int: 被清理的损坏形态键数量
+        """
+        total_removed = 0
+
+        for obj in list(self.target_objects):
+            if not obj.data:
+                continue
+            sk = getattr(obj.data, 'shape_keys', None)
+            if not sk:
+                continue
+
+            keys_to_remove = []
+            for kb in sk.key_blocks:
+                try:
+                    _ = kb.name
+                    _ = kb.value
+                    _ = kb.mute
+                    _ = kb.slider_min
+                    _ = kb.slider_max
+                    _ = kb.interpolation
+                    kb.data.foreach_get('co', numpy.empty((len(obj.data.vertices), 3), dtype=numpy.float32).ravel())
+                except Exception as e:
+                    key_label = "<无法获取名称>"
+                    try:
+                        key_label = kb.name
+                    except Exception:
+                        pass
+                    print(f"    [Corrupt] 检测到损坏形态键 '{key_label}' (物体: {obj.name}): {e}")
+                    keys_to_remove.append(kb)
+
+            for kb in keys_to_remove:
+                try:
+                    obj.shape_key_remove(kb)
+                    total_removed += 1
+                    print(f"    [Corrupt] 已移除损坏形态键 (物体: {obj.name})")
+                except Exception as clean_err:
+                    print(f"    [Corrupt] 移除损坏形态键失败 (物体: {obj.name}): {clean_err}")
+
+        if total_removed > 0:
+            try:
+                bpy.ops.outliner.orphans_purge(do_recursive=True)
+                print(f"  [Corrupt] 已清理 {total_removed} 个损坏形态键，并执行孤立数据清理。")
+            except Exception:
+                print(f"  [Corrupt] 已清理 {total_removed} 个损坏形态键，但孤立数据清理失败。")
+
+        return total_removed
+
     def _safe_save_mainfile(self):
         """安全保存工程文件，自动处理损坏的形态键等无效数据"""
         try:
@@ -162,11 +220,16 @@ class SKE_AutomationPipeline:
                             keys_to_remove.append(kb)
 
                     for kb in keys_to_remove:
+                        key_label = "<无法获取名称>"
+                        try:
+                            key_label = kb.name
+                        except Exception:
+                            pass
                         try:
                             obj.shape_key_remove(kb)
-                            print(f"    [Clean] 已移除损坏形态键 '{kb.name}' (物体: {obj.name})")
+                            print(f"    [Clean] 已移除损坏形态键 '{key_label}' (物体: {obj.name})")
                         except Exception as clean_err:
-                            print(f"    [Clean] 移除失败 '{kb.name}': {clean_err}")
+                            print(f"    [Clean] 移除失败 '{key_label}': {clean_err}")
 
                 try:
                     bpy.ops.outliner.orphans_purge(do_recursive=True)
@@ -242,6 +305,11 @@ class SKE_AutomationPipeline:
             self.target_objects.clear()
             self._collect_objects_from_node_tree(self.props.ske_node_tree_name)
             
+            print("  [Init] 检查并清理损坏的形态键数据块...")
+            removed = self._clean_corrupted_shape_keys()
+            if removed > 0:
+                print(f"  [Init] 已清理 {removed} 个损坏形态键，将重新统计槽位数。")
+            
             for obj in self.target_objects:
                 if obj.data and obj.data.shape_keys:
                     num_keys = len(obj.data.shape_keys.key_blocks)
@@ -284,11 +352,21 @@ class SKE_AutomationPipeline:
                 self.set_all_shape_keys(0)
 
                 print(f"  [SK] 激活槽位 {slot_index} 的形态键...")
+                slot_corrupted = False
                 for obj in self.target_objects:
                     if obj.data and obj.data.shape_keys:
                         if len(obj.data.shape_keys.key_blocks) > slot_index:
                             key_block = obj.data.shape_keys.key_blocks[slot_index]
-                            key_block.value = 1.0
+                            try:
+                                key_block.value = 1.0
+                            except Exception as sk_err:
+                                print(f"    [Corrupt] 槽位 {slot_index} 形态键访问失败 (物体: {obj.name}): {sk_err}")
+                                slot_corrupted = True
+
+                if slot_corrupted:
+                    print(f"  [SK] 槽位 {slot_index} 存在损坏形态键，执行清理后跳过此槽位...")
+                    self._clean_corrupted_shape_keys()
+                    continue
 
                 self.select_objects_from_node_tree(self.props.ske_node_tree_name)
                 self._wait_for_step_delay()

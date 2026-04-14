@@ -281,10 +281,8 @@ class SSMTNode_Object_Rename(SSMTNodeBase):
 
                 history.append(record)
                 current_name = new_name
-
-                _LOG.debug(f"      [规则{i+1}] '{old_name_before_rule}' → '{new_name}' (搜索'{search_str}', 替换为'{replace_str}')")
             else:
-                _LOG.debug(f"      [规则{i+1}] 未匹配: '{current_name}' 不包含 '{search_str}'")
+                pass
 
         if reverse_mapping and total_modified:
             _LOG.debug(f"   ↩️ 开始全局反转映射...")
@@ -407,6 +405,187 @@ class SSMTNode_Object_Rename(SSMTNodeBase):
             lines.append(f"      规则 #{rename_op.get('rule_index', '?')}: 搜索'{rename_op.get('search', '')}', 替换为'{rename_op.get('replace', '')}'")
 
         return lines
+
+    @staticmethod
+    def execute_object_rename(original_obj_name: str, new_name: str, scene_objects=None) -> tuple:
+        """
+        实际执行物体重命名操作，处理同名冲突
+        
+        Args:
+            original_obj_name: 原始物体名称
+            new_name: 目标新名称
+            scene_objects: 场景中的物体集合（用于检测冲突），如果为 None 则使用 bpy.data.objects
+            
+        Returns:
+            tuple: (final_name, was_renamed, conflict_resolved)
+                - final_name: 最终的物体名称
+                - was_renamed: 是否执行了重命名
+                - conflict_resolved: 是否解决了同名冲突
+        """
+        if scene_objects is None:
+            scene_objects = bpy.data.objects
+        
+        obj = scene_objects.get(original_obj_name)
+        if not obj:
+            return (original_obj_name, False, False)
+        
+        if original_obj_name == new_name:
+            return (original_obj_name, False, False)
+        
+        existing_obj = scene_objects.get(new_name)
+        
+        if existing_obj is None or existing_obj == obj:
+            try:
+                obj.name = new_name
+                return (obj.name, True, False)
+            except Exception:
+                return (original_obj_name, False, False)
+        
+        final_name = SSMTNode_Object_Rename._resolve_name_conflict(new_name, scene_objects, obj)
+        
+        try:
+            obj.name = final_name
+            return (obj.name, True, True)
+        except Exception:
+            return (original_obj_name, False, False)
+
+    @staticmethod
+    def _resolve_name_conflict(target_name: str, scene_objects, exclude_obj=None) -> str:
+        """
+        解决物体名称冲突，在点后面插入数字序号
+        
+        例如：
+        - 'd1a31f0b-7146-0.自定义名称_copy' → 'd1a31f0b-7146-0.001.自定义名称_copy'
+        - 'd1a31f0b-7146-0.自定义名称' → 'd1a31f0b-7146-0.001.自定义名称'
+        
+        Args:
+            target_name: 目标名称
+            scene_objects: 场景物体集合
+            exclude_obj: 要排除的物体（避免与自身比较）
+            
+        Returns:
+            str: 解决冲突后的名称
+        """
+        dot_pos = target_name.find('.')
+        
+        if dot_pos == -1:
+            prefix = target_name
+            suffix = ""
+        else:
+            prefix = target_name[:dot_pos]
+            suffix = target_name[dot_pos:]
+        
+        counter = 1
+        while True:
+            new_name = f"{prefix}.{counter:03d}{suffix}"
+            
+            existing = scene_objects.get(new_name)
+            if existing is None or existing == exclude_obj:
+                return new_name
+            
+            counter += 1
+            
+            if counter > 9999:
+                import uuid
+                return f"{prefix}.{uuid.uuid4().hex[:8]}{suffix}"
+
+    @staticmethod
+    def execute_batch_rename(rename_chains: list) -> dict:
+        """
+        批量执行物体重命名操作
+        
+        Args:
+            rename_chains: 包含 rename_history 和 original_object_name 的处理链列表
+            
+        Returns:
+            dict: {'total_renamed': int, 'total_conflicts': int}
+        """
+        from ..utils.log_utils import LOG
+        
+        rule_match_counts = {}
+        total_renamed = 0
+        total_conflicts = 0
+        renamed_objects = {}
+        
+        for chain in rename_chains:
+            original_name = chain.original_object_name
+            new_name = chain.object_name
+            
+            if original_name == new_name:
+                continue
+            
+            lookup_name = renamed_objects.get(original_name, original_name)
+            
+            for record in chain.rename_history:
+                search = record.get('search', '')
+                replace = record.get('replace', '')
+                rule_key = f"'{search}' → '{replace}'"
+                
+                if rule_key not in rule_match_counts:
+                    rule_match_counts[rule_key] = 0
+            
+            final_name, was_renamed, conflict_resolved = SSMTNode_Object_Rename.execute_object_rename(
+                lookup_name,
+                new_name
+            )
+            
+            if was_renamed:
+                total_renamed += 1
+                chain.object_name = final_name
+                renamed_objects[original_name] = final_name
+                
+                for record in chain.rename_history:
+                    search = record.get('search', '')
+                    replace = record.get('replace', '')
+                    rule_key = f"'{search}' → '{replace}'"
+                    rule_match_counts[rule_key] += 1
+                
+                if conflict_resolved:
+                    total_conflicts += 1
+            else:
+                if original_name in renamed_objects:
+                    chain.object_name = renamed_objects[original_name]
+        
+        if total_renamed == 0:
+            return {'total_renamed': 0, 'total_conflicts': 0, 'renamed_objects': renamed_objects}
+        
+        LOG.info("🔧 重命名节点开始执行")
+        
+        for rule_key, count in rule_match_counts.items():
+            if count > 0:
+                LOG.info(f"   规则 {rule_key}: {count} 个物体匹配成功")
+        
+        conflict_str = f", 解决 {total_conflicts} 个冲突" if total_conflicts > 0 else ""
+        LOG.info(f"   ✅ 重命名节点执行完成: {total_renamed} 个物体{conflict_str}")
+        
+        return {'total_renamed': total_renamed, 'total_conflicts': total_conflicts, 'renamed_objects': renamed_objects}
+
+    @staticmethod
+    def log_rename_summary(rename_chains: list):
+        from ..utils.log_utils import LOG
+
+        rule_match_counts = {}
+        total_count = 0
+
+        for chain in rename_chains:
+            total_count += 1
+            for record in chain.rename_history:
+                search = record.get('search', '')
+                replace = record.get('replace', '')
+                rule_key = f"'{search}' → '{replace}'"
+
+                if rule_key not in rule_match_counts:
+                    rule_match_counts[rule_key] = 0
+                rule_match_counts[rule_key] += 1
+
+        if total_count == 0:
+            return
+
+        LOG.info("🔧 重命名节点（虚拟映射）")
+        for rule_key, count in rule_match_counts.items():
+            if count > 0:
+                LOG.info(f"   规则 {rule_key}: {count} 个物体匹配")
+        LOG.info(f"   ✅ 共 {total_count} 个物体将使用重命名映射")
 
     def validate_configuration(self) -> list:
         """验证节点配置"""

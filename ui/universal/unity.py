@@ -9,6 +9,7 @@ from ...common.m_ini_helper import M_IniHelper
 from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .drawib_export_base import DrawIBExportBase
+from ...utils.timer_utils import TimerUtils
 
 
 class ExportUnity(DrawIBExportBase):
@@ -132,8 +133,9 @@ class ExportUnity(DrawIBExportBase):
         ini_builder.append_section(vertexlimit_section)
 
     def add_unity_vs_resource_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        from ...blueprint.export_helper import BlueprintExportHelper
         resource_vb_section = M_IniSection(M_SectionType.ResourceBuffer)
-        buffer_folder_name = "Meshes"
+        buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
 
         for category_name in drawib_model.d3d11GameType.OrderedCategoryNameList:
             resource_vb_section.append("[Resource" + drawib_model.draw_ib + category_name + "]")
@@ -273,7 +275,8 @@ class ExportUnity(DrawIBExportBase):
 
     def add_unity_cs_resource_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
         resource_vb_section = M_IniSection(M_SectionType.ResourceBuffer)
-        buffer_folder_name = "Meshes"
+        from ...blueprint.export_helper import BlueprintExportHelper
+        buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
 
         for category_name in drawib_model.d3d11GameType.OrderedCategoryNameList:
             resource_vb_section.append("[Resource" + drawib_model.draw_ib + category_name + "]")
@@ -397,8 +400,13 @@ class ExportUnity(DrawIBExportBase):
         - Naraka、NarakaM、AILIMIT：使用计算着色器模式
         - 其他游戏：使用顶点着色器模式
         """
+        TimerUtils.start_stage("缓冲文件生成")
         self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
+        TimerUtils.end_stage("缓冲文件生成")
+
+        TimerUtils.start_stage("INI配置生成")
         if GlobalConfig.logic_name in {LogicName.Naraka, LogicName.NarakaM, LogicName.AILIMIT}:
             self.generate_unity_cs_config_ini()
         else:
             self.generate_unity_vs_config_ini()
+        TimerUtils.end_stage("INI配置生成")

@@ -157,12 +157,13 @@ class SSMTNode_DataType(SSMTNodeBase):
         default='',
     )
 
-    # 配置文件路径
+    # 配置文件路径（自动刷新）
     tmp_json_path: StringProperty(
         name='配置文件',
         description='用于覆盖数据类型的 JSON 配置文件',
         subtype='FILE_PATH',
         default='',
+        update=lambda self, context: self._auto_refresh(),
     )
 
     # 解析后的 WorkGameType
@@ -183,12 +184,6 @@ class SSMTNode_DataType(SSMTNodeBase):
         type=BufferInfoItem,
     )
 
-    # 已加载的配置文件路径（用于判断是否需要刷新）
-    loaded_json_path: StringProperty(
-        name='LoadedJsonPath',
-        default='',
-    )
-
     def init(self, context):
         """节点初始化"""
         self.inputs.new('SSMTSocketObject', 'Input')
@@ -200,12 +195,6 @@ class SSMTNode_DataType(SSMTNodeBase):
         col = layout.column()
         col.prop(self, 'draw_ib_match', text='IB')
         col.prop(self, 'tmp_json_path', text='配置文件')
-
-        # 检查是否需要刷新
-        need_refresh = self._need_refresh()
-        if need_refresh:
-            row = layout.row()
-            row.operator('ssmt.refresh_datatype_node', text='刷新解析', icon='FILE_REFRESH')
 
         # 显示解析错误
         if self.parse_error:
@@ -236,11 +225,12 @@ class SSMTNode_DataType(SSMTNodeBase):
                 layout.separator()
                 layout.label(text="未解析到任何数据类型", icon='INFO')
 
-    def _need_refresh(self) -> bool:
-        """检查是否需要刷新解析"""
-        if not self.tmp_json_path:
-            return False
-        return self.loaded_json_path != self.tmp_json_path
+    def _auto_refresh(self):
+        """自动刷新回调，在配置文件路径变化时自动调用"""
+        try:
+            self.refresh_datatype_info()
+        except Exception:
+            pass
 
     def refresh_datatype_info(self):
         """刷新数据类型信息，解析配置文件"""
@@ -248,7 +238,6 @@ class SSMTNode_DataType(SSMTNodeBase):
         self.work_game_type = ''
         self.parse_error = ''
         self.parsed_buffers.clear()
-        self.loaded_json_path = ''
 
         if not self.tmp_json_path:
             return
@@ -289,9 +278,6 @@ class SSMTNode_DataType(SSMTNodeBase):
                 item.category = category
                 item.file_name = file_name
                 item.type_name = type_name
-
-        # 记录已加载的路径
-        self.loaded_json_path = self.tmp_json_path
 
         # 检查是否解析到有效数据
         if not self.work_game_type and len(self.parsed_buffers) == 0 and not self.parse_error:
@@ -410,26 +396,11 @@ class SSMTNode_DataType(SSMTNodeBase):
         return build_category_override_dict(loaded.get('CategoryBufferList', []))
 
 
-class SSMT_OT_RefreshDataTypeNode(bpy.types.Operator):
-    """刷新数据类型节点操作"""
-    bl_idname = 'ssmt.refresh_datatype_node'
-    bl_label = '刷新数据类型节点'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        node = context.node
-        if hasattr(node, 'refresh_datatype_info'):
-            node.refresh_datatype_info()
-        return {'FINISHED'}
-
-
 def register():
     bpy.utils.register_class(BufferInfoItem)
     bpy.utils.register_class(SSMTNode_DataType)
-    bpy.utils.register_class(SSMT_OT_RefreshDataTypeNode)
 
 
 def unregister():
-    bpy.utils.unregister_class(SSMT_OT_RefreshDataTypeNode)
     bpy.utils.unregister_class(SSMTNode_DataType)
     bpy.utils.unregister_class(BufferInfoItem)

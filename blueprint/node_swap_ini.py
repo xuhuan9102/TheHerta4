@@ -341,3 +341,11 @@ class SwapKeyDebugINIWriter:
         
         return "\n".join(lines)
 
+
+def register():
+    pass
+
+
+def unregister():
+    pass
+

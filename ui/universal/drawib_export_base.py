@@ -41,6 +41,14 @@ class DrawIBExportBase:
                 with open(shapekey_buf_filepath, 'wb') as file_obj:
                     shapekey_buf.tofile(file_obj)
 
+    def export_buffers_only(self):
+        """只导出 Buffer 文件，不生成 INI 配置"""
+        from ...common.global_config import GlobalConfig
+        from ...utils.timer_utils import TimerUtils
+        TimerUtils.start_stage("缓冲文件生成")
+        self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
+        TimerUtils.end_stage("缓冲文件生成")
+
     def _integrate_object_swap_ini_hook(self, ini_builder):
         """【钩子方法】自动集成物体切换节点的 INI 配置
         

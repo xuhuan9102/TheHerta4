@@ -114,8 +114,8 @@ class GlobalConfig:
     
     @classmethod
     def path_generatemod_buffer_folder(cls):
-       
-        buffer_folder_name = "Meshes"
+        from ..blueprint.export_helper import BlueprintExportHelper
+        buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
         buffer_path = os.path.join(GlobalConfig.path_generate_mod_folder(), buffer_folder_name + "\\")
         if not os.path.exists(buffer_path):
             os.makedirs(buffer_path)
