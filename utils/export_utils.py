@@ -6,6 +6,7 @@ from typing import Optional
 
 from ..common.global_config import GlobalConfig
 from ..common.logic_name import LogicName
+from ..common.global_properties import GlobalProterties
 from .obj_utils import ObjUtils
 from .shapekey_utils import ShapeKeyUtils
 from .timer_utils import TimerUtils
@@ -319,12 +320,14 @@ class ExportUtils:
         element_vertex_ndarray: numpy.ndarray,
         dtype: numpy.dtype,
         d3d11_game_type: D3D11GameType,
+        deduplicate_element_set: set = None,
     ):
         return ObjBufferHelper.calc_index_vertex_buffer_wwmi_v2(
             mesh=mesh,
             element_vertex_ndarray=element_vertex_ndarray,
             dtype=dtype,
             d3d11_game_type=d3d11_game_type,
+            deduplicate_element_set=deduplicate_element_set,
         )
 
     @staticmethod
@@ -349,11 +352,14 @@ class ExportUtils:
                 final_elementname_data_dict=element_context.final_elementname_data_dict,
             )
 
+        deduplicate_element_set = GlobalProterties.get_deduplicate_element_set()
+
         ib, category_buffer_dict, index_vertex_id_dict, unique_element_vertex_ndarray, unique_first_loop_indices = ExportUtils.build_wwmi_index_buffers(
             mesh=element_context.mesh,
             element_vertex_ndarray=element_vertex_ndarray,
             dtype=element_context.total_structured_dtype,
             d3d11_game_type=element_context.d3d11_game_type,
+            deduplicate_element_set=deduplicate_element_set,
         )
         shapekey_offsets, shapekey_vertex_ids, shapekey_vertex_offsets, export_shapekey = ExportUtils.build_wwmi_shapekey_payload(
             obj=element_context.obj,

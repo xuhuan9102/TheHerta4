@@ -572,12 +572,15 @@ class ObjBufferHelper:
         mesh:bpy.types.Mesh, 
         element_vertex_ndarray:numpy.ndarray, 
         dtype:numpy.dtype,
-        d3d11_game_type:D3D11GameType):
+        d3d11_game_type:D3D11GameType,
+        deduplicate_element_set:set = None):
         '''
         - 用 numpy 将结构化顶点视图为一行字节，避免逐顶点 bytes() 与 dict 哈希。
         - 使用 numpy.unique(..., axis=0, return_index=True, return_inverse=True) 在 C 层完成唯一化与逆映射。
         - 仅在构建 per-polygon IB 时使用少量 Python 切片，整体效率大幅提高。
         - 当 structured dtype 非连续时，内部会做一次拷贝（ascontiguousarray）；通常开销小于逐顶点哈希开销。
+        - deduplicate_element_set: 指定哪些元素类型参与去重，为 None 时使用全部元素。
+          元素类型名称包括: POSITION, NORMAL, TANGENT, BINORMAL, TEXCOORD, COLOR, BLENDWEIGHT, BLENDINDICES
         '''
 
         # (1) loop -> vertex mapping
@@ -594,6 +597,16 @@ class ObjBufferHelper:
         except Exception:
             raw = vb.tobytes()
             row_bytes = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(n_loops, row_size)
+
+        # 根据 deduplicate_element_set 过滤参与去重的元素
+        if deduplicate_element_set is not None:
+            filtered_row_bytes = ObjBufferHelper._filter_deduplicate_elements(
+                element_vertex_ndarray, dtype, d3d11_game_type, deduplicate_element_set, n_loops
+            )
+        else:
+            filtered_row_bytes = row_bytes
+
+        filtered_row_size = filtered_row_bytes.shape[1]
 
         # WWMI-Tools deduplicates loop rows including the loop's VertexId -> they
         # effectively perform uniqueness on loop attributes + VertexId treated as
@@ -613,14 +626,14 @@ class ObjBufferHelper:
 
         # Combine row bytes + vid bytes, but to make numpy.unique faster we pad the
         # combined row to a multiple of 8 bytes and view it as uint64 blocks.
-        total_bytes = row_size + 4
+        total_bytes = filtered_row_size + 4
         pad = (-total_bytes) % 8
         padded_width = total_bytes + pad
 
         # Allocate padded combined buffer and fill
         combined_padded = numpy.zeros((n_loops, padded_width), dtype=numpy.uint8)
-        combined_padded[:, :row_size] = row_bytes
-        combined_padded[:, row_size:row_size+4] = vid_bytes
+        combined_padded[:, :filtered_row_size] = filtered_row_bytes
+        combined_padded[:, filtered_row_size:filtered_row_size+4] = vid_bytes
 
         # View as uint64 blocks (shape: n_loops x n_blocks)
         n_blocks = padded_width // 8
@@ -643,6 +656,7 @@ class ObjBufferHelper:
         unique_first_indices_insertion = unique_first_indices[order]
 
         # Pick original unique rows from row_bytes using insertion-ordered indices
+        # 注意：这里使用原始的 row_bytes 而不是 filtered_row_bytes，以保留完整数据
         unique_rows = row_bytes[unique_first_indices_insertion]
 
         # Expose the loop indices (first-occurrence loop indices) used to select
@@ -701,6 +715,53 @@ class ObjBufferHelper:
 
         ib = flipped
         return ib, category_buffer_dict, index_vertex_id_dict, unique_element_vertex_ndarray,unique_first_loop_indices
+
+    @staticmethod
+    def _filter_deduplicate_elements(
+        element_vertex_ndarray:numpy.ndarray,
+        dtype:numpy.dtype,
+        d3d11_game_type:D3D11GameType,
+        deduplicate_element_set:set,
+        n_loops:int) -> numpy.ndarray:
+        '''
+        根据 deduplicate_element_set 过滤参与去重的元素，返回过滤后的字节数组。
+        deduplicate_element_set 中的元素名称会匹配以该名称开头的所有字段。
+        例如: "TEXCOORD" 会匹配 "TEXCOORD", "TEXCOORD1", "TEXCOORD2" 等。
+        '''
+        fields_to_include = []
+        for field_name in dtype.names:
+            should_include = False
+            for element_type in deduplicate_element_set:
+                if field_name == element_type or field_name.startswith(element_type):
+                    should_include = True
+                    break
+            if should_include:
+                fields_to_include.append(field_name)
+        
+        if not fields_to_include:
+            SSMTErrorUtils.raise_fatal("顶点去重精度控制: 没有选择任何元素参与去重，请至少选择一个元素类型")
+        
+        total_bytes = 0
+        field_byte_ranges = []
+        for field_name in dtype.names:
+            field_dtype = dtype.fields[field_name][0]
+            field_size = field_dtype.itemsize
+            if field_name in fields_to_include:
+                field_byte_ranges.append((total_bytes, total_bytes + field_size))
+            total_bytes += field_size
+        
+        row_bytes = element_vertex_ndarray.view(numpy.uint8).reshape(n_loops, total_bytes)
+        
+        filtered_bytes_list = []
+        for start, end in field_byte_ranges:
+            filtered_bytes_list.append(row_bytes[:, start:end])
+        
+        if filtered_bytes_list:
+            filtered_row_bytes = numpy.concatenate(filtered_bytes_list, axis=1)
+        else:
+            filtered_row_bytes = numpy.zeros((n_loops, 0), dtype=numpy.uint8)
+        
+        return filtered_row_bytes
 
 
     @staticmethod

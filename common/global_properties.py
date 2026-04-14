@@ -87,6 +87,54 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    deduplicate_POSITION: bpy.props.BoolProperty(
+        name="位置数据",
+        description="位置数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_NORMAL: bpy.props.BoolProperty(
+        name="法线数据",
+        description="法线数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_TANGENT: bpy.props.BoolProperty(
+        name="切线数据",
+        description="切线数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_BINORMAL: bpy.props.BoolProperty(
+        name="副法线数据",
+        description="副法线数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_TEXCOORD: bpy.props.BoolProperty(
+        name="UV坐标数据",
+        description="UV坐标数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_COLOR: bpy.props.BoolProperty(
+        name="顶点颜色数据",
+        description="顶点颜色数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_BLENDWEIGHT: bpy.props.BoolProperty(
+        name="骨骼权重数据",
+        description="骨骼权重数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_BLENDINDICES: bpy.props.BoolProperty(
+        name="骨骼索引数据",
+        description="骨骼索引数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
     @classmethod
     def _instance(cls):
         return bpy.context.scene.global_properties
@@ -146,6 +194,28 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def export_add_missing_vertex_groups(cls):
         return cls._instance().export_add_missing_vertex_groups
+
+    @classmethod
+    def get_deduplicate_element_set(cls) -> set:
+        instance = cls._instance()
+        element_set = set()
+        if instance.deduplicate_POSITION:
+            element_set.add("POSITION")
+        if instance.deduplicate_NORMAL:
+            element_set.add("NORMAL")
+        if instance.deduplicate_TANGENT:
+            element_set.add("TANGENT")
+        if instance.deduplicate_BINORMAL:
+            element_set.add("BINORMAL")
+        if instance.deduplicate_TEXCOORD:
+            element_set.add("TEXCOORD")
+        if instance.deduplicate_COLOR:
+            element_set.add("COLOR")
+        if instance.deduplicate_BLENDWEIGHT:
+            element_set.add("BLENDWEIGHT")
+        if instance.deduplicate_BLENDINDICES:
+            element_set.add("BLENDINDICES")
+        return element_set
 
 
 def register():

@@ -2,6 +2,7 @@ import bpy
 from typing import List, Dict
 
 from ..utils.log_utils import LOG
+from ..utils.shapekey_utils import ShapeKeyUtils
 from .export_helper import BlueprintExportHelper
 
 
@@ -27,6 +28,23 @@ class PreProcessHelper:
             LOG.info(f"📋 多文件导出节点物体: {len(multi_file_objects)} 个")
         
         cls._create_object_copies(unique_objects)
+        
+        copy_names = list(cls.original_to_copy_map.values())
+        
+        LOG.info(f"🔧 对所有副本物体应用约束...")
+        cls._apply_constraints(copy_names)
+        
+        LOG.info(f"🔧 对所有副本物体应用修改器...")
+        cls._apply_modifiers(copy_names)
+        
+        LOG.info(f"🔧 对所有物体执行三角化...")
+        cls._triangulate_objects(copy_names)
+        
+        LOG.info(f"🔧 对所有物体执行应用变换...")
+        cls._apply_transforms(copy_names)
+        
+        LOG.info(f"🔧 对所有副本物体应用形态键...")
+        cls._apply_shape_keys(copy_names)
         
         LOG.info(f"🔧 前处理完成: {len(unique_objects)} 个物体")
         
@@ -60,11 +78,230 @@ class PreProcessHelper:
             
             bpy.context.collection.objects.link(obj_copy)
             
+            original_shapekey_count = 0
+            if obj.data.shape_keys:
+                original_shapekey_count = len(obj.data.shape_keys.key_blocks)
+            copy_shapekey_count = 0
+            if obj_copy.data.shape_keys:
+                copy_shapekey_count = len(obj_copy.data.shape_keys.key_blocks)
+            
+            if original_shapekey_count > 0:
+                LOG.info(f"   副本 {copy_name}: 原始形态键 {original_shapekey_count} -> 副本形态键 {copy_shapekey_count}")
+            
             cls.original_to_copy_map[obj_name] = copy_name
             cls.created_copies.append(copy_name)
             created_count += 1
         
         LOG.info(f"📋 创建副本: 成功 {created_count} 个, 已存在 {existing_count} 个, 失败 {failed_count} 个")
+
+    @classmethod
+    def _apply_constraints(cls, object_names: List[str]):
+        applied_count = 0
+        failed_count = 0
+        
+        for obj_name in object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                failed_count += 1
+                continue
+            
+            if not obj.constraints:
+                continue
+            
+            original_active = bpy.context.view_layer.objects.active
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            
+            constraint_names = [c.name for c in obj.constraints]
+            for constraint_name in constraint_names:
+                try:
+                    bpy.ops.object.constraint_apply(constraint=constraint_name)
+                    applied_count += 1
+                except Exception as e:
+                    LOG.warning(f"   应用约束失败 {obj_name}.{constraint_name}: {e}")
+            
+            if original_active:
+                bpy.context.view_layer.objects.active = original_active
+        
+        LOG.info(f"   ✅ 应用约束: {applied_count} 个")
+
+    @classmethod
+    def _apply_modifiers(cls, object_names: List[str]):
+        applied_count = 0
+        failed_count = 0
+        shapekey_count = 0
+        no_modifier_count = 0
+        
+        for obj_name in object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                failed_count += 1
+                continue
+            
+            if obj.type != 'MESH':
+                LOG.info(f"   {obj_name}: 非网格物体，跳过")
+                continue
+            
+            modifier_count = len(obj.modifiers)
+            has_shape_keys = obj.data.shape_keys and len(obj.data.shape_keys.key_blocks) > 0
+            shape_key_count_before = len(obj.data.shape_keys.key_blocks) if has_shape_keys else 0
+            
+            if modifier_count == 0:
+                no_modifier_count += 1
+                LOG.info(f"   {obj_name}: 无修改器 (形态键: {shape_key_count_before})")
+                continue
+            
+            LOG.info(f"   {obj_name}: {modifier_count} 个修改器, {shape_key_count_before} 个形态键")
+            
+            original_active = bpy.context.view_layer.objects.active
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            
+            if has_shape_keys:
+                modifier_names = [m.name for m in obj.modifiers if m.show_viewport]
+                if modifier_names:
+                    success, error = ShapeKeyUtils.apply_modifiers_for_object_with_shape_keys_optimized(
+                        bpy.context, modifier_names, disable_armatures=False
+                    )
+                    if success:
+                        applied_count += len(modifier_names)
+                        shapekey_count += 1
+                        shape_key_count_after = len(obj.data.shape_keys.key_blocks) if obj.data.shape_keys else 0
+                        LOG.info(f"   ✅ {obj_name}: 修改器应用成功，形态键 {shape_key_count_before} -> {shape_key_count_after}")
+                    else:
+                        LOG.warning(f"   ❌ {obj_name}: 应用修改器失败 - {error}")
+                        failed_count += 1
+            else:
+                modifier_names = [m.name for m in obj.modifiers if m.show_viewport]
+                for modifier_name in modifier_names:
+                    try:
+                        bpy.ops.object.modifier_apply(modifier=modifier_name)
+                        applied_count += 1
+                    except Exception as e:
+                        LOG.warning(f"   ❌ {obj_name}.{modifier_name}: 应用失败 - {e}")
+                        failed_count += 1
+            
+            if original_active:
+                bpy.context.view_layer.objects.active = original_active
+        
+        if shapekey_count > 0:
+            LOG.info(f"   ✅ 应用修改器: {applied_count} 个 (含 {shapekey_count} 个有形态键物体)")
+        elif no_modifier_count > 0:
+            LOG.info(f"   ✅ 应用修改器: {applied_count} 个 ({no_modifier_count} 个物体无修改器)")
+        else:
+            LOG.info(f"   ✅ 应用修改器: {applied_count} 个")
+
+    @classmethod
+    def _triangulate_objects(cls, object_names: List[str]):
+        triangulated_count = 0
+        failed_count = 0
+        
+        for obj_name in object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                failed_count += 1
+                continue
+            
+            if obj.type != 'MESH':
+                continue
+            
+            original_active = bpy.context.view_layer.objects.active
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            
+            try:
+                bpy.ops.object.mode_set(mode='EDIT')
+                bpy.ops.mesh.select_all(action='SELECT')
+                bpy.ops.mesh.quads_convert_to_tris(quad_method='BEAUTY', ngon_method='BEAUTY')
+                bpy.ops.object.mode_set(mode='OBJECT')
+                triangulated_count += 1
+            except Exception as e:
+                LOG.warning(f"   三角化失败 {obj_name}: {e}")
+                failed_count += 1
+                try:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                except:
+                    pass
+            
+            if original_active:
+                bpy.context.view_layer.objects.active = original_active
+        
+        LOG.info(f"   ✅ 三角化: {triangulated_count} 个物体")
+
+    @classmethod
+    def _apply_transforms(cls, object_names: List[str]):
+        applied_count = 0
+        failed_count = 0
+        
+        for obj_name in object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                failed_count += 1
+                continue
+            
+            original_active = bpy.context.view_layer.objects.active
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            
+            try:
+                bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+                applied_count += 1
+            except Exception as e:
+                LOG.warning(f"   应用变换失败 {obj_name}: {e}")
+                failed_count += 1
+            
+            if original_active:
+                bpy.context.view_layer.objects.active = original_active
+        
+        LOG.info(f"   ✅ 应用变换: {applied_count} 个物体")
+
+    @classmethod
+    def _apply_shape_keys(cls, object_names: List[str]):
+        applied_count = 0
+        no_shapekey_count = 0
+        failed_count = 0
+        
+        for obj_name in object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                failed_count += 1
+                continue
+            
+            if obj.type != 'MESH':
+                continue
+            
+            shapekey_count = 0
+            if obj.data.shape_keys:
+                shapekey_count = len(obj.data.shape_keys.key_blocks)
+            
+            if shapekey_count == 0:
+                no_shapekey_count += 1
+                LOG.info(f"   {obj_name}: 无形态键")
+                continue
+            
+            LOG.info(f"   {obj_name}: 有 {shapekey_count} 个形态键，准备应用...")
+            
+            original_active = bpy.context.view_layer.objects.active
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            
+            try:
+                bpy.ops.object.shape_key_remove(all=True, apply_mix=True)
+                applied_count += 1
+                LOG.info(f"   ✅ {obj_name}: 形态键应用成功")
+            except Exception as e:
+                LOG.warning(f"   应用形态键失败 {obj_name}: {e}")
+                failed_count += 1
+            
+            if original_active:
+                bpy.context.view_layer.objects.active = original_active
+        
+        LOG.info(f"   ✅ 应用形态键: {applied_count} 个物体, {no_shapekey_count} 个无形态键")
 
     @classmethod
     def update_blueprint_node_references(cls, tree, nested_trees: List = None):

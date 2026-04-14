@@ -279,6 +279,11 @@ class SSMTNode_Result_Output(SSMTNodeBase):
     bl_label = 'Generate Mod'
     bl_icon = 'EXPORT'
 
+    show_vertex_deduplication_panel: bpy.props.BoolProperty(
+        name="顶点去重精度控制",
+        default=False,
+    ) # type: ignore
+
     def init(self, context):
         self.inputs.new('SSMTSocketObject', "Group 1")
         self.outputs.new('SSMTSocketPostProcess', "Post Process")
@@ -321,6 +326,25 @@ class SSMTNode_Result_Output(SSMTNodeBase):
             box.label(text=context.scene.global_properties.generate_mod_folder_path)
 
             layout.operator("ssmt.select_generate_mod_folder", icon='FILE_FOLDER')
+
+        row = layout.row()
+        row.prop(self, "show_vertex_deduplication_panel", 
+                 icon='TRIA_DOWN' if self.show_vertex_deduplication_panel else 'TRIA_RIGHT',
+                 icon_only=True, emboss=False)
+        row.label(text="顶点去重精度控制")
+
+        if self.show_vertex_deduplication_panel:
+            box = layout.box()
+            col = box.column()
+            col.label(text="参与去重的数据类型:")
+            col.prop(context.scene.global_properties, "deduplicate_POSITION")
+            col.prop(context.scene.global_properties, "deduplicate_NORMAL")
+            col.prop(context.scene.global_properties, "deduplicate_TANGENT")
+            col.prop(context.scene.global_properties, "deduplicate_BINORMAL")
+            col.prop(context.scene.global_properties, "deduplicate_TEXCOORD")
+            col.prop(context.scene.global_properties, "deduplicate_COLOR")
+            col.prop(context.scene.global_properties, "deduplicate_BLENDWEIGHT")
+            col.prop(context.scene.global_properties, "deduplicate_BLENDINDICES")
 
     def update(self):
         if self.inputs and self.inputs[-1].is_linked:

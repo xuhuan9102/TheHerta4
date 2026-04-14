@@ -7,6 +7,12 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
     bl_label = "执行权重传递"
     bl_options = {'REGISTER', 'UNDO'}
     
+    def get_armature_modifier(self, obj):
+        for mod in obj.modifiers:
+            if mod.type == 'ARMATURE' and mod.object:
+                return mod
+        return None
+    
     def apply_shapekey_positions(self, obj):
         if not obj.data.shape_keys:
             return False
@@ -55,6 +61,34 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
                 vert.co = applied_positions[i]
         
         return True
+    
+    def apply_armature_positions(self, obj):
+        armature_mod = self.get_armature_modifier(obj)
+        if not armature_mod:
+            return False, None
+        
+        armature_obj = armature_mod
+        
+        original_positions = [v.co.copy() for v in obj.data.vertices]
+        
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(depsgraph)
+        
+        evaluated_positions = []
+        for vert in eval_obj.data.vertices:
+            evaluated_positions.append(vert.co.copy())
+        
+        for i, vert in enumerate(obj.data.vertices):
+            vert.co = evaluated_positions[i]
+        
+        return True, original_positions
+    
+    def restore_positions(self, obj, original_positions):
+        if not original_positions:
+            return
+        for i, vert in enumerate(obj.data.vertices):
+            if i < len(original_positions):
+                vert.co = original_positions[i]
 
     def execute(self, context):
         props = context.scene.bmtp_props
@@ -74,6 +108,23 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
         for obj in [source_obj] + target_objects:
             original_modes[obj.name] = obj.mode
         
+        source_armature_applied = False
+        source_armature_positions = None
+        if props.wt_use_armature_positions:
+            source_armature_applied, source_armature_positions = self.apply_armature_positions(source_obj)
+            if source_armature_applied:
+                self.report({'INFO'}, f"源物体 '{source_obj.name}' 已应用骨骼位置")
+        
+        target_armature_applied = {}
+        target_armature_positions = {}
+        if props.wt_use_armature_positions:
+            for target_obj in target_objects:
+                applied, positions = self.apply_armature_positions(target_obj)
+                target_armature_applied[target_obj.name] = applied
+                target_armature_positions[target_obj.name] = positions
+                if applied:
+                    self.report({'INFO'}, f"目标物体 '{target_obj.name}' 已应用骨骼位置")
+        
         source_shapekey_applied = False
         if props.wt_use_shapekey_positions:
             source_shapekey_applied = self.apply_shapekey_positions(source_obj)
@@ -92,55 +143,21 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
             
             self.report({'INFO'}, f"将传递以下顶点组: {', '.join(selected_vg_names)}")
             
-            backup_data = None
-            if hasattr(context.scene, 'bmtp_vertex_group_weights_backup') and source_obj.name in context.scene['bmtp_vertex_group_weights_backup']:
-                try:
-                    backup_json = context.scene['bmtp_vertex_group_weights_backup'][source_obj.name]
-                    backup_data = json.loads(backup_json)
-                except:
-                    pass
-            
-            if not backup_data:
-                self.report({'WARNING'}, "未找到权重备份数据，正在创建临时备份...")
-                backup_data = {}
-                for vg in source_obj.vertex_groups:
-                    backup_data[vg.name] = {}
-                    for i, v in enumerate(source_obj.data.vertices):
-                        try:
-                            weight = vg.weight(i)
-                            if weight > 0:
-                                backup_data[vg.name][str(i)] = weight
-                        except:
-                            pass
-                
-                self.report({'INFO'}, f"备份完成，共备份 {len(backup_data)} 个顶点组")
-                for vg_name, weights in backup_data.items():
-                    self.report({'INFO'}, f"  {vg_name}: {len(weights)} 个顶点有权重")
-            
-            temp_removed_groups = []
-            temp_removed_vg_objects = []
-            for vg in source_obj.vertex_groups:
-                if vg.name not in selected_vg_names:
-                    temp_removed_groups.append(vg.name)
-                    temp_removed_vg_objects.append(vg)
-            
-            self.report({'INFO'}, f"选中的顶点组: {selected_vg_names}")
-            self.report({'INFO'}, f"将要删除的顶点组: {temp_removed_groups}")
-            self.report({'INFO'}, f"删除前源物体有 {len(source_obj.vertex_groups)} 个顶点组")
-            
-            for vg in temp_removed_vg_objects:
-                source_obj.vertex_groups.remove(vg)
-            
-            self.report({'INFO'}, f"删除后源物体有 {len(source_obj.vertex_groups)} 个顶点组")
-            
             try:
                 bpy.ops.object.mode_set(mode='OBJECT')
                 
-                source_obj.select_set(True)
-                context.view_layer.objects.active = source_obj
-                
                 for target_obj in target_objects:
-                    target_obj.select_set(True)
+                    target_vg_backup = {}
+                    if not props.wt_cleanup:
+                        for vg in target_obj.vertex_groups:
+                            target_vg_backup[vg.name] = {}
+                            for i, v in enumerate(target_obj.data.vertices):
+                                try:
+                                    weight = vg.weight(i)
+                                    if weight > 0:
+                                        target_vg_backup[vg.name][str(i)] = weight
+                                except:
+                                    pass
                     
                     if props.wt_cleanup:
                         target_obj.vertex_groups.clear()
@@ -149,18 +166,43 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
                         if vg.name not in target_obj.vertex_groups:
                             target_obj.vertex_groups.new(name=vg.name)
                     
-                    modifier = target_obj.modifiers.new(name="TempWeightTransfer", type='DATA_TRANSFER')
-                    modifier.object = source_obj
-                    modifier.use_loop_data = False
-                    modifier.use_vert_data = True
-                    modifier.data_types_loops = set()
-                    modifier.data_types_verts = {'VGROUP_WEIGHTS'}
-                    modifier.vert_mapping = 'POLY_NEAREST'
-                    modifier.mix_mode = 'REPLACE'
-                    modifier.mix_factor = 1.0
+                    for obj in context.view_layer.objects:
+                        obj.select_set(False)
                     
+                    source_obj.select_set(True)
+                    target_obj.select_set(True)
                     context.view_layer.objects.active = target_obj
-                    bpy.ops.object.modifier_apply(modifier=modifier.name)
+                    
+                    context.view_layer.update()
+                    bpy.context.evaluated_depsgraph_get().update()
+                    
+                    bpy.ops.object.data_transfer(
+                        use_reverse_transfer=True,
+                        data_type='VGROUP_WEIGHTS',
+                        use_create=True,
+                        vert_mapping='NEAREST',
+                        layers_select_src='NAME',
+                        layers_select_dst='ALL'
+                    )
+                    
+                    vgs_to_remove_from_target = []
+                    for vg in target_obj.vertex_groups:
+                        if vg.name not in selected_vg_names:
+                            vgs_to_remove_from_target.append(vg.name)
+                    
+                    for vg_name in vgs_to_remove_from_target:
+                        target_obj.vertex_groups.remove(target_obj.vertex_groups[vg_name])
+                    
+                    if not props.wt_cleanup and target_vg_backup:
+                        for vg_name, weights in target_vg_backup.items():
+                            if vg_name not in selected_vg_names:
+                                if vg_name not in target_obj.vertex_groups:
+                                    target_obj.vertex_groups.new(name=vg_name)
+                                vg = target_obj.vertex_groups[vg_name]
+                                vg.remove([i for i in range(len(target_obj.data.vertices))])
+                                for vert_idx_str, weight in weights.items():
+                                    vert_idx = int(vert_idx_str)
+                                    vg.add([vert_idx], weight, 'REPLACE')
                     
                     target_obj.select_set(False)
             finally:
@@ -176,32 +218,11 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
                         obj = bpy.data.objects[obj_name]
                         context.view_layer.objects.active = obj
                         bpy.ops.object.mode_set(mode=mode)
-                
-                for vg_name in temp_removed_groups:
-                    vg = source_obj.vertex_groups.new(name=vg_name)
-                    if backup_data and vg_name in backup_data:
-                        self.report({'INFO'}, f"正在恢复顶点组 {vg_name}，共 {len(backup_data[vg_name])} 个顶点")
-                        for vert_idx_str, weight in backup_data[vg_name].items():
-                            vert_idx = int(vert_idx_str)
-                            vg.add([vert_idx], weight, 'REPLACE')
-                    else:
-                        self.report({'WARNING'}, f"未找到顶点组 {vg_name} 的备份数据")
-                
-                self.report({'INFO'}, f"恢复后源物体有 {len(source_obj.vertex_groups)} 个顶点组")
-                
-                if temp_removed_groups:
-                    self.report({'INFO'}, f"已恢复以下顶点组: {', '.join(temp_removed_groups)}")
         else:
             self.report({'INFO'}, "将传递所有顶点组")
             
-            for obj in context.view_layer.objects:
-                obj.select_set(False)
-            
             try:
                 bpy.ops.object.mode_set(mode='OBJECT')
-                
-                source_obj.select_set(True)
-                context.view_layer.objects.active = source_obj
                 
                 for target_obj in target_objects:
                     target_obj.select_set(True)
@@ -213,18 +234,24 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
                         if vg.name not in target_obj.vertex_groups:
                             target_obj.vertex_groups.new(name=vg.name)
                     
-                    modifier = target_obj.modifiers.new(name="TempWeightTransfer", type='DATA_TRANSFER')
-                    modifier.object = source_obj
-                    modifier.use_loop_data = False
-                    modifier.use_vert_data = True
-                    modifier.data_types_loops = set()
-                    modifier.data_types_verts = {'VGROUP_WEIGHTS'}
-                    modifier.vert_mapping = 'POLY_NEAREST'
-                    modifier.mix_mode = 'REPLACE'
-                    modifier.mix_factor = 1.0
+                    for obj in context.view_layer.objects:
+                        obj.select_set(False)
                     
+                    source_obj.select_set(True)
+                    target_obj.select_set(True)
                     context.view_layer.objects.active = target_obj
-                    bpy.ops.object.modifier_apply(modifier=modifier.name)
+                    
+                    context.view_layer.update()
+                    bpy.context.evaluated_depsgraph_get().update()
+                    
+                    bpy.ops.object.data_transfer(
+                        use_reverse_transfer=True,
+                        data_type='VGROUP_WEIGHTS',
+                        use_create=True,
+                        vert_mapping='NEAREST',
+                        layers_select_src='NAME',
+                        layers_select_dst='ALL'
+                    )
                     
                     target_obj.select_set(False)
             finally:
@@ -242,6 +269,17 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
             for target_obj in target_objects:
                 if target_obj.name in target_shapekey_applied and target_shapekey_applied[target_obj.name]:
                     pass
+        
+        if source_armature_applied and source_armature_positions:
+            self.restore_positions(source_obj, source_armature_positions)
+            self.report({'INFO'}, f"源物体 '{source_obj.name}' 已恢复原始位置")
+        
+        if props.wt_use_armature_positions:
+            for target_obj in target_objects:
+                if target_obj.name in target_armature_applied and target_armature_applied[target_obj.name]:
+                    if target_obj.name in target_armature_positions and target_armature_positions[target_obj.name]:
+                        self.restore_positions(target_obj, target_armature_positions[target_obj.name])
+                        self.report({'INFO'}, f"目标物体 '{target_obj.name}' 已恢复原始位置")
         
         self.report({'INFO'}, f"成功将权重从 '{source_obj.name}' 传递到 {len(target_objects)} 个物体")
         return {'FINISHED'}

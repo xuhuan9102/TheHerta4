@@ -49,6 +49,8 @@ class BMTP_Properties(bpy.types.PropertyGroup):
     wt_vertex_groups_index: bpy.props.IntProperty(name="顶点组列表索引", default=0)
     wt_use_shapekey_positions: bpy.props.BoolProperty(name="使用形态键位置", default=False,
                                                       description="在传递权重时使用形态键位置而非基础网格位置")
+    wt_use_armature_positions: bpy.props.BoolProperty(name="使用骨骼位置", default=False,
+                                                       description="在传递权重时使用骨骼修改器变形后的位置（需要模型有骨骼修改器）")
                                        
     wt_smooth_factor: bpy.props.FloatProperty(
         name="平滑系数",

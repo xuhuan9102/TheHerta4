@@ -180,6 +180,7 @@ class BMTP_WeightOperationPanel(bpy.types.Panel):
             box.label(text="提示：点击刷新按钮会备份所有顶点组的权重数据", icon='HELP')
         
         box.prop(props, "wt_use_shapekey_positions")
+        box.prop(props, "wt_use_armature_positions")
         
         try:
             box.prop(props, "wt_use_selected_groups")
