@@ -431,12 +431,39 @@ class ExportEFMI:
                 category_resource_name = "Resource_" + submesh_model.unique_str.replace("-","_")  + "_" + category
                 texture_override_ib_section.append(category_slot + " = " + category_resource_name)
 
+            unique_str = submesh_model.unique_str
+            texture_override_ib_section.append("vb0 = Resource_" + unique_str.replace('-', '_') + "_Position")
+            texture_override_ib_section.append("vb1 = Resource_" + unique_str.replace('-', '_') + "_Texcoord")
+            texture_override_ib_section.append("vb2 = Resource_" + unique_str.replace('-', '_') + "_Blend")
+            texture_override_ib_section.append("vb3 = Resource_" + unique_str.replace('-', '_') + "_Position")
+
             if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None:
                 texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
-                for texture_markup_info in texture_markup_info_list:
-                    if getattr(texture_markup_info, "mark_type", "") != "Slot":
-                        continue
-                    texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+                if GlobalProterties.use_rabbitfx_slot():
+                    for texture_markup_info in texture_markup_info_list:
+                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
+                            continue
+                        if texture_markup_info.mark_name == "DiffuseMap":
+                            texture_override_ib_section.append("Resource\\RabbitFx\\Diffuse = ref " + texture_markup_info.get_resource_name())
+                        elif texture_markup_info.mark_name == "LightMap":
+                            texture_override_ib_section.append("Resource\\RabbitFx\\LightMap = ref " + texture_markup_info.get_resource_name())
+                        elif texture_markup_info.mark_name == "NormalMap":
+                            texture_override_ib_section.append("Resource\\RabbitFx\\NormalMap = ref " + texture_markup_info.get_resource_name())
+                    
+                    texture_override_ib_section.append("run = CommandList\\RabbitFx\\SetTextures")
+                    
+                    for texture_markup_info in texture_markup_info_list:
+                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
+                            continue
+                        if texture_markup_info.mark_name in ["DiffuseMap", "LightMap", "NormalMap"]:
+                            pass
+                        else:
+                            texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+                else:
+                    for texture_markup_info in texture_markup_info_list:
+                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
+                            continue
+                        texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
 
             if self.has_cross_ib and (is_source_ib or is_target_ib):
                 texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
