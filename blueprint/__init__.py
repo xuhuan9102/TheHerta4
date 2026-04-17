@@ -15,6 +15,10 @@ try:
 except ImportError:
     pass
 try:
+    from .preprocess_cache import PreProcessCache
+except ImportError:
+    pass
+try:
     from .export_helper import BlueprintExportHelper
 except ImportError:
     pass
@@ -36,6 +40,7 @@ _MODULE_REGISTRY = [
     {"name": "node_shapekey", "required": True},
     {"name": "model", "required": True},
     {"name": "export_helper", "required": True},
+    {"name": "preprocess_cache", "required": True},
     {"name": "sync", "required": True},
     {"name": "node_menu", "required": True},
     {"name": "node_preset", "required": True},

@@ -277,24 +277,21 @@ class ExportEFMI:
         present_section.new_line()
 
         shader_overrides = [
-            ("ShaderOverridevs1000", "617db42150841836", "200"),
-            ("ShaderOverridevs1001", "c98b450a62081ecd", "200"),
-            ("ShaderOverridevs1002", "847947b4a1ad40cf", "200"),
-            ("ShaderOverridevs1003", "cada6d476255bdcf", "201"),
-            ("ShaderOverridevs1004", "2d76aa4224fa7500", "201"),
-            ("ShaderOverridevs1005", "d9d6448a7b62687e", "202"),
-            ("ShaderOverridevs1006", "e8d242aae0b3bacf", "203"),
-            ("ShaderOverridevs1007", "8e1c0782db9e85d1", "203"),
-            ("ShaderOverridevs1008", "c4e7c530806e7424", "203"),
-            ("ShaderOverridevs1009", "06c94dd56f447210", "204"),
-            ("ShaderOverridevs1010", "c568b3b3834b0e7f", "204"),
-            ("ShaderOverridevs1011", "0ba16985f9f74f8d", "204"),
+            ("ShaderOverridevs1000", "241383a9d64b4978", "200"),
+            ("ShaderOverridevs1001", "6733250da4e23fd6", "200"),
+            ("ShaderOverridevs1002", "9bac7486f7930a24", "201"),
+            ("ShaderOverridevs1003", "b30cc5ad521e0700", "202"),
+            ("ShaderOverridevs1004", "4921f64a7c74226d", "203"),
+            ("ShaderOverridevs1005", "1b835d0e8dbbfb8f", "203"),
+            ("ShaderOverridevs1006", "06c94dd56f447210", "204"),
+            ("ShaderOverridevs1007", "f47b1f797f5831d0", "204"),
         ]
 
         for name, hash_val, filter_idx in shader_overrides:
             present_section.append(f"[{name}]")
             present_section.append(f"hash = {hash_val}")
             present_section.append(f"filter_index = {filter_idx}")
+            present_section.append("allow_duplicate_hash = overrule")
             present_section.new_line()
 
         ini_builder.append_section(present_section)

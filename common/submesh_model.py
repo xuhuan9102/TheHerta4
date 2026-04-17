@@ -17,6 +17,7 @@ import math
 import os
 import array
 import hashlib
+import re
 import struct
 from concurrent.futures import ThreadPoolExecutor
 
@@ -76,6 +77,7 @@ class SubMeshModel:
             if source_name:
                 if source_name.endswith('_copy'):
                     source_name = source_name[:-5]
+                source_name = re.sub(r'_chain\d+$', '', source_name)
             original_names.append(source_name if source_name else draw_call_model.get_blender_obj_name())
 
         # 调试输出：打印所有对象的哈希值和原始名称

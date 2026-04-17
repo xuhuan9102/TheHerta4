@@ -72,6 +72,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         return False
 
     def execute(self, context):
+        LOG.start_collecting()
+        
         TimerUtils.start_session("Mod导出")
 
         TimerUtils.start_stage("蓝图验证")
@@ -430,6 +432,11 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             self.report({'ERROR'}, error_message)
 
         TimerUtils.print_summary()
+
+        LOG.stop_collecting()
+        log_name = LOG.save_to_text_editor()
+        if log_name:
+            print(f"📄 导出日志已保存至文本编辑器: {log_name}")
 
         return {'FINISHED'}
 

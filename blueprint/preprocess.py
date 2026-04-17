@@ -4,6 +4,8 @@ from typing import List, Dict
 from ..utils.log_utils import LOG
 from ..utils.shapekey_utils import ShapeKeyUtils
 from .export_helper import BlueprintExportHelper
+from .preprocess_cache import PreProcessCache
+from ..common.global_properties import GlobalProterties
 
 
 class PreProcessHelper:
@@ -27,7 +29,20 @@ class PreProcessHelper:
         if multi_file_objects:
             LOG.info(f"📋 多文件导出节点物体: {len(multi_file_objects)} 个")
         
-        cls._create_object_copies(unique_objects)
+        cache_enabled = GlobalProterties.enable_preprocess_cache()
+        
+        if cache_enabled:
+            cls._execute_preprocess_with_cache(unique_objects)
+        else:
+            cls._execute_preprocess_without_cache(unique_objects)
+        
+        LOG.info(f"🔧 前处理完成: {len(unique_objects)} 个物体")
+        
+        return cls.original_to_copy_map
+
+    @classmethod
+    def _execute_preprocess_without_cache(cls, object_names: List[str]):
+        cls._create_object_copies(object_names)
         
         copy_names = list(cls.original_to_copy_map.values())
         
@@ -45,10 +60,64 @@ class PreProcessHelper:
         
         LOG.info(f"🔧 对所有副本物体应用形态键...")
         cls._apply_shape_keys(copy_names)
+
+    @classmethod
+    def _execute_preprocess_with_cache(cls, object_names: List[str]):
+        hash_map = {}
+        cached_objects = {}
+        uncached_objects = []
         
-        LOG.info(f"🔧 前处理完成: {len(unique_objects)} 个物体")
+        LOG.info(f"🔐 计算物体哈希值...")
+        for obj_name in object_names:
+            hash_value = PreProcessCache.compute_object_hash(obj_name)
+            hash_map[obj_name] = hash_value
+            if hash_value and PreProcessCache.has_cache(hash_value):
+                cached_objects[obj_name] = hash_value
+            else:
+                uncached_objects.append(obj_name)
         
-        return cls.original_to_copy_map
+        if cached_objects:
+            LOG.info(f"📦 缓存命中: {len(cached_objects)} 个物体")
+        if uncached_objects:
+            LOG.info(f"🔄 缓存未命中: {len(uncached_objects)} 个物体, 需要重新前处理")
+        
+        for obj_name, hash_value in cached_objects.items():
+            copy_name = f"{obj_name}_copy"
+            success = PreProcessCache.load_from_cache(obj_name, hash_value)
+            if success:
+                cls.original_to_copy_map[obj_name] = copy_name
+                cls.created_copies.append(copy_name)
+            else:
+                LOG.warning(f"   ⚠️ 缓存加载失败 {obj_name}, 将重新前处理")
+                uncached_objects.append(obj_name)
+        
+        if uncached_objects:
+            cls._create_object_copies(uncached_objects)
+            
+            copy_names = [cls.original_to_copy_map[name] for name in uncached_objects if name in cls.original_to_copy_map]
+            
+            LOG.info(f"🔧 对未缓存副本物体应用约束...")
+            cls._apply_constraints(copy_names)
+            
+            LOG.info(f"🔧 对未缓存副本物体应用修改器...")
+            cls._apply_modifiers(copy_names)
+            
+            LOG.info(f"🔧 对未缓存物体执行三角化...")
+            cls._triangulate_objects(copy_names)
+            
+            LOG.info(f"🔧 对未缓存物体执行应用变换...")
+            cls._apply_transforms(copy_names)
+            
+            LOG.info(f"🔧 对未缓存副本物体应用形态键...")
+            cls._apply_shape_keys(copy_names)
+            
+            LOG.info(f"💾 保存前处理结果到缓存...")
+            for obj_name in uncached_objects:
+                if obj_name in cls.original_to_copy_map:
+                    copy_name = cls.original_to_copy_map[obj_name]
+                    hash_value = hash_map.get(obj_name, "")
+                    if hash_value:
+                        PreProcessCache.save_to_cache(obj_name, copy_name, hash_value)
 
     @classmethod
     def _create_object_copies(cls, object_names: List[str]):

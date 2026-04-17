@@ -19,7 +19,6 @@ class GlobalConfig:
     def read_from_main_json_ssmt4(cls) :
         try:
             main_json_path = GlobalConfig.path_main_json_ssmt4()
-            print("Reading SSMT4 main json from: " + main_json_path)
             # 先从main_json_path里读取ssmt位置，也就是ssmt总工作空间的位置
             # 在新架构中，总工作空间位置已不会再发生改变，所以用户只需要选择一次就可以了
             if os.path.exists(main_json_path):

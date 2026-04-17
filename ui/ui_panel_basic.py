@@ -10,6 +10,19 @@ from ..utils.translate_utils import TR
 
 from .ui_func_import_ssmt import SSMT4ImportAllFromCurrentWorkSpaceBlueprint, SSMT4ImportRaw
 
+from ..blueprint.preprocess_cache import PreProcessCache
+
+
+class SSMT_OT_ClearPreprocessCache(bpy.types.Operator):
+    bl_idname = "ssmt.clear_preprocess_cache"
+    bl_label = "清空前处理缓存"
+    bl_description = "清空所有前处理缓存文件"
+
+    def execute(self, context):
+        cleared_count = PreProcessCache.clear_cache()
+        self.report({'INFO'}, f"已清空 {cleared_count} 个缓存文件")
+        return {'FINISHED'}
+
 
 class PanelBasicInformation(bpy.types.Panel):
     '''
@@ -57,6 +70,21 @@ class PanelBasicInformation(bpy.types.Panel):
         layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
 
         layout.separator()
+
+        cache_box = layout.box()
+        cache_box.label(text="前处理缓存", icon='FILE_CACHE')
+        cache_box.prop(context.scene.global_properties, "enable_preprocess_cache")
+
+        cache_stats = PreProcessCache.get_cache_stats()
+        file_count = cache_stats["file_count"]
+        total_size = cache_stats["total_size"]
+        size_str = PreProcessCache.format_size(total_size)
+        cache_box.label(text=f"缓存文件: {file_count} 个, 大小: {size_str}")
+
+        row = cache_box.row()
+        row.operator(SSMT_OT_ClearPreprocessCache.bl_idname, icon='TRASH')
+        
+        layout.separator()
         
         layout.prop(context.scene, "herta_show_toolkit", text="工具集模式", icon='TOOL_SETTINGS')
         if context.scene.herta_show_toolkit:
@@ -68,7 +96,9 @@ class PanelBasicInformation(bpy.types.Panel):
 
 
 def register():
+    bpy.utils.register_class(SSMT_OT_ClearPreprocessCache)
     bpy.utils.register_class(PanelBasicInformation)
 
 def unregister():
     bpy.utils.unregister_class(PanelBasicInformation)
+    bpy.utils.unregister_class(SSMT_OT_ClearPreprocessCache)

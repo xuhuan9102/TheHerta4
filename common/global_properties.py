@@ -93,6 +93,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    enable_preprocess_cache: bpy.props.BoolProperty(
+        name="启用前处理缓存",
+        description="启用后，前处理结果会被缓存到本地文件。当物体数据未变化时，下次导出将直接使用缓存，减少重复计算",
+        default=True,
+    ) # type: ignore
+
     deduplicate_POSITION: bpy.props.BoolProperty(
         name="位置数据",
         description="位置数据是否参与顶点去重判断",
@@ -204,6 +210,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def export_add_missing_vertex_groups(cls):
         return cls._instance().export_add_missing_vertex_groups
+
+    @classmethod
+    def enable_preprocess_cache(cls):
+        return cls._instance().enable_preprocess_cache
 
     @classmethod
     def get_deduplicate_element_set(cls) -> set:
