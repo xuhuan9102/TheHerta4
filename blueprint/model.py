@@ -380,8 +380,11 @@ class BluePrintModel:
         visited.add(node_key)
 
         if _is_postprocess_node(node.bl_idname):
-            self.postprocess_nodes.append(node)
-            LOG.debug(f"   🔧 发现后处理节点: {node.bl_idname} ({node.name})")
+            if not node.mute:
+                self.postprocess_nodes.append(node)
+                LOG.debug(f"   🔧 发现后处理节点: {node.bl_idname} ({node.name})")
+            else:
+                LOG.debug(f"   ⏭️ 跳过禁用的后处理节点: {node.bl_idname} ({node.name})")
 
         for output_socket in node.outputs:
             if output_socket.is_linked:

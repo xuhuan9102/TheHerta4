@@ -1,4 +1,15 @@
 import bpy
+import os
+
+
+def _default_parallel_instance_count() -> int:
+    cpu_count = os.cpu_count() or 4
+    return max(1, min(4, cpu_count))
+
+
+def _update_parallel_preprocess_toggle(self, context):
+    if self.enable_parallel_preprocess and not self.parallel_blender_executable:
+        self.parallel_blender_executable = bpy.app.binary_path or ""
 
 
 class GlobalProterties(bpy.types.PropertyGroup):
@@ -97,6 +108,49 @@ class GlobalProterties(bpy.types.PropertyGroup):
         name="启用前处理缓存",
         description="启用后，前处理结果会被缓存到本地文件。当物体数据未变化时，下次导出将直接使用缓存，减少重复计算",
         default=True,
+    ) # type: ignore
+
+    enable_parallel_preprocess: bpy.props.BoolProperty(
+        name="启用并行前处理",
+        description="通过多个独立 Blender 子进程并行执行未命中的前处理任务，以提升大量物体场景下的处理速度",
+        default=False,
+        update=_update_parallel_preprocess_toggle,
+    ) # type: ignore
+
+    enable_parallel_export_rounds: bpy.props.BoolProperty(
+        name="启用并行多轮导出",
+        description="将多文件导出和形态键导出的中间轮次分发到多个 Blender 子进程并行执行。首轮与尾轮仍保留在主线程中",
+        default=False,
+        update=_update_parallel_preprocess_toggle,
+    ) # type: ignore
+
+    parallel_blender_executable: bpy.props.StringProperty(
+        name="Blender 可执行文件",
+        description="用于启动并行前处理子进程的 Blender 可执行文件路径。留空时会默认使用当前运行实例的路径",
+        default="",
+        subtype='FILE_PATH',
+    ) # type: ignore
+
+    parallel_preprocess_instances: bpy.props.IntProperty(
+        name="并行实例数",
+        description="用于并行前处理的最大 Blender 子进程数，同时作为任务分组上限",
+        default=_default_parallel_instance_count(),
+        min=1,
+        soft_max=16,
+    ) # type: ignore
+
+    parallel_preprocess_timeout_seconds: bpy.props.IntProperty(
+        name="单任务超时(秒)",
+        description="单个并行前处理任务允许执行的最长时间，超时后会终止并报错",
+        default=1800,
+        min=30,
+        soft_max=7200,
+    ) # type: ignore
+
+    parallel_preprocess_keep_temp_files: bpy.props.BoolProperty(
+        name="保留临时文件",
+        description="保留并行前处理生成的快照、任务清单与子工程结果，便于调试问题",
+        default=False,
     ) # type: ignore
 
     deduplicate_POSITION: bpy.props.BoolProperty(
@@ -214,6 +268,30 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def enable_preprocess_cache(cls):
         return cls._instance().enable_preprocess_cache
+
+    @classmethod
+    def enable_parallel_preprocess(cls):
+        return cls._instance().enable_parallel_preprocess
+
+    @classmethod
+    def enable_parallel_export_rounds(cls):
+        return cls._instance().enable_parallel_export_rounds
+
+    @classmethod
+    def parallel_blender_executable(cls):
+        return cls._instance().parallel_blender_executable
+
+    @classmethod
+    def parallel_preprocess_instances(cls):
+        return cls._instance().parallel_preprocess_instances
+
+    @classmethod
+    def parallel_preprocess_timeout_seconds(cls):
+        return cls._instance().parallel_preprocess_timeout_seconds
+
+    @classmethod
+    def parallel_preprocess_keep_temp_files(cls):
+        return cls._instance().parallel_preprocess_keep_temp_files
 
     @classmethod
     def get_deduplicate_element_set(cls) -> set:

@@ -94,6 +94,16 @@ def unlink_object_from_collection(obj, col):
 
 def select_object(obj):
     obj = ObjUtils.assert_object(obj)
+    if obj.name not in bpy.context.view_layer.objects:
+        if not obj.users_collection:
+            bpy.context.scene.collection.objects.link(obj)
+        else:
+            for col in obj.users_collection:
+                try:
+                    if col not in bpy.context.scene.collection.children and col != bpy.context.scene.collection:
+                        bpy.context.scene.collection.children.link(col)
+                except RuntimeError:
+                    pass
     obj.select_set(True)
 
 

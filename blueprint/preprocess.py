@@ -14,20 +14,42 @@ class PreProcessHelper:
     modified_nodes: List[tuple] = []
 
     @classmethod
-    def execute_preprocess(cls, object_names: List[str]) -> Dict[str, str]:
+    def reset_runtime_state(cls):
         cls.original_to_copy_map.clear()
         cls.created_copies.clear()
         cls.modified_nodes.clear()
-        
+
+    @classmethod
+    def register_copy_result(cls, original_name: str, copy_name: str):
+        cls.original_to_copy_map[original_name] = copy_name
+        if copy_name not in cls.created_copies:
+            cls.created_copies.append(copy_name)
+
+    @classmethod
+    def collect_target_object_names(cls, object_names: List[str]) -> List[str]:
         unique_objects = list(set(object_names))
-        
+
         multi_file_objects = BlueprintExportHelper.get_all_objects_from_multi_file_nodes()
         for obj_name in multi_file_objects:
             if obj_name not in unique_objects:
                 unique_objects.append(obj_name)
-        
+
         if multi_file_objects:
             LOG.info(f"📋 多文件导出节点物体: {len(multi_file_objects)} 个")
+
+        return unique_objects
+
+    @classmethod
+    def execute_objects_without_cache(cls, object_names: List[str]) -> Dict[str, str]:
+        cls.reset_runtime_state()
+        cls._execute_preprocess_without_cache(object_names)
+        return dict(cls.original_to_copy_map)
+
+    @classmethod
+    def execute_preprocess(cls, object_names: List[str]) -> Dict[str, str]:
+        cls.reset_runtime_state()
+
+        unique_objects = cls.collect_target_object_names(object_names)
         
         cache_enabled = GlobalProterties.enable_preprocess_cache()
         
@@ -85,8 +107,7 @@ class PreProcessHelper:
             copy_name = f"{obj_name}_copy"
             success = PreProcessCache.load_from_cache(obj_name, hash_value)
             if success:
-                cls.original_to_copy_map[obj_name] = copy_name
-                cls.created_copies.append(copy_name)
+                cls.register_copy_result(obj_name, copy_name)
             else:
                 LOG.warning(f"   ⚠️ 缓存加载失败 {obj_name}, 将重新前处理")
                 uncached_objects.append(obj_name)
@@ -145,7 +166,7 @@ class PreProcessHelper:
             if obj.data:
                 obj_copy.data = obj.data.copy()
             
-            bpy.context.collection.objects.link(obj_copy)
+            bpy.context.scene.collection.objects.link(obj_copy)
             
             original_shapekey_count = 0
             if obj.data.shape_keys:
@@ -157,8 +178,7 @@ class PreProcessHelper:
             if original_shapekey_count > 0:
                 LOG.info(f"   副本 {copy_name}: 原始形态键 {original_shapekey_count} -> 副本形态键 {copy_shapekey_count}")
             
-            cls.original_to_copy_map[obj_name] = copy_name
-            cls.created_copies.append(copy_name)
+            cls.register_copy_result(obj_name, copy_name)
             created_count += 1
         
         LOG.info(f"📋 创建副本: 成功 {created_count} 个, 已存在 {existing_count} 个, 失败 {failed_count} 个")

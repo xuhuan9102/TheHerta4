@@ -108,10 +108,12 @@ class PreProcessCache:
         if obj.type == 'MESH' and obj.data and obj.data.shape_keys:
             key_blocks = obj.data.shape_keys.key_blocks
             hasher.update(struct.pack('<I', len(key_blocks)))
+            print(f"[HashDebug] 物体 {obj_name} 形态键哈希计算:")
             for kb in key_blocks:
                 hasher.update(kb.name.encode('utf-8'))
                 hasher.update(struct.pack('<d', kb.value))
                 hasher.update(struct.pack('<?', kb.mute))
+                print(f"[HashDebug]   {kb.name}: value={kb.value}, mute={kb.mute}")
                 if kb.data:
                     n_sk_verts = len(kb.data)
                     if n_sk_verts > 0:
@@ -255,7 +257,7 @@ class PreProcessCache:
             if loaded_obj.data:
                 loaded_obj.data.name = f"{copy_name}_mesh"
 
-            bpy.context.collection.objects.link(loaded_obj)
+            bpy.context.scene.collection.objects.link(loaded_obj)
 
             loaded_obj.location = (0, 0, 0)
             loaded_obj.rotation_euler = (0, 0, 0)

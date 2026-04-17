@@ -19,6 +19,14 @@ try:
 except ImportError:
     pass
 try:
+    from .preprocess_parallel import ParallelPreprocessCoordinator
+except ImportError:
+    pass
+try:
+    from .export_parallel import ParallelExportCoordinator
+except ImportError:
+    pass
+try:
     from .export_helper import BlueprintExportHelper
 except ImportError:
     pass
@@ -41,6 +49,8 @@ _MODULE_REGISTRY = [
     {"name": "model", "required": True},
     {"name": "export_helper", "required": True},
     {"name": "preprocess_cache", "required": True},
+    {"name": "preprocess_parallel", "required": True},
+    {"name": "export_parallel", "required": True},
     {"name": "sync", "required": True},
     {"name": "node_menu", "required": True},
     {"name": "node_preset", "required": True},

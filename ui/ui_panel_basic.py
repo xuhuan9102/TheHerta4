@@ -11,6 +11,7 @@ from ..utils.translate_utils import TR
 from .ui_func_import_ssmt import SSMT4ImportAllFromCurrentWorkSpaceBlueprint, SSMT4ImportRaw
 
 from ..blueprint.preprocess_cache import PreProcessCache
+from ..blueprint.preprocess_parallel import ParallelPreprocessCoordinator
 
 
 class SSMT_OT_ClearPreprocessCache(bpy.types.Operator):
@@ -83,6 +84,23 @@ class PanelBasicInformation(bpy.types.Panel):
 
         row = cache_box.row()
         row.operator(SSMT_OT_ClearPreprocessCache.bl_idname, icon='TRASH')
+
+        parallel_box = layout.box()
+        parallel_box.label(text="并行处理", icon='SYSTEM')
+        parallel_box.prop(context.scene.global_properties, "enable_parallel_preprocess")
+        parallel_box.prop(context.scene.global_properties, "enable_parallel_export_rounds")
+
+        if context.scene.global_properties.enable_parallel_preprocess or context.scene.global_properties.enable_parallel_export_rounds:
+            parallel_box.prop(context.scene.global_properties, "parallel_blender_executable")
+            parallel_box.prop(context.scene.global_properties, "parallel_preprocess_instances")
+            parallel_box.prop(context.scene.global_properties, "parallel_preprocess_timeout_seconds")
+            parallel_box.prop(context.scene.global_properties, "parallel_preprocess_keep_temp_files")
+
+            effective_path = ParallelPreprocessCoordinator.get_effective_blender_executable()
+            is_valid, message = ParallelPreprocessCoordinator.get_validation_summary()
+
+            parallel_box.label(text=f"当前生效路径: {effective_path or '未设置'}")
+            parallel_box.label(text=message, icon='CHECKMARK' if is_valid else 'ERROR')
         
         layout.separator()
         

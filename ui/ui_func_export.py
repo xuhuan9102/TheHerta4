@@ -23,6 +23,9 @@ from .universal.zzmi import ExportZZMI
 from ..blueprint.model import BluePrintModel
 from ..blueprint.export_helper import BlueprintExportHelper
 from ..blueprint.preprocess import PreProcessHelper
+from ..blueprint.preprocess_parallel import ParallelPreprocessCoordinator
+from ..blueprint.export_parallel import ExportRoundExecutor, ParallelExportCoordinator, ParallelExportError
+from ..common.global_properties import GlobalProterties
 
 
 class SSMTGenerateModBlueprint(bpy.types.Operator):
@@ -121,282 +124,95 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 LOG.info(f"   - 节点 '{node.name}': {len(obj_list)} 个物体")
 
         LOG.info("")
-        LOG.info("📍 第一阶段：前处理")
+        LOG.info("📍 第一阶段：检测与准备")
         LOG.info("-" * 40)
-
-        TimerUtils.start_stage("物体收集")
-        object_names = self._collect_object_names_from_tree(tree)
-        TimerUtils.end_stage("物体收集")
-
-        TimerUtils.start_stage("副本创建")
-        original_to_copy_map = PreProcessHelper.execute_preprocess(object_names)
-
-        if original_to_copy_map:
-            nested_trees = self._collect_nested_trees(tree)
-            PreProcessHelper.update_blueprint_node_references(tree, nested_trees)
-        TimerUtils.end_stage("副本创建")
-
-        if has_shapekey_export:
-            BlueprintExportHelper.collect_shapekey_objects(tree)
 
         export_success = False
         error_message = None
         buffer_sizes = []
         blueprint_model = None
+        export_plan = []
 
         try:
-            current_export_round = 0
+            export_plan = self._build_export_round_plan(
+                has_shapekey_export=has_shapekey_export,
+                max_shapekey_slot=max_shapekey_slot,
+                has_multi_file_export=has_multi_file_export,
+                max_multi_file_count=max_multi_file_count,
+            )
+            self._log_export_plan(export_plan)
 
             if has_shapekey_export:
-                LOG.info("")
-                LOG.info("📍 第二阶段：形态键导出")
-                LOG.info("-" * 40)
+                BlueprintExportHelper.collect_shapekey_objects(tree)
+                LOG.info(f"   收集到 {len(BlueprintExportHelper.shapekey_objects)} 个形态键物体")
 
-                for slot_index in range(max_shapekey_slot + 1):
-                    current_export_round += 1
-                    
-                    if slot_index == 0:
-                        buffer_folder_name = "Meshes0000"
-                        BlueprintExportHelper.set_all_shapekey_values(0)
-                        LOG.info("")
-                        LOG.info(f"🎭 第 {current_export_round} 轮导出: 基态 (所有形态键=0)")
-                    else:
-                        buffer_folder_name = f"Meshes1{slot_index:03d}"
-                        BlueprintExportHelper.set_all_shapekey_values(0, slot_index)
-                        LOG.info("")
-                        LOG.info(f"🎭 第 {current_export_round} 轮导出: 槽位 {slot_index}")
-                    
-                    LOG.info(f"   Buffer 文件夹: {buffer_folder_name}")
-                    
-                    BlueprintExportHelper.set_current_buffer_folder_name(buffer_folder_name)
-                    BlueprintExportHelper.set_current_export_index(1)
-
-                    blueprint_model = self._do_single_export(
-                        context, tree, buffer_folder_name, 
-                        current_export_round, 
-                        generate_ini=(current_export_round == 1)
-                    )
-                    
-                    if blueprint_model is None:
-                        error_message = "蓝图解析失败"
-                        break
-
-                    if current_export_round == 1:
-                        BlueprintExportHelper.generate_shapekey_classification_report(blueprint_model)
-
-                    mod_export_path = GlobalConfig.path_generate_mod_folder()
-                    buffer_path = os.path.join(mod_export_path, buffer_folder_name)
-                    
-                    if os.path.exists(buffer_path):
-                        buffer_size = self._get_folder_size(buffer_path)
-                        buffer_sizes.append(buffer_size)
-                        LOG.info(f"   Buffer 文件夹大小: {buffer_size} 字节")
-                        
-                        if len(buffer_sizes) > 1:
-                            if buffer_size != buffer_sizes[0]:
-                                error_message = f"形态键导出第 {current_export_round} 轮的 Buffer 文件夹大小 ({buffer_size} 字节) 与第一轮 ({buffer_sizes[0]} 字节) 不一致！"
-                                LOG.error(f"❌ {error_message}")
-                                break
-
-                if error_message:
-                    pass
-                elif has_multi_file_export:
-                    LOG.info("")
-                    LOG.info("📍 第三阶段：多文件导出")
-                    LOG.info("-" * 40)
-
-                    BlueprintExportHelper.set_all_shapekey_values(0)
-
-                    for multi_index in range(1, max_multi_file_count + 1):
-                        current_export_round += 1
-                        
-                        buffer_folder_name = f"Meshes{multi_index:02d}"
-                        LOG.info("")
-                        LOG.info(f"📦 第 {current_export_round} 轮导出: 多文件索引 {multi_index}")
-                        LOG.info(f"   Buffer 文件夹: {buffer_folder_name}")
-                        
-                        BlueprintExportHelper.set_current_buffer_folder_name(buffer_folder_name)
-                        BlueprintExportHelper.set_current_export_index(multi_index)
-                        
-                        obj_info = BlueprintExportHelper.get_multi_file_export_object_info(multi_index - 1)
-                        for node_name, info in obj_info.items():
-                            LOG.info(f"   节点 '{node_name}' → 物体: {info.get('object_name', 'N/A')}")
-
-                        is_final_export = (multi_index == max_multi_file_count)
-                        
-                        blueprint_model = self._do_single_export(
-                            context, tree, buffer_folder_name,
-                            current_export_round,
-                            generate_ini=False
-                        )
-                        
-                        if blueprint_model is None:
-                            error_message = "蓝图解析失败"
-                            break
-
-                        mod_export_path = GlobalConfig.path_generate_mod_folder()
-                        buffer_path = os.path.join(mod_export_path, buffer_folder_name)
-                        
-                        if os.path.exists(buffer_path):
-                            buffer_size = self._get_folder_size(buffer_path)
-                            buffer_sizes.append(buffer_size)
-                            LOG.info(f"   Buffer 文件夹大小: {buffer_size} 字节")
-                            
-                            if len(buffer_sizes) > 1:
-                                if buffer_size != buffer_sizes[0]:
-                                    error_message = f"多文件导出第 {current_export_round} 轮的 Buffer 文件夹大小 ({buffer_size} 字节) 与第一轮 ({buffer_sizes[0]} 字节) 不一致！"
-                                    LOG.error(f"❌ {error_message}")
-                                    break
-
-                if not error_message:
-                    LOG.info("")
-                    LOG.info("📍 第四阶段：后处理")
-                    LOG.info("-" * 40)
-                    LOG.info(f"   所有导出完成，开始执行后处理")
-
-                    TimerUtils.start_stage("后处理节点")
-                    mod_export_path = GlobalConfig.path_generate_mod_folder()
-                    blueprint_model.execute_postprocess_nodes(mod_export_path)
-                    TimerUtils.end_stage("后处理节点")
-                    export_success = True
-
-                else:
-                    LOG.info("")
-                    LOG.info("📍 第三阶段：最终导出")
-                    LOG.info("-" * 40)
-                    
-                    buffer_folder_name = "Meshes"
-                    LOG.info(f"   Buffer 文件夹: {buffer_folder_name}")
-                    
-                    BlueprintExportHelper.set_current_buffer_folder_name(buffer_folder_name)
-                    BlueprintExportHelper.set_current_export_index(1)
-                    BlueprintExportHelper.set_all_shapekey_values(0)
-
-                    blueprint_model = self._do_single_export(
-                        context, tree, buffer_folder_name,
-                        current_export_round + 1,
-                        generate_ini=False
-                    )
-                    
-                    if blueprint_model is None:
-                        error_message = "蓝图解析失败"
-                    else:
-                        mod_export_path = GlobalConfig.path_generate_mod_folder()
-                        buffer_path = os.path.join(mod_export_path, buffer_folder_name)
-                        
-                        if os.path.exists(buffer_path):
-                            buffer_size = self._get_folder_size(buffer_path)
-                            buffer_sizes.append(buffer_size)
-                            LOG.info(f"   Buffer 文件夹大小: {buffer_size} 字节")
-                            
-                            if len(buffer_sizes) > 1:
-                                if buffer_size != buffer_sizes[0]:
-                                    error_message = f"最终导出的 Buffer 文件夹大小 ({buffer_size} 字节) 与第一轮 ({buffer_sizes[0]} 字节) 不一致！"
-                                    LOG.error(f"❌ {error_message}")
-                        
-                        if not error_message:
-                            LOG.info("")
-                            LOG.info("📍 第四阶段：后处理")
-                            LOG.info("-" * 40)
-                            LOG.info(f"   所有导出完成，开始执行后处理")
-
-                            TimerUtils.start_stage("后处理节点")
-                            mod_export_path = GlobalConfig.path_generate_mod_folder()
-                            blueprint_model.execute_postprocess_nodes(mod_export_path)
-                            TimerUtils.end_stage("后处理节点")
-                            export_success = True
-
-            elif has_multi_file_export:
-                LOG.info("")
-                LOG.info("📍 第二阶段：多文件导出")
-                LOG.info("-" * 40)
-
-                for multi_index in range(1, max_multi_file_count + 1):
-                    current_export_round += 1
-                    
-                    buffer_folder_name = f"Meshes{multi_index:02d}"
-                    LOG.info("")
-                    LOG.info(f"📦 第 {current_export_round} 轮导出")
-                    LOG.info(f"   Buffer 文件夹: {buffer_folder_name}")
-                    
-                    BlueprintExportHelper.set_current_buffer_folder_name(buffer_folder_name)
-                    BlueprintExportHelper.set_current_export_index(multi_index)
-                    
-                    obj_info = BlueprintExportHelper.get_multi_file_export_object_info(multi_index - 1)
-                    for node_name, info in obj_info.items():
-                        LOG.info(f"   节点 '{node_name}' → 物体: {info.get('object_name', 'N/A')}")
-
-                    is_first_export = (multi_index == 1)
-                    
-                    blueprint_model = self._do_single_export(
-                        context, tree, buffer_folder_name,
-                        current_export_round,
-                        generate_ini=is_first_export
-                    )
-                    
-                    if blueprint_model is None:
-                        error_message = "蓝图解析失败"
-                        break
-
-                    mod_export_path = GlobalConfig.path_generate_mod_folder()
-                    buffer_path = os.path.join(mod_export_path, buffer_folder_name)
-                    
-                    if os.path.exists(buffer_path):
-                        buffer_size = self._get_folder_size(buffer_path)
-                        buffer_sizes.append(buffer_size)
-                        LOG.info(f"   Buffer 文件夹大小: {buffer_size} 字节")
-                        
-                        if len(buffer_sizes) > 1:
-                            if buffer_size != buffer_sizes[0]:
-                                error_message = f"第 {current_export_round} 轮导出的 Buffer 文件夹大小 ({buffer_size} 字节) 与第一轮 ({buffer_sizes[0]} 字节) 不一致！"
-                                LOG.error(f"❌ {error_message}")
-                                break
-
-                if not error_message:
-                    LOG.info("")
-                    LOG.info("📍 第三阶段：后处理")
-                    LOG.info("-" * 40)
-                    LOG.info(f"   所有 {max_multi_file_count} 轮导出完成，开始执行后处理")
-
-                    TimerUtils.start_stage("后处理节点")
-                    mod_export_path = GlobalConfig.path_generate_mod_folder()
-                    blueprint_model.execute_postprocess_nodes(mod_export_path)
-                    TimerUtils.end_stage("后处理节点")
-                    export_success = True
-
-            else:
+            if len(export_plan) == 1:
                 LOG.info("")
                 LOG.info("📍 第二阶段：单次导出")
                 LOG.info("-" * 40)
 
-                buffer_folder_name = "Meshes"
-                BlueprintExportHelper.set_current_buffer_folder_name(buffer_folder_name)
-                BlueprintExportHelper.set_current_export_index(1)
+                round_result = self._execute_main_round(tree, export_plan[0])
+                blueprint_model = round_result["blueprint_model"]
+                reference_size = round_result["buffer_size"]
+                buffer_sizes.append(reference_size)
 
-                blueprint_model = self._do_single_export(
-                    context, tree, buffer_folder_name,
-                    1,
-                    generate_ini=True
-                )
-                
-                if blueprint_model is None:
-                    error_message = "蓝图解析失败"
-                else:
-                    LOG.info("")
-                    LOG.info("📍 第三阶段：后处理")
-                    LOG.info("-" * 40)
+            else:
+                first_round = export_plan[0]
+                middle_rounds = export_plan[1:-1]
+                last_round = export_plan[-1]
 
-                    TimerUtils.start_stage("后处理节点")
-                    mod_export_path = GlobalConfig.path_generate_mod_folder()
-                    blueprint_model.execute_postprocess_nodes(mod_export_path)
-                    TimerUtils.end_stage("后处理节点")
-                    export_success = True
+                LOG.info("")
+                LOG.info("📍 第二阶段：主线程首轮导出")
+                LOG.info("-" * 40)
+
+                first_result = self._execute_main_round(tree, first_round)
+                blueprint_model = first_result["blueprint_model"]
+                reference_size = first_result["buffer_size"]
+                buffer_sizes.append(reference_size)
+
+                if middle_rounds:
+                    if GlobalProterties.enable_parallel_export_rounds():
+                        LOG.info("")
+                        LOG.info("📍 第三阶段：并行中间轮次导出")
+                        LOG.info("-" * 40)
+                        middle_results = ParallelExportCoordinator.execute_middle_rounds(tree, middle_rounds)
+                        middle_results.sort(key=lambda item: item.get("round_index", 0))
+                        for result in middle_results:
+                            self._validate_buffer_size(reference_size, result["buffer_size"], result["round_index"], result["buffer_folder_name"])
+                            buffer_sizes.append(result["buffer_size"])
+                    else:
+                        LOG.info("")
+                        LOG.info("📍 第三阶段：串行中间轮次导出")
+                        LOG.info("-" * 40)
+                        for round_plan in middle_rounds:
+                            round_result = self._execute_main_round(tree, round_plan)
+                            self._validate_buffer_size(reference_size, round_result["buffer_size"], round_plan["round_index"], round_plan["buffer_folder_name"])
+                            buffer_sizes.append(round_result["buffer_size"])
+
+                LOG.info("")
+                LOG.info("📍 第四阶段：主线程尾轮导出")
+                LOG.info("-" * 40)
+                last_result = self._execute_main_round(tree, last_round)
+                blueprint_model = last_result["blueprint_model"]
+                self._validate_buffer_size(reference_size, last_result["buffer_size"], last_round["round_index"], last_round["buffer_folder_name"])
+                buffer_sizes.append(last_result["buffer_size"])
+
+            LOG.info("")
+            LOG.info("📍 第五阶段：后处理")
+            LOG.info("-" * 40)
+            TimerUtils.start_stage("后处理节点")
+            mod_export_path = GlobalConfig.path_generate_mod_folder()
+            blueprint_model.execute_postprocess_nodes(mod_export_path)
+            TimerUtils.end_stage("后处理节点")
+            export_success = True
 
         except Exception as e:
-            LOG.error(f"❌ 导出过程中发生错误: {e}")
             error_message = f"导出失败: {str(e)}"
+            print(f"❌ 导出过程中发生错误: {e}")
             import traceback
             traceback.print_exc()
+
+            PreProcessHelper.cleanup_copies()
 
         LOG.info("")
         LOG.info("📍 清理阶段")
@@ -406,21 +222,16 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             BlueprintExportHelper.set_all_shapekey_values(0)
             LOG.info("   所有形态键已归零")
 
-        TimerUtils.start_stage("资源清理")
-        PreProcessHelper.cleanup_copies()
-        TimerUtils.end_stage("资源清理")
-
         LOG.info("")
         LOG.info("=" * 60)
         if export_success:
+            total_rounds = len(export_plan) if export_plan else 1
             if has_shapekey_export and has_multi_file_export:
-                total_rounds = max_shapekey_slot + 1 + max_multi_file_count
                 LOG.info(f"✅ 形态键+多文件导出完成! 共导出 {total_rounds} 轮")
             elif has_shapekey_export:
-                total_rounds = max_shapekey_slot + 2
                 LOG.info(f"✅ 形态键导出完成! 共导出 {total_rounds} 轮")
             elif has_multi_file_export:
-                LOG.info(f"✅ 多文件导出完成! 共导出 {max_multi_file_count} 轮")
+                LOG.info(f"✅ 多文件导出完成! 共导出 {total_rounds} 轮")
             else:
                 LOG.info("✅ Mod生成完成!")
             LOG.info("=" * 60)
@@ -439,6 +250,105 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             print(f"📄 导出日志已保存至文本编辑器: {log_name}")
 
         return {'FINISHED'}
+
+    def _build_export_round_plan(self, has_shapekey_export: bool, max_shapekey_slot: int,
+                                 has_multi_file_export: bool, max_multi_file_count: int) -> list:
+        export_plan = []
+        round_index = 0
+
+        if has_shapekey_export:
+            for slot_index in range(max_shapekey_slot + 1):
+                round_index += 1
+                if slot_index == 0:
+                    export_plan.append({
+                        "round_index": round_index,
+                        "phase": "shapekey",
+                        "description": "形态键基态",
+                        "buffer_folder_name": "Meshes0000",
+                        "export_index": 1,
+                        "generate_ini": True,
+                        "generate_classification_report": True,
+                        "shapekey_mode": "all_zero",
+                        "shapekey_slot_index": None,
+                    })
+                else:
+                    export_plan.append({
+                        "round_index": round_index,
+                        "phase": "shapekey",
+                        "description": f"形态键槽位 {slot_index}",
+                        "buffer_folder_name": f"Meshes1{slot_index:03d}",
+                        "export_index": 1,
+                        "generate_ini": False,
+                        "generate_classification_report": False,
+                        "shapekey_mode": "slot",
+                        "shapekey_slot_index": slot_index,
+                    })
+
+        if has_multi_file_export:
+            for multi_index in range(1, max_multi_file_count + 1):
+                round_index += 1
+                export_plan.append({
+                    "round_index": round_index,
+                    "phase": "multifile",
+                    "description": f"多文件索引 {multi_index}",
+                    "buffer_folder_name": f"Meshes{multi_index:02d}",
+                    "export_index": multi_index,
+                    "generate_ini": (not has_shapekey_export and multi_index == 1),
+                    "generate_classification_report": False,
+                    "shapekey_mode": "all_zero" if has_shapekey_export else "unchanged",
+                    "shapekey_slot_index": None,
+                })
+
+        if not export_plan:
+            export_plan.append({
+                "round_index": 1,
+                "phase": "single",
+                "description": "单次导出",
+                "buffer_folder_name": "Meshes",
+                "export_index": 1,
+                "generate_ini": True,
+                "generate_classification_report": False,
+                "shapekey_mode": "unchanged",
+                "shapekey_slot_index": None,
+            })
+
+        return export_plan
+
+    def _log_export_plan(self, export_plan: list):
+        LOG.info("")
+        LOG.info("🗂️ 导出轮次计划")
+        LOG.info("-" * 40)
+        for round_plan in export_plan:
+            flags = []
+            if round_plan.get("generate_ini"):
+                flags.append("生成INI")
+            if round_plan.get("generate_classification_report"):
+                flags.append("分类报告")
+            if not flags:
+                flags.append("仅Buffer")
+            LOG.info(
+                f"   第 {round_plan['round_index']} 轮: {round_plan['description']} -> {round_plan['buffer_folder_name']} ({' / '.join(flags)})"
+            )
+
+    def _execute_main_round(self, tree, round_plan: dict) -> dict:
+        LOG.info("")
+        LOG.info(f"🔄 第 {round_plan['round_index']} 轮导出: {round_plan['description']}")
+        LOG.info(f"   Buffer 文件夹: {round_plan['buffer_folder_name']}")
+
+        result = ExportRoundExecutor.execute_round(
+            tree=tree,
+            round_plan=round_plan,
+            allow_parallel_preprocess=True,
+        )
+
+        LOG.info(f"   Buffer 文件夹大小: {result['buffer_size']} 字节")
+        return result
+
+    def _validate_buffer_size(self, reference_size: int, current_size: int, round_index: int, buffer_folder_name: str):
+        if reference_size != current_size:
+            raise ParallelExportError(
+                f"第 {round_index} 轮导出的 Buffer 文件夹 {buffer_folder_name} 大小 ({current_size} 字节) 与首轮 ({reference_size} 字节) 不一致"
+            )
 
     def _do_single_export(self, context, tree, buffer_folder_name, export_round, generate_ini=True):
         LOG.info(f"   正在解析蓝图...")

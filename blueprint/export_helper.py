@@ -288,11 +288,9 @@ class BlueprintExportHelper:
                 return
             visited.add(node.name)
 
-            if node.mute:
-                return
-
             if node.bl_idname.startswith('SSMTNode_PostProcess_') and node not in ordered_chain:
-                ordered_chain.append(node)
+                if not node.mute:
+                    ordered_chain.append(node)
 
             for output_socket in node.outputs:
                 if getattr(output_socket, 'bl_idname', '') != 'SSMTSocketPostProcess':
@@ -301,16 +299,13 @@ class BlueprintExportHelper:
                     continue
                 for link in output_socket.links:
                     target = link.to_node
-                    if target.bl_idname.startswith('SSMTNode_PostProcess_') and not target.mute:
+                    if target.bl_idname.startswith('SSMTNode_PostProcess_'):
                         follow_forward(target)
 
         def follow_backward(node):
             if node.name in visited:
                 return
             visited.add(node.name)
-
-            if node.mute:
-                return
 
             for input_socket in node.inputs:
                 if getattr(input_socket, 'bl_idname', '') != 'SSMTSocketPostProcess':
@@ -319,11 +314,12 @@ class BlueprintExportHelper:
                     continue
                 for link in input_socket.links:
                     source = link.from_node
-                    if source.bl_idname.startswith('SSMTNode_PostProcess_') and not source.mute:
+                    if source.bl_idname.startswith('SSMTNode_PostProcess_'):
                         follow_backward(source)
 
             if node.bl_idname.startswith('SSMTNode_PostProcess_') and node not in ordered_chain:
-                ordered_chain.append(node)
+                if not node.mute:
+                    ordered_chain.append(node)
 
         if output_node:
             follow_forward(output_node)
@@ -334,7 +330,7 @@ class BlueprintExportHelper:
                         continue
                     for link in input_socket.links:
                         source = link.from_node
-                        if source.bl_idname.startswith('SSMTNode_PostProcess_') and not source.mute:
+                        if source.bl_idname.startswith('SSMTNode_PostProcess_'):
                             follow_backward(source)
 
         chain_names = {n.name for n in ordered_chain}
@@ -615,14 +611,21 @@ class BlueprintExportHelper:
 
     @staticmethod
     def set_all_shapekey_values(value: int, slot_index: int = None):
+        print(f"[ShapeKeyExport] set_all_shapekey_values 调用: value={value}, slot_index={slot_index}")
+        print(f"[ShapeKeyExport] shapekey_objects 列表: {BlueprintExportHelper.shapekey_objects}")
+        
         for obj_name in BlueprintExportHelper.shapekey_objects:
             obj = bpy.data.objects.get(obj_name)
             if not obj or not obj.data:
+                print(f"[ShapeKeyExport]   物体不存在或无数据: {obj_name}")
                 continue
             if not hasattr(obj.data, 'shape_keys') or not obj.data.shape_keys:
+                print(f"[ShapeKeyExport]   物体无形态键: {obj_name}")
                 continue
             
             key_blocks = obj.data.shape_keys.key_blocks
+            print(f"[ShapeKeyExport]   物体 {obj_name} 有 {len(key_blocks)} 个形态键")
+            
             for i, kb in enumerate(key_blocks):
                 if i == 0:
                     continue
@@ -631,8 +634,9 @@ class BlueprintExportHelper:
                     if i == slot_index:
                         try:
                             kb.value = 1.0
-                        except Exception:
-                            pass
+                            print(f"[ShapeKeyExport]     设置 {kb.name} = 1.0")
+                        except Exception as e:
+                            print(f"[ShapeKeyExport]     设置失败 {kb.name}: {e}")
                     else:
                         try:
                             kb.value = 0.0

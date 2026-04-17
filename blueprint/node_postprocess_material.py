@@ -74,7 +74,15 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
         reverse_mapping = self._get_reverse_name_mapping()
         name_mapping = self._get_name_mapping()
 
-        potential_names = [mesh_name]
+        potential_names = []
+
+        suffix_patterns = [r'_chain\d+_copy$', r'_chain\d+$', r'_copy$']
+        for pattern in suffix_patterns:
+            base_name = re.sub(pattern, '', mesh_name)
+            if base_name != mesh_name and base_name not in potential_names:
+                potential_names.append(base_name)
+
+        potential_names.append(mesh_name)
 
         if reverse_mapping:
             for new_name, original_name in reverse_mapping.items():
@@ -90,9 +98,19 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
 
         clean_name = re.sub(r'^[a-f0-9]+-[\d]+-', '', mesh_name)
         if clean_name != mesh_name:
-            obj = bpy.data.objects.get(clean_name)
-            if obj:
-                return obj
+            potential_clean_names = []
+
+            for pattern in suffix_patterns:
+                base_clean_name = re.sub(pattern, '', clean_name)
+                if base_clean_name != clean_name and base_clean_name not in potential_clean_names:
+                    potential_clean_names.append(base_clean_name)
+
+            potential_clean_names.append(clean_name)
+
+            for name in potential_clean_names:
+                obj = bpy.data.objects.get(name)
+                if obj:
+                    return obj
 
             if reverse_mapping:
                 for new_name, original_name in reverse_mapping.items():
