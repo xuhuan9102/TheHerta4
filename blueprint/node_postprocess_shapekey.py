@@ -827,20 +827,46 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
 
             print("开始自动计算顶点索引范围...")
             draw_info_map = self._parse_ini_for_draw_info(sections, mod_export_path)
-            calculated_ranges = {}
-            for obj_name in all_objects:
-                if obj_name not in draw_info_map:
+            print(f"  [DEBUG] draw_info_map 键: {list(draw_info_map.keys())}")
+            print(f"  [DEBUG] all_objects: {all_objects}")
+            
+            hash_prefix_to_range = {}
+            for mesh_name, info_list in draw_info_map.items():
+                mesh_hash = self._extract_hash_from_name(mesh_name)
+                if not mesh_hash:
                     continue
-                info_list = draw_info_map[obj_name]
+                mesh_prefix = self._extract_hash_prefix(mesh_hash)
+                if not mesh_prefix:
+                    continue
+                
                 all_ranges = []
                 for info in info_list:
                     start_v, end_v = self._calculate_vertex_range(info['ib_path'], info['draw_params'])
                     if start_v is not None and end_v is not None:
                         all_ranges.append((start_v, end_v))
+                
                 if all_ranges:
                     min_start = min(r[0] for r in all_ranges)
                     max_end = max(r[1] for r in all_ranges)
-                    calculated_ranges[obj_name] = (min_start, max_end)
+                    if mesh_prefix not in hash_prefix_to_range:
+                        hash_prefix_to_range[mesh_prefix] = (min_start, max_end)
+                    else:
+                        existing_start, existing_end = hash_prefix_to_range[mesh_prefix]
+                        hash_prefix_to_range[mesh_prefix] = (
+                            min(existing_start, min_start),
+                            max(existing_end, max_end)
+                        )
+            
+            calculated_ranges = {}
+            for obj_name in all_objects:
+                obj_hash = self._extract_hash_from_name(obj_name)
+                if obj_hash:
+                    obj_prefix = self._extract_hash_prefix(obj_hash)
+                    if obj_prefix and obj_prefix in hash_prefix_to_range:
+                        calculated_ranges[obj_name] = hash_prefix_to_range[obj_prefix]
+                        print(f"  [DEBUG] 映射物体 '{obj_name}' -> 哈希前缀 '{obj_prefix}' -> 范围 {hash_prefix_to_range[obj_prefix]}")
+            
+            print(f"  [DEBUG] calculated_ranges: {calculated_ranges}")
 
             vertex_counts = {}
             for s, ls in sections.items():

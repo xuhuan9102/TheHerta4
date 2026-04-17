@@ -656,27 +656,96 @@ class BlueprintExportHelper:
     @staticmethod
     def generate_shapekey_classification_report(blueprint_model=None):
         from collections import defaultdict
+        import re
+        
+        def extract_original_name(name):
+            if not name:
+                return name
+            patterns = [
+                r'_copy$',
+                r'_chain\d+_copy$',
+                r'_dup\d+_copy$',
+                r'_chain\d+_dup\d+_copy$',
+            ]
+            result = name
+            for pattern in patterns:
+                result = re.sub(pattern, '', result)
+            return result
         
         classification_data = defaultdict(lambda: defaultdict(list))
+        original_to_derived = defaultdict(set)
+        original_to_shapekeys = {}
         
         if blueprint_model:
+            print(f"[ShapeKeyExport] 开始生成分类报告，处理链数: {len(blueprint_model.processing_chains)}")
+            
             for chain in blueprint_model.processing_chains:
-                obj_name = chain.object_name
-                obj = bpy.data.objects.get(obj_name)
-                if not obj or not obj.data:
-                    continue
-                if obj.hide_viewport or obj.hide_render or obj.hide_get():
-                    continue
-                if not hasattr(obj.data, 'shape_keys') or not obj.data.shape_keys:
+                if not chain.is_valid or not chain.reached_output:
                     continue
                 
-                key_blocks = obj.data.shape_keys.key_blocks
-                for i, kb in enumerate(key_blocks):
-                    if i == 0:
+                current_obj_name = chain.object_name
+                original_obj_name = chain.original_object_name or chain.object_name
+                true_original_name = extract_original_name(original_obj_name)
+                
+                original_to_derived[true_original_name].add(current_obj_name)
+                original_to_derived[true_original_name].add(original_obj_name)
+                if current_obj_name != original_obj_name:
+                    original_to_derived[true_original_name].add(current_obj_name)
+            
+            print(f"[ShapeKeyExport] 收集到 {len(original_to_derived)} 个原始物体组")
+            for orig_name, derived_set in original_to_derived.items():
+                print(f"[ShapeKeyExport]   '{orig_name}' -> {sorted(derived_set)}")
+            
+            for original_obj_name in original_to_derived:
+                obj = bpy.data.objects.get(original_obj_name)
+                obj_status = "存在" if obj else "不存在"
+                hide_status = f"hide_get={obj.hide_get()}" if obj else ""
+                shapekey_status = ""
+                if obj and obj.data:
+                    if hasattr(obj.data, 'shape_keys') and obj.data.shape_keys:
+                        shapekey_status = f"形态键数={len(obj.data.shape_keys.key_blocks)}"
+                    else:
+                        shapekey_status = "无形态键"
+                print(f"[ShapeKeyExport] 检查原始物体 '{original_obj_name}': {obj_status}, {hide_status}, {shapekey_status}")
+                
+                if obj and obj.data and not obj.hide_get():
+                    if hasattr(obj.data, 'shape_keys') and obj.data.shape_keys:
+                        key_blocks = obj.data.shape_keys.key_blocks
+                        shapekey_info = []
+                        for i, kb in enumerate(key_blocks):
+                            if i == 0:
+                                continue
+                            shapekey_info.append((i, kb.name))
+                        
+                        if shapekey_info:
+                            original_to_shapekeys[original_obj_name] = shapekey_info
+                            print(f"[ShapeKeyExport]   从原始物体获取形态键: {shapekey_info}")
+                            continue
+                
+                for derived_name in original_to_derived[original_obj_name]:
+                    if derived_name == original_obj_name:
                         continue
-                    slot_index = i
-                    shape_key_name = kb.name
-                    classification_data[slot_index][shape_key_name].append(obj_name)
+                    derived_obj = bpy.data.objects.get(derived_name)
+                    if derived_obj and derived_obj.data and not derived_obj.hide_get():
+                        if hasattr(derived_obj.data, 'shape_keys') and derived_obj.data.shape_keys:
+                            key_blocks = derived_obj.data.shape_keys.key_blocks
+                            shapekey_info = []
+                            for i, kb in enumerate(key_blocks):
+                                if i == 0:
+                                    continue
+                                shapekey_info.append((i, kb.name))
+                            
+                            if shapekey_info:
+                                original_to_shapekeys[original_obj_name] = shapekey_info
+                                print(f"[ShapeKeyExport] 从衍生物体 '{derived_name}' 获取形态键信息")
+                                break
+            
+            for original_obj_name, shapekey_info in original_to_shapekeys.items():
+                derived_objects = original_to_derived.get(original_obj_name, set())
+                
+                for slot_index, shape_key_name in shapekey_info:
+                    for derived_obj_name in derived_objects:
+                        classification_data[slot_index][shape_key_name].append(derived_obj_name)
         else:
             for obj_name in BlueprintExportHelper.shapekey_objects:
                 obj = bpy.data.objects.get(obj_name)
@@ -701,6 +770,16 @@ class BlueprintExportHelper:
         
         import time
         output_lines = ["# 自动化形态键导出 - 分类报告", time.ctime(), "=" * 40, ""]
+        
+        if original_to_derived:
+            output_lines.append("# 原始物体与衍生物体映射:")
+            for orig_name in sorted(original_to_derived.keys()):
+                derived = original_to_derived.get(orig_name, set())
+                if len(derived) > 1 or (orig_name in derived and len(derived) == 1):
+                    derived_sorted = sorted(derived)
+                    output_lines.append(f"#   {orig_name} -> {', '.join(derived_sorted)}")
+            output_lines.append("")
+        
         sorted_slots = sorted(classification_data.keys())
         
         for slot in sorted_slots:
@@ -711,7 +790,7 @@ class BlueprintExportHelper:
             for sk_name in sorted_sk_names:
                 output_lines.append(f"  - 名称: {sk_name}")
                 object_list = sk_data[sk_name]
-                for obj_name in sorted(object_list):
+                for obj_name in sorted(set(object_list)):
                     output_lines.append(f"    - 物体: {obj_name}")
             output_lines.append("")
         
@@ -725,6 +804,8 @@ class BlueprintExportHelper:
         txt.write(final_text)
         
         print(f"[ShapeKeyExport] 形态键分类报告已生成: '{text_block_name}'")
+        print(f"[ShapeKeyExport]   - 原始物体数: {len(original_to_shapekeys)}")
+        print(f"[ShapeKeyExport]   - 衍生物体映射数: {len(original_to_derived)}")
         return True
 
 
