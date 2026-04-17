@@ -285,16 +285,22 @@ class BE_AutomationPipeline:
 
                     print("  [Step 1] 清理场景，准备当前帧...")
                     for blue_coll in blue_collections_this_loop:
-                        for obj in blue_coll.objects:
-                            if obj in self.registered_source_objects:
-                                if obj not in self.all_hidden_source_objects:
-                                    self.all_hidden_source_objects.append(obj)
-                                obj.hide_set(True)
-                        
-                        for child_coll in blue_coll.children:
-                            if child_coll.name.startswith(f"{blue_coll.name}_Frame_"):
-                                for obj in child_coll.objects:
+                        if blue_coll.name not in bpy.data.collections:
+                            continue
+                        for obj in list(blue_coll.objects):
+                            if obj and obj.name in bpy.data.objects:
+                                if obj in self.registered_source_objects:
+                                    if obj not in self.all_hidden_source_objects:
+                                        self.all_hidden_source_objects.append(obj)
                                     obj.hide_set(True)
+                        
+                        for child_coll in list(blue_coll.children):
+                            if child_coll.name not in bpy.data.collections:
+                                continue
+                            if child_coll.name.startswith(f"{blue_coll.name}_Frame_"):
+                                for obj in list(child_coll.objects):
+                                    if obj and obj.name in bpy.data.objects:
+                                        obj.hide_set(True)
 
                     print("  [Step 2] 生成或显示当前帧的物体...")
                     for blue_coll in blue_collections_this_loop:

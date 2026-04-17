@@ -560,13 +560,23 @@ class ATP_OT_SplitFramesToShapeKeyMulti(bpy.types.Operator):
         
         for sub_coll in list(temp_collection.children):
             for temp_obj in list(sub_coll.objects):
-                bpy.data.objects.remove(temp_obj, do_unlink=True)
-            bpy.data.collections.remove(sub_coll)
+                if temp_obj and temp_obj.name in bpy.data.objects:
+                    try:
+                        bpy.data.objects.remove(temp_obj, do_unlink=True)
+                    except Exception:
+                        pass
+            if sub_coll.name in bpy.data.collections:
+                bpy.data.collections.remove(sub_coll)
         
         for temp_obj in list(temp_collection.objects):
-            bpy.data.objects.remove(temp_obj, do_unlink=True)
+            if temp_obj and temp_obj.name in bpy.data.objects:
+                try:
+                    bpy.data.objects.remove(temp_obj, do_unlink=True)
+                except Exception:
+                    pass
         
-        bpy.data.collections.remove(temp_collection)
+        if temp_collection.name in bpy.data.collections:
+            bpy.data.collections.remove(temp_collection)
     
     def finish_processing(self, context):
         """完成处理"""

@@ -1,6 +1,33 @@
 import bpy
 import numpy as np
 import bmesh
+import math
+
+
+def srgb_to_linear(srgb_value):
+    """将 SRGB 值转换为线性值"""
+    if srgb_value <= 0.04045:
+        return srgb_value / 12.92
+    else:
+        return math.pow((srgb_value + 0.055) / 1.055, 2.4)
+
+
+def linear_to_srgb(linear_value):
+    """将线性值转换为 SRGB 值"""
+    if linear_value <= 0.0031308:
+        return linear_value * 12.92
+    else:
+        return math.pow(linear_value, 1.0 / 2.4) * 1.055 - 0.055
+
+
+def convert_color_srgb_to_linear(color_rgba):
+    """将 RGBA 颜色从 SRGB 空间转换到线性空间"""
+    return [
+        srgb_to_linear(color_rgba[0]),
+        srgb_to_linear(color_rgba[1]),
+        srgb_to_linear(color_rgba[2]),
+        color_rgba[3]
+    ]
 
 
 class BMTP_OT_DynamicBridge(bpy.types.Operator):
@@ -61,20 +88,48 @@ class BMTP_OT_SetVertexColor(bpy.types.Operator):
         if not selected_objects:
             self.report({'ERROR'}, "请选择至少一个网格物体")
             return {'CANCELLED'}
-        color_rgba = props.vc_color[:]
+        
+        color_rgba_srgb = props.vc_color[:]
+        color_rgba_linear = convert_color_srgb_to_linear(color_rgba_srgb)
+        
         for obj in selected_objects:
             mesh = obj.data
-            color_attr = mesh.color_attributes.active_color or \
-                         mesh.color_attributes.new(name="COLOR", type='BYTE_COLOR', domain='CORNER')
-            num_loops = len(mesh.loops)
-            color_data = np.zeros(num_loops * 4, dtype=np.float32)
-            if props.vc_mode == 'ALPHA_ONLY':
-                color_attr.data.foreach_get("color", color_data)
-                color_data[3::4] = color_rgba[3]
+            
+            if not mesh.color_attributes.active_color:
+                color_attr = mesh.color_attributes.new(name="COLOR", type='BYTE_COLOR', domain='CORNER')
             else:
-                color_data = np.tile(color_rgba, num_loops)
+                color_attr = mesh.color_attributes.active_color
+            
+            is_byte_color = (color_attr.data_type == 'BYTE_COLOR')
+            num_loops = len(mesh.loops)
+            
+            if is_byte_color:
+                color_data = np.zeros(num_loops * 4, dtype=np.uint8)
+                if props.vc_mode == 'ALPHA_ONLY':
+                    temp_data = np.zeros(num_loops * 4, dtype=np.uint8)
+                    color_attr.data.foreach_get("color", temp_data)
+                    color_data[:] = temp_data
+                    alpha_val = int(round(color_rgba_linear[3] * 255))
+                    color_data[3::4] = np.clip(alpha_val, 0, 255).astype(np.uint8)
+                else:
+                    r = int(round(color_rgba_linear[0] * 255))
+                    g = int(round(color_rgba_linear[1] * 255))
+                    b = int(round(color_rgba_linear[2] * 255))
+                    a = int(round(color_rgba_linear[3] * 255))
+                    rgba_bytes = [np.clip(r, 0, 255), np.clip(g, 0, 255), 
+                                 np.clip(b, 0, 255), np.clip(a, 0, 255)]
+                    color_data = np.tile(rgba_bytes, num_loops).astype(np.uint8)
+            else:
+                color_data = np.zeros(num_loops * 4, dtype=np.float32)
+                if props.vc_mode == 'ALPHA_ONLY':
+                    color_attr.data.foreach_get("color", color_data)
+                    color_data[3::4] = color_rgba_linear[3]
+                else:
+                    color_data = np.tile(color_rgba_linear, num_loops)
+            
             color_attr.data.foreach_set("color", color_data)
             mesh.update()
+        
         self.report({'INFO'}, f"顶点色操作完成，处理了 {len(selected_objects)} 个对象")
         return {'FINISHED'}
 

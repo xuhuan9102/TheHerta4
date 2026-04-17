@@ -191,18 +191,24 @@ class BMTP_OT_TransferWeights(bpy.types.Operator):
                             vgs_to_remove_from_target.append(vg.name)
                     
                     for vg_name in vgs_to_remove_from_target:
-                        target_obj.vertex_groups.remove(target_obj.vertex_groups[vg_name])
+                        vg = target_obj.vertex_groups.get(vg_name)
+                        if vg:
+                            target_obj.vertex_groups.remove(vg)
                     
                     if not props.wt_cleanup and target_vg_backup:
                         for vg_name, weights in target_vg_backup.items():
                             if vg_name not in selected_vg_names:
                                 if vg_name not in target_obj.vertex_groups:
                                     target_obj.vertex_groups.new(name=vg_name)
-                                vg = target_obj.vertex_groups[vg_name]
-                                vg.remove([i for i in range(len(target_obj.data.vertices))])
-                                for vert_idx_str, weight in weights.items():
-                                    vert_idx = int(vert_idx_str)
-                                    vg.add([vert_idx], weight, 'REPLACE')
+                                vg = target_obj.vertex_groups.get(vg_name)
+                                if vg:
+                                    vg.remove([i for i in range(len(target_obj.data.vertices))])
+                                    for vert_idx_str, weight in weights.items():
+                                        vert_idx = int(vert_idx_str)
+                                        try:
+                                            vg.add([vert_idx], weight, 'REPLACE')
+                                        except (RuntimeError, IndexError):
+                                            pass
                     
                     target_obj.select_set(False)
             finally:

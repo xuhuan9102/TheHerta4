@@ -116,13 +116,16 @@ class ATP_OT_BakeAndImportAlembic(bpy.types.Operator):
                             mix_mode='REPLACE'
                         )
                         self.report({'INFO'}, "顶点组传递成功！")
-                    except RuntimeError as e:
+                    except (RuntimeError, AttributeError, KeyError) as e:
                         self.report({'ERROR'}, f"数据传递操作失败: {e}。请确保拓扑结构一致。")
                     finally:
-                        bpy.ops.object.select_all(action='DESELECT')
-                        for obj in pre_transfer_selection:
-                            obj.select_set(True)
-                        context.view_layer.objects.active = pre_transfer_active
+                        if context.view_layer:
+                            bpy.ops.object.select_all(action='DESELECT')
+                            for obj in pre_transfer_selection:
+                                if obj and obj.name in bpy.data.objects:
+                                    obj.select_set(True)
+                            if pre_transfer_active and pre_transfer_active.name in bpy.data.objects:
+                                context.view_layer.objects.active = pre_transfer_active
                 else:
                     self.report({'WARNING'}, "顶点组传递失败：源或目标不是网格物体。")
             elif len(original_selection) != 1:
@@ -239,7 +242,7 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
         mesh = eval_obj.to_mesh()
 
         try:
-            if not mesh.polygons:
+            if not mesh or not mesh.polygons:
                 return static_verts_list
 
             initial_dynamic_indices = {i for i, is_static in enumerate(static_verts_list) if not is_static}
