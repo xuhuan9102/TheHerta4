@@ -8,6 +8,7 @@ from ..utils.log_utils import LOG
 
 from ..common.m_key import M_Key
 from ..common.draw_call_model import DrawCallModel
+from ..common.object_prefix_helper import ObjectPrefixHelper
 from .export_helper import BlueprintExportHelper
 
 _NODE_TYPE_OBJECT_INFO = 'SSMTNode_Object_Info'
@@ -86,6 +87,10 @@ class ProcessingChain:
             obj_name = getattr(node, 'object_name', '')
             if obj_name:
                 params.append(f"obj={obj_name}")
+
+            prefix_info = ObjectPrefixHelper.get_node_prefix_info(node)
+            if prefix_info:
+                params.append(f"prefix={prefix_info[0]}")
 
             return f"ObjectInfo[{','.join(params)}]" if params else "ObjectInfo[]"
 
@@ -244,7 +249,11 @@ class ProcessingChain:
         return new_chain
 
     def to_draw_call_model(self) -> DrawCallModel:
-        obj_model = DrawCallModel(obj_name=self.object_name)
+        export_object_name = self.object_name
+        if self.source_node and getattr(self.source_node, 'bl_idname', '') == _NODE_TYPE_OBJECT_INFO:
+            export_object_name = ObjectPrefixHelper.build_virtual_object_name_for_node(self.source_node, strict=True)
+
+        obj_model = DrawCallModel(obj_name=export_object_name)
 
         obj = bpy.data.objects.get(self.object_name)
         if obj:
@@ -999,7 +1008,8 @@ class BluePrintModel:
             self.parse_current_node(unknown_node, chain_key_list)
 
         elif unknown_node.bl_idname == _NODE_TYPE_OBJECT_INFO:
-            obj_model = DrawCallModel(obj_name=unknown_node.object_name)
+            virtual_object_name = ObjectPrefixHelper.build_virtual_object_name_for_node(unknown_node, strict=True)
+            obj_model = DrawCallModel(obj_name=virtual_object_name)
 
             if hasattr(unknown_node, 'original_object_name') and unknown_node.original_object_name:
                 obj_model.display_name = unknown_node.original_object_name

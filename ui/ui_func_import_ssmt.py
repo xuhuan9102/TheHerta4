@@ -16,6 +16,7 @@ from ..utils.translate_utils import TR
 from ..common.global_config import GlobalConfig
 from ..common.ssmt_import_helper import SSMTImportHelper
 from ..common.workspace_helper import WorkSpaceHelper
+from .ui_prefix_quick_ops import PrefixQuickOpsHelper
 
 
 # 全量导入逻辑
@@ -34,6 +35,7 @@ def ImprotFromWorkSpaceFull(self, context):
     # 读取时保存每个导入文件夹里导入的 GameType 名称到工作空间根目录的 Import.json
     # 生成 Mod 时会用它来确定应该进入哪个 TYPE_xxx 目录读取 SubmeshJson
     foldername_gametypename_dict = {}
+    imported_objects = []
 
     for submesh_folder_path in workspace_subfolders:
         submesh_folder_name = os.path.basename(submesh_folder_path)
@@ -59,6 +61,7 @@ def ImprotFromWorkSpaceFull(self, context):
                 if imported_obj is not None:
                     imported_obj.name = submesh_folder_name + this_alias
                     imported_obj.data.name = imported_obj.name
+                    imported_objects.append(imported_obj)
 
                 # 如果能执行到这里，说明这个DrawIB成功导入了一个数据类型
                 # 然后要把这个DrawIB对应的GameType名称保存下来
@@ -81,6 +84,7 @@ def ImprotFromWorkSpaceFull(self, context):
     
     # 因为用户习惯了导入后就是全部选中的状态，所以默认选中所有导入的obj
     CollectionUtils.select_collection_objects(workspace_collection)
+    PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
 
     # ==========================
     # 自动生成蓝图节点逻辑
@@ -242,6 +246,7 @@ class SSMT4ImportRaw(bpy.types.Operator, ImportHelper):
         collection_name = os.path.basename(dirname)
         collection = bpy.data.collections.new(collection_name)
         bpy.context.scene.collection.children.link(collection)
+        imported_objects = []
 
         # 如果用户不选择任何json文件，则默认返回读取所有的json文件。
         import_filename_list = []
@@ -262,10 +267,13 @@ class SSMT4ImportRaw(bpy.types.Operator, ImportHelper):
                 json_file_path = json_file_name
             else:
                 json_file_path = os.path.join(dirname, json_file_name)
-            SSMTImportHelper.create_mesh_from_json(json_file_path=json_file_path, import_collection=collection)
+            imported_obj = SSMTImportHelper.create_mesh_from_json(json_file_path=json_file_path, import_collection=collection)
+            if imported_obj is not None:
+                imported_objects.append(imported_obj)
 
         # Select all objects under collection (因为用户习惯了导入后就是全部选中的状态). 
         CollectionUtils.select_collection_objects(collection)
+        PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
 
         return {'FINISHED'}
 

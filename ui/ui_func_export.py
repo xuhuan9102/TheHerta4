@@ -26,6 +26,7 @@ from ..blueprint.preprocess import PreProcessHelper
 from ..blueprint.preprocess_parallel import ParallelPreprocessCoordinator
 from ..blueprint.export_parallel import ExportRoundExecutor, ParallelExportCoordinator, ParallelExportError
 from ..common.global_properties import GlobalProterties
+from ..common.object_prefix_helper import ObjectPrefixHelper
 
 
 class SSMTGenerateModBlueprint(bpy.types.Operator):
@@ -439,7 +440,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
 
         for node in tree.nodes:
             if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                obj_name = getattr(node, 'object_name', '')
+                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
                 if obj_name:
                     object_names.append(obj_name)
 
@@ -466,7 +467,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         object_names = []
         for node in nested_tree.nodes:
             if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                obj_name = getattr(node, 'object_name', '')
+                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
                 if obj_name:
                     object_names.append(obj_name)
 

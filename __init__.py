@@ -9,6 +9,7 @@ from .ui import ui_panel_basic
 from .ui import ui_panel_sword
 from .ui import ui_func_import
 from .ui import ui_func_import_ssmt
+from .ui import ui_prefix_quick_ops
 
 from . import blueprint
 
@@ -22,6 +23,7 @@ import importlib
 importlib.reload(addon_updater_ops)
 importlib.reload(global_properties)
 importlib.reload(blueprint)
+importlib.reload(ui_prefix_quick_ops)
 
 _global_config_timer_handle = None
 _GLOBAL_CONFIG_REFRESH_INTERVAL = 1.0
@@ -160,6 +162,7 @@ def register():
     bpy.utils.register_class(HertaUpdatePreference)
 
     blueprint.register()
+    ui_prefix_quick_ops.register()
     ui_panel_basic.register()
     ui_panel_sword.register()
     ui_func_import_ssmt.register()
@@ -188,6 +191,7 @@ def unregister():
     ui_func_import_ssmt.unregister()
     ui_panel_sword.unregister()
     ui_panel_basic.unregister()
+    ui_prefix_quick_ops.unregister()
     blueprint.unregister()
 
     bpy.utils.unregister_class(HertaUpdatePreference)

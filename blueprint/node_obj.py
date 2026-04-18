@@ -4,6 +4,7 @@ from bpy.types import NodeTree, Node, NodeSocket
 from ..common.logic_name import LogicName
 from ..common.global_config import GlobalConfig
 from ..common.global_properties import GlobalProterties
+from ..common.object_prefix_helper import ObjectPrefixHelper
 from .node_base import SSMTBlueprintTree, SSMTNodeBase
 
 BLENDER_VERSION = bpy.app.version[:2]
@@ -187,41 +188,75 @@ class SSMTNode_Object_Info(SSMTNodeBase):
     bl_label = 'Object Info'
     bl_icon = 'OBJECT_DATAMODE'
     bl_width_min = 300
+
+    def _set_cached_prefix_data(self, prefix: str, separator: str):
+        self["object_prefix"] = ObjectPrefixHelper.normalize_prefix(prefix)
+        self["prefix_separator"] = separator or "."
+
+    def _refresh_prefix_cache(self, from_prefix_update: bool = False):
+        self.label = self.object_name if self.object_name else "Object Info"
+
+        prefix_info = ObjectPrefixHelper.get_node_prefix_info(self)
+        prefix = ""
+        separator = self.prefix_separator or "."
+        if prefix_info:
+            prefix, separator = prefix_info
+
+        if prefix:
+            self._set_cached_prefix_data(prefix, separator)
+            if not from_prefix_update:
+                normalized = ObjectPrefixHelper.normalize_prefix(prefix)
+                if self.object_prefix != normalized:
+                    self.object_prefix = normalized
+        elif not self.object_prefix:
+            self["prefix_separator"] = separator
+
+        parts = ObjectPrefixHelper.parse_prefix_parts(self.object_prefix)
+        self.draw_ib = parts["draw_ib"]
+        self.index_count = parts["index_count"]
+        self.first_index = parts["first_index"]
+        self.component = parts["component"]
+
+        _, _, base_name = ObjectPrefixHelper.split_name_and_prefix(self.object_name, self.object_prefix, self.prefix_separator)
+        self.alias_name = base_name
+
+        obj = bpy.data.objects.get(self.object_name)
+        if obj:
+            self.object_id = str(obj.as_pointer())
+        elif not self.object_name:
+            self.object_id = ""
+
+        self.update_node_width([self.object_name, self.object_prefix])
+
+    def update_object_prefix(self, context):
+        self._set_cached_prefix_data(self.object_prefix, self.prefix_separator)
+        self._refresh_prefix_cache(from_prefix_update=True)
     
     def update_object_name(self, context):
-        if self.object_name:
-            self.label = self.object_name
-            if "-" in self.object_name:
-                obj_name_total_split = self.object_name.split(".")
-
-                obj_name_split = obj_name_total_split[0].split("-")
-
-                self.draw_ib = obj_name_split[0]
-                self.index_count = obj_name_split[1]
-                self.first_index = obj_name_split[2]
-
-                if len(obj_name_total_split) >= 2:
-                    self.alias_name = ".".join(obj_name_total_split[1:])
-                else:
-                    self.alias_name = ""
-            
-            obj = bpy.data.objects.get(self.object_name)
-            if obj:
-                self.object_id = str(obj.as_pointer())
-        else:
-            self.label = "Object Info"
-            self.object_id = ""
-        
-        self.update_node_width([self.object_name, self.draw_ib, self.index_count, self.first_index, self.alias_name])
+        self._refresh_prefix_cache()
     object_name: bpy.props.StringProperty(name="Object Name", default="", update=update_object_name)
     object_id: bpy.props.StringProperty(name="Object ID", default="")
     original_object_name: bpy.props.StringProperty(name="Original Object Name", default="")
+    object_prefix: bpy.props.StringProperty(name="Prefix", default="", update=update_object_prefix)
+    prefix_separator: bpy.props.StringProperty(name="Prefix Separator", default=".")
 
 
     draw_ib: bpy.props.StringProperty(name="DrawIB", default="")
     index_count: bpy.props.StringProperty(name="IndexCount", default="")
     first_index: bpy.props.StringProperty(name="FirstIndex", default="")
+    component: bpy.props.StringProperty(name="Component", default="")
     alias_name: bpy.props.StringProperty(name="Alias Name", default="")
+
+    def get_effective_prefix(self) -> str:
+        prefix_info = ObjectPrefixHelper.get_node_prefix_info(self)
+        return prefix_info[0] if prefix_info else ""
+
+    def get_effective_separator(self) -> str:
+        prefix_info = ObjectPrefixHelper.get_node_prefix_info(self)
+        return prefix_info[1] if prefix_info else (self.prefix_separator or ".")
+
+    def get_virtual_object_name(self) -> str:
+        return ObjectPrefixHelper.build_virtual_object_name_for_node(self)
 
     def init(self, context):
         self.outputs.new('SSMTSocketObject', "Object")
@@ -245,10 +280,7 @@ class SSMTNode_Object_Info(SSMTNodeBase):
             else:
                 row.label(text="", icon='ERROR')
 
-        layout.label(text=f"DrawIB: {self.draw_ib}")
-        layout.label(text=f"IndexCount: {self.index_count}")
-        layout.label(text=f"FirstIndex: {self.first_index}")
-        layout.label(text=f"Alias Name: {self.alias_name}")
+        layout.prop(self, "object_prefix", text="前缀")
 
 
 class SSMTNode_Object_Group(SSMTNodeBase):

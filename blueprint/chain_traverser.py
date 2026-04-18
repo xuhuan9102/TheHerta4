@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Set, Tuple
 
 from ..utils.log_utils import LOG
 from ..common.m_key import M_Key
+from ..common.object_prefix_helper import ObjectPrefixHelper
 from .export_helper import BlueprintExportHelper
 from .model import ProcessingChain
 
@@ -112,17 +113,20 @@ class ChainTraverser:
                 if not getattr(obj_node, 'object_name', ''):
                     continue
 
+                effective_object_name = ObjectPrefixHelper.build_virtual_object_name_for_node(obj_node, strict=True)
+
                 chain = ProcessingChain(
-                    object_name=obj_node.object_name,
+                    object_name=effective_object_name,
+                    original_object_name=obj_node.object_name,
                     source_node=obj_node
                 )
 
-                LOG.info(f"   📋 Object_Info '{obj_node.object_name}' → 开始遍历")
+                LOG.info(f"   📋 Object_Info '{obj_node.object_name}' → 开始遍历 (有效名称: '{effective_object_name}')")
 
             completed_chains = []
             self._traverse_forward(chain, obj_node, set(), completed_chains)
 
-            node_display_name = object_name if obj_node.bl_idname == _NODE_TYPE_MULTI_FILE_EXPORT else obj_node.object_name
+            node_display_name = object_name if obj_node.bl_idname == _NODE_TYPE_MULTI_FILE_EXPORT else chain.object_name
             node_type_name = "MultiFile_Export" if obj_node.bl_idname == _NODE_TYPE_MULTI_FILE_EXPORT else "Object_Info"
             LOG.info(f"   📋 {node_type_name} '{node_display_name}' → 产生 {len(completed_chains)} 条链路")
             for ci, fc in enumerate(completed_chains):

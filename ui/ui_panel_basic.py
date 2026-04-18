@@ -9,6 +9,7 @@ from ..common.logic_name import LogicName
 from ..utils.translate_utils import TR
 
 from .ui_func_import_ssmt import SSMT4ImportAllFromCurrentWorkSpaceBlueprint, SSMT4ImportRaw
+from . import ui_prefix_quick_ops
 
 from ..blueprint.preprocess_cache import PreProcessCache
 from ..blueprint.preprocess_parallel import ParallelPreprocessCoordinator
@@ -60,6 +61,12 @@ class PanelBasicInformation(bpy.types.Panel):
             layout.label(text="RecalculateTANGENT: " + str(recalculate_tangent))
             layout.label(text="RecalculateCOLOR: " + str(recalculate_color))
             
+        layout.prop(context.scene, "herta_show_toolkit", text="工具集模式", icon='TOOL_SETTINGS')
+        if context.scene.herta_show_toolkit:
+            layout.operator("model.switch_to_main_panel", text="返回主面板", icon='BACK')
+        
+        layout.separator()
+        
         layout.operator("theherta3.open_persistent_blueprint", icon='NODETREE')
         
         layout.operator("import_mesh.migoto_raw_buffers_mmt", text="导入.fmt .ib .vb格式模型", icon='IMPORT')
@@ -69,6 +76,8 @@ class PanelBasicInformation(bpy.types.Panel):
         layout.separator()
 
         layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
+
+        ui_prefix_quick_ops.draw_prefix_quick_section(layout, context)
 
         layout.separator()
 
@@ -102,12 +111,6 @@ class PanelBasicInformation(bpy.types.Panel):
             parallel_box.label(text=f"当前生效路径: {effective_path or '未设置'}")
             parallel_box.label(text=message, icon='CHECKMARK' if is_valid else 'ERROR')
         
-        layout.separator()
-        
-        layout.prop(context.scene, "herta_show_toolkit", text="工具集模式", icon='TOOL_SETTINGS')
-        if context.scene.herta_show_toolkit:
-            layout.operator("model.switch_to_main_panel", text="返回主面板", icon='BACK')
-
         if GlobalConfig.logic_name == LogicName.WWMI:
             layout.prop(context.scene.global_properties,"import_merged_vgmap")
             layout.prop(context.scene.global_properties,"import_skip_empty_vertex_groups")

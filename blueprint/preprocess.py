@@ -6,6 +6,7 @@ from ..utils.shapekey_utils import ShapeKeyUtils
 from .export_helper import BlueprintExportHelper
 from .preprocess_cache import PreProcessCache
 from ..common.global_properties import GlobalProterties
+from ..common.object_prefix_helper import ObjectPrefixHelper
 
 
 class PreProcessHelper:
@@ -148,7 +149,12 @@ class PreProcessHelper:
         
         for obj_name in object_names:
             obj = bpy.data.objects.get(obj_name)
+            source_obj_name = obj_name
             if not obj:
+                source_obj_name = ObjectPrefixHelper.resolve_source_object_name(obj_name)
+                obj = bpy.data.objects.get(source_obj_name)
+            if not obj:
+                LOG.warning(f"   找不到源物体 {obj_name} (解析源名称: {source_obj_name})")
                 failed_count += 1
                 continue
             
@@ -408,12 +414,12 @@ class PreProcessHelper:
         for current_tree in trees_to_update:
             for node in current_tree.nodes:
                 if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                    original_name = getattr(node, 'object_name', '')
+                    original_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node)
                     if original_name.endswith('_copy'):
                         continue
                     if original_name in cls.original_to_copy_map:
                         copy_name = cls.original_to_copy_map[original_name]
-                        cls.modified_nodes.append((current_tree.name, node.name, original_name, 'object_info'))
+                        cls.modified_nodes.append((current_tree.name, node.name, getattr(node, 'object_name', ''), 'object_info'))
                         node.object_name = copy_name
                         updated_count += 1
                         

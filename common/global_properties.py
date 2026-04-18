@@ -153,6 +153,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=False,
     ) # type: ignore
 
+    prefix_quick_apply_to_object_name: bpy.props.BoolProperty(
+        name="前缀写入物体名称",
+        description="勾选时直接替换物体名称中的前缀；取消勾选时仅把前缀写入对应的物体信息节点",
+        default=True,
+    ) # type: ignore
+
     deduplicate_POSITION: bpy.props.BoolProperty(
         name="位置数据",
         description="位置数据是否参与顶点去重判断",
@@ -292,6 +298,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def parallel_preprocess_keep_temp_files(cls):
         return cls._instance().parallel_preprocess_keep_temp_files
+
+    @classmethod
+    def prefix_quick_apply_to_object_name(cls):
+        return cls._instance().prefix_quick_apply_to_object_name
 
     @classmethod
     def get_deduplicate_element_set(cls) -> set:

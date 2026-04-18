@@ -6,15 +6,31 @@ import struct
 import numpy
 
 from ..utils.log_utils import LOG
+from ..common.object_prefix_helper import ObjectPrefixHelper
 
 
 class PreProcessCache:
     CACHE_DIR_NAME = ".ssmt_preprocess_cache"
     CACHE_INDEX_FILENAME = "cache_index.json"
     CACHE_VERSION = 2
+    _override_cache_dir: str = ""
+
+    @classmethod
+    def set_override_cache_dir(cls, cache_dir: str):
+        cls._override_cache_dir = cache_dir
+
+    @classmethod
+    def clear_override_cache_dir(cls):
+        cls._override_cache_dir = ""
 
     @classmethod
     def get_cache_dir(cls) -> str:
+        if cls._override_cache_dir:
+            cache_dir = cls._override_cache_dir
+            if not os.path.exists(cache_dir):
+                os.makedirs(cache_dir)
+            return cache_dir
+        
         blend_filepath = bpy.data.filepath
         if not blend_filepath:
             return ""
@@ -25,6 +41,16 @@ class PreProcessCache:
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         return cache_dir
+
+    @classmethod
+    def get_original_cache_dir(cls) -> str:
+        blend_filepath = bpy.data.filepath
+        if not blend_filepath:
+            return ""
+        blend_dir = os.path.dirname(blend_filepath)
+        if not blend_dir:
+            return ""
+        return os.path.join(blend_dir, cls.CACHE_DIR_NAME)
 
     @classmethod
     def get_cache_index_path(cls) -> str:
@@ -59,6 +85,10 @@ class PreProcessCache:
     @classmethod
     def compute_object_hash(cls, obj_name: str) -> str:
         obj = bpy.data.objects.get(obj_name)
+        source_obj_name = obj_name
+        if not obj:
+            source_obj_name = ObjectPrefixHelper.resolve_source_object_name(obj_name)
+            obj = bpy.data.objects.get(source_obj_name)
         if not obj:
             return ""
 
@@ -108,7 +138,7 @@ class PreProcessCache:
         if obj.type == 'MESH' and obj.data and obj.data.shape_keys:
             key_blocks = obj.data.shape_keys.key_blocks
             hasher.update(struct.pack('<I', len(key_blocks)))
-            print(f"[HashDebug] 物体 {obj_name} 形态键哈希计算:")
+            print(f"[HashDebug] 物体 {obj_name} (源物体 {source_obj_name}) 形态键哈希计算:")
             for kb in key_blocks:
                 hasher.update(kb.name.encode('utf-8'))
                 hasher.update(struct.pack('<d', kb.value))

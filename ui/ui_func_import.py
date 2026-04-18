@@ -11,6 +11,7 @@ from ..utils.collection_utils import CollectionUtils
 from ..utils.translate_utils import TR
 
 from ..common.mesh_import_helper import MeshImportHelper, MigotoBinaryFile
+from .ui_prefix_quick_ops import PrefixQuickOpsHelper
 
 
 class Import3DMigotoRaw(bpy.types.Operator, ImportHelper):
@@ -38,6 +39,7 @@ class Import3DMigotoRaw(bpy.types.Operator, ImportHelper):
         collection_name = os.path.basename(dirname)
         collection = bpy.data.collections.new(collection_name)
         bpy.context.scene.collection.children.link(collection)
+        imported_objects = []
 
         import_filename_list = []
         if len(self.files) == 1:
@@ -54,9 +56,12 @@ class Import3DMigotoRaw(bpy.types.Operator, ImportHelper):
         for fmt_file_name in import_filename_list:
             fmt_file_path = os.path.join(dirname, fmt_file_name)
             mbf = MigotoBinaryFile(fmt_path=fmt_file_path)
-            MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=collection)
+            imported_obj = MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf, import_collection=collection)
+            if imported_obj is not None:
+                imported_objects.append(imported_obj)
 
         CollectionUtils.select_collection_objects(collection)
+        PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
 
         return {'FINISHED'}
 

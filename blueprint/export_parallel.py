@@ -11,10 +11,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..common.global_config import GlobalConfig
 from ..common.global_properties import GlobalProterties
 from ..common.logic_name import LogicName
+from ..common.object_prefix_helper import ObjectPrefixHelper
 from ..utils.log_utils import LOG
 from .model import BluePrintModel
 from .export_helper import BlueprintExportHelper
 from .preprocess import PreProcessHelper
+from .preprocess_cache import PreProcessCache
 from .preprocess_parallel import ParallelPreprocessCoordinator
 from ..ui.universal.efmi import ExportEFMI
 from ..ui.universal.gimi import ExportGIMI
@@ -161,7 +163,7 @@ class ExportRoundExecutor:
 
         for node in tree.nodes:
             if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                obj_name = getattr(node, 'object_name', '')
+                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
                 if obj_name:
                     object_names.append(obj_name)
 
@@ -189,7 +191,7 @@ class ExportRoundExecutor:
         object_names = []
         for node in nested_tree.nodes:
             if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                obj_name = getattr(node, 'object_name', '')
+                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
                 if obj_name:
                     object_names.append(obj_name)
 
@@ -282,6 +284,8 @@ class ParallelExportCoordinator:
 
     @classmethod
     def _build_jobs(cls, session_dir: str, snapshot_path: str, tree_name: str, middle_rounds: list[dict]) -> list[dict]:
+        cache_dir = PreProcessCache.get_original_cache_dir()
+        
         jobs = []
         for index, round_plan in enumerate(middle_rounds, start=1):
             job_dir = os.path.join(session_dir, f"job_{index:03d}")
@@ -298,6 +302,7 @@ class ParallelExportCoordinator:
                 "round_plan": round_plan,
                 "result_path": result_path,
                 "log_path": log_path,
+                "cache_dir": cache_dir,
             }
 
             with open(manifest_path, "w", encoding="utf-8") as file:
@@ -423,6 +428,10 @@ def _run_worker(manifest_path: str):
     try:
         LOG.start_collecting()
         GlobalConfig.read_from_main_json_ssmt4()
+        
+        cache_dir = manifest.get("cache_dir", "")
+        if cache_dir:
+            PreProcessCache.set_override_cache_dir(cache_dir)
 
         tree = bpy.data.node_groups.get(manifest["tree_name"])
         if not tree:
@@ -440,6 +449,8 @@ def _run_worker(manifest_path: str):
         result["error"] = str(error)
         traceback.print_exc()
     finally:
+        PreProcessCache.clear_override_cache_dir()
+        
         with open(manifest["log_path"], "w", encoding="utf-8") as file:
             file.write(LOG.get_log_content())
 
