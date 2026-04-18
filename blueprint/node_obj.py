@@ -280,7 +280,9 @@ class SSMTNode_Object_Info(SSMTNodeBase):
             else:
                 row.label(text="", icon='ERROR')
 
-        layout.prop(self, "object_prefix", text="前缀")
+        row = layout.row(align=True)
+        row.enabled = False
+        row.prop(self, "object_prefix", text="前缀")
 
 
 class SSMTNode_Object_Group(SSMTNodeBase):
