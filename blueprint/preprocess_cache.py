@@ -100,7 +100,7 @@ class PreProcessCache:
                         hasher.update(color_data.tobytes())
 
         for modifier in obj.modifiers:
-            hasher.update(modifier.bl_idname.encode('utf-8'))
+            hasher.update(modifier.type.encode('utf-8'))
             hasher.update(modifier.name.encode('utf-8'))
             hasher.update(struct.pack('<?', modifier.show_viewport))
             cls._hash_rna_properties(hasher, modifier)
@@ -134,7 +134,7 @@ class PreProcessCache:
                 hasher.update(bytes(weight_bytes))
 
         for constraint in obj.constraints:
-            hasher.update(constraint.bl_idname.encode('utf-8'))
+            hasher.update(constraint.type.encode('utf-8'))
             hasher.update(constraint.name.encode('utf-8'))
             cls._hash_rna_properties(hasher, constraint)
 

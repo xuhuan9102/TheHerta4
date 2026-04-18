@@ -48,6 +48,8 @@ class ExportRoundExecutor:
                 LOG.info("   ⚡ 已启用并行前处理")
                 original_to_copy_map = ParallelPreprocessCoordinator.execute_preprocess(object_names)
             else:
+                if not allow_parallel_preprocess and GlobalProterties.enable_parallel_preprocess():
+                    LOG.info("   ℹ️ 当前轮次运行在并行导出子进程中，已禁用嵌套并行前处理，改为当前轮次独立串行前处理")
                 original_to_copy_map = PreProcessHelper.execute_preprocess(object_names)
 
             if original_to_copy_map:
@@ -81,8 +83,10 @@ class ExportRoundExecutor:
         if shape_key_mode != "unchanged":
             BlueprintExportHelper.collect_shapekey_objects(tree)
             if shape_key_mode == "all_zero":
+                LOG.info("   🎭 当前轮次形态键状态: 全部归零后再执行前处理")
                 BlueprintExportHelper.set_all_shapekey_values(0)
             elif shape_key_mode == "slot":
+                LOG.info(f"   🎭 当前轮次形态键状态: 槽位 {round_plan.get('shapekey_slot_index')} = 1，其余归零，然后执行前处理")
                 BlueprintExportHelper.set_all_shapekey_values(0, round_plan.get("shapekey_slot_index"))
 
         BlueprintExportHelper.set_current_buffer_folder_name(round_plan["buffer_folder_name"])
