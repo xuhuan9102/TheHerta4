@@ -5,6 +5,7 @@ import hashlib
 import struct
 import numpy
 
+from ..common.global_properties import GlobalProterties
 from ..utils.log_utils import LOG
 from ..common.object_prefix_helper import ObjectPrefixHelper
 
@@ -96,6 +97,7 @@ class PreProcessCache:
 
         hasher.update(obj_name.encode('utf-8'))
         hasher.update(obj.type.encode('utf-8'))
+        hasher.update(struct.pack('<?', GlobalProterties.enable_non_mirror_workflow()))
 
         loc = numpy.array(obj.location, dtype=numpy.float32)
         rot = numpy.array(obj.rotation_euler, dtype=numpy.float32)

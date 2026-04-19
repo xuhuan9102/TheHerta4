@@ -6,6 +6,7 @@ from ..utils.shapekey_utils import ShapeKeyUtils
 from .export_helper import BlueprintExportHelper
 from .preprocess_cache import PreProcessCache
 from ..common.global_properties import GlobalProterties
+from ..common.non_mirror_workflow import NonMirrorWorkflowHelper
 from ..common.object_prefix_helper import ObjectPrefixHelper
 
 
@@ -84,6 +85,10 @@ class PreProcessHelper:
         LOG.info(f"🔧 对所有副本物体应用形态键...")
         cls._apply_shape_keys(copy_names)
 
+        if GlobalProterties.enable_non_mirror_workflow():
+            LOG.info(f"🔧 对所有副本物体执行非镜像工作流恢复...")
+            cls._restore_non_mirror_objects(copy_names)
+
     @classmethod
     def _execute_preprocess_with_cache(cls, object_names: List[str]):
         hash_map = {}
@@ -132,6 +137,10 @@ class PreProcessHelper:
             
             LOG.info(f"🔧 对未缓存副本物体应用形态键...")
             cls._apply_shape_keys(copy_names)
+
+            if GlobalProterties.enable_non_mirror_workflow():
+                LOG.info(f"🔧 对未缓存副本物体执行非镜像工作流恢复...")
+                cls._restore_non_mirror_objects(copy_names)
             
             LOG.info(f"💾 保存前处理结果到缓存...")
             for obj_name in uncached_objects:
@@ -397,6 +406,15 @@ class PreProcessHelper:
                 bpy.context.view_layer.objects.active = original_active
         
         LOG.info(f"   ✅ 应用形态键: {applied_count} 个物体, {no_shapekey_count} 个无形态键")
+
+    @classmethod
+    def _restore_non_mirror_objects(cls, object_names: List[str]):
+        objects = []
+        for obj_name in object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if obj:
+                objects.append(obj)
+        NonMirrorWorkflowHelper.restore_export_objects(objects)
 
     @classmethod
     def update_blueprint_node_references(cls, tree, nested_trees: List = None):

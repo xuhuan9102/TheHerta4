@@ -65,17 +65,19 @@ class PanelBasicInformation(bpy.types.Panel):
         if context.scene.herta_show_toolkit:
             layout.operator("model.switch_to_main_panel", text="返回主面板", icon='BACK')
         
-        layout.separator()
-        
-        layout.operator("theherta3.open_persistent_blueprint", icon='NODETREE')
-        
-        layout.operator("import_mesh.migoto_raw_buffers_mmt", text="导入.fmt .ib .vb格式模型", icon='IMPORT')
+        layout.prop(context.scene.global_properties, "enable_non_mirror_workflow", text="非镜像工作流", toggle=True)
 
-        layout.operator(SSMT4ImportRaw.bl_idname, text="导入SSMT格式模型", icon='IMPORT')
+        layout.separator()
+
+        layout.operator("theherta3.open_persistent_blueprint", text="打开蓝图界面", icon='NODETREE')
 
         layout.separator()
 
         layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
+        
+        layout.operator("import_mesh.migoto_raw_buffers_mmt", text="导入.fmt .ib .vb格式模型", icon='IMPORT')
+
+        layout.operator(SSMT4ImportRaw.bl_idname, text="导入SSMT格式模型", icon='IMPORT')
 
         ui_prefix_quick_ops.draw_prefix_quick_section(layout, context)
 

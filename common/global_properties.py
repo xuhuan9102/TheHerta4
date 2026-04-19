@@ -104,6 +104,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    enable_non_mirror_workflow: bpy.props.BoolProperty(
+        name="非镜像工作流",
+        description="启用后，导入时会先将模型镜像、应用变换并翻转面；导出前处理时会对副本再次执行同样操作以恢复原始朝向",
+        default=True,
+    ) # type: ignore
+
     enable_preprocess_cache: bpy.props.BoolProperty(
         name="启用前处理缓存",
         description="启用后，前处理结果会被缓存到本地文件。当物体数据未变化时，下次导出将直接使用缓存，减少重复计算",
@@ -270,6 +276,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def export_add_missing_vertex_groups(cls):
         return cls._instance().export_add_missing_vertex_groups
+
+    @classmethod
+    def enable_non_mirror_workflow(cls):
+        return cls._instance().enable_non_mirror_workflow
 
     @classmethod
     def enable_preprocess_cache(cls):

@@ -10,7 +10,9 @@ from bpy_extras.io_utils import ImportHelper
 from ..utils.collection_utils import CollectionUtils
 from ..utils.translate_utils import TR
 
+from ..common.global_properties import GlobalProterties
 from ..common.mesh_import_helper import MeshImportHelper, MigotoBinaryFile
+from ..common.non_mirror_workflow import NonMirrorWorkflowHelper
 from .ui_prefix_quick_ops import PrefixQuickOpsHelper
 
 
@@ -59,6 +61,9 @@ class Import3DMigotoRaw(bpy.types.Operator, ImportHelper):
             imported_obj = MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf, import_collection=collection)
             if imported_obj is not None:
                 imported_objects.append(imported_obj)
+
+        if GlobalProterties.enable_non_mirror_workflow():
+            NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
 
         CollectionUtils.select_collection_objects(collection)
         PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)

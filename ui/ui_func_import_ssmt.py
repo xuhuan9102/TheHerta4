@@ -14,6 +14,8 @@ from ..utils.timer_utils import TimerUtils
 from ..utils.translate_utils import TR
 
 from ..common.global_config import GlobalConfig
+from ..common.global_properties import GlobalProterties
+from ..common.non_mirror_workflow import NonMirrorWorkflowHelper
 from ..common.ssmt_import_helper import SSMTImportHelper
 from ..common.workspace_helper import WorkSpaceHelper
 from .ui_prefix_quick_ops import PrefixQuickOpsHelper
@@ -81,6 +83,9 @@ def ImprotFromWorkSpaceFull(self, context):
     # 保存工作空间级 Import.json 选择记录
     save_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(),"Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict,filepath=save_import_json_path)
+
+    if GlobalProterties.enable_non_mirror_workflow():
+        NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
     
     # 因为用户习惯了导入后就是全部选中的状态，所以默认选中所有导入的obj
     CollectionUtils.select_collection_objects(workspace_collection)
@@ -270,6 +275,9 @@ class SSMT4ImportRaw(bpy.types.Operator, ImportHelper):
             imported_obj = SSMTImportHelper.create_mesh_from_json(json_file_path=json_file_path, import_collection=collection)
             if imported_obj is not None:
                 imported_objects.append(imported_obj)
+
+        if GlobalProterties.enable_non_mirror_workflow():
+            NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
 
         # Select all objects under collection (因为用户习惯了导入后就是全部选中的状态). 
         CollectionUtils.select_collection_objects(collection)
