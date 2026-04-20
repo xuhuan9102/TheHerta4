@@ -95,65 +95,62 @@ def ImprotFromWorkSpaceFull(self, context):
     # 自动生成蓝图节点逻辑
     # ==========================
     try:
-        # 创建蓝图，名称为当前工作空间名称
         tree_name = GlobalConfig.workspacename
-        
-        # Nico: 为了防止覆盖用户修改过的蓝图，始终创建新蓝图
-        # 如果已存在同名蓝图，Blender会自动添加.001等后缀，从而保留旧蓝图
+
         try:
             tree = bpy.data.node_groups.new(name=tree_name, type='SSMTBlueprintTreeType')
         except Exception as e:
             print(f"Failed to create new node tree: {e}. Check if SSMTBlueprintTreeType is registered.")
             return
         tree.use_fake_user = True
-        
-        # 创建 Group 节点 (并在循环中连接)
-        group_node = tree.nodes.new('SSMTNode_Object_Group')
-        group_node.label = "Default Group"
-        
-        # 3. 遍历导入的对象并创建对应节点
-        current_x = 0
-        current_y = 0
-        y_gap = 200 # 增加垂直间距
-        
-        count = 0
-        
-        # 此时 default_show_collection 应该在作用域内，因为它是上面的局部变量
-        # 且导入的模型都放在这个集合里
+
+        drawib_tabname_dict = WorkSpaceHelper.get_drawib_tabname_dict()
+
+        tab_group_nodes = {}
+        tab_node_lists = {}
+        default_group_node = tree.nodes.new('SSMTNode_Object_Group')
+        default_group_node.label = "Default Group"
+        default_node_list = []
+
+        y_gap = 200
+        tab_gap = 400
+
         if 'workspace_collection' in locals() and workspace_collection:
              target_objects = workspace_collection.objects
         else:
-             target_objects = [] # Fallback
+             target_objects = []
 
         if not target_objects:
              print("Warning: Could not find Workspace collection to generate blueprint nodes.")
 
-        # 使用列表手动计算布局中心
-        min_y = 0
         for import_folder_path in workspace_subfolders:
             submesh_folder_name = os.path.basename(import_folder_path)
             namesplits = submesh_folder_name.split('-')
             if len(namesplits) < 3:
                 continue
             draw_ib = namesplits[0]
-            index_count = namesplits[1]
-            first_index = namesplits[2]
-            
-            # 在导入集合中寻找属于当前 DrawIB 的对象
-            # 命名规则通常是: DrawIB-Part-Alias
+
+            tab_name = drawib_tabname_dict.get(draw_ib)
+
+            if tab_name and tab_name not in tab_group_nodes:
+                group_node = tree.nodes.new('SSMTNode_Object_Group')
+                group_node.label = tab_name
+                tab_group_nodes[tab_name] = group_node
+                tab_node_lists[tab_name] = []
+
+            target_group = tab_group_nodes.get(tab_name, default_group_node) if tab_name else default_group_node
+
             found_objs = [obj for obj in target_objects if obj.name.startswith(submesh_folder_name)]
-            
+
             for obj in found_objs:
                  if obj.type == 'MESH':
-                    # 创建节点
                     node = tree.nodes.new('SSMTNode_Object_Info')
-                    node.location = (current_x, current_y)
-                    
-                    # 填充属性
+
                     node.object_name = obj.name
+                    node.object_id = str(obj.as_pointer())
+
                     node.draw_ib = draw_ib
-                    
-                    # 解析 Part 部分作为 Component (即 DrawIB-Part-Alias 中的 Part)
+
                     name_parts = obj.name.split('-')
                     if len(name_parts) >= 2:
                         node.component = name_parts[1]
@@ -161,44 +158,76 @@ def ImprotFromWorkSpaceFull(self, context):
                         node.component = "1"
 
                     node.alias_name = drawib_aliasname_dict.get(draw_ib, "自定义名称")
-                        
-                    node.label = obj.name # 设置节点标题方便识别
+                    node.label = obj.name
 
-                    # ----------------------
-                    # 自动连线到 Group
-                    # ----------------------
-                    # 如果 Group 最后一个插槽已被占用，手动扩展一个
-                    if group_node.inputs[-1].is_linked:
-                        group_node.inputs.new('SSMTSocketObject', f"Input {len(group_node.inputs) + 1}")
-                    
-                    tree.links.new(node.outputs[0], group_node.inputs[-1])
-                    
-                    # 布局计算
-                    count += 1
-                    current_y -= y_gap
-                    min_y = min(min_y, current_y)
+                    if target_group.inputs[-1].is_linked:
+                        target_group.inputs.new('SSMTSocketObject', f"Input {len(target_group.inputs) + 1}")
 
-        
-        # 4. 放置 Group 和 Output 节点
-        # 计算垂直中心大致位置
-        final_center_y = min_y / 2 if count <= 5 else -200 # 简单估算
-        
-        group_node.location = (current_x + 400, final_center_y)
+                    tree.links.new(node.outputs[0], target_group.inputs[-1])
+
+                    if tab_name:
+                        tab_node_lists[tab_name].append(node)
+                    else:
+                        default_node_list.append(node)
+
+        all_group_nodes = []
+        tab_order = list(tab_group_nodes.keys())
+
+        current_y = 0
+        for tab_name in tab_order:
+            nodes = tab_node_lists.get(tab_name, [])
+            for node in nodes:
+                node.location = (0, current_y)
+                current_y -= y_gap
+            current_y -= tab_gap - y_gap
+
+        for node in default_node_list:
+            node.location = (0, current_y)
+            current_y -= y_gap
+
+        has_default_links = any(inp.is_linked for inp in default_group_node.inputs)
+        if has_default_links:
+            all_group_nodes.append(default_group_node)
+        elif not all_group_nodes:
+            all_group_nodes.append(default_group_node)
+        else:
+            tree.nodes.remove(default_group_node)
+
+        for tab_name in tab_order:
+            all_group_nodes.append(tab_group_nodes[tab_name])
+
+        group_x = 400
+        group_current_y = 0
+
+        for grp_node in all_group_nodes:
+            grp_node.location = (group_x, group_current_y)
+            group_current_y -= 300
 
         output_node = tree.nodes.new('SSMTNode_Result_Output')
-        output_node.location = (current_x + 800, final_center_y)
+        output_node.location = (800, 0)
         output_node.label = "Generate Mod"
-        
-        # 连接 Group 到 Output
-        if len(output_node.inputs) > 0 and len(group_node.outputs) > 0:
-            tree.links.new(group_node.outputs[0], output_node.inputs[0])
 
-        # 触发一次group node的更新（虽然脚本连线有时不需要，但为了保险起见）
-        if hasattr(group_node, "update"):
-             group_node.update()
+        if len(output_node.inputs) > 0 and len(all_group_nodes) > 0:
+            if len(all_group_nodes) == 1:
+                tree.links.new(all_group_nodes[0].outputs[0], output_node.inputs[0])
+            else:
+                merge_node = tree.nodes.new('SSMTNode_Object_Group')
+                merge_node.label = "Merge"
+                merge_node.location = (600, 0)
 
-        print(f"Blueprint {tree_name} updated with imported objects.")
-        
+                for grp_node in all_group_nodes:
+                    if merge_node.inputs[-1].is_linked:
+                        merge_node.inputs.new('SSMTSocketObject', f"Input {len(merge_node.inputs) + 1}")
+                    tree.links.new(grp_node.outputs[0], merge_node.inputs[-1])
+
+                tree.links.new(merge_node.outputs[0], output_node.inputs[0])
+
+        for grp_node in all_group_nodes:
+            if hasattr(grp_node, "update"):
+                grp_node.update()
+
+        print(f"Blueprint {tree_name} updated with imported objects, grouped by workspace tabs.")
+
     except Exception as e:
         print(f"Error generating blueprint nodes: {e}")
         import traceback

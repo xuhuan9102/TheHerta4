@@ -214,11 +214,19 @@ class PreProcessCache:
     @classmethod
     def save_to_cache(cls, obj_name: str, copy_name: str, hash_value: str):
         copy_obj = bpy.data.objects.get(copy_name)
-        if not copy_obj or copy_obj.type != 'MESH' or not copy_obj.data:
+        if not copy_obj:
+            LOG.warning(f"⚠️ 缓存保存跳过: 找不到副本物体 {copy_name}")
+            return
+        if copy_obj.type != 'MESH':
+            LOG.warning(f"⚠️ 缓存保存跳过: {copy_name} 不是网格类型 (类型: {copy_obj.type})")
+            return
+        if not copy_obj.data:
+            LOG.warning(f"⚠️ 缓存保存跳过: {copy_name} 没有网格数据")
             return
 
         cache_dir = cls.get_cache_dir()
         if not cache_dir:
+            LOG.warning(f"⚠️ 缓存保存跳过: 无法获取缓存目录 (blend文件可能未保存)")
             return
 
         cache_filename = f"{hash_value}.blend"

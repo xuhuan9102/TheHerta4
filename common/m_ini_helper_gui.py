@@ -203,7 +203,7 @@ class M_IniHelperGUI:
                 commandlist_section.append("if $Button_number == " + str(button_number + 1))
             else:
                 commandlist_section.append("else if $Button_number == " + str(button_number + 1))
-            key_tmp_name = "$swapkey" + str(button_number)
+            key_tmp_name = mkey.key_name
             commandlist_section.append("    if " + key_tmp_name + " < " + str(len(mkey.value_list) - 1))
             commandlist_section.append("        " + key_tmp_name + " = " + key_tmp_name + " + 1" )
             commandlist_section.append("    else")

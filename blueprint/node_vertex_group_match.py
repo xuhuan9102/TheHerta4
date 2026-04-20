@@ -5,9 +5,12 @@
 """
 import bpy
 import bmesh
+import json
 import re
 import time
+import uuid
 import numpy as np
+from collections import defaultdict
 from bpy.types import PropertyGroup
 from mathutils import Vector, kdtree
 from typing import Dict, List, Tuple, Optional
@@ -161,6 +164,18 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         default=""
     )
 
+    source_collection: bpy.props.StringProperty(
+        name="源合集",
+        description="源合集名称，设置后会将合集下所有网格物体作为源物体参与匹配",
+        default=""
+    )
+
+    runtime_source_object: bpy.props.StringProperty(
+        name="临时源物体",
+        description="合集模式下用于计算和权重预览的持久临时合并物体",
+        default=""
+    )
+
     target_object: bpy.props.StringProperty(
         name="目标物体",
         description="目标物体名称",
@@ -233,6 +248,24 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         default=""
     )
 
+    source_mapping_applied: bpy.props.BoolProperty(
+        name="已应用到原物体",
+        description="当前映射表是否已直接应用到源物体顶点组名称",
+        default=False
+    )
+
+    source_mapping_backup: bpy.props.StringProperty(
+        name="原顶点组备份",
+        description="用于撤回时恢复原始顶点组名称",
+        default=""
+    )
+
+    source_mapping_backup_object: bpy.props.StringProperty(
+        name="备份物体名",
+        description="记录已应用映射的源物体名称",
+        default=""
+    )
+
     def init(self, context):
         self.outputs.new('SSMTSocketObject', "Output")
         self.width = 300
@@ -240,7 +273,13 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
     def draw_buttons(self, context, layout):
         box = layout.box()
         box.label(text="顶点组匹配设置", icon='GROUP')
+
+        if self.source_collection:
+            box.label(text="当前使用源合集模式，优先于单物体", icon='OUTLINER_COLLECTION')
         
+        row = box.row()
+        row.prop_search(self, "source_collection", bpy.data, "collections", text="源合集")
+
         row = box.row()
         row.prop_search(self, "source_object", bpy.data, "objects", text="源物体")
         
@@ -280,6 +319,12 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         op = row.operator("ssmt.vertex_group_match_execute", text="执行匹配", icon='PLAY')
         op.node_name = self.name
         op = row.operator("ssmt.vertex_group_match_clear", text="清除映射", icon='X')
+        op.node_name = self.name
+
+        row = layout.row(align=True)
+        apply_text = "撤回应用" if self.source_mapping_applied else "应用到原物体"
+        apply_icon = 'LOOP_BACK' if self.source_mapping_applied else 'CHECKMARK'
+        op = row.operator("ssmt.vertex_group_match_apply_to_source", text=apply_text, icon=apply_icon)
         op.node_name = self.name
         
         layout.separator()
@@ -363,6 +408,471 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
             return parts[0].strip(), parts[1].strip()
         return name, name
 
+    def get_source_scope_label(self):
+        if self.source_collection:
+            return f"源合集: {self.source_collection}"
+        if self.source_object:
+            return f"源物体: {self.source_object}"
+        return "源物体未设置"
+
+    def get_source_mesh_objects(self):
+        """解析当前节点配置的源物体集合。设置源合集时优先使用合集。"""
+        if self.source_collection:
+            source_collection = bpy.data.collections.get(self.source_collection)
+            if not source_collection:
+                return [], f"未找到源合集: {self.source_collection}"
+
+            source_objects = [
+                obj for obj in source_collection.all_objects
+                if obj.type == 'MESH' and obj.data
+            ]
+            if not source_objects:
+                return [], f"源合集 '{self.source_collection}' 下没有可用的网格物体"
+            return source_objects, ""
+
+        source_obj = bpy.data.objects.get(self.source_object)
+        if not source_obj:
+            return [], "未找到源物体"
+        if source_obj.type != 'MESH' or not source_obj.data:
+            return [], "源物体必须是带网格数据的网格物体"
+        return [source_obj], ""
+
+    @staticmethod
+    def _merge_source_objects_for_match(context, source_objects, temp_prefix="SSMT_VGMatchTemp", force_temp=False, object_name=""):
+        valid_sources = [obj for obj in source_objects if obj and obj.type == 'MESH' and obj.data]
+        if len(valid_sources) == 1 and not force_temp:
+            return valid_sources[0], False
+
+        if not valid_sources:
+            return None, False
+
+        depsgraph = context.evaluated_depsgraph_get()
+        merged_name = object_name or f"{temp_prefix}_{uuid.uuid4().hex[:8]}"
+        merged_mesh = bpy.data.meshes.new(f"{merged_name}_mesh")
+        merged_obj = bpy.data.objects.new(merged_name, merged_mesh)
+        merged_obj["ssmt_temp_vg_match"] = True
+        merged_obj["ssmt_temp_source_names"] = ",".join(obj.name for obj in valid_sources)
+        merged_obj.hide_render = True
+        merged_obj.display_type = 'WIRE'
+
+        vertices = []
+        edges = []
+        faces = []
+        group_assignments = defaultdict(list)
+        vertex_offset = 0
+
+        for source_obj in valid_sources:
+            evaluated_obj = source_obj.evaluated_get(depsgraph)
+            evaluated_mesh = evaluated_obj.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+            try:
+                if not evaluated_mesh or len(evaluated_mesh.vertices) == 0:
+                    continue
+
+                source_group_names = {vg.index: vg.name for vg in source_obj.vertex_groups}
+                vertex_count = len(evaluated_mesh.vertices)
+
+                for vert in evaluated_mesh.vertices:
+                    vertices.append(tuple((evaluated_obj.matrix_world @ vert.co)[:]))
+
+                for edge in evaluated_mesh.edges:
+                    edges.append((
+                        vertex_offset + edge.vertices[0],
+                        vertex_offset + edge.vertices[1],
+                    ))
+
+                for polygon in evaluated_mesh.polygons:
+                    faces.append([
+                        vertex_offset + vertex_index
+                        for vertex_index in polygon.vertices
+                    ])
+
+                source_vertices = source_obj.data.vertices
+                if len(source_vertices) != vertex_count:
+                    source_vertices = source_obj.data.vertices[:min(len(source_obj.data.vertices), vertex_count)]
+
+                for vert_index in range(min(len(source_vertices), vertex_count)):
+                    source_vert = source_vertices[vert_index]
+                    merged_index = vertex_offset + vert_index
+                    for group_elem in source_vert.groups:
+                        group_name = source_group_names.get(group_elem.group)
+                        if not group_name or group_elem.weight <= 0:
+                            continue
+                        group_assignments[group_name].append((merged_index, group_elem.weight))
+
+                vertex_offset += vertex_count
+            finally:
+                evaluated_obj.to_mesh_clear()
+
+        if not vertices:
+            bpy.data.objects.remove(merged_obj, do_unlink=True)
+            bpy.data.meshes.remove(merged_mesh, do_unlink=True)
+            return None, False
+
+        merged_mesh.from_pydata(vertices, edges, faces)
+        merged_mesh.update()
+        merged_mesh.validate(verbose=False)
+        context.scene.collection.objects.link(merged_obj)
+
+        for group_name, assignments in group_assignments.items():
+            vertex_group = merged_obj.vertex_groups.new(name=group_name)
+            for vert_index, weight in assignments:
+                vertex_group.add([vert_index], weight, 'REPLACE')
+
+        return merged_obj, True
+
+    @staticmethod
+    def _remove_temp_object(obj):
+        if not obj:
+            return
+
+        mesh_data = obj.data if getattr(obj, 'type', None) == 'MESH' else None
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh_data and mesh_data.users == 0:
+            bpy.data.meshes.remove(mesh_data, do_unlink=True)
+
+    def _get_runtime_source_object_base_name(self):
+        node_tree_name = self.id_data.name if getattr(self, 'id_data', None) else "Blueprint"
+        safe_tree_name = re.sub(r'[^A-Za-z0-9_]+', '_', node_tree_name)[:24] or "Blueprint"
+        safe_node_name = re.sub(r'[^A-Za-z0-9_]+', '_', self.name)[:24] or "VertexGroupMatch"
+        return f"SSMT_VGMatchRuntime_{safe_tree_name}_{safe_node_name}"
+
+    def get_runtime_source_object(self):
+        if not self.runtime_source_object:
+            return None
+        return bpy.data.objects.get(self.runtime_source_object)
+
+    def clear_runtime_source_object(self):
+        runtime_obj = self.get_runtime_source_object()
+        if runtime_obj:
+            self._remove_temp_object(runtime_obj)
+        self.runtime_source_object = ""
+
+    def ensure_runtime_source_object(self, context, source_objects):
+        runtime_name = self.runtime_source_object or self._get_runtime_source_object_base_name()
+        existing_runtime = bpy.data.objects.get(runtime_name)
+        if existing_runtime:
+            self._remove_temp_object(existing_runtime)
+
+        runtime_obj, is_temp_object = self._merge_source_objects_for_match(
+            context,
+            source_objects,
+            temp_prefix=self._get_runtime_source_object_base_name(),
+            force_temp=True,
+            object_name=runtime_name,
+        )
+        if not runtime_obj:
+            return None, False
+
+        runtime_obj["ssmt_vg_match_persistent"] = True
+        runtime_obj["ssmt_vg_match_node_name"] = self.name
+        runtime_obj["ssmt_vg_match_node_tree"] = self.id_data.name if getattr(self, 'id_data', None) else ""
+        runtime_obj["ssmt_vg_match_source_collection"] = self.source_collection
+        runtime_obj.hide_render = True
+        runtime_obj.display_type = 'WIRE'
+        self.runtime_source_object = runtime_obj.name
+        return runtime_obj, is_temp_object
+
+    def build_runtime_source_object(self, context):
+        source_objects, error_message = self.get_source_mesh_objects()
+        if error_message:
+            return None, False, error_message
+
+        if self.source_collection:
+            source_obj, is_temp_object = self.ensure_runtime_source_object(context, source_objects)
+        else:
+            source_obj, is_temp_object = self._merge_source_objects_for_match(context, source_objects)
+            if self.runtime_source_object:
+                self.clear_runtime_source_object()
+
+        if not source_obj:
+            return None, False, "源物体合并失败，无法执行顶点组匹配"
+
+        return source_obj, is_temp_object, ""
+
+    def get_mapping_dict(self):
+        """从当前节点关联的映射文本读取映射字典。"""
+        if not self.mapping_text_name:
+            return {}
+
+        text = bpy.data.texts.get(self.mapping_text_name)
+        if not text:
+            return {}
+
+        mapping = {}
+        for line in text.lines:
+            clean_line = re.sub(r'[#//].*', '', line.body).strip()
+            if '=' not in clean_line:
+                continue
+
+            left, right = clean_line.split('=', 1)
+            left = left.strip()
+            right = right.strip()
+            if left and right:
+                mapping[left] = right
+
+        return mapping
+
+    @staticmethod
+    def _build_temp_vertex_group_name(index):
+        return f"__SSMT_VG_TMP_{index:04d}__"
+
+    def _rename_vertex_groups_by_index(self, obj, target_names_by_index):
+        """两阶段重命名，避免 A->B、B->C 这类冲突导致的自动重名。"""
+        vertex_groups = obj.vertex_groups
+        rename_indices = [
+            index for index, target_name in target_names_by_index.items()
+            if 0 <= index < len(vertex_groups) and vertex_groups[index].name != target_name
+        ]
+
+        if not rename_indices:
+            return 0
+
+        for index in rename_indices:
+            vertex_groups[index].name = self._build_temp_vertex_group_name(index)
+
+        for index in rename_indices:
+            vertex_groups[index].name = target_names_by_index[index]
+
+        return len(rename_indices)
+
+    def _collect_vertex_group_weights(self, obj):
+        index_to_name = {vg.index: vg.name for vg in obj.vertex_groups}
+        weights_by_name = {vg.name: defaultdict(float) for vg in obj.vertex_groups}
+
+        for vert in obj.data.vertices:
+            for group_elem in vert.groups:
+                group_name = index_to_name.get(group_elem.group)
+                if not group_name or group_elem.weight <= 0:
+                    continue
+                weights_by_name[group_name][vert.index] += group_elem.weight
+
+        return weights_by_name
+
+    def _create_vertex_group_weight_snapshot(self, obj):
+        group_map = {str(vg.index): vg.name for vg in obj.vertex_groups}
+        vertex_weights = defaultdict(list)
+
+        for vertex in obj.data.vertices:
+            for group_elem in vertex.groups:
+                if group_elem.weight > 1e-6:
+                    vertex_weights[str(vertex.index)].append([group_elem.group, group_elem.weight])
+
+        return {
+            'group_map': group_map,
+            'vertex_weights': dict(vertex_weights),
+        }
+
+    @staticmethod
+    def _remove_all_vertex_groups(obj):
+        for vertex_group in reversed(list(obj.vertex_groups)):
+            try:
+                obj.vertex_groups.remove(vertex_group)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _apply_weight_maps_to_object(obj, ordered_group_names, weights_by_name):
+        for group_name in ordered_group_names:
+            vertex_group = obj.vertex_groups.new(name=group_name)
+            weight_to_vertices = defaultdict(list)
+            for vert_idx, weight in weights_by_name.get(group_name, {}).items():
+                clamped_weight = min(1.0, weight)
+                if clamped_weight > 0:
+                    weight_to_vertices[clamped_weight].append(vert_idx)
+
+            for weight, vert_indices in weight_to_vertices.items():
+                vertex_group.add(vert_indices, weight, 'REPLACE')
+
+    def _remove_backup_objects_from_payload(self, backup_payload):
+        return
+
+    def _apply_mapping_with_merge(self, source_obj, mapping):
+        ordered_final_names = []
+        final_name_by_original = {}
+
+        for vertex_group in source_obj.vertex_groups:
+            original_name, mapped_name = self.parse_vg_name(vertex_group.name)
+            final_name = mapping.get(original_name) or mapping.get(mapped_name) or vertex_group.name
+            final_name_by_original[vertex_group.name] = final_name
+            if final_name not in ordered_final_names:
+                ordered_final_names.append(final_name)
+
+        if not ordered_final_names:
+            return 0, 0
+
+        original_weights = self._collect_vertex_group_weights(source_obj)
+        merged_weights = {group_name: defaultdict(float) for group_name in ordered_final_names}
+        changed_group_count = 0
+
+        for original_name, weights in original_weights.items():
+            final_name = final_name_by_original.get(original_name, original_name)
+            if final_name != original_name:
+                changed_group_count += 1
+            for vert_idx, weight in weights.items():
+                merged_weights[final_name][vert_idx] += weight
+
+        merged_group_count = max(0, len(source_obj.vertex_groups) - len(ordered_final_names))
+
+        self._remove_all_vertex_groups(source_obj)
+        self._apply_weight_maps_to_object(source_obj, ordered_final_names, merged_weights)
+
+        return changed_group_count, merged_group_count
+
+    def _restore_vertex_groups_from_snapshot(self, source_obj, snapshot):
+        if not isinstance(snapshot, dict):
+            return False, f"源物体 '{source_obj.name}' 的权重备份格式无效"
+
+        group_map = snapshot.get('group_map', {})
+        vertex_weights = snapshot.get('vertex_weights', {})
+        if not isinstance(group_map, dict) or not isinstance(vertex_weights, dict):
+            return False, f"源物体 '{source_obj.name}' 的权重备份格式无效"
+
+        self._remove_all_vertex_groups(source_obj)
+
+        ordered_group_names = []
+        for group_index in sorted(group_map.keys(), key=lambda value: int(value) if str(value).isdigit() else str(value)):
+            group_name = group_map[group_index]
+            if group_name not in ordered_group_names:
+                ordered_group_names.append(group_name)
+                source_obj.vertex_groups.new(name=group_name)
+
+        current_vg_map = {vg.name: vg for vg in source_obj.vertex_groups}
+
+        for vert_idx_str, weights in vertex_weights.items():
+            try:
+                vert_idx = int(vert_idx_str)
+            except (TypeError, ValueError):
+                continue
+
+            if vert_idx < 0 or vert_idx >= len(source_obj.data.vertices):
+                continue
+
+            for group_idx, weight in weights:
+                group_name = group_map.get(str(group_idx))
+                if not group_name:
+                    group_name = group_map.get(group_idx)
+                if not group_name:
+                    continue
+
+                vertex_group = current_vg_map.get(group_name)
+                if vertex_group and weight > 1e-6:
+                    vertex_group.add([vert_idx], min(1.0, weight), 'ADD')
+
+        return True, ""
+
+    def apply_mapping_to_source_object(self):
+        """将映射表直接应用到源物体或源合集下所有物体的顶点组名称。"""
+        if self.source_mapping_applied:
+            return False, "映射已经处于应用状态"
+
+        source_objects, error_message = self.get_source_mesh_objects()
+        if error_message:
+            return False, error_message
+
+        mapping = self.get_mapping_dict()
+        if not mapping:
+            return False, "未找到可用映射表，请先执行匹配"
+
+        backup_payload = {
+            'source_object': self.source_object,
+            'source_collection': self.source_collection,
+            'objects': {}
+        }
+        renamed_count = 0
+        merged_count = 0
+        renamed_objects = 0
+
+        for source_obj in source_objects:
+            will_change = False
+            for vertex_group in source_obj.vertex_groups:
+                original_name, mapped_name = self.parse_vg_name(vertex_group.name)
+                if original_name in mapping or mapped_name in mapping:
+                    will_change = True
+                    break
+
+            if not will_change:
+                continue
+
+            backup_payload['objects'][source_obj.name] = {
+                'weight_snapshot': self._create_vertex_group_weight_snapshot(source_obj),
+            }
+
+            changed_group_count, merged_group_count = self._apply_mapping_with_merge(source_obj, mapping)
+            renamed_count += changed_group_count
+            merged_count += merged_group_count
+            renamed_objects += 1
+
+        if renamed_count == 0:
+            self._remove_backup_objects_from_payload(backup_payload)
+            return False, "源物体或源合集中没有顶点组命中当前映射表"
+
+        self.source_mapping_backup = json.dumps(backup_payload, ensure_ascii=False)
+        self.source_mapping_backup_object = self.source_collection or self.source_object
+        self.source_mapping_applied = True
+        scope_label = self.get_source_scope_label()
+        return True, f"已将映射表应用到{scope_label}，共处理 {renamed_objects} 个物体，重命名 {renamed_count} 个顶点组，合并 {merged_count} 组同名顶点组"
+
+    def revert_mapping_on_source_object(self):
+        """撤回映射应用，恢复源物体原始顶点组名称。"""
+        if not self.source_mapping_applied:
+            return False, "当前没有可撤回的应用"
+
+        try:
+            backup_payload = json.loads(self.source_mapping_backup) if self.source_mapping_backup else {}
+        except json.JSONDecodeError:
+            return False, "原始顶点组备份已损坏，无法撤回"
+
+        object_backups = backup_payload.get('objects', {}) if isinstance(backup_payload, dict) else {}
+        if not object_backups:
+            return False, "未找到可撤回的物体备份信息"
+
+        restored_count = 0
+        restored_objects = 0
+
+        for object_name, object_info in object_backups.items():
+            source_obj = bpy.data.objects.get(object_name)
+            if not source_obj:
+                return False, f"找不到已应用映射的源物体: {object_name}"
+            if source_obj.type != 'MESH':
+                return False, f"备份对应的源物体不是网格物体: {object_name}"
+
+            snapshot = object_info.get('weight_snapshot') if isinstance(object_info, dict) else None
+            if not snapshot:
+                return False, f"找不到源物体 '{object_name}' 的顶点组权重备份，无法撤回"
+
+            success, error_message = self._restore_vertex_groups_from_snapshot(source_obj, snapshot)
+            if not success:
+                return False, error_message
+
+            group_map = snapshot.get('group_map', {}) if isinstance(snapshot, dict) else {}
+            restored_count += len(set(group_map.values())) if isinstance(group_map, dict) else 0
+            restored_objects += 1
+
+        self._remove_backup_objects_from_payload(backup_payload)
+
+        self.source_mapping_applied = False
+        self.source_mapping_backup = ""
+        self.source_mapping_backup_object = ""
+        scope_label = self.get_source_scope_label()
+        return True, f"已撤回{scope_label}上的映射应用，恢复 {restored_objects} 个物体的 {restored_count} 个顶点组名称"
+
+    @staticmethod
+    def get_or_create_debug_material(mat_name, color):
+        mat = bpy.data.materials.get(mat_name)
+        if not mat:
+            mat = bpy.data.materials.new(name=mat_name)
+        mat.diffuse_color = color
+        mat.use_nodes = True
+        principled = mat.node_tree.nodes.get("Principled BSDF")
+        if not principled:
+            principled = mat.node_tree.nodes.new('ShaderNodeBsdfPrincipled')
+            output = mat.node_tree.nodes.get("Material Output")
+            if output:
+                mat.node_tree.links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+        principled.inputs['Base Color'].default_value = color
+        principled.inputs['Roughness'].default_value = 0.4
+        return mat
+
     def create_debug_object(self, name, location, parent, is_connected=False, distance=None):
         """创建调试物体"""
         is_source = name.startswith("Source_")
@@ -388,10 +898,7 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
             bm.free()
             mat_name, color = "VGTP_Debug_Yellow", (1.0, 1.0, 0.0, 1.0)
 
-        mat = bpy.data.materials.get(mat_name)
-        if not mat:
-            mat = bpy.data.materials.new(name=mat_name)
-            mat.diffuse_color = color
+        mat = self.get_or_create_debug_material(mat_name, color)
 
         debug_obj = bpy.data.objects.new(name, mesh)
         debug_obj.location = location
@@ -443,20 +950,14 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
                     
                     if is_one_to_many:
                         mat_name = "VGTP_Debug_Red_Error"
-                        mat = bpy.data.materials.get(mat_name)
-                        if not mat:
-                            mat = bpy.data.materials.new(name=mat_name)
-                            mat.diffuse_color = (1.0, 0.0, 0.0, 1.0)
+                        mat = self.get_or_create_debug_material(mat_name, (1.0, 0.0, 0.0, 1.0))
                         curve_obj.data.materials.clear()
                         curve_obj.data.materials.append(mat)
                         curve_obj["is_one_to_many_connection"] = True
                         curve_obj["connected_targets"] = str(one_to_many_connections[src_name])
                     else:
                         mat_name = "VGTP_Debug_White_Normal"
-                        mat = bpy.data.materials.get(mat_name)
-                        if not mat:
-                            mat = bpy.data.materials.new(name=mat_name)
-                            mat.diffuse_color = (1.0, 1.0, 1.0, 1.0)
+                        mat = self.get_or_create_debug_material(mat_name, (1.0, 1.0, 1.0, 1.0))
                         curve_obj.data.materials.clear()
                         curve_obj.data.materials.append(mat)
                         curve_obj["is_one_to_many_connection"] = False
@@ -479,21 +980,31 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
 
     def execute_match(self, context):
         """执行顶点组匹配"""
-        source_obj = bpy.data.objects.get(self.source_object)
+        source_obj, source_is_temp, source_error = self.build_runtime_source_object(context)
         target_obj = bpy.data.objects.get(self.target_object)
 
+        if source_error:
+            return None, source_error
+
         if not source_obj or not target_obj:
-            return None, "请同时指定源物体和目标物体"
+            return None, "请同时指定源物体/源合集和目标物体"
         
         if source_obj.type != 'MESH' or target_obj.type != 'MESH':
             return None, "源和目标都必须是网格物体"
 
         debug_parent = None
+        source_scope_label = self.get_source_scope_label()
+
         if self.create_debug_objects:
-            parent_name = f"Debug_Match_{source_obj.name}_to_{target_obj.name}_{int(time.time())}"
+            parent_name = f"Debug_Match_{target_obj.name}_{int(time.time())}"
             debug_parent = bpy.data.objects.new(parent_name, None)
             context.scene.collection.objects.link(debug_parent)
-            debug_parent["vgtp_source_name"] = source_obj.name
+            debug_parent["vgtp_node_name"] = self.name
+            debug_parent["vgtp_node_tree"] = self.id_data.name if getattr(self, 'id_data', None) else ""
+            debug_parent["vgtp_source_name"] = self.source_object
+            debug_parent["vgtp_source_collection"] = self.source_collection
+            debug_parent["vgtp_source_scope_label"] = source_scope_label
+            debug_parent["vgtp_runtime_source_object"] = source_obj.name if source_is_temp else ""
             debug_parent["vgtp_target_name"] = target_obj.name
 
         source_deformed_data = self.get_deformed_vertices(context, source_obj) if self.use_shape_key else None
@@ -503,7 +1014,7 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         target_centers = self.get_vertex_group_centers(context, target_obj, target_deformed_data)
 
         if not source_centers or not target_centers:
-            if debug_parent: 
+            if debug_parent:
                 bpy.data.objects.remove(debug_parent, do_unlink=True)
             return None, "物体缺少有效的顶点组"
 
@@ -549,10 +1060,7 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
                     source_debug_objects[src_name]["is_connected"] = True
                     source_debug_objects[src_name]["chamfer_distance"] = chamfer_dist
                     mat_name = "VGTP_Debug_Blue"
-                    mat = bpy.data.materials.get(mat_name)
-                    if not mat:
-                        mat = bpy.data.materials.new(name=mat_name)
-                        mat.diffuse_color = (0.0, 0.2, 1.0, 1.0)
+                    mat = self.get_or_create_debug_material(mat_name, (0.0, 0.2, 1.0, 1.0))
                     source_debug_objects[src_name].data.materials.clear()
                     source_debug_objects[src_name].data.materials.append(mat)
         else:
@@ -576,10 +1084,7 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
                     if self.create_debug_objects and src_name in source_debug_objects:
                         source_debug_objects[src_name]["is_connected"] = True
                         mat_name = "VGTP_Debug_Blue"
-                        mat = bpy.data.materials.get(mat_name)
-                        if not mat:
-                            mat = bpy.data.materials.new(name=mat_name)
-                            mat.diffuse_color = (0.0, 0.2, 1.0, 1.0)
+                        mat = self.get_or_create_debug_material(mat_name, (0.0, 0.2, 1.0, 1.0))
                         source_debug_objects[src_name].data.materials.clear()
                         source_debug_objects[src_name].data.materials.append(mat)
 
@@ -607,7 +1112,8 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
             text = bpy.data.texts.new(text_name)
 
         text.write(f"# 顶点组名称映射表\n")
-        text.write(f"# 源物体: {source_obj.name}\n")
+        text.write(f"# {source_scope_label}\n")
+        text.write(f"# 用于计算的源物体: {source_obj.name}\n")
         text.write(f"# 目标物体: {target_obj.name}\n")
         text.write(f"# 匹配阈值: {self.match_threshold}\n")
         text.write(f"# 使用Chamfer匹配: {self.use_chamfer_matching}\n")
@@ -722,45 +1228,88 @@ class SSMT_OT_VertexGroupMatchClear(bpy.types.Operator):
             self.report({'WARNING'}, "请选中顶点组匹配节点")
             return {'CANCELLED'}
         
-        source_obj = bpy.data.objects.get(node.source_object)
-        target_obj = bpy.data.objects.get(node.target_object)
+        debug_objects_to_remove = []
+        mapping_texts_to_remove = set()
         
-        if source_obj and target_obj:
-            debug_objects_to_remove = []
-            mapping_texts_to_remove = set()
+        for obj in find_debug_parents_for_node(node):
+            debug_objects_to_remove.append(obj)
+            obj_mapping_text = obj.get("vgtp_mapping_text", "")
+            if obj_mapping_text:
+                mapping_texts_to_remove.add(obj_mapping_text)
             
-            for obj in bpy.data.objects:
-                if obj.name.startswith("Debug_Match_"):
-                    obj_source = obj.get("vgtp_source_name", "")
-                    obj_target = obj.get("vgtp_target_name", "")
-                    if obj_source == source_obj.name and obj_target == target_obj.name:
-                        debug_objects_to_remove.append(obj)
-                        obj_mapping_text = obj.get("vgtp_mapping_text", "")
-                        if obj_mapping_text:
-                            mapping_texts_to_remove.add(obj_mapping_text)
-            
-            for debug_parent in debug_objects_to_remove:
-                children_to_remove = list(debug_parent.children)
-                for child in children_to_remove:
-                    bpy.data.objects.remove(child, do_unlink=True)
-                bpy.data.objects.remove(debug_parent, do_unlink=True)
-            
-            if node.mapping_text_name:
-                mapping_texts_to_remove.add(node.mapping_text_name)
-            
-            for text_name in mapping_texts_to_remove:
-                if text_name in bpy.data.texts:
-                    bpy.data.texts.remove(bpy.data.texts[text_name])
-            
-            node.mapping_text_name = ""
-            
-            if mapping_texts_to_remove or debug_objects_to_remove:
-                self.report({'INFO'}, f"已清除 {len(mapping_texts_to_remove)} 个映射表和 {len(debug_objects_to_remove)} 个调试物体")
-            else:
-                self.report({'INFO'}, f"未找到需要清除的内容")
+        for debug_parent in debug_objects_to_remove:
+            children_to_remove = list(debug_parent.children)
+            for child in children_to_remove:
+                bpy.data.objects.remove(child, do_unlink=True)
+            bpy.data.objects.remove(debug_parent, do_unlink=True)
+        
+        if node.mapping_text_name:
+            mapping_texts_to_remove.add(node.mapping_text_name)
+        
+        for text_name in mapping_texts_to_remove:
+            if text_name in bpy.data.texts:
+                bpy.data.texts.remove(bpy.data.texts[text_name])
+
+        node.clear_runtime_source_object()
+
+        try:
+            backup_payload = json.loads(node.source_mapping_backup) if node.source_mapping_backup else {}
+        except json.JSONDecodeError:
+            backup_payload = {}
+        node._remove_backup_objects_from_payload(backup_payload)
+        
+        node.mapping_text_name = ""
+        node.source_mapping_applied = False
+        node.source_mapping_backup = ""
+        node.source_mapping_backup_object = ""
+        
+        if mapping_texts_to_remove or debug_objects_to_remove:
+            self.report({'INFO'}, f"已清除 {len(mapping_texts_to_remove)} 个映射表和 {len(debug_objects_to_remove)} 个调试物体，并移除临时源物体")
         else:
-            self.report({'WARNING'}, "请先设置源物体和目标物体")
+            self.report({'INFO'}, f"未找到需要清除的内容")
         
+        return {'FINISHED'}
+
+
+class SSMT_OT_VertexGroupMatchApplyToSource(bpy.types.Operator):
+    '''将映射表直接应用到源物体，或再次执行以撤回'''
+    bl_idname = "ssmt.vertex_group_match_apply_to_source"
+    bl_label = "应用映射到原物体"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty(default="")
+
+    @classmethod
+    def poll(cls, context):
+        space_data = getattr(context, "space_data", None)
+        return space_data and space_data.type == 'NODE_EDITOR'
+
+    def execute(self, context):
+        node = None
+        if self.node_name:
+            space_data = getattr(context, "space_data", None)
+            if space_data and hasattr(space_data, 'node_tree') and space_data.node_tree:
+                node = space_data.node_tree.nodes.get(self.node_name)
+
+        if not node:
+            selected_nodes = [n for n in context.selected_nodes if n.bl_idname == 'SSMTNode_VertexGroupMatch']
+            if selected_nodes:
+                node = selected_nodes[0]
+
+        if not node or node.bl_idname != 'SSMTNode_VertexGroupMatch':
+            self.report({'WARNING'}, "请选中顶点组匹配节点")
+            return {'CANCELLED'}
+
+        if node.source_mapping_applied:
+            success, message = node.revert_mapping_on_source_object()
+        else:
+            success, message = node.apply_mapping_to_source_object()
+
+        if not success:
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -793,20 +1342,13 @@ class SSMT_OT_VertexGroupMatchToggleDebug(bpy.types.Operator):
             self.report({'WARNING'}, "请选中顶点组匹配节点")
             return {'CANCELLED'}
         
-        source_obj = bpy.data.objects.get(node.source_object)
         target_obj = bpy.data.objects.get(node.target_object)
         
-        if not source_obj or not target_obj:
-            self.report({'WARNING'}, "请先设置源物体和目标物体")
+        if not target_obj:
+            self.report({'WARNING'}, "请先设置目标物体")
             return {'CANCELLED'}
         
-        debug_objects = []
-        for obj in bpy.data.objects:
-            if obj.name.startswith("Debug_Match_"):
-                obj_source = obj.get("vgtp_source_name", "")
-                obj_target = obj.get("vgtp_target_name", "")
-                if obj_source == source_obj.name and obj_target == target_obj.name:
-                    debug_objects.append(obj)
+        debug_objects = find_debug_parents_for_node(node)
         
         if not debug_objects:
             self.report({'INFO'}, "未找到关联的调试物体，请先执行匹配")
@@ -825,19 +1367,76 @@ class SSMT_OT_VertexGroupMatchToggleDebug(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def find_debug_parents_for_node(node):
+    """优先按节点标识查找调试父级，兼容旧版按源/目标物体名回退。"""
+    node_tree_name = node.id_data.name if getattr(node, 'id_data', None) else ""
+    debug_parents = []
+    seen_names = set()
+
+    for obj in bpy.data.objects:
+        if not obj.name.startswith("Debug_Match_"):
+            continue
+
+        if obj.get("vgtp_node_name", "") == node.name:
+            obj_tree_name = obj.get("vgtp_node_tree", "")
+            if not node_tree_name or obj_tree_name == node_tree_name:
+                if obj.name not in seen_names:
+                    debug_parents.append(obj)
+                    seen_names.add(obj.name)
+                continue
+
+        source_name = obj.get("vgtp_source_name", "")
+        target_name = obj.get("vgtp_target_name", "")
+        if source_name == getattr(node, 'source_object', '') and target_name == getattr(node, 'target_object', ''):
+            if obj.name not in seen_names:
+                debug_parents.append(obj)
+                seen_names.add(obj.name)
+
+    return debug_parents
+
+
+def get_debug_source_objects(debug_parent):
+    """从调试父级解析源物体列表，支持源合集。"""
+    source_collection_name = debug_parent.get("vgtp_source_collection", "")
+    if source_collection_name:
+        source_collection = bpy.data.collections.get(source_collection_name)
+        if source_collection:
+            source_objects = [
+                obj for obj in source_collection.all_objects
+                if obj.type == 'MESH' and obj.data
+            ]
+            if source_objects:
+                return source_objects
+
+    source_obj_name = debug_parent.get("vgtp_source_name", "")
+    source_obj = bpy.data.objects.get(source_obj_name) if source_obj_name else None
+    if source_obj and source_obj.type == 'MESH' and source_obj.data:
+        return [source_obj]
+
+    return []
+
+
+def get_debug_runtime_source_object(debug_parent):
+    runtime_source_name = debug_parent.get("vgtp_runtime_source_object", "")
+    if runtime_source_name:
+        runtime_obj = bpy.data.objects.get(runtime_source_name)
+        if runtime_obj and runtime_obj.type == 'MESH' and runtime_obj.data:
+            return runtime_obj
+
+    return None
+
+
 def find_debug_info(source_empty):
-    """从调试物体查找关联的源物体、目标物体和调试父级"""
+    """从调试物体查找关联的源物体列表、目标物体和调试父级"""
     debug_parent = source_empty.parent
     if not debug_parent:
         return None, None, None
-    
-    source_obj_name = debug_parent.get("vgtp_source_name")
+
+    source_objects = get_debug_source_objects(debug_parent)
     target_obj_name = debug_parent.get("vgtp_target_name")
-    
-    source_obj = bpy.data.objects.get(source_obj_name) if source_obj_name else None
     target_obj = bpy.data.objects.get(target_obj_name) if target_obj_name else None
-    
-    return source_obj, target_obj, debug_parent
+
+    return source_objects, target_obj, debug_parent
 
 
 class SSMT_OT_VertexGroupMatchSync(bpy.types.Operator):
@@ -922,13 +1521,8 @@ class SSMT_OT_VertexGroupMatchSync(bpy.types.Operator):
             self.report({'ERROR'}, "无法确定调试父级")
             return {'CANCELLED'}
 
-        source_obj_name = debug_parent.get("vgtp_source_name")
+        source_scope_label = debug_parent.get("vgtp_source_scope_label", "源物体")
         target_obj_name = debug_parent.get("vgtp_target_name")
-        
-        source_obj = bpy.data.objects.get(source_obj_name) if source_obj_name else None
-        if not source_obj:
-            self.report({'ERROR'}, "无法确定关联的源物体")
-            return {'CANCELLED'}
 
         mapping_text = self.find_mapping_text_from_debug_parent(debug_parent)
         if not mapping_text:
@@ -946,7 +1540,7 @@ class SSMT_OT_VertexGroupMatchSync(bpy.types.Operator):
             
             mapping_text = bpy.data.texts.new(text_name)
             mapping_text.write(f"# 顶点组名称映射表\n")
-            mapping_text.write(f"# 源物体: {source_obj_name}\n")
+            mapping_text.write(f"# {source_scope_label}\n")
             mapping_text.write(f"# 目标物体: {target_obj_name}\n")
             mapping_text.write(f"# 格式: 源名称=目标名称\n")
             debug_parent["vgtp_mapping_text"] = text_name
@@ -957,10 +1551,7 @@ class SSMT_OT_VertexGroupMatchSync(bpy.types.Operator):
                 return {'CANCELLED'}
 
         mat_name = "VGTP_Debug_Blue"
-        mat = bpy.data.materials.get(mat_name)
-        if not mat:
-            mat = bpy.data.materials.new(name=mat_name)
-            mat.diffuse_color = (0.0, 0.2, 1.0, 1.0)
+        mat = SSMTNode_VertexGroupMatch.get_or_create_debug_material(mat_name, (0.0, 0.2, 1.0, 1.0))
 
         success_count = 0
         for source_empty in source_empties:
@@ -990,10 +1581,7 @@ class SSMT_OT_VertexGroupMatchSync(bpy.types.Operator):
             context.scene.collection.objects.link(curve_obj)
             
             mat_white_name = "VGTP_Debug_White_Normal"
-            mat_white = bpy.data.materials.get(mat_white_name)
-            if not mat_white:
-                mat_white = bpy.data.materials.new(name=mat_white_name)
-                mat_white.diffuse_color = (1.0, 1.0, 1.0, 1.0)
+            mat_white = SSMTNode_VertexGroupMatch.get_or_create_debug_material(mat_white_name, (1.0, 1.0, 1.0, 1.0))
             curve_obj.data.materials.clear()
             curve_obj.data.materials.append(mat_white)
 
@@ -1084,10 +1672,7 @@ class SSMT_OT_VertexGroupMatchDeleteConnection(bpy.types.Operator):
             if source_empty:
                 source_empty["is_connected"] = False
                 mat_name = "VGTP_Debug_Green"
-                mat = bpy.data.materials.get(mat_name)
-                if not mat:
-                    mat = bpy.data.materials.new(name=mat_name)
-                    mat.diffuse_color = (0.0, 1.0, 0.2, 1.0)
+                mat = SSMTNode_VertexGroupMatch.get_or_create_debug_material(mat_name, (0.0, 1.0, 0.2, 1.0))
                 source_empty.data.materials.clear()
                 source_empty.data.materials.append(mat)
             
@@ -1178,10 +1763,7 @@ class SSMT_OT_VertexGroupMatchDetectMulti(bpy.types.Operator):
                 reverse_multi_connections[target_vg] = source_vgs
         
         white_mat_name = "VGTP_Debug_White_Normal"
-        white_mat = bpy.data.materials.get(white_mat_name)
-        if not white_mat:
-            white_mat = bpy.data.materials.new(name=white_mat_name)
-            white_mat.diffuse_color = (1.0, 1.0, 1.0, 1.0)
+        white_mat = SSMTNode_VertexGroupMatch.get_or_create_debug_material(white_mat_name, (1.0, 1.0, 1.0, 1.0))
             
         for curve in all_match_curves:
             curve.data.materials.clear()
@@ -1205,10 +1787,7 @@ class SSMT_OT_VertexGroupMatchDetectMulti(bpy.types.Operator):
                             
                             if source_vg_current == source_vg_clean and target_vg_current == target_vg_clean:
                                 mat_name = "VGTP_Debug_Red_Error"
-                                mat = bpy.data.materials.get(mat_name)
-                                if not mat:
-                                    mat = bpy.data.materials.new(name=mat_name)
-                                    mat.diffuse_color = (1.0, 0.0, 0.0, 1.0)
+                                mat = SSMTNode_VertexGroupMatch.get_or_create_debug_material(mat_name, (1.0, 0.0, 0.0, 1.0))
                                 curve.data.materials.clear()
                                 curve.data.materials.append(mat)
                                 curve["is_multi_connection"] = True
@@ -1298,19 +1877,22 @@ class SSMT_OT_VertexGroupMatchQuickWeight(bpy.types.Operator):
             self.report({'ERROR'}, "无法找到连接线的父级调试组")
             return {'CANCELLED'}
         
-        source_obj_name = debug_parent.get("vgtp_source_name")
         target_obj_name = debug_parent.get("vgtp_target_name")
         
-        if not source_obj_name or not target_obj_name:
-            self.report({'ERROR'}, "调试组缺少源物体或目标物体信息")
+        if not target_obj_name:
+            self.report({'ERROR'}, "调试组缺少目标物体信息")
             return {'CANCELLED'}
-        
-        source_obj = bpy.data.objects.get(source_obj_name)
+
+        runtime_source_obj = get_debug_runtime_source_object(debug_parent)
+        source_objects = [runtime_source_obj] if runtime_source_obj else get_debug_source_objects(debug_parent)
         target_obj = bpy.data.objects.get(target_obj_name)
         
-        if not source_obj or not target_obj:
+        if not source_objects or not target_obj:
             self.report({'ERROR'}, "无法找到关联的源或目标物体")
             return {'CANCELLED'}
+
+        source_obj = source_objects[0]
+        source_is_temp = bool(runtime_source_obj and source_obj == runtime_source_obj)
 
         source_vg = None
         for vg in source_obj.vertex_groups:
@@ -1416,10 +1998,14 @@ class SSMT_OT_VertexGroupMatchQuickWeight(bpy.types.Operator):
         """处理调试物体选择 - 直接进入原始物体的权重模式"""
         is_source = debug_obj.name.startswith("Source_")
         
-        source_obj, target_obj, _ = find_debug_info(debug_obj)
-        mesh_obj = source_obj if is_source else target_obj
+        source_objects, target_obj, debug_parent = find_debug_info(debug_obj)
+        runtime_source_obj = get_debug_runtime_source_object(debug_parent) if debug_parent else None
+        if is_source and runtime_source_obj:
+            mesh_candidates = [runtime_source_obj]
+        else:
+            mesh_candidates = source_objects if is_source else ([target_obj] if target_obj else [])
         
-        if not mesh_obj:
+        if not mesh_candidates:
             self.report({'WARNING'}, "无法找到此调试物体关联的原始模型")
             return {'CANCELLED'}
 
@@ -1428,24 +2014,31 @@ class SSMT_OT_VertexGroupMatchQuickWeight(bpy.types.Operator):
             self.report({'ERROR'}, "调试物体缺少顶点组名称信息")
             return {'CANCELLED'}
 
-        found_vg = None
-        if is_source:
-            for vg in mesh_obj.vertex_groups:
-                if "=" in vg.name:
-                    original_name = vg.name.split("=", 1)[0].strip()
-                else:
-                    original_name = vg.name
-                
-                if original_name == vg_name_from_empty:
-                    found_vg = vg
-                    break
-        else:
-            found_vg = mesh_obj.vertex_groups.get(vg_name_from_empty)
+        match_candidates = []
+        for mesh_obj in mesh_candidates:
+            found_vg = None
+            if is_source:
+                for vg in mesh_obj.vertex_groups:
+                    if "=" in vg.name:
+                        original_name = vg.name.split("=", 1)[0].strip()
+                    else:
+                        original_name = vg.name
 
-        if not found_vg:
-            self.report({'WARNING'}, f"在物体 '{mesh_obj.name}' 中未找到顶点组 '{vg_name_from_empty}'")
+                    if original_name == vg_name_from_empty:
+                        found_vg = vg
+                        break
+            else:
+                found_vg = mesh_obj.vertex_groups.get(vg_name_from_empty)
+
+            if found_vg:
+                match_candidates.append((mesh_obj, found_vg))
+
+        if not match_candidates:
+            self.report({'WARNING'}, f"未找到关联顶点组: {vg_name_from_empty}")
             return {'CANCELLED'}
-        
+
+        mesh_obj, found_vg = match_candidates[0]
+
         if mesh_obj.hide_get():
             mesh_obj.hide_set(False)
         if mesh_obj.hide_select:
@@ -1457,7 +2050,12 @@ class SSMT_OT_VertexGroupMatchQuickWeight(bpy.types.Operator):
         mesh_obj.vertex_groups.active = found_vg
         bpy.ops.object.mode_set(mode='WEIGHT_PAINT')
 
-        self.report({'INFO'}, f"已进入权重绘制模式: {mesh_obj.name} - {found_vg.name}")
+        if is_source and runtime_source_obj:
+            self.report({'INFO'}, f"已进入权重绘制模式: {mesh_obj.name} - {found_vg.name}（源合集预览临时物体）")
+        elif is_source and len(match_candidates) > 1:
+            self.report({'INFO'}, f"已进入权重绘制模式: {mesh_obj.name} - {found_vg.name}（源合集下命中 {len(match_candidates)} 个物体，已打开第一个）")
+        else:
+            self.report({'INFO'}, f"已进入权重绘制模式: {mesh_obj.name} - {found_vg.name}")
         return {'FINISHED'}
 
 
@@ -1504,6 +2102,7 @@ classes = (
     SSMTNode_VertexGroupMatch,
     SSMT_OT_VertexGroupMatchExecute,
     SSMT_OT_VertexGroupMatchClear,
+    SSMT_OT_VertexGroupMatchApplyToSource,
     SSMT_OT_VertexGroupMatchToggleDebug,
     SSMT_OT_VertexGroupMatchSync,
     SSMT_OT_VertexGroupMatchDeleteConnection,

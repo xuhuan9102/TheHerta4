@@ -134,16 +134,23 @@ class ObjectSwapChainProcessor:
                 comment = getattr(node, 'comment', f'物体切换_{swap_index}')
                 option_count = getattr(node, 'input_slot_count', 1)
                 condition_operator = getattr(node, 'condition_operator', '&&')
+                custom_var_name = getattr(node, 'custom_var_name', '')
                 
                 # 从 swap_node_option_values 获取选项值
                 option_value = swap_node_option_values.get(node.name, 0)
                 
+                config = SwapKeyConfig(
+                    index=swap_index,
+                    custom_var_name=custom_var_name,
+                )
+                
                 m_key = M_Key()
-                m_key.key_name = f"$swapkey{swap_index}"
+                m_key.key_name = config.get_swap_key_name()
                 m_key.initialize_vk_str = hotkey
                 m_key.comment = comment
-                m_key.tmp_value = option_value  # 使用选项值而不是固定的 1
+                m_key.tmp_value = option_value
                 m_key.condition_operator = condition_operator
+                m_key.is_swapkey = True
                 
                 swap_keys.append(m_key)
         
@@ -190,6 +197,7 @@ class ObjectSwapChainProcessor:
                 swap_type=getattr(node, 'swap_type', 'cycle'),
                 option_count=getattr(node, 'input_slot_count', 2),
                 comment=getattr(node, 'comment', ''),
+                custom_var_name=getattr(node, 'custom_var_name', ''),
             )
             
             key_swap_lines = []
@@ -287,8 +295,11 @@ class DebugOutputGenerator:
         lines.append(f"\n总共分配了 {registry.next_index} 个 swapkey 变量\n")
         
         for idx, node in enumerate(registry.swapkey_nodes):
-            lines.append(f"[swapkey{idx}] 对应节点:")
+            custom_var_name = getattr(node, 'custom_var_name', '')
+            var_name = f"${custom_var_name}" if custom_var_name else f"$swapkey{idx}"
+            lines.append(f"[{var_name.replace('$', 'swapkey') if not custom_var_name else custom_var_name}] 对应节点:")
             lines.append(f"  节点名称: {node.name}")
+            lines.append(f"  变量名: {var_name}")
             lines.append(f"  备注: {getattr(node, 'comment', 'N/A')}")
             lines.append(f"  快捷键: {getattr(node, 'hotkey', 'N/A')}")
             lines.append(f"  切换类型: {getattr(node, 'swap_type', 'N/A')}")

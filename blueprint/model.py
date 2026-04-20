@@ -484,15 +484,94 @@ class BluePrintModel:
 
         self._integrate_object_swap_nodes()
 
-        self._execute_object_rename_nodes()
+        self._execute_chain_nodes_sequentially()
 
-        self._integrate_vertex_group_nodes()
+        self._detect_and_apply_cross_ib_rename_mapping()
 
         self._process_cross_ib_nodes()
 
         self._build_draw_call_models_from_chains()
 
         self._output_debug_info_to_text_editor()
+
+    def _execute_chain_nodes_sequentially(self):
+        from .node_rename import SSMTNode_Object_Rename
+
+        valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
+
+        has_rename_chains = any(c.rename_history for c in valid_chains)
+        has_vg_chains = any(c.vertex_group_process_nodes for c in valid_chains)
+
+        if not has_rename_chains and not has_vg_chains:
+            return
+
+        if BluePrintModel._has_executed_rename:
+            for chain in valid_chains:
+                original_obj_name = chain.object_name
+                mapped_name = BluePrintModel.get_mapped_object_name(original_obj_name)
+                if mapped_name != original_obj_name:
+                    chain.object_name = mapped_name
+                    LOG.debug(f"   🔄 使用映射名称: '{original_obj_name}' → '{mapped_name}'")
+            if has_vg_chains:
+                self._integrate_vertex_group_nodes()
+            return
+
+        if not has_vg_chains:
+            self._execute_object_rename_nodes()
+            return
+
+        if not has_rename_chains:
+            self._integrate_vertex_group_nodes()
+            return
+
+        LOG.info("🔗 开始链路顺序执行（重命名 + 顶点组处理）")
+
+        rename_count = 0
+        vg_count = 0
+
+        for chain in valid_chains:
+            obj_name = chain.object_name
+            obj = bpy.data.objects.get(obj_name)
+            if not obj and chain.original_object_name:
+                obj = bpy.data.objects.get(chain.original_object_name)
+            if not obj:
+                continue
+
+            original_obj_name = chain.object_name
+            current_name = obj.name
+            chain_had_rename = False
+
+            for node in chain.node_path:
+                if node.bl_idname == _NODE_TYPE_VERTEX_GROUP_PROCESS:
+                    if obj.type == 'MESH':
+                        stats = node.process_object(obj)
+                        vg_count += 1
+                        LOG.info(f"   🔧 顶点组处理: 节点 '{node.name}', 物体 '{current_name}' "
+                                f"(重命名={stats.get('renamed', 0)}, 合并={stats.get('merged', 0)}, "
+                                f"清理={stats.get('cleaned', 0)}, 填充={stats.get('filled', 0)})")
+
+                elif node.bl_idname == _NODE_TYPE_OBJECT_RENAME:
+                    new_name, was_modified, _, _ = SSMTNode_Object_Rename.apply_to_object_name(
+                        current_name, node
+                    )
+                    if was_modified:
+                        current_name = new_name
+                        obj.name = current_name
+                        current_name = obj.name
+                        rename_count += 1
+                        chain_had_rename = True
+
+            if chain_had_rename and obj.name != original_obj_name:
+                chain.object_name = obj.name
+                BluePrintModel._object_name_mapping[original_obj_name] = obj.name
+                LOG.info(f"   ✏️ 重命名: '{chain.original_object_name or original_obj_name}' → '{obj.name}'")
+
+        BluePrintModel._has_executed_rename = True
+
+        rename_chains = [c for c in valid_chains if c.rename_history]
+        SSMTNode_Object_Rename.log_rename_summary(rename_chains)
+
+        LOG.info(f"   ✅ 链路顺序执行完成: {rename_count} 次重命名, {vg_count} 次顶点组处理")
 
     def _execute_object_rename_nodes(self):
         valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
@@ -616,6 +695,88 @@ class BluePrintModel:
             LOG.warning(f"⚠️ 顶点组处理节点集成遇到错误: {e}")
             traceback.print_exc()
 
+    def _detect_and_apply_cross_ib_rename_mapping(self):
+        from .node_cross_ib import SSMTNode_CrossIB, CrossIBMatchMode
+        from ..common.object_prefix_helper import ObjectPrefixHelper
+
+        valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
+
+        cross_ib_rename_chains = []
+        for chain in valid_chains:
+            has_cross_ib = any(n.bl_idname == _NODE_TYPE_CROSS_IB for n in chain.node_path)
+            has_rename = bool(chain.rename_history)
+            if has_cross_ib and has_rename:
+                cross_ib_rename_chains.append(chain)
+
+        if not cross_ib_rename_chains:
+            LOG.info("🔗 未检测到同时包含跨IB节点和重命名节点的链路")
+            return
+
+        LOG.info(f"🔗 检测到 {len(cross_ib_rename_chains)} 条链路同时包含跨IB节点和重命名节点，开始构建重命名映射")
+
+        indexcount_mapping = {}
+        ibhash_mapping = {}
+
+        for chain in cross_ib_rename_chains:
+            for record in chain.rename_history:
+                old_name = record.get('old_name', '')
+                new_name = record.get('new_name', '')
+
+                if not old_name or not new_name or old_name == new_name:
+                    continue
+
+                old_prefix_info = ObjectPrefixHelper.extract_prefix_info(old_name)
+                new_prefix_info = ObjectPrefixHelper.extract_prefix_info(new_name)
+
+                if not old_prefix_info or not new_prefix_info:
+                    continue
+
+                old_prefix = old_prefix_info[0]
+                new_prefix = new_prefix_info[0]
+
+                old_parts = ObjectPrefixHelper.parse_prefix_parts(old_prefix)
+                new_parts = ObjectPrefixHelper.parse_prefix_parts(new_prefix)
+
+                old_indexcount = old_parts.get('index_count', '')
+                new_indexcount = new_parts.get('index_count', '')
+                if old_indexcount and new_indexcount and old_indexcount != new_indexcount:
+                    if old_indexcount not in indexcount_mapping:
+                        indexcount_mapping[old_indexcount] = new_indexcount
+                        LOG.info(f"🔗   IndexCount映射: {old_indexcount} → {new_indexcount}")
+
+                old_ib_hash = old_parts.get('draw_ib', '')
+                new_ib_hash = new_parts.get('draw_ib', '')
+                old_first_index = old_parts.get('first_index', '')
+                new_first_index = new_parts.get('first_index', '')
+
+                if old_ib_hash and new_ib_hash and (old_ib_hash != new_ib_hash or old_first_index != new_first_index):
+                    old_key = f"{old_ib_hash}-{old_first_index}"
+                    new_key = f"{new_ib_hash}-{new_first_index}"
+                    if old_key not in ibhash_mapping:
+                        ibhash_mapping[old_key] = new_key
+                        LOG.info(f"🔗   IBHash映射: {old_key} → {new_key}")
+
+        if not indexcount_mapping and not ibhash_mapping:
+            LOG.info("🔗 未从重命名历史中提取到有效的映射规则")
+            return
+
+        applied_nodes = set()
+        for cross_ib_node in self.cross_ib_nodes:
+            match_mode = getattr(cross_ib_node, 'match_mode', CrossIBMatchMode.INDEX_COUNT)
+
+            if match_mode == CrossIBMatchMode.INDEX_COUNT and indexcount_mapping:
+                cross_ib_node.save_original_params()
+                cross_ib_node.apply_indexcount_mapping(indexcount_mapping)
+                applied_nodes.add(cross_ib_node.name)
+                LOG.info(f"🔗   节点 '{cross_ib_node.name}': 已应用IndexCount映射 ({len(indexcount_mapping)} 条)")
+            elif match_mode == CrossIBMatchMode.IB_HASH and ibhash_mapping:
+                cross_ib_node.save_original_params()
+                cross_ib_node.apply_ibhash_mapping(ibhash_mapping)
+                applied_nodes.add(cross_ib_node.name)
+                LOG.info(f"🔗   节点 '{cross_ib_node.name}': 已应用IBHash映射 ({len(ibhash_mapping)} 条)")
+
+        LOG.info(f"🔗 跨IB重命名映射应用完成: IndexCount映射 {len(indexcount_mapping)} 条, IBHash映射 {len(ibhash_mapping)} 条, 影响 {len(applied_nodes)} 个跨IB节点")
+
     def _process_cross_ib_nodes(self):
         LOG.info(f"🔗 开始处理跨IB节点，共 {len(self.cross_ib_nodes)} 个节点")
 
@@ -672,7 +833,7 @@ class BluePrintModel:
                             'source': vb_condition_source,
                             'target': vb_condition_target
                         }
-                        LOG.info(f"🔗   VB条件映射 {mapping_key}: source={vb_condition_source}, target={vb_condition_target}")
+                        LOG.info(f"🔗   VS条件映射 {mapping_key}: source={vb_condition_source}, target={vb_condition_target}")
 
             for source_key, target_keys in node_ib_mapping.items():
                 for target_key in target_keys:

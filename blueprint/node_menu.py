@@ -1,7 +1,10 @@
+import re
+
 import bpy
 from bpy.types import NodeTree, Node, NodeSocket
 
 from ..common.global_config import GlobalConfig
+from ..common.object_prefix_helper import ObjectPrefixHelper
 
 from .node_base import SSMTBlueprintTree, SSMTNodeBase
 
@@ -63,6 +66,95 @@ def _add_node_entry(layout, text, icon, node_type):
         layout.operator("node.add_node", text=text, icon=icon).type = node_type
     except Exception:
         pass
+
+
+def _get_or_create_blueprint_tree(context):
+    node_tree = _get_active_blueprint_tree(context)
+    if node_tree:
+        return node_tree
+
+    GlobalConfig.read_from_main_json_ssmt4()
+    tree_name = GlobalConfig.workspacename or "SSMT_Mod_Logic"
+    tree = bpy.data.node_groups.get(tree_name)
+    if tree and tree.bl_idname == 'SSMTBlueprintTreeType':
+        return tree
+
+    tree = bpy.data.node_groups.new(name=tree_name, type='SSMTBlueprintTreeType')
+    tree.use_fake_user = True
+    return tree
+
+
+def _get_new_node_location(node_tree, x_padding: float = 220.0, y_step: float = 180.0):
+    if not node_tree.nodes:
+        return (0.0, 0.0)
+
+    max_x = max(node.location.x + getattr(node, "width", 200) for node in node_tree.nodes)
+    min_y = min(node.location.y for node in node_tree.nodes)
+    return (max_x + x_padding, min_y - y_step)
+
+
+def _extract_target_hash_from_name(object_name: str) -> str:
+    if not object_name:
+        return ""
+
+    match = re.match(r'^([a-f0-9]{8}-[a-f0-9]+(?:-[a-f0-9]+)?)', object_name)
+    if match:
+        return match.group(1)
+
+    match = re.match(r'^([a-f0-9]{8})', object_name)
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+def _append_rename_rule(node, search_str: str, replace_str: str) -> bool:
+    for rule in getattr(node, 'rename_rules', []):
+        if getattr(rule, 'search_str', '') == search_str and getattr(rule, 'replace_str', '') == replace_str:
+            return False
+
+    rule = node.rename_rules.add()
+    rule.name = f"Rule_{len(node.rename_rules):03d}"
+    rule.search_str = search_str
+    rule.replace_str = replace_str
+    node.active_rule_index = len(node.rename_rules) - 1
+    return True
+
+
+def _get_unique_collection_name(base_name: str) -> str:
+    if base_name not in bpy.data.collections:
+        return base_name
+
+    suffix = 1
+    while True:
+        collection_name = f"{base_name}_{suffix:03d}"
+        if collection_name not in bpy.data.collections:
+            return collection_name
+        suffix += 1
+
+
+def _create_source_collection_for_vg_match(context, source_objects, target_obj):
+    valid_sources = [obj for obj in source_objects if obj and obj.type == 'MESH' and obj.data]
+    if len(valid_sources) == 1:
+        return None, False
+
+    if not valid_sources:
+        return None, False
+
+    base_name = f"VGMatchSources_{target_obj.name}" if target_obj else "VGMatchSources"
+    if len(base_name) > 56:
+        base_name = base_name[:56]
+
+    collection_name = _get_unique_collection_name(base_name)
+    source_collection = bpy.data.collections.new(collection_name)
+    context.scene.collection.children.link(source_collection)
+    source_collection["ssmt_vg_match_source_count"] = len(valid_sources)
+
+    for source_obj in valid_sources:
+        if source_collection not in source_obj.users_collection:
+            source_collection.objects.link(source_obj)
+
+    return source_collection, True
 
 
 class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
@@ -162,6 +254,129 @@ class SSMT_OT_CreateInternalSwitch(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SSMT_OT_QuickAddRenameRule(bpy.types.Operator):
+    bl_idname = "ssmt.quick_add_rename_rule"
+    bl_label = "快速添加重命名规则"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        active_obj = getattr(context, 'active_object', None)
+        if not active_obj:
+            return False
+        selected_objects = getattr(context, 'selected_objects', [])
+        return len(selected_objects) == 2 and active_obj in selected_objects
+
+    def execute(self, context):
+        target_obj = context.active_object
+        source_candidates = [obj for obj in context.selected_objects if obj != target_obj]
+        if len(source_candidates) != 1:
+            self.report({'ERROR'}, "请选择两个物体，且活动物体作为目标物体")
+            return {'CANCELLED'}
+
+        source_obj = source_candidates[0]
+        source_prefix_info = ObjectPrefixHelper.extract_prefix_info(source_obj.name)
+        target_prefix_info = ObjectPrefixHelper.extract_prefix_info(target_obj.name)
+
+        if not source_prefix_info or not target_prefix_info:
+            self.report({'ERROR'}, "无法从所选物体名称中提取前缀，请确认名称包含可识别前缀")
+            return {'CANCELLED'}
+
+        search_str = source_prefix_info[0]
+        replace_str = target_prefix_info[0]
+        if not search_str or not replace_str:
+            self.report({'ERROR'}, "提取到的前缀为空，无法生成重命名规则")
+            return {'CANCELLED'}
+
+        node_tree = _get_or_create_blueprint_tree(context)
+        rename_nodes = [node for node in node_tree.nodes if node.bl_idname == 'SSMTNode_Object_Rename']
+        created_node = None
+        if not rename_nodes:
+            new_location = _get_new_node_location(node_tree)
+            created_node = node_tree.nodes.new(type='SSMTNode_Object_Rename')
+            created_node.location = new_location
+            rename_nodes = [created_node]
+
+        added_count = 0
+        duplicate_count = 0
+        for node in rename_nodes:
+            if _append_rename_rule(node, search_str, replace_str):
+                added_count += 1
+            else:
+                duplicate_count += 1
+
+        for node in node_tree.nodes:
+            node.select = False
+        active_node = created_node or rename_nodes[0]
+        active_node.select = True
+        node_tree.nodes.active = active_node
+
+        mapping_str = f"{search_str} >>> {replace_str}"
+        if added_count == 0:
+            self.report({'INFO'}, f"重命名规则已存在: {mapping_str}")
+        else:
+            extra = f"，跳过重复 {duplicate_count} 个节点" if duplicate_count else ""
+            self.report({'INFO'}, f"已添加重命名规则: {mapping_str}，影响 {added_count} 个节点{extra}")
+        return {'FINISHED'}
+
+
+class SSMT_OT_QuickAddVertexGroupMatch(bpy.types.Operator):
+    bl_idname = "ssmt.quick_add_vertex_group_match"
+    bl_label = "快速添加顶点组匹配"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        active_obj = getattr(context, 'active_object', None)
+        if not active_obj or active_obj.type != 'MESH':
+            return False
+        selected_objects = getattr(context, 'selected_objects', [])
+        non_active = [obj for obj in selected_objects if obj != active_obj and obj.type == 'MESH']
+        return len(non_active) >= 1
+
+    def execute(self, context):
+        target_obj = context.active_object
+        source_objects = [obj for obj in context.selected_objects if obj != target_obj and obj.type == 'MESH']
+        if not source_objects:
+            self.report({'ERROR'}, "请至少选择一个非活动网格物体作为源物体")
+            return {'CANCELLED'}
+
+        source_collection, is_collection_mode = _create_source_collection_for_vg_match(context, source_objects, target_obj)
+
+        node_tree = _get_or_create_blueprint_tree(context)
+        new_location = _get_new_node_location(node_tree)
+        match_node = node_tree.nodes.new(type='SSMTNode_VertexGroupMatch')
+        match_node.location = new_location
+        if is_collection_mode and source_collection:
+            match_node.source_collection = source_collection.name
+            match_node.source_object = ""
+        else:
+            match_node.source_object = source_objects[0].name
+            match_node.source_collection = ""
+        match_node.target_object = target_obj.name
+        match_node.match_threshold = 0.06
+        match_node.use_chamfer_matching = False
+        match_node.use_shape_key = True
+        match_node.create_debug_objects = True
+        match_node.rename_format = True
+        match_node.target_hash = _extract_target_hash_from_name(target_obj.name)
+
+        for node in node_tree.nodes:
+            node.select = False
+        match_node.select = True
+        node_tree.nodes.active = match_node
+
+        rename_map, message = match_node.execute_match(context)
+        if rename_map is None:
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+
+        source_suffix = f"，已创建源合集: {source_collection.name}" if is_collection_mode and source_collection else ""
+        hash_suffix = f"，目标哈希: {match_node.target_hash}" if match_node.target_hash else ""
+        self.report({'INFO'}, f"{message}{source_suffix}{hash_suffix}")
+        return {'FINISHED'}
+
+
 def draw_objects_context_menu_add(self, context):
     layout = self.layout
     layout.separator()
@@ -174,6 +389,9 @@ class SSMT_MT_ObjectContextMenuSub(bpy.types.Menu):
         layout = self.layout
         layout.operator("ssmt.create_group_from_selection", text="将所选物体新建到组节点", icon='GROUP')
         layout.operator("ssmt.create_internal_switch", text="创建内部切换", icon='ARROW_LEFTRIGHT')
+        layout.separator()
+        layout.operator("ssmt.quick_add_rename_rule", text="快速添加重命名规则", icon='FONT_DATA')
+        layout.operator("ssmt.quick_add_vertex_group_match", text="快速添加顶点组匹配", icon='GROUP_VERTEX')
 
 
 class SSMT_MT_NodeMenu_Object(bpy.types.Menu):
@@ -635,6 +853,8 @@ def draw_node_context_menu(self, context):
 def register():
     bpy.utils.register_class(SSMT_OT_CreateGroupFromSelection)
     bpy.utils.register_class(SSMT_OT_CreateInternalSwitch)
+    bpy.utils.register_class(SSMT_OT_QuickAddRenameRule)
+    bpy.utils.register_class(SSMT_OT_QuickAddVertexGroupMatch)
     bpy.utils.register_class(SSMT_OT_AlignNodes)
     bpy.utils.register_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.register_class(SSMT_MT_ObjectContextMenuSub)
@@ -663,5 +883,7 @@ def unregister():
     bpy.utils.unregister_class(SSMT_MT_ObjectContextMenuSub)
     bpy.utils.unregister_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.unregister_class(SSMT_OT_AlignNodes)
+    bpy.utils.unregister_class(SSMT_OT_QuickAddVertexGroupMatch)
+    bpy.utils.unregister_class(SSMT_OT_QuickAddRenameRule)
     bpy.utils.unregister_class(SSMT_OT_CreateInternalSwitch)
     bpy.utils.unregister_class(SSMT_OT_CreateGroupFromSelection)

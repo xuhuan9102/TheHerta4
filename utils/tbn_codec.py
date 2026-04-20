@@ -115,7 +115,8 @@ class TBNCodec:
         flags = data[:, 3:].astype(numpy.int32)
         data_vals = data[:, 0:3]
 
-        data_vals = numpy.rint(data_vals * 511).astype(numpy.int32)
+        data_vals = numpy.nan_to_num(data_vals * 511, nan=0.0, posinf=511.0, neginf=-511.0)
+        data_vals = numpy.rint(data_vals).astype(numpy.int32)
         data_vals = numpy.clip(data_vals, -511, 511)
         data_vals &= 0x3FF
 
@@ -167,7 +168,7 @@ class TBNCodec:
         sin_theta = numpy.clip(sin_theta, -1.0, 1.0)
 
         denom = numpy.abs(cos_theta) + numpy.abs(sin_theta)
-        u_t = cos_theta / denom
+        u_t = numpy.where(denom > 0, cos_theta / denom, 0.0)
         t = 1 - (1 - u_t) / 2.0
 
         s = numpy.where(sin_theta == 0.0, 1.0, numpy.sign(sin_theta))

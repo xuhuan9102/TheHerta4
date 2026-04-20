@@ -31,6 +31,7 @@ class M_Key:
         self.comment = ""  # 备注信息，会以注释形式生成到配置表中
         
         self.condition_operator = "&&"  # 该条件与前面条件之间的逻辑运算符（第一个条件忽略此值）
+        self.is_swapkey = False  # 标记是否为物体切换节点的变量（由 node_swap_ini.py 单独处理）
 
     def __str__(self) -> str:
         """返回 M_Key 的字符串表示

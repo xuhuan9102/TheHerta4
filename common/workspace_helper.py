@@ -65,6 +65,59 @@ class WorkSpaceHelper:
         return submesh_folderpath_list
 
     @staticmethod
+    def get_drawib_tabname_dict() -> Dict[str, str]:
+        '''
+        从当前工作空间的 Config/Tabs 目录下读取各工作区 Tab 的配置，
+        返回 DrawIB → 工作区名称 的映射字典。
+        
+        读取流程：
+        1. 读取 Config/WorkPageTabs.json 获取 tab_id → tab_name 映射
+        2. 读取 Config/Tabs/ws-tab-*.json 获取每个 tab 包含的 DrawIB 列表
+        3. 合并为 DrawIB → tab_name 映射
+        '''
+        drawib_tabname_dict = {}
+
+        tabs_dir = os.path.join(GlobalConfig.path_workspace_folder(), "Config", "Tabs")
+        workpage_tabs_path = os.path.join(GlobalConfig.path_workspace_folder(), "Config", "WorkPageTabs.json")
+
+        if not os.path.exists(workpage_tabs_path):
+            return drawib_tabname_dict
+
+        tab_id_to_name = {}
+        workpage_tabs_json = JsonUtils.LoadFromFile(workpage_tabs_path)
+        if isinstance(workpage_tabs_json, dict):
+            tabs_list = workpage_tabs_json.get("tabs", [])
+            for tab_info in tabs_list:
+                if isinstance(tab_info, dict):
+                    tab_id = str(tab_info.get("id", "")).strip()
+                    tab_name = str(tab_info.get("name", "")).strip()
+                    if tab_id:
+                        tab_id_to_name[tab_id] = tab_name
+
+        if not os.path.exists(tabs_dir):
+            return drawib_tabname_dict
+
+        for filename in os.listdir(tabs_dir):
+            if not filename.startswith("ws-tab-") or not filename.endswith(".json"):
+                continue
+            tab_json_path = os.path.join(tabs_dir, filename)
+            tab_json = JsonUtils.LoadFromFile(tab_json_path)
+            if not isinstance(tab_json, dict):
+                continue
+
+            tab_id = filename.replace(".json", "")
+            tab_name = tab_id_to_name.get(tab_id, tab_id)
+
+            model_rows = tab_json.get("modelRows", [])
+            for row in model_rows:
+                if isinstance(row, dict):
+                    draw_ib = str(row.get("drawIB", "")).strip()
+                    if draw_ib:
+                        drawib_tabname_dict[draw_ib] = tab_name
+
+        return drawib_tabname_dict
+
+    @staticmethod
     def get_drawib_aliasname_dict() -> Dict[str,str]:
         '''
         从当前工作空间目录下的Config.json里读取DrawIB和别名的对应关系

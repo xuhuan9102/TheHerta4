@@ -149,6 +149,8 @@ class PreProcessHelper:
                     hash_value = hash_map.get(obj_name, "")
                     if hash_value:
                         PreProcessCache.save_to_cache(obj_name, copy_name, hash_value)
+                    else:
+                        LOG.warning(f"⚠️ 缓存保存跳过: {obj_name} 哈希值为空")
 
     @classmethod
     def _create_object_copies(cls, object_names: List[str]):

@@ -80,6 +80,7 @@ class SwapKeyINIGenerator:
                 swap_type=getattr(node, 'swap_type', 'cycle'),
                 option_count=getattr(node, 'input_slot_count', 2),
                 comment=getattr(node, 'comment', ''),
+                custom_var_name=getattr(node, 'custom_var_name', ''),
             )
             
             if idx > 0:
@@ -129,7 +130,10 @@ class SwapKeyINIGenerator:
             if node.bl_idname != 'SSMTNode_ObjectSwap':
                 continue
             
-            config = SwapKeyConfig(index=idx)
+            config = SwapKeyConfig(
+                index=idx,
+                custom_var_name=getattr(node, 'custom_var_name', ''),
+            )
             
             var_line = f"global persist {config.get_swap_key_name()} = 0"
             already_exists = any(var_line in line for line in section.SectionLineList)
@@ -299,6 +303,8 @@ class SwapKeyDebugINIWriter:
         lines.append("\n; ========== KeySwap 段落 ==========")
         for idx, node in enumerate(swap_nodes):
             comment = getattr(node, 'comment', '')
+            custom_var_name = getattr(node, 'custom_var_name', '')
+            var_name = f"${custom_var_name}" if custom_var_name else f"$swapkey{idx}"
             lines.append(f"\n[KeySwap_{idx}]")
             if comment:
                 lines.append(f"; {comment}")
@@ -307,13 +313,15 @@ class SwapKeyDebugINIWriter:
             lines.append(f"type = {getattr(node, 'swap_type', 'cycle')}")
             option_count = getattr(node, 'input_slot_count', 2)
             option_seq = ','.join(str(i) for i in range(option_count))
-            lines.append(f"$swapkey{idx} = {option_seq},")
+            lines.append(f"{var_name} = {option_seq},")
         
         lines.append("\n\n; ========== [Constants] 中的声明 ==========")
         lines.append("[Constants]")
         lines.append("global $active0")
-        for idx in range(len(swap_nodes)):
-            lines.append(f"global persist $swapkey{idx} = 0")
+        for idx, node in enumerate(swap_nodes):
+            custom_var_name = getattr(node, 'custom_var_name', '')
+            var_name = f"${custom_var_name}" if custom_var_name else f"$swapkey{idx}"
+            lines.append(f"global persist {var_name} = 0")
         
         lines.append("\n\n; ========== [Present] 中的初始化 ==========")
         lines.append("[Present]")
@@ -326,14 +334,23 @@ class SwapKeyDebugINIWriter:
         lines.append("; ... 其他配置内容 ...")
         
         lines.append("\n\n; ========== drawindexed 条件示例 ==========")
-        lines.append(f"if $swapkey0 == 1")
+        if swap_nodes:
+            first_custom = getattr(swap_nodes[0], 'custom_var_name', '')
+            first_var = f"${first_custom}" if first_custom else "$swapkey0"
+            lines.append(f"if {first_var} == 1")
+        else:
+            lines.append(f"if $swapkey0 == 1")
         lines.append(f"  drawindexed = 7068,0,0")
         lines.append(f"endif")
         
         if len(swap_nodes) > 1:
             lines.append(f"\n; 支持嵌套条件")
             condition_operator = getattr(swap_nodes[0], 'condition_operator', '&&') if swap_nodes else '&&'
-            lines.append(f"if $swapkey0 == 1 {condition_operator} $swapkey1 == 1")
+            first_custom = getattr(swap_nodes[0], 'custom_var_name', '')
+            first_var = f"${first_custom}" if first_custom else "$swapkey0"
+            second_custom = getattr(swap_nodes[1], 'custom_var_name', '') if len(swap_nodes) > 1 else ''
+            second_var = f"${second_custom}" if second_custom else "$swapkey1"
+            lines.append(f"if {first_var} == 1 {condition_operator} {second_var} == 1")
             lines.append(f"  drawindexed = 7068,0,0")
             lines.append(f"endif")
         

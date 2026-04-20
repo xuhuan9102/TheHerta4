@@ -434,11 +434,9 @@ class ExportEFMI:
                 category_resource_name = "Resource_" + submesh_model.unique_str.replace("-","_")  + "_" + category
                 texture_override_ib_section.append(category_slot + " = " + category_resource_name)
 
-            unique_str = submesh_model.unique_str
-            texture_override_ib_section.append("vb0 = Resource_" + unique_str.replace('-', '_') + "_Position")
-            texture_override_ib_section.append("vb1 = Resource_" + unique_str.replace('-', '_') + "_Texcoord")
-            texture_override_ib_section.append("vb2 = Resource_" + unique_str.replace('-', '_') + "_Blend")
-            texture_override_ib_section.append("vb3 = Resource_" + unique_str.replace('-', '_') + "_Position")
+            if is_source_ib and self.has_cross_ib:
+                unique_str = submesh_model.unique_str
+                texture_override_ib_section.append("vb3 = Resource_" + unique_str.replace('-', '_') + "_Position")
 
             if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None:
                 texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)

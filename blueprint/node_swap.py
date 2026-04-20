@@ -21,6 +21,7 @@ class SwapKeyConfig:
         swap_type: 切换类型 (cycle/toggle/hold)
         option_count: 选项数量（会生成 0, 1, 2... 序列）
         comment: 备注信息（会生成在 KeySwap 段落中作为注释）
+        custom_var_name: 自定义变量名（不含$前缀），为空时使用默认的 $swapkey{index}
     """
     
     node_id: str = ""  # 节点唯一标识
@@ -30,13 +31,19 @@ class SwapKeyConfig:
     swap_type: str = "cycle"  # 切换类型: cycle, toggle, hold
     option_count: int = 2  # 选项数量（会生成 0, 1, 2... 序列）
     comment: str = ""  # 备注信息（会生成在 KeySwap 段落中作为注释）
+    custom_var_name: str = ""  # 自定义变量名（不含$前缀），为空时使用默认的 $swapkey{index}
     
     def get_swap_key_name(self) -> str:
         """生成对应的 $swapkey 变量名
         
+        如果设置了自定义变量名，则使用自定义名称（自动添加$前缀），
+        否则使用默认的 $swapkey{index} 格式。
+        
         Returns:
-            str: 格式为 "$swapkey{index}" 的变量名
+            str: 格式为 "$自定义名" 或 "$swapkey{index}" 的变量名
         """
+        if self.custom_var_name:
+            return f"${self.custom_var_name}"
         return f"$swapkey{self.index}"
     
     def get_key_swap_section_name(self) -> str:
@@ -94,6 +101,13 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
     comment: bpy.props.StringProperty(
         name="备注",
         description="节点的备注信息，会生成在 KeySwap 段落中作为注释",
+        default="",
+        update=update_all_properties
+    )
+    
+    custom_var_name: bpy.props.StringProperty(
+        name="变量名",
+        description="自定义变量名（不含$前缀），留空则自动分配 $swapkeyN。例如输入 hair 将生成 $hair",
         default="",
         update=update_all_properties
     )
@@ -202,6 +216,7 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
         """绘制节点 UI"""
         
         layout.prop(self, "comment", text="备注")
+        layout.prop(self, "custom_var_name", text="变量名")
         layout.prop(self, "hotkey", text="按键")
         layout.prop(self, "swap_type", text="类型")
         
@@ -242,6 +257,8 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
         layout.label(text="当前节点参数:", icon='FILE_TEXT')
         
         layout.label(text=f"  备注: {self.comment if self.comment else '(未设置)'}", icon='NONE')
+        var_display = f"${self.custom_var_name}" if self.custom_var_name else "$swapkeyN (自动分配)"
+        layout.label(text=f"  变量名: {var_display}", icon='NONE')
         layout.label(text=f"  快捷键: {self.hotkey}", icon='NONE')
         layout.label(text=f"  类型: {self.swap_type}", icon='NONE')
         layout.label(text=f"  逻辑运算符: {self.condition_operator}", icon='NONE')
@@ -250,7 +267,7 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
         layout.label(text="选项配置:", icon='TRACKING')
         option_seq = ', '.join(str(i) for i in range(self.input_slot_count))
         layout.label(text=f"  选项值: {option_seq}", icon='NONE')
-        layout.label(text=f"  条件格式: $swapkeyN == 选项值", icon='NONE')
+        layout.label(text=f"  条件格式: {var_display} == 选项值", icon='NONE')
         
         layout.separator()
         layout.label(text="生成示例:", icon='INFO')
@@ -260,7 +277,7 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
         layout.label(text=f"  condition = $active0 == 1", icon='NONE')
         layout.label(text=f"  key = {self.hotkey}", icon='NONE')
         layout.label(text=f"  type = {self.swap_type}", icon='NONE')
-        layout.label(text=f"  $swapkeyN = {option_seq},", icon='NONE')
+        layout.label(text=f"  {var_display} = {option_seq},", icon='NONE')
 
 
 class SSMT_OT_AddSwapOption(bpy.types.Operator):
@@ -357,21 +374,15 @@ class ObjectSwapDebugger:
 
     @staticmethod
     def generate_debug_detail(swap_node: bpy.types.Node, node_index: int, swap_key_index: int) -> list[str]:
-        """为处理链生成该节点的调试信息
+        """为处理链生成该节点的调试信息"""
+        custom_var_name = getattr(swap_node, 'custom_var_name', '')
+        var_name = f"${custom_var_name}" if custom_var_name else f"$swapkey{swap_key_index}"
         
-        Args:
-            swap_node: 物体切换节点实例
-            node_index: 节点在处理链中的序号
-            swap_key_index: 该节点对应的全局 swapkey 索引
-        
-        Returns:
-            list[str]: 调试文本行列表
-        """
         lines = []
         lines.append("")
         lines.append(f"🔄 物体切换节点 #{node_index + 1}")
         lines.append(f"   备注: {getattr(swap_node, 'comment', '未设置')}")
-        lines.append(f"   变量: $swapkey{swap_key_index}")
+        lines.append(f"   变量: {var_name}")
         lines.append(f"   快捷键: {getattr(swap_node, 'hotkey', 'N/A')}")
         lines.append(f"   切换类型: {getattr(swap_node, 'swap_type', 'N/A')}")
         lines.append(f"   选项数量: {getattr(swap_node, 'input_slot_count', 1)}")
@@ -379,6 +390,7 @@ class ObjectSwapDebugger:
         config = SwapKeyConfig(
             index=swap_key_index,
             comment=getattr(swap_node, 'comment', ''),
+            custom_var_name=custom_var_name,
         )
         
         lines.append(f"")
@@ -389,11 +401,11 @@ class ObjectSwapDebugger:
         lines.append(f"   condition = $active0 == 1")
         lines.append(f"   key = {getattr(swap_node, 'hotkey', 'N/A')}")
         lines.append(f"   type = {getattr(swap_node, 'swap_type', 'N/A')}")
-        lines.append(f"   ${config.get_swap_key_name()} = 0,{','.join(str(i) for i in range(getattr(swap_node, 'input_slot_count', 1)))},")
+        lines.append(f"   {var_name} = 0,{','.join(str(i) for i in range(getattr(swap_node, 'input_slot_count', 1)))},")
         
         lines.append(f"")
         lines.append(f"   常量声明:")
-        lines.append(f"   $swapkey{swap_key_index} = 0")
+        lines.append(f"   {var_name} = 0")
         
         lines.append(f"")
         lines.append(f"   初始化参数:")

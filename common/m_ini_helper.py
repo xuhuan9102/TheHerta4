@@ -641,7 +641,7 @@ class M_IniHelper:
 
             for mkey in key_name_mkey_dict.values():
                 # 跳过 swapkey，它们由 node_swap_ini.py 单独处理
-                if getattr(mkey, 'key_name', '').startswith('$swapkey'):
+                if getattr(mkey, 'is_swapkey', False):
                     continue
                 
                 key_str = "global persist " + mkey.key_name + " = " + str(mkey.initialize_value)
@@ -663,7 +663,7 @@ class M_IniHelper:
 
             for mkey in key_name_mkey_dict.values():
                 # 跳过 swapkey，它们由 node_swap_ini.py 单独处理
-                if getattr(mkey, 'key_name', '').startswith('$swapkey'):
+                if getattr(mkey, 'is_swapkey', False):
                     continue
                 
                 key_section = M_IniSection(M_SectionType.Key)

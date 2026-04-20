@@ -7,12 +7,14 @@
 4. 物体名称变化时自动更新节点引用（支持撤销/重做）
 """
 import bpy
+import time
 from bpy.app.handlers import persistent
 
 _SYNC_NODE_TYPES = {'SSMTNode_Object_Info', 'SSMTNode_MultiFile_Export'}
 
 _sync_enabled = True
 _is_syncing = False
+_is_syncing_since = 0.0
 _last_synced_objects = set()
 _last_synced_nodes = set()
 _msgbus_owner = object()
@@ -20,6 +22,15 @@ _msgbus_owner = object()
 _object_id_to_name = {}
 _timer_handle = None
 _check_counter = 0
+_heartbeat_counter = 0
+
+_SYNC_STUCK_TIMEOUT = 2.0
+_SYNC_DEBUG = False
+
+
+def _log(msg):
+    if _SYNC_DEBUG:
+        print(f"[Sync] {msg}")
 
 
 def _is_sync_node(node):
@@ -72,6 +83,8 @@ def _resolve_node_objects(node):
                         node.object_name = obj.name
             if obj:
                 objects.append(obj)
+            else:
+                _log(f"_resolve_node_objects: 节点 '{getattr(node, 'name', '?')}' 未找到物体 (object_name='{object_name}')")
         elif node.bl_idname == 'SSMTNode_MultiFile_Export':
             for item in getattr(node, 'object_list', []):
                 obj_name = getattr(item, 'object_name', '')
@@ -123,14 +136,27 @@ def is_blueprint_editor(context):
 
 def get_active_blueprint_tree(context):
     """获取当前活动的蓝图树"""
-    for window in context.window_manager.windows:
-        for area in window.screen.areas:
-            if area.type == 'NODE_EDITOR':
-                for space in area.spaces:
-                    if space.type == 'NODE_EDITOR':
-                        tree = getattr(space, 'edit_tree', None) or getattr(space, 'node_tree', None)
-                        if tree and tree.bl_idname == 'SSMTBlueprintTreeType':
-                            return tree, window, area
+    try:
+        wm = context.window_manager
+    except (AttributeError, ReferenceError):
+        wm = bpy.context.window_manager
+
+    if not wm:
+        return None, None, None
+
+    try:
+        for window in wm.windows:
+            if not window.screen:
+                continue
+            for area in window.screen.areas:
+                if area.type == 'NODE_EDITOR':
+                    for space in area.spaces:
+                        if space.type == 'NODE_EDITOR':
+                            tree = getattr(space, 'edit_tree', None) or getattr(space, 'node_tree', None)
+                            if tree and tree.bl_idname == 'SSMTBlueprintTreeType':
+                                return tree, window, area
+    except (AttributeError, ReferenceError):
+        pass
     return None, None, None
 
 
@@ -158,6 +184,59 @@ def find_nodes_by_object_name(tree, object_name):
     return nodes
 
 
+def find_nodes_by_prefix_match(tree, object_name):
+    """通过DrawIB前缀模糊匹配节点（回退策略）"""
+    nodes = []
+    if not tree or not object_name:
+        return nodes
+
+    try:
+        from ..common.object_prefix_helper import ObjectPrefixHelper
+    except ImportError:
+        return nodes
+
+    prefix_info = ObjectPrefixHelper.extract_prefix_info(object_name)
+    if not prefix_info:
+        return nodes
+
+    search_prefix, _ = prefix_info
+
+    for node in tree.nodes:
+        if not _is_sync_node(node):
+            continue
+        node_obj_name = getattr(node, 'object_name', '')
+        if not node_obj_name:
+            continue
+        node_prefix_info = ObjectPrefixHelper.extract_prefix_info(node_obj_name)
+        if node_prefix_info and node_prefix_info[0] == search_prefix:
+            nodes.append(node)
+            _log(f"  前缀匹配: 节点 '{getattr(node, 'name', '?')}' object_name='{node_obj_name}' ↔ 搜索前缀='{search_prefix}'")
+
+    return nodes
+
+
+def refresh_stale_node_ids(tree):
+    """刷新节点中过期的object_id（物体存在但pointer已变）"""
+    refreshed = 0
+    for node in tree.nodes:
+        if not _is_sync_node(node):
+            continue
+        if node.bl_idname == 'SSMTNode_Object_Info':
+            obj_name = getattr(node, 'object_name', '')
+            obj_id = getattr(node, 'object_id', '')
+            if obj_name:
+                obj = bpy.data.objects.get(obj_name)
+                if obj:
+                    current_id = str(obj.as_pointer())
+                    if obj_id != current_id:
+                        _log(f"  刷新过期ID: 节点 '{node.name}' object_id '{obj_id[:8]}...' → '{current_id[:8]}...'")
+                        node.object_id = current_id
+                        refreshed += 1
+                elif obj_id:
+                    _log(f"  清除无效ID: 节点 '{node.name}' 物体 '{obj_name}' 不存在")
+    return refreshed
+
+
 def find_object_by_id(object_id):
     """通过物体ID查找物体"""
     if not object_id:
@@ -171,9 +250,10 @@ def find_object_by_id(object_id):
 
 def sync_nodes_to_objects(nodes, context):
     """多个节点选择时同步选择对应的物体"""
-    global _is_syncing, _last_synced_objects
+    global _is_syncing, _last_synced_objects, _is_syncing_since
 
     if _is_syncing or not _sync_enabled:
+        _log(f"sync_nodes_to_objects: 被阻止 (_is_syncing={_is_syncing}, _sync_enabled={_sync_enabled})")
         return
 
     objects_to_select = []
@@ -182,58 +262,107 @@ def sync_nodes_to_objects(nodes, context):
         if not _is_sync_node(node):
             continue
 
+        _log(f"sync_nodes_to_objects: 搜索节点 '{getattr(node, 'name', '?')}' (object_name='{getattr(node, 'object_name', '')}', object_id='{getattr(node, 'object_id', '')[:8]}...')")
+
         for obj in _resolve_node_objects(node):
             if obj not in objects_to_select:
                 objects_to_select.append(obj)
 
     if not objects_to_select:
+        _log(f"sync_nodes_to_objects: 未找到关联物体 ({len(nodes)} 个节点)")
         return
 
     _is_syncing = True
+    _is_syncing_since = time.time()
     try:
-        for o in context.selected_objects:
-            if o not in objects_to_select:
-                o.select_set(False)
+        try:
+            for o in context.selected_objects:
+                if o not in objects_to_select:
+                    o.select_set(False)
+        except (AttributeError, ReferenceError):
+            for o in bpy.context.selected_objects:
+                if o not in objects_to_select:
+                    o.select_set(False)
 
         for obj in objects_to_select:
             obj.select_set(True)
 
         if objects_to_select:
-            context.view_layer.objects.active = objects_to_select[0]
+            try:
+                context.view_layer.objects.active = objects_to_select[0]
+            except (AttributeError, ReferenceError):
+                bpy.context.view_layer.objects.active = objects_to_select[0]
 
         _last_synced_objects = set(objects_to_select)
+        _log(f"sync_nodes_to_objects: 已选中 {len(objects_to_select)} 个物体")
     finally:
         _is_syncing = False
+        _is_syncing_since = 0.0
 
 
 def sync_objects_to_nodes(objects, context):
     """多个物体选择时同步选择对应的节点"""
-    global _is_syncing, _last_synced_nodes
+    global _is_syncing, _last_synced_nodes, _is_syncing_since
 
     if _is_syncing or not _sync_enabled:
+        _log(f"sync_objects_to_nodes: 被阻止 (_is_syncing={_is_syncing}, _sync_enabled={_sync_enabled})")
         return
 
     tree, window, area = get_active_blueprint_tree(context)
     if not tree:
+        _log("sync_objects_to_nodes: 未找到蓝图树")
         return
 
     nodes_to_select = []
 
     for obj in objects:
         object_id = str(obj.as_pointer())
-        nodes = find_nodes_by_object_id(tree, object_id)
+        object_name = obj.name
 
-        if not nodes:
-            nodes = find_nodes_by_object_name(tree, obj.name)
+        _log(f"sync_objects_to_nodes: 搜索物体 '{object_name}' (id={object_id[:8]}...)")
+
+        nodes = find_nodes_by_object_id(tree, object_id)
+        if nodes:
+            _log(f"  → 通过object_id匹配到 {len(nodes)} 个节点")
+        else:
+            nodes = find_nodes_by_object_name(tree, object_name)
+            if nodes:
+                _log(f"  → 通过object_name匹配到 {len(nodes)} 个节点")
+            else:
+                _log(f"  → object_id和object_name均未匹配，尝试回退策略...")
+
+                stale_count = refresh_stale_node_ids(tree)
+                if stale_count > 0:
+                    _log(f"  → 刷新了 {stale_count} 个过期ID，重新搜索...")
+                    nodes = find_nodes_by_object_id(tree, object_id)
+                    if nodes:
+                        _log(f"  → 刷新ID后通过object_id匹配到 {len(nodes)} 个节点")
+
+                if not nodes:
+                    nodes = find_nodes_by_prefix_match(tree, object_name)
+                    if nodes:
+                        _log(f"  → 通过前缀匹配到 {len(nodes)} 个节点")
+
+                if not nodes:
+                    sync_nodes_in_tree = [n for n in tree.nodes if _is_sync_node(n)]
+                    _log(f"  → 所有回退策略均失败。树中共 {len(sync_nodes_in_tree)} 个同步节点:")
+                    for n in sync_nodes_in_tree[:5]:
+                        n_name = getattr(n, 'object_name', '')
+                        n_id = getattr(n, 'object_id', '')
+                        _log(f"     节点 '{n.name}': object_name='{n_name}', object_id='{n_id[:8] if n_id else '(空)'}...'")
+                    if len(sync_nodes_in_tree) > 5:
+                        _log(f"     ... 还有 {len(sync_nodes_in_tree) - 5} 个节点")
 
         for node in nodes:
             if node not in nodes_to_select:
                 nodes_to_select.append(node)
 
     if not nodes_to_select:
+        _log(f"sync_objects_to_nodes: 未找到关联节点 ({len(objects)} 个物体)")
         return
 
     _is_syncing = True
+    _is_syncing_since = time.time()
     try:
         for node in tree.nodes:
             if node not in nodes_to_select:
@@ -246,8 +375,10 @@ def sync_objects_to_nodes(objects, context):
             tree.nodes.active = nodes_to_select[0]
 
         _last_synced_nodes = set(nodes_to_select)
+        _log(f"sync_objects_to_nodes: 已选中 {len(nodes_to_select)} 个节点")
     finally:
         _is_syncing = False
+        _is_syncing_since = 0.0
 
 
 def check_node_selection():
@@ -258,19 +389,26 @@ def check_node_selection():
         return
 
     _check_counter += 1
-    if _check_counter % 3 != 0:
+    if _check_counter % 2 != 0:
         return
 
-    context = bpy.context
+    try:
+        context = bpy.context
+    except (AttributeError, ReferenceError):
+        return
 
     tree, window, area = get_active_blueprint_tree(context)
     if not tree:
         return
 
-    selected_nodes = [n for n in tree.nodes if n.select]
+    try:
+        selected_nodes = [n for n in tree.nodes if n.select]
+    except (AttributeError, ReferenceError):
+        return
 
     if not selected_nodes:
-        _last_synced_nodes = set()
+        if _last_synced_nodes:
+            _last_synced_nodes = set()
         return
 
     current_selection = set(selected_nodes)
@@ -281,6 +419,7 @@ def check_node_selection():
 
     sync_nodes = [n for n in selected_nodes if _is_sync_node(n)]
     if sync_nodes:
+        _log(f"检测到节点选择变化: {[n.name for n in sync_nodes]}")
         sync_nodes_to_objects(sync_nodes, context)
 
 
@@ -291,11 +430,15 @@ def check_object_selection():
     if _is_syncing or not _sync_enabled:
         return
 
-    context = bpy.context
-    selected_objects = set(context.selected_objects)
+    try:
+        context = bpy.context
+        selected_objects = set(context.selected_objects)
+    except (AttributeError, ReferenceError):
+        return
 
     if not selected_objects:
-        _last_synced_objects = set()
+        if _last_synced_objects:
+            _last_synced_objects = set()
         return
 
     if selected_objects == _last_synced_objects:
@@ -303,15 +446,48 @@ def check_object_selection():
 
     _last_synced_objects = selected_objects
 
+    _log(f"检测到物体选择变化: {[o.name for o in selected_objects]}")
     sync_objects_to_nodes(list(selected_objects), context)
 
 
 def timer_callback():
     """定时器回调函数"""
+    global _is_syncing, _is_syncing_since, _heartbeat_counter
+
+    _heartbeat_counter += 1
+    if _heartbeat_counter > 100000:
+        _heartbeat_counter = 1
+
+    if _SYNC_DEBUG and _heartbeat_counter % 200 == 1:
+        _log(f"心跳 #{_heartbeat_counter}: 定时器运行中 (enabled={_sync_enabled}, syncing={_is_syncing})")
+
+    if _is_syncing:
+        if _is_syncing_since > 0:
+            elapsed = time.time() - _is_syncing_since
+            if elapsed > _SYNC_STUCK_TIMEOUT:
+                _log(f"_is_syncing 已卡住 {elapsed:.1f}s，自动重置")
+                _is_syncing = False
+                _is_syncing_since = 0.0
+        else:
+            _is_syncing = False
+            _is_syncing_since = 0.0
+
     if _sync_enabled:
-        check_node_selection()
-        check_object_selection()
-        update_node_references_check()
+        try:
+            check_node_selection()
+        except Exception as e:
+            _log(f"check_node_selection 异常: {e}")
+
+        try:
+            check_object_selection()
+        except Exception as e:
+            _log(f"check_object_selection 异常: {e}")
+
+        try:
+            update_node_references_check()
+        except Exception as e:
+            _log(f"update_node_references_check 异常: {e}")
+
     return 0.05
 
 
@@ -352,7 +528,11 @@ def on_node_selection_changed():
     if _is_syncing or not _sync_enabled:
         return
 
-    context = bpy.context
+    try:
+        context = bpy.context
+    except (AttributeError, ReferenceError):
+        return
+
     if not is_blueprint_editor(context):
         return
 
@@ -384,8 +564,11 @@ def on_object_selection_changed():
     if _is_syncing or not _sync_enabled:
         return
 
-    context = bpy.context
-    selected_objects = set(context.selected_objects)
+    try:
+        context = bpy.context
+        selected_objects = set(context.selected_objects)
+    except (AttributeError, ReferenceError):
+        return
 
     if not selected_objects:
         _last_synced_objects = set()
@@ -637,6 +820,45 @@ class SSMT_OT_SelectNodeFromObject(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SSMT_OT_SyncDebugStatus(bpy.types.Operator):
+    """检查同步状态并输出调试信息"""
+    bl_idname = "ssmt.sync_debug_status"
+    bl_label = "同步调试状态"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        global _SYNC_DEBUG
+        _SYNC_DEBUG = not _SYNC_DEBUG
+
+        lines = []
+        lines.append(f"同步开关: {'开启' if _sync_enabled else '关闭'}")
+        lines.append(f"正在同步中: {_is_syncing}")
+        lines.append(f"同步卡住时间: {_is_syncing_since}")
+        lines.append(f"调试模式: {'开启' if _SYNC_DEBUG else '关闭'}")
+        lines.append(f"定时器运行: {_timer_handle is not None and bpy.app.timers.is_registered(_timer_handle) if _timer_handle else False}")
+        lines.append(f"上次同步物体数: {len(_last_synced_objects)}")
+        lines.append(f"上次同步节点数: {len(_last_synced_nodes)}")
+        lines.append(f"物体缓存数: {len(_object_id_to_name)}")
+
+        tree, window, area = get_active_blueprint_tree(context)
+        if tree:
+            lines.append(f"蓝图树: {tree.name}")
+            sync_nodes = [n for n in tree.nodes if _is_sync_node(n)]
+            lines.append(f"同步节点数: {len(sync_nodes)}")
+            for node in sync_nodes:
+                obj_name = getattr(node, 'object_name', '')
+                obj_id = getattr(node, 'object_id', '')
+                obj = bpy.data.objects.get(obj_name) if obj_name else None
+                lines.append(f"  节点 '{node.name}': object_name='{obj_name}', object_id='{obj_id[:8]}...' , 物体存在={obj is not None}")
+        else:
+            lines.append("蓝图树: 未找到")
+
+        msg = "\n".join(lines)
+        print(f"[Sync Debug]\n{msg}")
+        self.report({'INFO'}, f"调试模式已{'开启' if _SYNC_DEBUG else '关闭'}，详情见控制台")
+        return {'FINISHED'}
+
+
 def draw_view3d_sync_menu(self, context):
     """在3D视图物体右键菜单中添加同步选项"""
     if not context.selected_objects:
@@ -659,6 +881,7 @@ def draw_node_header(self, context):
     icon = 'CHECKMARK' if _sync_enabled else 'X'
     row = layout.row(align=True)
     row.operator("ssmt.toggle_sync", text=sync_status, icon=icon, emboss=False)
+    row.operator("ssmt.sync_debug_status", text="", icon='CONSOLE')
 
 
 classes = (
@@ -668,6 +891,7 @@ classes = (
     SSMT_OT_UpdateAllNodeReferences,
     SSMT_OT_SelectObjectFromNode,
     SSMT_OT_SelectNodeFromObject,
+    SSMT_OT_SyncDebugStatus,
 )
 
 

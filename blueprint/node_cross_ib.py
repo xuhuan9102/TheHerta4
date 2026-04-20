@@ -194,31 +194,31 @@ class SSMTNode_CrossIB(SSMTNodeBase):
 
     vb_slot_200: BoolProperty(
         name="200",
-        description="源块 VB 槽位 200",
+        description="源块 VS 槽位 200",
         default=True
     )
 
     vb_slot_201: BoolProperty(
         name="201",
-        description="源块 VB 槽位 201",
+        description="源块 VS 槽位 201",
         default=True
     )
 
     vb_slot_202: BoolProperty(
         name="202",
-        description="目标块 VB 槽位 202",
+        description="目标块 VS 槽位 202",
         default=True
     )
 
     vb_slot_203: BoolProperty(
         name="203",
-        description="目标块 VB 槽位 203",
+        description="目标块 VS 槽位 203",
         default=True
     )
 
     vb_slot_204: BoolProperty(
         name="204",
-        description="源块 VB 槽位 204",
+        description="源块 VS 槽位 204",
         default=True
     )
 
@@ -283,7 +283,7 @@ class SSMTNode_CrossIB(SSMTNodeBase):
             row.prop(self, "match_mode", text="识别模式")
 
             box_vb = layout.box()
-            box_vb.label(text="VB 槽位选项 (用于条件判断)", icon='CHECKBOX_HLT')
+            box_vb.label(text="VS 槽位选项 (用于条件判断)", icon='CHECKBOX_HLT')
 
             row = box_vb.row()
             row.label(text="源块:")
@@ -446,6 +446,8 @@ class SSMTNode_CrossIB(SSMTNodeBase):
         original_data = []
         for item in self.cross_ib_list:
             original_data.append({
+                'source_ib': item.source_ib,
+                'target_ib': item.target_ib,
                 'source_index_count': item.source_index_count,
                 'target_index_count': item.target_index_count,
             })
@@ -465,8 +467,10 @@ class SSMTNode_CrossIB(SSMTNodeBase):
             self.cross_ib_list.clear()
             for item_data in original_data:
                 new_item = self.cross_ib_list.add()
-                new_item.source_index_count = item_data['source_index_count']
-                new_item.target_index_count = item_data['target_index_count']
+                new_item.source_ib = item_data.get('source_ib', '')
+                new_item.target_ib = item_data.get('target_ib', '')
+                new_item.source_index_count = item_data.get('source_index_count', '')
+                new_item.target_index_count = item_data.get('target_index_count', '')
 
             print(f"[CrossIB] 已恢复节点 {self.name} 的原始参数，共 {len(original_data)} 条")
 
@@ -498,6 +502,31 @@ class SSMTNode_CrossIB(SSMTNodeBase):
                 updated_count += 1
 
         print(f"[CrossIB] IndexCount映射应用完成，更新了 {updated_count} 条映射")
+
+    def apply_ibhash_mapping(self, ibhash_mapping):
+        if not ibhash_mapping:
+            return
+
+        print(f"[CrossIB] 开始应用IBHash映射，共 {len(ibhash_mapping)} 条规则")
+
+        updated_count = 0
+        for item in self.cross_ib_list:
+            original_source = item.source_ib
+            original_target = item.target_ib
+
+            if original_source in ibhash_mapping:
+                new_source = ibhash_mapping[original_source]
+                item.source_ib = new_source
+                print(f"[CrossIB] 更新源IB映射: {original_source} -> {new_source}")
+                updated_count += 1
+
+            if original_target in ibhash_mapping:
+                new_target = ibhash_mapping[original_target]
+                item.target_ib = new_target
+                print(f"[CrossIB] 更新目标IB映射: {original_target} -> {new_target}")
+                updated_count += 1
+
+        print(f"[CrossIB] IBHash映射应用完成，更新了 {updated_count} 条映射")
 
 
 class SSMTNode_PostProcess_CrossIB(SSMTNodeBase):

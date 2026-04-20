@@ -38,6 +38,7 @@ try:
         SSMT_OT_UpdateAllNodeReferences,
         SSMT_OT_SelectObjectFromNode,
         SSMT_OT_SelectNodeFromObject,
+        SSMT_OT_SyncDebugStatus,
     )
 except ImportError:
     pass

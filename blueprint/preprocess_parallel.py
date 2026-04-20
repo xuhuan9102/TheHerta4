@@ -353,6 +353,8 @@ class ParallelPreprocessCoordinator:
                     hash_value = hash_map.get(original_name, "")
                     if hash_value:
                         PreProcessCache.save_to_cache(original_name, copy_name, hash_value)
+                    else:
+                        LOG.warning(f"⚠️ 缓存保存跳过: {original_name} 哈希值为空")
 
     @staticmethod
     def _write_text(file_path: str, content: str):
