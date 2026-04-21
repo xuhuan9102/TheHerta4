@@ -384,7 +384,7 @@ class ObjBufferHelper:
             if max_index > 255:
                 print("BLENDINDICES大于255了,最大值是：" + str(max_index))
             else:
-                blendindices.astype(numpy.uint8)
+                blendindices = blendindices.astype(numpy.uint8)
             return blendindices
             # print(original_elementname_data_dict[d3d11_element_name].dtype)
         elif d3d11_element.Format == "R8_UINT" and d3d11_element.ByteWidth == 8:
@@ -392,13 +392,13 @@ class ObjBufferHelper:
             if max_index > 255:
                 print("BLENDINDICES大于255了,最大值是：" + str(max_index))
             else:
-                blendindices.astype(numpy.uint8)
+                blendindices = blendindices.astype(numpy.uint8)
 
             return blendindices
             # print(original_elementname_data_dict[d3d11_element_name].dtype)
             # print("WWMI R8_UINT特殊处理")
         elif d3d11_element.Format == "R16_UINT" and d3d11_element.ByteWidth == 16:
-            blendindices.astype(numpy.uint16)
+            blendindices = blendindices.astype(numpy.uint16)
             return blendindices
             # print("WWMI R16_UINT特殊处理")
         else:
@@ -573,7 +573,8 @@ class ObjBufferHelper:
         element_vertex_ndarray:numpy.ndarray, 
         dtype:numpy.dtype,
         d3d11_game_type:D3D11GameType,
-        deduplicate_element_set:set = None):
+        deduplicate_element_set:set = None,
+        flip_triangles: bool = True):
         '''
         - 用 numpy 将结构化顶点视图为一行字节，避免逐顶点 bytes() 与 dict 哈希。
         - 使用 numpy.unique(..., axis=0, return_index=True, return_inverse=True) 在 C 层完成唯一化与逆映射。
@@ -700,20 +701,20 @@ class ObjBufferHelper:
             category_buffer_dict[cname] = unique_rows[:, stride_offset:stride_offset + cstride].flatten()
             stride_offset += cstride
 
-        # (6) 翻转三角形方向（高效）
-        # 鸣潮需要翻转这一下
-        flat_arr = flattened_ib_arr
-        if flat_arr.size % 3 == 0:
-            flipped = flat_arr.reshape(-1, 3)[:, ::-1].flatten().tolist()
+        if flip_triangles:
+            flat_arr = flattened_ib_arr
+            if flat_arr.size % 3 == 0:
+                ib = flat_arr.reshape(-1, 3)[:, ::-1].flatten().tolist()
+            else:
+                flipped = []
+                iarr = flat_arr.tolist()
+                for i in range(0, len(iarr), 3):
+                    tri = iarr[i:i + 3]
+                    flipped.extend(tri[::-1])
+                ib = flipped
         else:
-            # Rare irregular case: fallback to python loop on numpy array
-            flipped = []
-            iarr = flat_arr.tolist()
-            for i in range(0, len(iarr), 3):
-                tri = iarr[i:i + 3]
-                flipped.extend(tri[::-1])
+            ib = flattened_ib_arr.tolist()
 
-        ib = flipped
         return ib, category_buffer_dict, index_vertex_id_dict, unique_element_vertex_ndarray,unique_first_loop_indices
 
     @staticmethod

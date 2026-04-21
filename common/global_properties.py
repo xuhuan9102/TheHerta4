@@ -165,6 +165,30 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    expand_import_quick_tools: bpy.props.BoolProperty(
+        name="展开导入子菜单",
+        description="展开后显示导入 FMT 与导入 SSMT 的快捷按钮",
+        default=False,
+    ) # type: ignore
+
+    expand_prefix_quick_ops: bpy.props.BoolProperty(
+        name="展开前缀快捷操作",
+        description="展开前缀快捷操作面板",
+        default=False,
+    ) # type: ignore
+
+    expand_preprocess_cache: bpy.props.BoolProperty(
+        name="展开前处理缓存",
+        description="展开前处理缓存面板",
+        default=False,
+    ) # type: ignore
+
+    expand_parallel_processing: bpy.props.BoolProperty(
+        name="展开并行处理",
+        description="展开并行处理面板",
+        default=False,
+    ) # type: ignore
+
     deduplicate_POSITION: bpy.props.BoolProperty(
         name="位置数据",
         description="位置数据是否参与顶点去重判断",

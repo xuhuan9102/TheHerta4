@@ -120,17 +120,23 @@ class ExportUtils:
     ) -> UnityBufferBuildResult:
         ObjBufferHelper.check_and_verify_attributes(obj=obj, d3d11_game_type=d3d11_game_type)
 
+        TimerUtils.start_stage("Element数据解析")
         element_context = ExportUtils.build_obj_element_context(
             d3d11_game_type=d3d11_game_type,
             obj=obj,
         )
+        TimerUtils.end_stage("Element数据解析")
+
+        TimerUtils.start_stage("Element数据打包")
         element_vertex_ndarray = ExportUtils.pack_element_vertex_ndarray(
             d3d11_game_type=d3d11_game_type,
             mesh=element_context.mesh,
             original_elementname_data_dict=element_context.original_elementname_data_dict,
             final_elementname_data_dict=element_context.final_elementname_data_dict,
         )
+        TimerUtils.end_stage("Element数据打包")
 
+        TimerUtils.start_stage("索引去重与Buffer构建")
         ib, category_buffer_dict, index_loop_id_dict = ExportUtils.build_unity_index_buffers(
             obj=obj,
             mesh=element_context.mesh,
@@ -138,12 +144,16 @@ class ExportUtils:
             d3d11_game_type=d3d11_game_type,
             dtype=element_context.total_structured_dtype,
         )
+        TimerUtils.end_stage("索引去重与Buffer构建")
+
+        TimerUtils.start_stage("ShapeKey计算")
         shape_key_buffer_dict = ExportUtils.build_unity_shape_key_buffer_dict(
             obj=obj,
             d3d11_game_type=d3d11_game_type,
             dtype=element_context.total_structured_dtype,
             index_loop_id_dict=index_loop_id_dict,
         )
+        TimerUtils.end_stage("ShapeKey计算")
 
         return UnityBufferBuildResult(
             obj_name=element_context.obj_name,
@@ -174,13 +184,57 @@ class ExportUtils:
                 dtype=dtype,
             )
 
-        return ObjBufferHelper.calc_index_vertex_buffer_unified(
-            mesh=mesh,
-            element_vertex_ndarray=element_vertex_ndarray,
-            d3d11_game_type=d3d11_game_type,
-            dtype=dtype,
+        deduplicate_element_set = GlobalProterties.get_deduplicate_element_set()
+
+        ib, _, _, unique_element_vertex_ndarray, unique_first_loop_indices = \
+            ObjBufferHelper.calc_index_vertex_buffer_wwmi_v2(
+                mesh=mesh,
+                element_vertex_ndarray=element_vertex_ndarray,
+                dtype=dtype,
+                d3d11_game_type=d3d11_game_type,
+                deduplicate_element_set=deduplicate_element_set,
+                flip_triangles=False,
+            )
+
+        index_loop_id_dict = dict(enumerate(unique_first_loop_indices.tolist()))
+
+        vertex_data_list = [row.tobytes() for row in unique_element_vertex_ndarray]
+
+        indexed_vertices = ObjBufferHelper.average_normal_tangent_xxmi(
             obj=obj,
+            indexed_vertices=vertex_data_list,
+            flattened_ib=ib,
+            d3d11GameType=d3d11_game_type,
+            dtype=dtype,
         )
+
+        indexed_vertices = ObjBufferHelper.average_normal_color(
+            obj=obj,
+            indexed_vertices=indexed_vertices,
+            d3d11GameType=d3d11_game_type,
+            dtype=dtype,
+        )
+
+        if isinstance(indexed_vertices, numpy.ndarray):
+            n_unique = len(indexed_vertices)
+            row_size = indexed_vertices.dtype.itemsize
+            post_processed_bytes = numpy.ascontiguousarray(indexed_vertices).view(numpy.uint8).reshape(n_unique, row_size)
+        else:
+            post_processed_bytes = numpy.array([numpy.frombuffer(bd, dtype=numpy.uint8) for bd in indexed_vertices])
+
+        category_stride_dict = d3d11_game_type.get_real_category_stride_dict()
+        category_buffer_dict = {}
+        stride_offset = 0
+        for cname, cstride in category_stride_dict.items():
+            category_buffer_dict[cname] = post_processed_bytes[:, stride_offset:stride_offset + cstride].flatten()
+            stride_offset += cstride
+
+        if GlobalConfig.logic_name == LogicName.YYSLS:
+            flat_arr = numpy.asarray(ib, dtype=numpy.int32)
+            if flat_arr.size % 3 == 0:
+                ib = flat_arr.reshape(-1, 3)[:, ::-1].flatten().tolist()
+
+        return ib, category_buffer_dict, index_loop_id_dict
 
     @staticmethod
     def build_unity_shape_key_buffer_dict(

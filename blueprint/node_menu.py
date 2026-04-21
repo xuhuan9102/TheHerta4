@@ -2,6 +2,7 @@ import re
 
 import bpy
 from bpy.types import NodeTree, Node, NodeSocket
+from bpy.props import StringProperty
 
 from ..common.global_config import GlobalConfig
 from ..common.object_prefix_helper import ObjectPrefixHelper
@@ -155,6 +156,81 @@ def _create_source_collection_for_vg_match(context, source_objects, target_obj):
             source_collection.objects.link(source_obj)
 
     return source_collection, True
+
+
+def _get_socket_index(sockets, target_socket):
+    for i, socket in enumerate(sockets):
+        if socket == target_socket:
+            return i
+    return None
+
+
+def _copy_scalar_and_collection_properties(source_node, target_node):
+    property_blacklist = {
+        'name', 'label', 'location', 'width', 'height', 'dimensions',
+        'select', 'show_options', 'show_preview',
+        'parent', 'use_custom_color', 'color', 'type', 'inputs', 'outputs',
+        'internal_links', 'rna_type', 'bl_idname', 'id_data'
+    }
+
+    for prop_name in source_node.bl_rna.properties.keys():
+        if prop_name in property_blacklist:
+            continue
+
+        prop = source_node.bl_rna.properties[prop_name]
+        if prop.is_readonly:
+            continue
+
+        try:
+            if prop.type in {'STRING', 'INT', 'FLOAT', 'BOOLEAN', 'ENUM'}:
+                setattr(target_node, prop_name, getattr(source_node, prop_name))
+            elif prop.type == 'COLLECTION':
+                source_collection = getattr(source_node, prop_name, None)
+                target_collection = getattr(target_node, prop_name, None)
+                if source_collection is None or target_collection is None:
+                    continue
+
+                try:
+                    while len(target_collection) > 0:
+                        target_collection.remove(len(target_collection) - 1)
+                except Exception:
+                    pass
+
+                for source_item in source_collection:
+                    target_item = target_collection.add()
+                    for item_prop_name in source_item.bl_rna.properties.keys():
+                        item_prop = source_item.bl_rna.properties[item_prop_name]
+                        if item_prop.is_readonly:
+                            continue
+                        if item_prop.type not in {'STRING', 'INT', 'FLOAT', 'BOOLEAN', 'ENUM'}:
+                            continue
+                        try:
+                            setattr(target_item, item_prop_name, getattr(source_item, item_prop_name))
+                        except Exception:
+                            continue
+        except Exception:
+            continue
+
+
+def _ensure_input_count(node, required_inputs: int):
+    while len(node.inputs) < required_inputs:
+        try:
+            node.inputs.new('SSMTSocketObject', f"Input {len(node.inputs) + 1}")
+        except Exception:
+            break
+
+
+def _create_nested_blueprint_name(parent_tree_name: str) -> str:
+    base_name = f"{parent_tree_name}_嵌套蓝图"
+    if base_name not in bpy.data.node_groups:
+        return base_name
+
+    index = 1
+    while True:
+        nested_name = f"{base_name}_{index:03d}"
+        if nested_name not in bpy.data.node_groups:
+            return nested_name
+        index += 1
 
 
 class SSMT_OT_CreateGroupFromSelection(bpy.types.Operator):
@@ -374,6 +450,234 @@ class SSMT_OT_QuickAddVertexGroupMatch(bpy.types.Operator):
         source_suffix = f"，已创建源合集: {source_collection.name}" if is_collection_mode and source_collection else ""
         hash_suffix = f"，目标哈希: {match_node.target_hash}" if match_node.target_hash else ""
         self.report({'INFO'}, f"{message}{source_suffix}{hash_suffix}")
+        return {'FINISHED'}
+
+
+class SSMT_OT_GroupNodesToNestedBlueprint(bpy.types.Operator):
+    bl_idname = "ssmt.group_nodes_to_nested_blueprint"
+    bl_label = "打组到嵌套蓝图"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    blueprint_name: StringProperty(
+        name="嵌套蓝图名称",
+        description="新建嵌套蓝图的名称",
+        default=""
+    )
+
+    @classmethod
+    def poll(cls, context):
+        space_data = getattr(context, 'space_data', None)
+        if not space_data or space_data.type != 'NODE_EDITOR':
+            return False
+
+        node_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+        if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
+            return False
+
+        selected_nodes = [node for node in node_tree.nodes if node.select and node.bl_idname != 'NodeFrame']
+        return len(selected_nodes) > 0
+
+    def invoke(self, context, event):
+        space_data = context.space_data
+        node_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+        if not self.blueprint_name:
+            self.blueprint_name = _create_nested_blueprint_name(node_tree.name)
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "blueprint_name")
+        layout.label(text="限制: 不支持外部输入，且外部输出需来自同一末端节点", icon='INFO')
+
+    def execute(self, context):
+        space_data = context.space_data
+        parent_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+        if not parent_tree or parent_tree.bl_idname != 'SSMTBlueprintTreeType':
+            self.report({'ERROR'}, "当前不在 SSMT 蓝图编辑器中")
+            return {'CANCELLED'}
+
+        selected_nodes = [node for node in parent_tree.nodes if node.select and node.bl_idname != 'NodeFrame']
+        if not selected_nodes:
+            self.report({'WARNING'}, "请先选择要打组的节点")
+            return {'CANCELLED'}
+
+        selected_set = set(selected_nodes)
+
+        unsupported_nodes = [
+            node for node in selected_nodes
+            if node.bl_idname == 'SSMTNode_Result_Output' or node.bl_idname.startswith('SSMTNode_PostProcess_')
+        ]
+        if unsupported_nodes:
+            names = ', '.join(node.name for node in unsupported_nodes[:4])
+            self.report({'ERROR'}, f"当前不支持将输出节点或后处理节点打入嵌套蓝图: {names}")
+            return {'CANCELLED'}
+
+        if not self.blueprint_name.strip():
+            self.report({'ERROR'}, "请输入嵌套蓝图名称")
+            return {'CANCELLED'}
+
+        if self.blueprint_name in bpy.data.node_groups:
+            self.report({'ERROR'}, f"蓝图 '{self.blueprint_name}' 已存在，请换一个名称")
+            return {'CANCELLED'}
+
+        external_input_links = []
+        external_output_links = []
+        internal_links = []
+
+        for link in parent_tree.links:
+            from_selected = link.from_node in selected_set
+            to_selected = link.to_node in selected_set
+            if from_selected and to_selected:
+                internal_links.append(link)
+            elif (not from_selected) and to_selected:
+                external_input_links.append(link)
+            elif from_selected and (not to_selected):
+                external_output_links.append(link)
+
+        if external_input_links:
+            offending = ', '.join(f"{link.from_node.name}->{link.to_node.name}" for link in external_input_links[:4])
+            self.report({'ERROR'}, f"选区存在外部输入，当前嵌套节点无法承接输入: {offending}")
+            return {'CANCELLED'}
+
+        if not external_output_links:
+            self.report({'ERROR'}, "选区没有对外输出，无法在父蓝图中替换为嵌套节点")
+            return {'CANCELLED'}
+
+        exit_nodes = {link.from_node for link in external_output_links}
+        if len(exit_nodes) != 1:
+            names = ', '.join(node.name for node in list(exit_nodes)[:4])
+            self.report({'ERROR'}, f"当前只支持单一出口节点的打组，检测到多个出口: {names}")
+            return {'CANCELLED'}
+
+        exit_node = next(iter(exit_nodes))
+        exit_socket_indices = {_get_socket_index(exit_node.outputs, link.from_socket) for link in external_output_links}
+        exit_socket_indices.discard(None)
+        if len(exit_socket_indices) != 1:
+            self.report({'ERROR'}, "当前只支持同一出口节点的同一输出口向外连接")
+            return {'CANCELLED'}
+
+        exit_socket_index = next(iter(exit_socket_indices))
+
+        external_targets = []
+        for link in external_output_links:
+            to_socket_index = _get_socket_index(link.to_node.inputs, link.to_socket)
+            if to_socket_index is None:
+                continue
+            external_targets.append((link.to_node, to_socket_index))
+
+        nested_tree = bpy.data.node_groups.new(self.blueprint_name, 'SSMTBlueprintTreeType')
+        nested_tree.use_fake_user = True
+
+        min_x = min(node.location.x for node in selected_nodes)
+        min_y = min(node.location.y for node in selected_nodes)
+        created_nodes = {}
+
+        dynamic_classes = set()
+        for source_node in selected_nodes:
+            if source_node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output'):
+                dynamic_classes.add(type(source_node))
+
+        saved_updates = {}
+        for cls in dynamic_classes:
+            if hasattr(cls, 'update'):
+                saved_updates[cls] = cls.update
+                cls.update = lambda self: None
+
+        try:
+            for index, source_node in enumerate(selected_nodes):
+                new_node = nested_tree.nodes.new(type=source_node.bl_idname)
+                new_node.location = (
+                    source_node.location.x - min_x,
+                    source_node.location.y - min_y,
+                )
+                new_node.width = source_node.width
+                new_node.label = source_node.label
+
+                try:
+                    new_node.name = source_node.name
+                except Exception:
+                    pass
+
+                _copy_scalar_and_collection_properties(source_node, new_node)
+                created_nodes[source_node] = new_node
+
+            required_input_counts = {}
+            for link in internal_links:
+                source_copy = created_nodes.get(link.from_node)
+                target_copy = created_nodes.get(link.to_node)
+                if not source_copy or not target_copy:
+                    continue
+                to_socket_index = _get_socket_index(link.to_node.inputs, link.to_socket)
+                if to_socket_index is None:
+                    continue
+                required_input_counts[target_copy] = max(required_input_counts.get(target_copy, 0), to_socket_index + 1)
+
+            for node, required_count in required_input_counts.items():
+                _ensure_input_count(node, required_count)
+
+            for link in internal_links:
+                source_copy = created_nodes.get(link.from_node)
+                target_copy = created_nodes.get(link.to_node)
+                if not source_copy or not target_copy:
+                    continue
+                from_socket_index = _get_socket_index(link.from_node.outputs, link.from_socket)
+                to_socket_index = _get_socket_index(link.to_node.inputs, link.to_socket)
+                if from_socket_index is None or to_socket_index is None:
+                    continue
+                if from_socket_index >= len(source_copy.outputs) or to_socket_index >= len(target_copy.inputs):
+                    continue
+                nested_tree.links.new(source_copy.outputs[from_socket_index], target_copy.inputs[to_socket_index])
+        finally:
+            for cls, original_update in saved_updates.items():
+                cls.update = original_update
+
+            for node in created_nodes.values():
+                if node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output'):
+                    try:
+                        node.update()
+                    except Exception:
+                        pass
+
+        nested_output = nested_tree.nodes.new('SSMTNode_Result_Output')
+        nested_output.label = "嵌套输出"
+
+        exit_copy = created_nodes.get(exit_node)
+        if not exit_copy or exit_socket_index >= len(exit_copy.outputs):
+            bpy.data.node_groups.remove(nested_tree, do_unlink=True)
+            self.report({'ERROR'}, "创建嵌套蓝图失败，未找到有效的出口节点拷贝")
+            return {'CANCELLED'}
+
+        _ensure_input_count(nested_output, 1)
+        nested_tree.links.new(exit_copy.outputs[exit_socket_index], nested_output.inputs[0])
+
+        max_x = max(node.location.x + getattr(node, 'width', 200) for node in created_nodes.values()) if created_nodes else 0
+        avg_y = sum(node.location.y for node in created_nodes.values()) / len(created_nodes) if created_nodes else 0
+        nested_output.location = (max_x + 260, avg_y)
+
+        center_x = sum(node.location.x for node in selected_nodes) / len(selected_nodes)
+        center_y = sum(node.location.y for node in selected_nodes) / len(selected_nodes)
+        nest_node = parent_tree.nodes.new('SSMTNode_Blueprint_Nest')
+        nest_node.location = (center_x, center_y)
+        nest_node.blueprint_name = nested_tree.name
+        nest_node.label = f"嵌套: {nested_tree.name}"
+
+        for source_node in selected_nodes:
+            parent_tree.nodes.remove(source_node)
+
+        for target_node, socket_index in external_targets:
+            if socket_index >= len(target_node.inputs):
+                continue
+            try:
+                parent_tree.links.new(nest_node.outputs[0], target_node.inputs[socket_index])
+            except Exception:
+                continue
+
+        for node in parent_tree.nodes:
+            node.select = False
+        nest_node.select = True
+        parent_tree.nodes.active = nest_node
+
+        self.report({'INFO'}, f"已将 {len(selected_nodes)} 个节点打组到嵌套蓝图 '{nested_tree.name}'")
         return {'FINISHED'}
 
 
@@ -842,6 +1146,9 @@ def draw_node_context_menu(self, context):
     layout.separator()
     layout.operator("ssmt.align_nodes", text="矩阵对齐节点", icon='GRID')
     layout.operator("ssmt.batch_connect_nodes", text="批量连接节点", icon='LINKED')
+    layout.operator_context = 'INVOKE_DEFAULT'
+    layout.operator("ssmt.group_nodes_to_nested_blueprint", text="打组到嵌套蓝图", icon='NODETREE')
+    layout.operator_context = 'EXEC_DEFAULT'
     layout.separator()
     layout.operator_context = 'INVOKE_DEFAULT'
     layout.operator("ssmt.save_node_preset", text="保存预设", icon='PRESET')
@@ -850,11 +1157,50 @@ def draw_node_context_menu(self, context):
     layout.operator("ssmt.update_all_node_references", text="更新所有节点引用", icon='FILE_REFRESH')
 
 
+_original_node_context_menu_draw = None
+
+
+def _remove_legacy_node_context_keymaps():
+    wm = getattr(bpy.context, 'window_manager', None)
+    if not wm:
+        return
+
+    for keyconfig in (wm.keyconfigs.addon, wm.keyconfigs.user):
+        if not keyconfig:
+            continue
+
+        for keymap in keyconfig.keymaps:
+            stale_items = [item for item in keymap.keymap_items if item.idname == "ssmt.node_context_menu"]
+            for item in stale_items:
+                try:
+                    keymap.keymap_items.remove(item)
+                except Exception:
+                    continue
+
+
+def _custom_node_context_menu_draw(self, context):
+    if not isinstance(context.space_data, bpy.types.SpaceNodeEditor):
+        if _original_node_context_menu_draw:
+            _original_node_context_menu_draw(self, context)
+        return
+
+    node_tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+    if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
+        if _original_node_context_menu_draw:
+            _original_node_context_menu_draw(self, context)
+        return
+
+    draw_node_context_menu(self, context)
+
+
 def register():
+    global _original_node_context_menu_draw
+
     bpy.utils.register_class(SSMT_OT_CreateGroupFromSelection)
     bpy.utils.register_class(SSMT_OT_CreateInternalSwitch)
     bpy.utils.register_class(SSMT_OT_QuickAddRenameRule)
     bpy.utils.register_class(SSMT_OT_QuickAddVertexGroupMatch)
+    bpy.utils.register_class(SSMT_OT_GroupNodesToNestedBlueprint)
     bpy.utils.register_class(SSMT_OT_AlignNodes)
     bpy.utils.register_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.register_class(SSMT_MT_ObjectContextMenuSub)
@@ -867,10 +1213,22 @@ def register():
 
     bpy.types.NODE_MT_add.prepend(draw_node_add_menu)
     bpy.types.VIEW3D_MT_object_context_menu.append(draw_objects_context_menu_add)
-    bpy.types.NODE_MT_context_menu.append(draw_node_context_menu)
+    _remove_legacy_node_context_keymaps()
+
+    if bpy.types.NODE_MT_context_menu.draw is not _custom_node_context_menu_draw:
+        _original_node_context_menu_draw = bpy.types.NODE_MT_context_menu.draw
+        bpy.types.NODE_MT_context_menu.draw = _custom_node_context_menu_draw
+
 
 def unregister():
-    bpy.types.NODE_MT_context_menu.remove(draw_node_context_menu)
+    global _original_node_context_menu_draw
+
+    _remove_legacy_node_context_keymaps()
+
+    if bpy.types.NODE_MT_context_menu.draw is _custom_node_context_menu_draw and _original_node_context_menu_draw:
+        bpy.types.NODE_MT_context_menu.draw = _original_node_context_menu_draw
+    _original_node_context_menu_draw = None
+
     bpy.types.NODE_MT_add.remove(draw_node_add_menu)
     bpy.types.VIEW3D_MT_object_context_menu.remove(draw_objects_context_menu_add)
 
@@ -883,6 +1241,7 @@ def unregister():
     bpy.utils.unregister_class(SSMT_MT_ObjectContextMenuSub)
     bpy.utils.unregister_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.unregister_class(SSMT_OT_AlignNodes)
+    bpy.utils.unregister_class(SSMT_OT_GroupNodesToNestedBlueprint)
     bpy.utils.unregister_class(SSMT_OT_QuickAddVertexGroupMatch)
     bpy.utils.unregister_class(SSMT_OT_QuickAddRenameRule)
     bpy.utils.unregister_class(SSMT_OT_CreateInternalSwitch)

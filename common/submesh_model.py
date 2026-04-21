@@ -1,10 +1,13 @@
 from dataclasses import dataclass, field
+import numpy
+
 from .draw_call_model import DrawCallModel
 
 from ..utils.export_utils import ExportUtils
 from ..utils.obj_utils import ObjUtils
 from ..utils.collection_utils import CollectionUtils
 from ..utils.json_utils import JsonUtils
+from ..utils.timer_utils import TimerUtils
 from .logic_name import LogicName
 from .global_config import GlobalConfig
 from .d3d11_gametype import D3D11GameType
@@ -60,14 +63,12 @@ class SubMeshModel:
     def calc_buffer(self):
         folder_name = self.unique_str
 
-        # 读取 SubmeshJson 获取 d3d11GameType
         submesh_metadata = SubmeshMetadataResolver.resolve(folder_name)
         self.d3d11_game_type = submesh_metadata.d3d11_game_type
 
-        # 预计算所有源对象的数据哈希，用于判断是否可以复用
-        # 哈希包含顶点位置、顶点组名称/权重、UV 数据等
-        # 使用多线程并行计算，避免产生大量性能开销
-        object_hashes = self._precompute_object_hashes()
+        TimerUtils.start_stage("数据哈希预计算")
+        object_hashes, source_obj_list = self._precompute_object_hashes()
+        TimerUtils.end_stage("数据哈希预计算")
         
         # 获取每个对象的原始名称（用于判断是否来自同一个物体）
         # 只有来自同一个原始物体的分裂物体才能复用
@@ -104,21 +105,44 @@ class SubMeshModel:
                 print(f"  📋 哈希 {h[:16]}... (原始: {orig_name}) → 独立对象: {names[0]}")
 
         index_offset = 0
-        # 临时对象列表，用于后续合并
         submesh_temp_obj_list = []
-        # 临时集合列表，用于后续清理
-        temp_collection_list = []
-        # 数据哈希缓存：(hash, original_name) → (index_offset, vertex_count, index_count)
-        # 只有来自同一个原始物体且哈希相同的对象才能复用
         data_hash_cache = {}
 
         reuse_count = 0
 
+        temp_collection = CollectionUtils.create_new_collection("TEMP_SUBMESH_COLLECTION_" + self.unique_str)
+        bpy.context.scene.collection.children.link(temp_collection)
+
+        TimerUtils.start_stage("对象处理与合并")
+
+        need_normalize = self.d3d11_game_type is not None and "Blend" in self.d3d11_game_type.OrderedCategoryNameList
+        need_rotate = (GlobalConfig.logic_name == LogicName.SRMI
+            or GlobalConfig.logic_name == LogicName.GIMI
+            or GlobalConfig.logic_name == LogicName.HIMI
+            or GlobalConfig.logic_name == LogicName.YYSLS
+            or GlobalConfig.logic_name == LogicName.IdentityV
+            or GlobalConfig.logic_name == LogicName.EFMI)
+
         for i, draw_call_model in enumerate(self.drawcall_model_list):
             blender_obj_name = draw_call_model.get_blender_obj_name()
-            source_obj = ObjUtils.get_obj_by_name(blender_obj_name)
+            source_obj = source_obj_list[i]
 
-            # 检查对象是否存在，不存在则报错
+            obj_hash = object_hashes[i]
+            if obj_hash is None:
+                obj_hash = f"FALLBACK_{blender_obj_name}"
+            original_name = original_names[i]
+            cache_key = (obj_hash, original_name)
+            cached_result = data_hash_cache.get(cache_key)
+
+            if cached_result is not None:
+                cached_offset, cached_vertex_count, cached_index_count = cached_result
+                draw_call_model.vertex_count = cached_vertex_count
+                draw_call_model.index_count = cached_index_count
+                draw_call_model.index_offset = cached_offset
+                reuse_count += 1
+                print(f"  ♻️复用: '{blender_obj_name}' (原始: {original_name}) → offset={cached_offset}, vertices={cached_vertex_count}, indices={cached_index_count}")
+                continue
+
             if source_obj is None:
                 from ..utils.ssmt_error_utils import SSMTErrorUtils
                 tried_names = [blender_obj_name]
@@ -132,94 +156,55 @@ class SubMeshModel:
                     f" — 请检查重命名节点是否正确配置"
                 )
 
-            # 用 (数据哈希, 原始名称) 作为缓存 key
-            # 只有来自同一个原始物体且数据完全相同的对象才能复用
-            obj_hash = object_hashes[i]
-            if obj_hash is None:
-                obj_hash = f"FALLBACK_{blender_obj_name}"
-            original_name = original_names[i]
-            cache_key = (obj_hash, original_name)
-            cached_result = data_hash_cache.get(cache_key)
-
-            if cached_result is not None:
-                # 缓存命中：直接复用已有的 index_offset、vertex_count、index_count
-                # 不再重复创建临时对象、三角化、写入 buffer
-                cached_offset, cached_vertex_count, cached_index_count = cached_result
-                draw_call_model.vertex_count = cached_vertex_count
-                draw_call_model.index_count = cached_index_count
-                draw_call_model.index_offset = cached_offset
-                reuse_count += 1
-                print(f"  ♻️复用: '{blender_obj_name}' (原始: {original_name}) → offset={cached_offset}, vertices={cached_vertex_count}, indices={cached_index_count}")
-                continue
-
-            # 缓存未命中：创建临时集合和临时对象进行处理
             print(f"  🆕 处理: '{blender_obj_name}' (原始: {original_name}, hash={obj_hash[:16]}...)")
-            temp_collection = CollectionUtils.create_new_collection("TEMP_SUBMESH_COLLECTION_" + self.unique_str)
-            bpy.context.scene.collection.children.link(temp_collection)
-            temp_collection_list.append(temp_collection)
 
-            # 复制源对象为临时对象，不影响原始对象
-            temp_obj = ObjUtils.copy_object(
-                context=bpy.context,
-                obj=source_obj,
-                name=source_obj.name + "_temp",
-                collection=temp_collection
-            )
+            new_obj = source_obj.copy()
+            new_obj.data = source_obj.data.copy()
+            new_obj.name = source_obj.name + "_temp"
+            temp_collection.objects.link(new_obj)
+            temp_obj = new_obj
 
-            # 归一化顶点组权重（Blend 类别需要）
-            self._normalize_temp_obj_for_export(temp_obj)
-            # 因为导入时根据 LogicName 进行了翻转，所以导出时对临时对象进行翻转才能得到游戏原本坐标系
-            self._apply_export_rotation_for_logic(temp_obj)
-            # 三角化对象，确保每个面都是三角形（后续 index_count = polygons * 3）
-            ObjUtils.triangulate_object(bpy.context, temp_obj)
-
-            # 计算顶点数和索引数
             draw_call_model.vertex_count = len(temp_obj.data.vertices)
-            # 因为三角化了，所以每个面都是3个索引，所以 *3 就没问题
             draw_call_model.index_count = len(temp_obj.data.polygons) * 3
             draw_call_model.index_offset = index_offset
 
-            # 存入缓存，后续来自同一原始物体且数据相同的对象可直接复用
             data_hash_cache[cache_key] = (index_offset, draw_call_model.vertex_count, draw_call_model.index_count)
 
             index_offset += draw_call_model.index_count
-            # 这里赋值的意义在于，后续可能会合并到 DrawIB 级别，这里就可以直接复用了
             self.vertex_count += draw_call_model.vertex_count
             self.index_count += draw_call_model.index_count
 
-            # 临时对象放到列表里，后续进行合并
             submesh_temp_obj_list.append(temp_obj)
 
-        # 调试输出：复用统计
         total = len(self.drawcall_model_list)
         if reuse_count > 0:
             print(f"[SubMeshModel] 数据复用统计: {reuse_count}/{total} 个对象复用, {total - reuse_count}/{total} 个对象独立处理")
         else:
             print(f"[SubMeshModel] 数据复用统计: 无复用, 全部 {total} 个对象独立处理")
 
-        # 接下来合并对象，合并的意义在于可以减少 IB 和 VB 的计算次数，在大批量导出时节省很多时间
-        # 确保选中第一个，否则 join_objects 会报错
         if submesh_temp_obj_list:
-            # 取消选中所有物体
             bpy.ops.object.select_all(action='DESELECT')
-            # 选中第一个物体并设置为活动物体
             target_active = submesh_temp_obj_list[0]
             target_active.select_set(True)
             bpy.context.view_layer.objects.active = target_active
 
-        # 执行物体合并
         ObjUtils.join_objects(bpy.context, submesh_temp_obj_list)
 
-        # 因为合并到第一个对象上了，所以这里直接拿到这个对象
         submesh_merged_obj = submesh_temp_obj_list[0]
-        # 重命名为指定名称，等待后续操作
         merged_obj_name = "TEMP_SUBMESH_MERGED_" + self.unique_str
         ObjUtils.rename_object(submesh_merged_obj, merged_obj_name)
+
+        if need_normalize:
+            self._normalize_temp_obj_for_export(submesh_merged_obj)
+
+        if need_rotate:
+            self._apply_export_rotation_for_logic(submesh_merged_obj)
+
+        TimerUtils.end_stage("对象处理与合并")
 
         # 检查并校验是否有缺少的元素
         ObjBufferHelper.check_and_verify_attributes(obj=submesh_merged_obj, d3d11_game_type=self.d3d11_game_type)
 
-        # 构建 Unity 导出所需的 buffer 结果
         obj_buffer_result = ExportUtils.build_unity_obj_buffer_result(
             obj=submesh_merged_obj,
             d3d11_game_type=self.d3d11_game_type,
@@ -232,27 +217,49 @@ class SubMeshModel:
         # 计算完成后，删除临时对象
         bpy.data.objects.remove(submesh_merged_obj, do_unlink=True)
 
-        # 顺便把刚才创建的临时集合也删掉
-        for temp_collection in temp_collection_list:
-            if temp_collection.name in bpy.data.collections:
-                if temp_collection.name in bpy.context.scene.collection.children:
-                    bpy.context.scene.collection.children.unlink(temp_collection)
-                bpy.data.collections.remove(temp_collection)
+        if temp_collection.name in bpy.data.collections:
+            if temp_collection.name in bpy.context.scene.collection.children:
+                bpy.context.scene.collection.children.unlink(temp_collection)
+            bpy.data.collections.remove(temp_collection)
 
         print("SubMeshModel: " + self.unique_str + " 计算完成，临时对象已删除")
 
-    def _precompute_object_hashes(self) -> list:
+        self._deduplicate_draw_calls()
+
+    def _deduplicate_draw_calls(self):
+        if len(self.drawcall_model_list) <= 1:
+            return
+
+        seen_keys = set()
+        deduped = []
+        for dcm in self.drawcall_model_list:
+            condition_str = dcm.get_condition_str()
+            draw_key = (dcm.index_offset, dcm.index_count, condition_str)
+            if condition_str or draw_key not in seen_keys:
+                seen_keys.add(draw_key)
+                deduped.append(dcm)
+
+        removed = len(self.drawcall_model_list) - len(deduped)
+        if removed > 0:
+            print(f"[SubMeshModel] 绘制去重: {self.unique_str} 移除 {removed} 个重复绘制 (原始 {len(self.drawcall_model_list)} → 保留 {len(deduped)})")
+            self.drawcall_model_list = deduped
+
+    def _precompute_object_hashes(self) -> tuple:
         """预计算所有源对象的数据哈希，使用多线程并行计算
         
         流程：
         1. 主线程中从 Blender 对象提取原始数据（Blender API 非线程安全）
         2. 多线程并行计算哈希值（纯 Python 计算，线程安全）
+        
+        Returns:
+            (hashes, source_obj_list): 哈希列表和源对象引用列表
         """
-        # 第一步：在主线程中提取所有对象的原始数据
         raw_data_list = []
+        source_obj_list = []
         for draw_call_model in self.drawcall_model_list:
             blender_obj_name = draw_call_model.get_blender_obj_name()
             source_obj = ObjUtils.get_obj_by_name(blender_obj_name)
+            source_obj_list.append(source_obj)
 
             if source_obj is None:
                 raw_data_list.append(None)
@@ -276,16 +283,16 @@ class SubMeshModel:
                     h.update(struct.pack('f', item))
             return h.hexdigest()
 
-        hashes = [compute_hash(raw_data) for raw_data in raw_data_list]
-
-        if len(raw_data_list) > 4:
+        if len(raw_data_list) > 8:
             try:
                 with ThreadPoolExecutor() as executor:
                     hashes = list(executor.map(compute_hash, raw_data_list))
             except Exception:
-                pass
+                hashes = [compute_hash(raw_data) for raw_data in raw_data_list]
+        else:
+            hashes = [compute_hash(raw_data) for raw_data in raw_data_list]
 
-        return hashes
+        return hashes, source_obj_list
 
     @staticmethod
     def _extract_object_raw_data(obj) -> list:
@@ -311,17 +318,13 @@ class SubMeshModel:
         for vg in obj.vertex_groups:
             raw_data.append(vg.name)
 
-        # 3. 顶点组权重数据（存储在 Mesh 层面，但通过 Object 的顶点组索引引用）
-        # 采样策略：每 step 个顶点取一个，平衡精度和性能
+        # 3. 顶点组权重数据
         if vert_count > 0 and vg_count > 0:
-            step = max(1, vert_count // 500)
-            for vi in range(0, vert_count, step):
-                vert = mesh.vertices[vi]
-                if vert.groups:
+            for vi, vert in enumerate(mesh.vertices):
+                for group in vert.groups:
                     raw_data.append(vi)
-                    for group in vert.groups:
-                        raw_data.append(group.group)
-                        raw_data.append(group.weight)
+                    raw_data.append(group.group)
+                    raw_data.append(group.weight)
 
         # 4. UV 数据
         uv_layer_count = len(mesh.uv_layers)
@@ -346,7 +349,52 @@ class SubMeshModel:
         if ObjUtils.is_all_vertex_groups_locked(temp_obj):
             return
 
-        ObjUtils.normalize_all(temp_obj)
+        self._normalize_vertex_groups_numpy(temp_obj)
+
+    @staticmethod
+    def _normalize_vertex_groups_numpy(obj: bpy.types.Object):
+        mesh = obj.data
+        n_verts = len(mesh.vertices)
+        vgroups = obj.vertex_groups
+        n_vgroups = len(vgroups)
+
+        if n_verts == 0 or n_vgroups == 0:
+            return
+
+        for vg in vgroups:
+            if vg.lock_weight:
+                vg.lock_weight = False
+
+        weights = numpy.zeros((n_verts, n_vgroups), dtype=numpy.float32)
+        for vi, vert in enumerate(mesh.vertices):
+            for group in vert.groups:
+                vg_idx = group.group
+                if vg_idx < n_vgroups:
+                    weights[vi, vg_idx] = group.weight
+
+        row_sums = numpy.sum(weights, axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        normalized = weights / row_sums
+
+        changed_mask = numpy.any(numpy.abs(normalized - weights) > 1e-7, axis=1)
+        changed_indices = numpy.nonzero(changed_mask)[0]
+
+        if len(changed_indices) == 0:
+            return
+
+        for vg_idx, vg in enumerate(vgroups):
+            col = normalized[:, vg_idx]
+            vert_indices_to_update = []
+            vert_weights_to_update = []
+            for vi in changed_indices:
+                old_w = weights[vi, vg_idx]
+                new_w = col[vi]
+                if old_w > 0 and abs(new_w - old_w) > 1e-7:
+                    vert_indices_to_update.append(int(vi))
+                    vert_weights_to_update.append(float(new_w))
+            if vert_indices_to_update:
+                for vi, w in zip(vert_indices_to_update, vert_weights_to_update):
+                    vg.add([vi], w, 'REPLACE')
 
     def _apply_export_rotation_for_logic(self, temp_obj: bpy.types.Object):
         if (GlobalConfig.logic_name == LogicName.SRMI

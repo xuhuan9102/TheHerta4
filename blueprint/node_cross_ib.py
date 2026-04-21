@@ -473,10 +473,39 @@ class SSMTNode_CrossIB(SSMTNodeBase):
                 new_item.target_index_count = item_data.get('target_index_count', '')
 
             print(f"[CrossIB] 已恢复节点 {self.name} 的原始参数，共 {len(original_data)} 条")
-
-            self.original_cross_ib_data = ""
         except Exception as e:
             print(f"[CrossIB] 恢复节点 {self.name} 的原始参数失败: {e}")
+
+    def _get_base_mapping_data(self):
+        import json
+
+        if self.original_cross_ib_data:
+            try:
+                return json.loads(self.original_cross_ib_data)
+            except Exception:
+                pass
+
+        base_data = []
+        for item in self.cross_ib_list:
+            base_data.append({
+                'source_ib': item.source_ib,
+                'target_ib': item.target_ib,
+                'source_index_count': item.source_index_count,
+                'target_index_count': item.target_index_count,
+            })
+        return base_data
+
+    def _has_indexcount_pair(self, source_index_count, target_index_count):
+        for item in self.cross_ib_list:
+            if item.source_index_count == source_index_count and item.target_index_count == target_index_count:
+                return True
+        return False
+
+    def _has_ibhash_pair(self, source_ib, target_ib):
+        for item in self.cross_ib_list:
+            if item.source_ib == source_ib and item.target_ib == target_ib:
+                return True
+        return False
 
     def apply_indexcount_mapping(self, indexcount_mapping):
         if not indexcount_mapping:
@@ -484,24 +513,32 @@ class SSMTNode_CrossIB(SSMTNodeBase):
 
         print(f"[CrossIB] 开始应用IndexCount映射，共 {len(indexcount_mapping)} 条规则")
 
-        updated_count = 0
-        for item in self.cross_ib_list:
-            original_source = item.source_index_count
-            original_target = item.target_index_count
+        added_count = 0
+        for item_data in self._get_base_mapping_data():
+            original_source = item_data.get('source_index_count', '')
+            original_target = item_data.get('target_index_count', '')
+            if not original_source or not original_target:
+                continue
 
-            if original_source in indexcount_mapping:
-                new_source = indexcount_mapping[original_source]
-                item.source_index_count = new_source
-                print(f"[CrossIB] 更新源映射: {original_source} -> {new_source}")
-                updated_count += 1
+            if original_source not in indexcount_mapping or original_target not in indexcount_mapping:
+                continue
 
-            if original_target in indexcount_mapping:
-                new_target = indexcount_mapping[original_target]
-                item.target_index_count = new_target
-                print(f"[CrossIB] 更新目标映射: {original_target} -> {new_target}")
-                updated_count += 1
+            new_source = indexcount_mapping[original_source]
+            new_target = indexcount_mapping[original_target]
 
-        print(f"[CrossIB] IndexCount映射应用完成，更新了 {updated_count} 条映射")
+            if new_source == original_source and new_target == original_target:
+                continue
+
+            if self._has_indexcount_pair(new_source, new_target):
+                continue
+
+            new_item = self.cross_ib_list.add()
+            new_item.source_index_count = new_source
+            new_item.target_index_count = new_target
+            added_count += 1
+            print(f"[CrossIB] 追加IndexCount映射: {original_source}->{original_target} => {new_source}->{new_target}")
+
+        print(f"[CrossIB] IndexCount映射应用完成，新增了 {added_count} 条映射")
 
     def apply_ibhash_mapping(self, ibhash_mapping):
         if not ibhash_mapping:
@@ -509,24 +546,32 @@ class SSMTNode_CrossIB(SSMTNodeBase):
 
         print(f"[CrossIB] 开始应用IBHash映射，共 {len(ibhash_mapping)} 条规则")
 
-        updated_count = 0
-        for item in self.cross_ib_list:
-            original_source = item.source_ib
-            original_target = item.target_ib
+        added_count = 0
+        for item_data in self._get_base_mapping_data():
+            original_source = item_data.get('source_ib', '')
+            original_target = item_data.get('target_ib', '')
+            if not original_source or not original_target:
+                continue
 
-            if original_source in ibhash_mapping:
-                new_source = ibhash_mapping[original_source]
-                item.source_ib = new_source
-                print(f"[CrossIB] 更新源IB映射: {original_source} -> {new_source}")
-                updated_count += 1
+            if original_source not in ibhash_mapping or original_target not in ibhash_mapping:
+                continue
 
-            if original_target in ibhash_mapping:
-                new_target = ibhash_mapping[original_target]
-                item.target_ib = new_target
-                print(f"[CrossIB] 更新目标IB映射: {original_target} -> {new_target}")
-                updated_count += 1
+            new_source = ibhash_mapping[original_source]
+            new_target = ibhash_mapping[original_target]
 
-        print(f"[CrossIB] IBHash映射应用完成，更新了 {updated_count} 条映射")
+            if new_source == original_source and new_target == original_target:
+                continue
+
+            if self._has_ibhash_pair(new_source, new_target):
+                continue
+
+            new_item = self.cross_ib_list.add()
+            new_item.source_ib = new_source
+            new_item.target_ib = new_target
+            added_count += 1
+            print(f"[CrossIB] 追加IBHash映射: {original_source}->{original_target} => {new_source}->{new_target}")
+
+        print(f"[CrossIB] IBHash映射应用完成，新增了 {added_count} 条映射")
 
 
 class SSMTNode_PostProcess_CrossIB(SSMTNodeBase):

@@ -2,6 +2,7 @@
 基础信息面板
 '''
 import bpy
+import os
 
 from ..common.global_config import GlobalConfig
 from ..common.logic_name import LogicName
@@ -10,6 +11,7 @@ from ..utils.translate_utils import TR
 
 from .ui_func_import_ssmt import SSMT4ImportAllFromCurrentWorkSpaceBlueprint, SSMT4ImportRaw
 from . import ui_prefix_quick_ops
+from .ui_func_export import SSMTQuickExportSelected
 
 from ..blueprint.preprocess_cache import PreProcessCache
 from ..blueprint.preprocess_parallel import ParallelPreprocessCoordinator
@@ -73,45 +75,80 @@ class PanelBasicInformation(bpy.types.Panel):
 
         layout.separator()
 
-        layout.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
-        
-        layout.operator("import_mesh.migoto_raw_buffers_mmt", text="导入.fmt .ib .vb格式模型", icon='IMPORT')
+        layout.operator(SSMTQuickExportSelected.bl_idname, text="快速局部导出", icon='EXPORT')
 
-        layout.operator(SSMT4ImportRaw.bl_idname, text="导入SSMT格式模型", icon='IMPORT')
+        import_row = layout.row(align=True)
+        import_row.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
+        import_row.prop(
+            context.scene.global_properties,
+            "expand_import_quick_tools",
+            text="",
+            icon='TRIA_DOWN' if context.scene.global_properties.expand_import_quick_tools else 'TRIA_RIGHT',
+            icon_only=True,
+            emboss=False,
+        )
+
+        if context.scene.global_properties.expand_import_quick_tools:
+            import_box = layout.box()
+            import_box.operator("import_mesh.migoto_raw_buffers_mmt", text="导入FMT格式模型", icon='IMPORT')
+            import_box.operator(SSMT4ImportRaw.bl_idname, text="导入SSMT格式模型", icon='IMPORT')
 
         ui_prefix_quick_ops.draw_prefix_quick_section(layout, context)
 
         layout.separator()
 
         cache_box = layout.box()
-        cache_box.label(text="前处理缓存", icon='FILE_CACHE')
-        cache_box.prop(context.scene.global_properties, "enable_preprocess_cache")
+        cache_header = cache_box.row(align=True)
+        cache_header.prop(
+            context.scene.global_properties,
+            "expand_preprocess_cache",
+            text="",
+            icon='TRIA_DOWN' if context.scene.global_properties.expand_preprocess_cache else 'TRIA_RIGHT',
+            icon_only=True,
+            emboss=False,
+        )
+        cache_header.label(text="前处理缓存", icon='FILE_CACHE')
 
-        cache_stats = PreProcessCache.get_cache_stats()
-        file_count = cache_stats["file_count"]
-        total_size = cache_stats["total_size"]
-        size_str = PreProcessCache.format_size(total_size)
-        cache_box.label(text=f"缓存文件: {file_count} 个, 大小: {size_str}")
+        if context.scene.global_properties.expand_preprocess_cache:
+            cache_box.prop(context.scene.global_properties, "enable_preprocess_cache")
 
-        row = cache_box.row()
-        row.operator(SSMT_OT_ClearPreprocessCache.bl_idname, icon='TRASH')
+            cache_stats = PreProcessCache.get_cache_stats()
+            file_count = cache_stats["file_count"]
+            total_size = cache_stats["total_size"]
+            size_str = PreProcessCache.format_size(total_size)
+            cache_box.label(text=f"缓存文件: {file_count} 个, 大小: {size_str}")
+
+            row = cache_box.row()
+            row.operator(SSMT_OT_ClearPreprocessCache.bl_idname, icon='TRASH')
 
         parallel_box = layout.box()
-        parallel_box.label(text="并行处理", icon='SYSTEM')
-        parallel_box.prop(context.scene.global_properties, "enable_parallel_preprocess")
-        parallel_box.prop(context.scene.global_properties, "enable_parallel_export_rounds")
+        parallel_header = parallel_box.row(align=True)
+        parallel_header.prop(
+            context.scene.global_properties,
+            "expand_parallel_processing",
+            text="",
+            icon='TRIA_DOWN' if context.scene.global_properties.expand_parallel_processing else 'TRIA_RIGHT',
+            icon_only=True,
+            emboss=False,
+        )
+        parallel_header.label(text="并行处理", icon='SYSTEM')
 
-        if context.scene.global_properties.enable_parallel_preprocess or context.scene.global_properties.enable_parallel_export_rounds:
-            parallel_box.prop(context.scene.global_properties, "parallel_blender_executable")
-            parallel_box.prop(context.scene.global_properties, "parallel_preprocess_instances")
-            parallel_box.prop(context.scene.global_properties, "parallel_preprocess_timeout_seconds")
-            parallel_box.prop(context.scene.global_properties, "parallel_preprocess_keep_temp_files")
+        if context.scene.global_properties.expand_parallel_processing:
+            parallel_box.prop(context.scene.global_properties, "enable_parallel_preprocess")
+            parallel_box.prop(context.scene.global_properties, "enable_parallel_export_rounds")
 
-            effective_path = ParallelPreprocessCoordinator.get_effective_blender_executable()
-            is_valid, message = ParallelPreprocessCoordinator.get_validation_summary()
+            if context.scene.global_properties.enable_parallel_preprocess or context.scene.global_properties.enable_parallel_export_rounds:
+                parallel_box.prop(context.scene.global_properties, "parallel_blender_executable")
+                parallel_box.prop(context.scene.global_properties, "parallel_preprocess_instances")
+                parallel_box.prop(context.scene.global_properties, "parallel_preprocess_timeout_seconds")
+                parallel_box.prop(context.scene.global_properties, "parallel_preprocess_keep_temp_files")
 
-            parallel_box.label(text=f"当前生效路径: {effective_path or '未设置'}")
-            parallel_box.label(text=message, icon='CHECKMARK' if is_valid else 'ERROR')
+                effective_path = ParallelPreprocessCoordinator.get_effective_blender_executable()
+                display_path = os.path.basename(effective_path) if effective_path else "未设置"
+                is_valid, message = ParallelPreprocessCoordinator.get_validation_summary()
+
+                parallel_box.label(text=f"当前生效路径: {display_path}")
+                parallel_box.label(text=message, icon='CHECKMARK' if is_valid else 'ERROR')
         
         if GlobalConfig.logic_name == LogicName.WWMI:
             layout.prop(context.scene.global_properties,"import_merged_vgmap")

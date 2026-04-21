@@ -877,11 +877,8 @@ def draw_node_header(self, context):
         return
 
     layout = self.layout
-    sync_status = "同步: 开启" if _sync_enabled else "同步: 关闭"
-    icon = 'CHECKMARK' if _sync_enabled else 'X'
     row = layout.row(align=True)
-    row.operator("ssmt.toggle_sync", text=sync_status, icon=icon, emboss=False)
-    row.operator("ssmt.sync_debug_status", text="", icon='CONSOLE')
+    row.operator("ssmt.generate_mod_blueprint", text="导出", icon='EXPORT')
 
 
 classes = (

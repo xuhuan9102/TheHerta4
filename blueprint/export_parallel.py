@@ -13,6 +13,7 @@ from ..common.global_properties import GlobalProterties
 from ..common.logic_name import LogicName
 from ..common.object_prefix_helper import ObjectPrefixHelper
 from ..utils.log_utils import LOG
+from ..utils.timer_utils import TimerUtils
 from .model import BluePrintModel
 from .export_helper import BlueprintExportHelper
 from .preprocess import PreProcessHelper
@@ -46,6 +47,7 @@ class ExportRoundExecutor:
 
             object_names = cls.collect_object_names_from_tree(tree)
 
+            TimerUtils.start_stage("前处理")
             if allow_parallel_preprocess and GlobalProterties.enable_parallel_preprocess():
                 LOG.info("   ⚡ 已启用并行前处理")
                 original_to_copy_map = ParallelPreprocessCoordinator.execute_preprocess(object_names)
@@ -57,8 +59,11 @@ class ExportRoundExecutor:
             if original_to_copy_map:
                 nested_trees = cls.collect_nested_trees(tree)
                 PreProcessHelper.update_blueprint_node_references(tree, nested_trees)
+            TimerUtils.end_stage("前处理")
 
+            TimerUtils.start_stage("蓝图解析")
             blueprint_model = cls._build_blueprint_model(tree)
+            TimerUtils.end_stage("蓝图解析")
 
             if round_plan.get("generate_ini"):
                 cls.export_with_ini(blueprint_model)

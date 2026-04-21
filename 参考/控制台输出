@@ -1,0 +1,367 @@
+============================================================
+🚀 开始生成Mod
+============================================================
+
+📍 第一阶段：检测与准备
+----------------------------------------
+
+🗂️ 导出轮次计划
+----------------------------------------
+   第 1 轮: 单次导出 -> Meshes (生成INI)
+
+📍 第二阶段：单次导出
+----------------------------------------
+
+🔄 第 1 轮导出: 单次导出
+   Buffer 文件夹: Meshes
+[MultiFileExport] 设置 Buffer 文件夹名称: Meshes
+[MultiFileExport] 设置当前导出索引: 1
+📋 物体收集: 庄方宜(主蓝图) 6 个, 嵌套蓝图 0 个, 共 6 个
+   ⚡ 已启用并行前处理
+🔐 计算物体哈希值...
+📦 缓存命中: 6 个物体
+   📦 缓存已加载: 0f9e1087-156318-0.自定义名称 <- 039f0cb8038802848aa2444d19a134f5f2ea8577f23e6efae94ab43b2634f67d.blend
+   📦 缓存已加载: fe47dc61-7014-0.自定义名称 <- bb110eb324db5a3758633caec51566ea44c53bd83546be17ee7a02ee3920ac85.blend
+   📦 缓存已加载: a8b9073c-13452-0.自定义名称 <- c6fc744c6da2f7f427349cbfc07c0770d9584349e3ed97ab67e443cefee572dc.blend
+   📦 缓存已加载: 0d2ddddc-1032-0.自定义名称 <- df15d397e530fb69f93c1e111481c326dc96b4fee28f726c7613a8c1d21a32a3.blend
+   📦 缓存已加载: bdc966a9-11538-0.自定义名称 <- 15daeefa1c10ab93ed2c3814fa8661e2baf46c5b3d7a365d18502ea7b3739288.blend
+   📦 缓存已加载: 6af95e58-52332-0.自定义名称 <- 0284d915d8558a5c6552c54a6c86d244a6e4fd22328c9ad8fce0345a5cc8e6be.blend
+🔧 前处理完成: 6 个物体
+📋 更新节点引用: 6 个节点
+   正在解析蓝图...
+Debug:    🌳 当前蓝图树: 庄方宜
+🔄 启动正向解析模式
+Debug:    🔧 发现顶点组处理节点: 顶点组处理
+Debug:    🔧 发现顶点组处理节点: 顶点组处理.001
+   🔧 收集到 2 个顶点组处理节点
+🔄 正向解析: 主蓝图 庄方宜(6个Object_Info, 0个MultiFile_Export)
+   📋 Object_Info '0d2ddddc-1032-0.自定义名称_copy' → 开始遍历 (有效名称: '0d2ddddc-1032-0.自定义名称_copy')
+Debug:    🔀 链路分叉: 2 条分支, 对象 '0d2ddddc-1032-0.自定义名称_copy'
+   🔀 链路分叉: '0d2ddddc-1032-0.自定义名称_copy' → '0d2ddddc-1032-0.自定义名称_chain1_copy'
+   📋 Object_Info '0d2ddddc-1032-0.自定义名称_copy' → 产生 2 条链路
+      链路0: object_name='0d2ddddc-1032-0.自定义名称_copy', valid=True, reached_output=True, nodes=4
+      链路1: object_name='0d2ddddc-1032-0.自定义名称_chain1_copy', valid=True, reached_output=True, nodes=2
+   📋 Object_Info 'bdc966a9-11538-0.自定义名称_copy' → 开始遍历 (有效名称: 'bdc966a9-11538-0.自定义名称_copy')
+Debug:    🔀 链路分叉: 2 条分支, 对象 'bdc966a9-11538-0.自定义名称_copy'
+   🔀 链路分叉: 'bdc966a9-11538-0.自定义名称_copy' → 'bdc966a9-11538-0.自定义名称_chain1_copy'
+   📋 Object_Info 'bdc966a9-11538-0.自定义名称_copy' → 产生 2 条链路
+      链路0: object_name='bdc966a9-11538-0.自定义名称_copy', valid=True, reached_output=True, nodes=4
+      链路1: object_name='bdc966a9-11538-0.自定义名称_chain1_copy', valid=True, reached_output=True, nodes=2
+   📋 Object_Info '0f9e1087-156318-0.自定义名称_copy' → 开始遍历 (有效名称: '0f9e1087-156318-0.自定义名称_copy')
+Debug:    🔀 链路分叉: 2 条分支, 对象 '0f9e1087-156318-0.自定义名称_copy'
+   🔀 链路分叉: '0f9e1087-156318-0.自定义名称_copy' → '0f9e1087-156318-0.自定义名称_chain1_copy'
+   📋 Object_Info '0f9e1087-156318-0.自定义名称_copy' → 产生 2 条链路
+      链路0: object_name='0f9e1087-156318-0.自定义名称_copy', valid=True, reached_output=True, nodes=4
+      链路1: object_name='0f9e1087-156318-0.自定义名称_chain1_copy', valid=True, reached_output=True, nodes=2
+   📋 Object_Info '6af95e58-52332-0.自定义名称_copy' → 开始遍历 (有效名称: '6af95e58-52332-0.自定义名称_copy')
+Debug:    🔀 链路分叉: 2 条分支, 对象 '6af95e58-52332-0.自定义名称_copy'
+   🔀 链路分叉: '6af95e58-52332-0.自定义名称_copy' → '6af95e58-52332-0.自定义名称_chain1_copy'
+   📋 Object_Info '6af95e58-52332-0.自定义名称_copy' → 产生 2 条链路
+      链路0: object_name='6af95e58-52332-0.自定义名称_copy', valid=True, reached_output=True, nodes=4
+      链路1: object_name='6af95e58-52332-0.自定义名称_chain1_copy', valid=True, reached_output=True, nodes=2
+   📋 Object_Info 'a8b9073c-13452-0.自定义名称_copy' → 开始遍历 (有效名称: 'a8b9073c-13452-0.自定义名称_copy')
+Debug:    🔀 链路分叉: 2 条分支, 对象 'a8b9073c-13452-0.自定义名称_copy'
+   🔀 链路分叉: 'a8b9073c-13452-0.自定义名称_copy' → 'a8b9073c-13452-0.自定义名称_chain1_copy'
+   📋 Object_Info 'a8b9073c-13452-0.自定义名称_copy' → 产生 2 条链路
+      链路0: object_name='a8b9073c-13452-0.自定义名称_copy', valid=True, reached_output=True, nodes=4
+      链路1: object_name='a8b9073c-13452-0.自定义名称_chain1_copy', valid=True, reached_output=True, nodes=2
+   📋 Object_Info 'fe47dc61-7014-0.自定义名称_copy' → 开始遍历 (有效名称: 'fe47dc61-7014-0.自定义名称_copy')
+Debug:    🔀 链路分叉: 2 条分支, 对象 'fe47dc61-7014-0.自定义名称_copy'
+   🔀 链路分叉: 'fe47dc61-7014-0.自定义名称_copy' → 'fe47dc61-7014-0.自定义名称_chain1_copy'
+   📋 Object_Info 'fe47dc61-7014-0.自定义名称_copy' → 产生 2 条链路
+      链路0: object_name='fe47dc61-7014-0.自定义名称_copy', valid=True, reached_output=True, nodes=4
+      链路1: object_name='fe47dc61-7014-0.自定义名称_chain1_copy', valid=True, reached_output=True, nodes=2
+   📋 去重前: 12 条链路
+      链路0: object_name='0d2ddddc-1032-0.自定义名称_copy', original='0d2ddddc-1032-0.自定义名称_copy'
+      链路1: object_name='0d2ddddc-1032-0.自定义名称_chain1_copy', original='0d2ddddc-1032-0.自定义名称_copy'
+      链路2: object_name='bdc966a9-11538-0.自定义名称_copy', original='bdc966a9-11538-0.自定义名称_copy'
+      链路3: object_name='bdc966a9-11538-0.自定义名称_chain1_copy', original='bdc966a9-11538-0.自定义名称_copy'
+      链路4: object_name='0f9e1087-156318-0.自定义名称_copy', original='0f9e1087-156318-0.自定义名称_copy'
+      链路5: object_name='0f9e1087-156318-0.自定义名称_chain1_copy', original='0f9e1087-156318-0.自定义名称_copy'
+      链路6: object_name='6af95e58-52332-0.自定义名称_copy', original='6af95e58-52332-0.自定义名称_copy'
+      链路7: object_name='6af95e58-52332-0.自定义名称_chain1_copy', original='6af95e58-52332-0.自定义名称_copy'
+      链路8: object_name='a8b9073c-13452-0.自定义名称_copy', original='a8b9073c-13452-0.自定义名称_copy'
+      链路9: object_name='a8b9073c-13452-0.自定义名称_chain1_copy', original='a8b9073c-13452-0.自定义名称_copy'
+      链路10: object_name='fe47dc61-7014-0.自定义名称_copy', original='fe47dc61-7014-0.自定义名称_copy'
+      链路11: object_name='fe47dc61-7014-0.自定义名称_chain1_copy', original='fe47dc61-7014-0.自定义名称_copy'
+   📋 同名物体检测: 12 个不同名称
+Debug:       ✓ '0d2ddddc-1032-0.自定义名称_copy' 仅 1 条链路引用
+Debug:       ✓ '0d2ddddc-1032-0.自定义名称_chain1_copy' 仅 1 条链路引用
+Debug:       ✓ 'bdc966a9-11538-0.自定义名称_copy' 仅 1 条链路引用
+Debug:       ✓ 'bdc966a9-11538-0.自定义名称_chain1_copy' 仅 1 条链路引用
+Debug:       ✓ '0f9e1087-156318-0.自定义名称_copy' 仅 1 条链路引用
+Debug:       ✓ '0f9e1087-156318-0.自定义名称_chain1_copy' 仅 1 条链路引用
+Debug:       ✓ '6af95e58-52332-0.自定义名称_copy' 仅 1 条链路引用
+Debug:       ✓ '6af95e58-52332-0.自定义名称_chain1_copy' 仅 1 条链路引用
+Debug:       ✓ 'a8b9073c-13452-0.自定义名称_copy' 仅 1 条链路引用
+Debug:       ✓ 'a8b9073c-13452-0.自定义名称_chain1_copy' 仅 1 条链路引用
+Debug:       ✓ 'fe47dc61-7014-0.自定义名称_copy' 仅 1 条链路引用
+Debug:       ✓ 'fe47dc61-7014-0.自定义名称_chain1_copy' 仅 1 条链路引用
+   📋 去重后: 12 条链路
+      链路0: object_name='0d2ddddc-1032-0.自定义名称_copy', original='0d2ddddc-1032-0.自定义名称_copy'
+      链路1: object_name='0d2ddddc-1032-0.自定义名称_chain1_copy', original='0d2ddddc-1032-0.自定义名称_copy'
+      链路2: object_name='bdc966a9-11538-0.自定义名称_copy', original='bdc966a9-11538-0.自定义名称_copy'
+      链路3: object_name='bdc966a9-11538-0.自定义名称_chain1_copy', original='bdc966a9-11538-0.自定义名称_copy'
+      链路4: object_name='0f9e1087-156318-0.自定义名称_copy', original='0f9e1087-156318-0.自定义名称_copy'
+      链路5: object_name='0f9e1087-156318-0.自定义名称_chain1_copy', original='0f9e1087-156318-0.自定义名称_copy'
+      链路6: object_name='6af95e58-52332-0.自定义名称_copy', original='6af95e58-52332-0.自定义名称_copy'
+      链路7: object_name='6af95e58-52332-0.自定义名称_chain1_copy', original='6af95e58-52332-0.自定义名称_copy'
+      链路8: object_name='a8b9073c-13452-0.自定义名称_copy', original='a8b9073c-13452-0.自定义名称_copy'
+      链路9: object_name='a8b9073c-13452-0.自定义名称_chain1_copy', original='a8b9073c-13452-0.自定义名称_copy'
+      链路10: object_name='fe47dc61-7014-0.自定义名称_copy', original='fe47dc61-7014-0.自定义名称_copy'
+      链路11: object_name='fe47dc61-7014-0.自定义名称_chain1_copy', original='fe47dc61-7014-0.自定义名称_copy'
+   ✅ 正向解析完成: 12 条有效处理链 / 12 条总处理链
+🔗 开始合并处理链...
+   📏 最长处理链参考: '0d2ddddc-1032-0.自定义名称_copy' (节点数: 4)
+🔗 合并处理链: 12 个物体 → 2 个处理链组 (其中 2 个组合并)
+✓ 物体切换节点集成完成
+🔗 开始链路顺序执行（重命名 + 顶点组处理）
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 '0d2ddddc-1032-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理', 物体 '0d2ddddc-1032-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 '0d2ddddc-1032-0.自定义名称_chain1_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 'bdc966a9-11538-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理', 物体 'bdc966a9-11538-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 'bdc966a9-11538-0.自定义名称_chain1_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 '0f9e1087-156318-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理', 物体 '91b47065-67080-0.自定义名称_copy' (重命名=198, 合并=5, 清理=0, 填充=9)
+   ✏️ 重命名: '0f9e1087-156318-0.自定义名称_copy' → '91b47065-67080-0.自定义名称_copy'
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 '0f9e1087-156318-0.自定义名称_chain1_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 '6af95e58-52332-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理', 物体 '79c9060c-25521-0.自定义名称_copy' (重命名=51, 合并=1, 清理=0, 填充=0)
+   ✏️ 重命名: '6af95e58-52332-0.自定义名称_copy' → '79c9060c-25521-0.自定义名称_copy'
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 '6af95e58-52332-0.自定义名称_chain1_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 'a8b9073c-13452-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理', 物体 '3bd805f5-7221-0.自定义名称_copy' (重命名=22, 合并=0, 清理=0, 填充=0)
+   ✏️ 重命名: 'a8b9073c-13452-0.自定义名称_copy' → '3bd805f5-7221-0.自定义名称_copy'
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 'a8b9073c-13452-0.自定义名称_chain1_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 'fe47dc61-7014-0.自定义名称_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+   🔧 顶点组处理: 节点 '顶点组处理', 物体 '49dfa7b0-3822-0.自定义名称_copy' (重命名=49, 合并=0, 清理=0, 填充=0)
+   ✏️ 重命名: 'fe47dc61-7014-0.自定义名称_copy' → '49dfa7b0-3822-0.自定义名称_copy'
+   🔧 顶点组处理: 节点 '顶点组处理.001', 物体 'fe47dc61-7014-0.自定义名称_chain1_copy' (重命名=0, 合并=0, 清理=0, 填充=0)
+🔧 重命名节点（虚拟映射）
+   规则 '0f9e1087-156318-0' → '91b47065-67080-0': 1 个物体匹配
+   规则 '6af95e58-52332-0' → '79c9060c-25521-0': 1 个物体匹配
+   规则 'a8b9073c-13452-0' → '3bd805f5-7221-0': 1 个物体匹配
+   规则 'fe47dc61-7014-0' → '49dfa7b0-3822-0': 1 个物体匹配
+   ✅ 共 4 个物体将使用重命名映射
+   ✅ 链路顺序执行完成: 4 次重命名, 18 次顶点组处理
+🔗 未检测到同时包含跨IB节点和重命名节点的链路
+🔗 开始处理跨IB节点，共 0 个节点
+🔗 没有找到跨IB节点，跳过处理
+🏗️ DrawCallModel 构建: 12 个有效 / 0 个无效
+📝 输出处理链调试信息...
+   📏 最长处理链参考: '0d2ddddc-1032-0.自定义名称_copy' (节点数: 4)
+      [1] Object_Group: Group (蓝图: 庄方宜)
+      [2] VertexGroupProcess: 顶点组处理.001 (蓝图: 庄方宜)
+      [3] Object_Rename: Rename Object (蓝图: 庄方宜)
+      [4] VertexGroupProcess: 顶点组处理 (蓝图: 庄方宜)
+   ✅ 调试信息已写入文本: '物体处理链' (12974 字符)
+📋 验证物体引用是否为副本...
+   ✅ 所有物体引用已正确更新为副本
+📋 待导出物体: 12 个
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 b60941e1f7ec28ac... (原始: 0d2ddddc-1032-0.自定义名称) → 2 个对象可复用: 0d2ddddc-1032-0.自定义名称_copy, 0d2ddddc-1032-0.自定义名称
+_chain1_copy
+  🆕 处理: '0d2ddddc-1032-0.自定义名称_copy' (原始: 0d2ddddc-1032-0.自定义名称, hash=b60941e1f7ec28ac...)
+
+
+
+  ♻️复用: '0d2ddddc-1032-0.自定义名称_chain1_copy' (原始: 0d2ddddc-1032-0.自定义名称) → offset=0, vertices=218, indices=1032
+[SubMeshModel] 数据复用统计: 1/2 个对象复用, 1/2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+尝试赋值 Element: POSITION    
+尝试赋值 Element: NORMAL      
+尝试赋值 Element: TEXCOORD    
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: 0d2ddddc-1032-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 d37bcfc1a20fb170... (原始: bdc966a9-11538-0.自定义名称) → 2 个对象可复用: bdc966a9-11538-0.自定义名称_copy, bdc966a9-11538-0.自定义名称_chain1_copy
+  🆕 处理: 'bdc966a9-11538-0.自定义名称_copy' (原始: bdc966a9-11538-0.自定义名称, hash=d37bcfc1a20fb170...)
+  ♻️复用: 'bdc966a9-11538-0.自定义名称_chain1_copy' (原始: bdc966a9-11538-0.自定义名称) → offset=0, vertices=2255, indices=11538
+[SubMeshModel] 数据复用统计: 1/2 个对象复用, 1/2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+尝试赋值 Element: POSITION    
+尝试赋值 Element: NORMAL      
+尝试赋值 Element: TEXCOORD    
+尝试赋值 Element: TEXCOORD1   
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: bdc966a9-11538-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 d4119d1819a07469... (原始: 91b47065-67080-0.自定义名称) → 独立对象: 91b47065-67080-0.自定义名称_copy
+  📋 哈希 7a9f7e5c1957def3... (原始: 0f9e1087-156318-0.自定义名称) → 独立对象: 0f9e1087-156318-0.自定义名称_chain1_copy
+  🆕 处理: '91b47065-67080-0.自定义名称_copy' (原始: 91b47065-67080-0.自定义名称, hash=d4119d1819a07469...)
+  🆕 处理: '0f9e1087-156318-0.自定义名称_chain1_copy' (原始: 0f9e1087-156318-0.自定义名称, hash=7a9f7e5c1957def3...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+R8G8B8A8_SNORM
+COLOR
+尝试赋值 Element: POSITION    
+尝试赋值 Element: NORMAL      
+尝试赋值 Element: TEXCOORD    
+尝试赋值 Element: TEXCOORD1   
+尝试赋值 Element: COLOR       
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: 0f9e1087-156318-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 e977485ccb55522d... (原始: 79c9060c-25521-0.自定义名称) → 独立对象: 79c9060c-25521-0.自定义名称_copy       
+  📋 哈希 8b439f9eb0a03778... (原始: 6af95e58-52332-0.自定义名称) → 独立对象: 6af95e58-52332-0.自定义名称_chain1_copy
+  🆕 处理: '79c9060c-25521-0.自定义名称_copy' (原始: 79c9060c-25521-0.自定义名称, hash=e977485ccb55522d...)
+  🆕 处理: '6af95e58-52332-0.自定义名称_chain1_copy' (原始: 6af95e58-52332-0.自定义名称, hash=8b439f9eb0a03778...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL      
+尝试赋值 Element: TEXCOORD    
+尝试赋值 Element: TEXCOORD1   
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: 6af95e58-52332-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 130838597cbc832d... (原始: 3bd805f5-7221-0.自定义名称) → 独立对象: 3bd805f5-7221-0.自定义名称_copy
+  📋 哈希 f490235f55b3c864... (原始: a8b9073c-13452-0.自定义名称) → 独立对象: a8b9073c-13452-0.自定义名称_chain1_copy
+  🆕 处理: '3bd805f5-7221-0.自定义名称_copy' (原始: 3bd805f5-7221-0.自定义名称, hash=130838597cbc832d...)
+  🆕 处理: 'a8b9073c-13452-0.自定义名称_chain1_copy' (原始: a8b9073c-13452-0.自定义名称, hash=f490235f55b3c864...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+R8G8B8A8_SNORM
+COLOR
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: TEXCOORD1
+尝试赋值 Element: COLOR
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: a8b9073c-13452-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 23ca7419555b8e32... (原始: 49dfa7b0-3822-0.自定义名称) → 独立对象: 49dfa7b0-3822-0.自定义名称_copy
+  📋 哈希 6d83786392f0f802... (原始: fe47dc61-7014-0.自定义名称) → 独立对象: fe47dc61-7014-0.自定义名称_chain1_copy
+  🆕 处理: '49dfa7b0-3822-0.自定义名称_copy' (原始: 49dfa7b0-3822-0.自定义名称, hash=23ca7419555b8e32...)
+  🆕 处理: 'fe47dc61-7014-0.自定义名称_chain1_copy' (原始: fe47dc61-7014-0.自定义名称, hash=6d83786392f0f802...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+R8G8B8A8_SNORM
+COLOR
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: TEXCOORD1
+尝试赋值 Element: COLOR
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: fe47dc61-7014-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 b60941e1f7ec28ac... (原始: 0d2ddddc-1032-0.自定义名称) → 2 个对象可复用: 0d2ddddc-1032-0.自定义名称_copy, 0d2ddddc-1032-0.自定义名称_chain1_copy
+  🆕 处理: '0d2ddddc-1032-0.自定义名称_copy' (原始: 0d2ddddc-1032-0.自定义名称, hash=b60941e1f7ec28ac...)
+  ♻️复用: '0d2ddddc-1032-0.自定义名称_chain1_copy' (原始: 0d2ddddc-1032-0.自定义名称) → offset=0, vertices=218, indices=1032
+[SubMeshModel] 数据复用统计: 1/2 个对象复用, 1/2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: 0d2ddddc-1032-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 d37bcfc1a20fb170... (原始: bdc966a9-11538-0.自定义名称) → 2 个对象可复用: bdc966a9-11538-0.自定义名称_copy, bdc966a9-11538-0.自定义名称_chain1_copy
+  🆕 处理: 'bdc966a9-11538-0.自定义名称_copy' (原始: bdc966a9-11538-0.自定义名称, hash=d37bcfc1a20fb170...)
+  ♻️复用: 'bdc966a9-11538-0.自定义名称_chain1_copy' (原始: bdc966a9-11538-0.自定义名称) → offset=0, vertices=2255, indices=11538
+[SubMeshModel] 数据复用统计: 1/2 个对象复用, 1/2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: TEXCOORD1
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: bdc966a9-11538-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 d4119d1819a07469... (原始: 91b47065-67080-0.自定义名称) → 独立对象: 91b47065-67080-0.自定义名称_copy
+  📋 哈希 7a9f7e5c1957def3... (原始: 0f9e1087-156318-0.自定义名称) → 独立对象: 0f9e1087-156318-0.自定义名称_chain1_copy
+  🆕 处理: '91b47065-67080-0.自定义名称_copy' (原始: 91b47065-67080-0.自定义名称, hash=d4119d1819a07469...)
+  🆕 处理: '0f9e1087-156318-0.自定义名称_chain1_copy' (原始: 0f9e1087-156318-0.自定义名称, hash=7a9f7e5c1957def3...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+R8G8B8A8_SNORM
+COLOR
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: TEXCOORD1
+尝试赋值 Element: COLOR
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: 0f9e1087-156318-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 e977485ccb55522d... (原始: 79c9060c-25521-0.自定义名称) → 独立对象: 79c9060c-25521-0.自定义名称_copy
+  📋 哈希 8b439f9eb0a03778... (原始: 6af95e58-52332-0.自定义名称) → 独立对象: 6af95e58-52332-0.自定义名称_chain1_copy
+  🆕 处理: '79c9060c-25521-0.自定义名称_copy' (原始: 79c9060c-25521-0.自定义名称, hash=e977485ccb55522d...)
+  🆕 处理: '6af95e58-52332-0.自定义名称_chain1_copy' (原始: 6af95e58-52332-0.自定义名称, hash=8b439f9eb0a03778...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: TEXCOORD1
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: 6af95e58-52332-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 130838597cbc832d... (原始: 3bd805f5-7221-0.自定义名称) → 独立对象: 3bd805f5-7221-0.自定义名称_copy
+  📋 哈希 f490235f55b3c864... (原始: a8b9073c-13452-0.自定义名称) → 独立对象: a8b9073c-13452-0.自定义名称_chain1_copy
+  🆕 处理: '3bd805f5-7221-0.自定义名称_copy' (原始: 3bd805f5-7221-0.自定义名称, hash=130838597cbc832d...)
+  🆕 处理: 'a8b9073c-13452-0.自定义名称_chain1_copy' (原始: a8b9073c-13452-0.自定义名称, hash=f490235f55b3c864...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+R8G8B8A8_SNORM
+COLOR
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: TEXCOORD1
+尝试赋值 Element: COLOR
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: a8b9073c-13452-0 计算完成，临时对象已删除
+[SubMeshModel] 数据哈希预计算完成: 2 个对象
+  📋 哈希 23ca7419555b8e32... (原始: 49dfa7b0-3822-0.自定义名称) → 独立对象: 49dfa7b0-3822-0.自定义名称_copy
+  📋 哈希 6d83786392f0f802... (原始: fe47dc61-7014-0.自定义名称) → 独立对象: fe47dc61-7014-0.自定义名称_chain1_copy
+  🆕 处理: '49dfa7b0-3822-0.自定义名称_copy' (原始: 49dfa7b0-3822-0.自定义名称, hash=23ca7419555b8e32...)
+  🆕 处理: 'fe47dc61-7014-0.自定义名称_chain1_copy' (原始: fe47dc61-7014-0.自定义名称, hash=6d83786392f0f802...)
+[SubMeshModel] 数据复用统计: 无复用, 全部 2 个对象独立处理
+get_blendweights_blendindices_v3
+True
+终末地法线编码 - 使用 TBNCodec
+R8G8B8A8_SNORM
+COLOR
+尝试赋值 Element: POSITION
+尝试赋值 Element: NORMAL
+尝试赋值 Element: TEXCOORD
+尝试赋值 Element: TEXCOORD1
+尝试赋值 Element: COLOR
+尝试赋值 Element: BLENDWEIGHTS
+尝试赋值 Element: BLENDINDICES
+SubMeshModel: fe47dc61-7014-0 计算完成，临时对象已删除

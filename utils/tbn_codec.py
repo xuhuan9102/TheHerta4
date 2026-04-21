@@ -140,6 +140,17 @@ class TBNCodec:
         Returns:
             shape (N,) 的 float32 角度编码值, 范围约 [-1, 1]
         """
+        normals = numpy.nan_to_num(normals, nan=0.0, posinf=1.0, neginf=-1.0)
+        tangents = numpy.nan_to_num(tangents, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        n_norms = numpy.linalg.norm(normals, axis=1, keepdims=True)
+        n_norms = numpy.where(n_norms < 1e-8, 1.0, n_norms)
+        normals = normals / n_norms
+        
+        t_norms = numpy.linalg.norm(tangents, axis=1, keepdims=True)
+        t_norms = numpy.where(t_norms < 1e-8, 1.0, t_norms)
+        tangents = tangents / t_norms
+
         R = numpy.stack([
             normals[:, 1] - normals[:, 2],
             normals[:, 2] - normals[:, 0],
@@ -147,7 +158,8 @@ class TBNCodec:
         ], axis=1)
 
         R_norm = numpy.linalg.norm(R, axis=1, keepdims=True)
-        small_mask = R_norm[:, 0] < 1e-6
+        R_norm = numpy.where(R_norm < 1e-8, 1.0, R_norm)
+        small_mask = (R_norm[:, 0] < 1e-6) | numpy.isnan(R_norm[:, 0])
 
         if numpy.any(small_mask):
             helper = numpy.where(
@@ -156,10 +168,17 @@ class TBNCodec:
                 numpy.array([0.0, 1.0, 0.0])
             )
             v_perp = numpy.cross(normals, helper)
-            v_perp /= numpy.linalg.norm(v_perp, axis=1, keepdims=True)
+            v_perp_norm = numpy.linalg.norm(v_perp, axis=1, keepdims=True)
+            v_perp_norm = numpy.where(v_perp_norm < 1e-8, 1.0, v_perp_norm)
+            v_perp = v_perp / v_perp_norm
             R = numpy.where(small_mask[:, None], v_perp, R / R_norm)
+        else:
+            R = R / R_norm
 
         B = numpy.cross(R, normals)
+        B_norm = numpy.linalg.norm(B, axis=1, keepdims=True)
+        B_norm = numpy.where(B_norm < 1e-8, 1.0, B_norm)
+        B = B / B_norm
 
         cos_theta = numpy.sum(tangents * R, axis=1)
         sin_theta = numpy.sum(tangents * B, axis=1)
@@ -168,13 +187,13 @@ class TBNCodec:
         sin_theta = numpy.clip(sin_theta, -1.0, 1.0)
 
         denom = numpy.abs(cos_theta) + numpy.abs(sin_theta)
-        u_t = numpy.where(denom > 0, cos_theta / denom, 0.0)
+        u_t = numpy.where(denom > 1e-8, cos_theta / denom, 0.0)
         t = 1 - (1 - u_t) / 2.0
 
         s = numpy.where(sin_theta == 0.0, 1.0, numpy.sign(sin_theta))
         t = numpy.copysign(t, s)
 
-        return t
+        return t.astype(numpy.float32)
 
     @staticmethod
     def decode_tbn_data(

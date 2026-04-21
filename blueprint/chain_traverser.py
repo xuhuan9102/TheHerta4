@@ -310,6 +310,7 @@ class ChainTraverser:
                     for record in history:
                         operation = {
                             'operation_index': len(chain.rename_history) + 1,
+                            'node_name': current_node.name,
                             **record
                         }
                         chain.rename_history.append(operation)

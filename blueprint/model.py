@@ -249,9 +249,7 @@ class ProcessingChain:
         return new_chain
 
     def to_draw_call_model(self) -> DrawCallModel:
-        export_object_name = self.object_name
-        if self.source_node and getattr(self.source_node, 'bl_idname', '') == _NODE_TYPE_OBJECT_INFO:
-            export_object_name = ObjectPrefixHelper.build_virtual_object_name_for_node(self.source_node, strict=True)
+        export_object_name = self.get_export_object_name()
 
         obj_model = DrawCallModel(obj_name=export_object_name)
 
@@ -268,6 +266,13 @@ class ProcessingChain:
         obj_model.work_key_list = copy.deepcopy(self.shapekey_params)
 
         return obj_model
+
+    def get_export_object_name(self) -> str:
+        export_object_name = self.object_name
+        if self.source_node and getattr(self.source_node, 'bl_idname', '') == _NODE_TYPE_OBJECT_INFO:
+            if not self.rename_history:
+                export_object_name = ObjectPrefixHelper.build_virtual_object_name_for_node(self.source_node, strict=True)
+        return export_object_name
 
 
 @dataclass
@@ -695,87 +700,94 @@ class BluePrintModel:
             LOG.warning(f"⚠️ 顶点组处理节点集成遇到错误: {e}")
             traceback.print_exc()
 
-    def _detect_and_apply_cross_ib_rename_mapping(self):
-        from .node_cross_ib import SSMTNode_CrossIB, CrossIBMatchMode
+    def _build_cross_ib_rename_mappings_for_chain(self, chain: ProcessingChain) -> Tuple[Dict[str, str], Dict[str, str]]:
         from ..common.object_prefix_helper import ObjectPrefixHelper
+
+        indexcount_mapping: Dict[str, str] = {}
+        ibhash_mapping: Dict[str, str] = {}
+
+        for record in chain.rename_history:
+            old_name = record.get('old_name', '')
+            new_name = record.get('new_name', '')
+
+            if not old_name or not new_name or old_name == new_name:
+                continue
+
+            old_prefix_info = ObjectPrefixHelper.extract_prefix_info(old_name)
+            new_prefix_info = ObjectPrefixHelper.extract_prefix_info(new_name)
+
+            if not old_prefix_info or not new_prefix_info:
+                continue
+
+            old_prefix = old_prefix_info[0]
+            new_prefix = new_prefix_info[0]
+
+            old_parts = ObjectPrefixHelper.parse_prefix_parts(old_prefix)
+            new_parts = ObjectPrefixHelper.parse_prefix_parts(new_prefix)
+
+            old_indexcount = old_parts.get('index_count', '')
+            new_indexcount = new_parts.get('index_count', '')
+            if old_indexcount and new_indexcount and old_indexcount != new_indexcount:
+                indexcount_mapping.setdefault(old_indexcount, new_indexcount)
+
+            old_ib_hash = old_parts.get('draw_ib', '')
+            new_ib_hash = new_parts.get('draw_ib', '')
+            old_first_index = old_parts.get('first_index', '')
+            new_first_index = new_parts.get('first_index', '')
+            if old_ib_hash and new_ib_hash and (old_ib_hash != new_ib_hash or old_first_index != new_first_index):
+                old_key = f"{old_ib_hash}_{old_first_index}"
+                new_key = f"{new_ib_hash}_{new_first_index}"
+                ibhash_mapping.setdefault(old_key, new_key)
+
+        return indexcount_mapping, ibhash_mapping
+
+    def _build_cross_ib_rename_mappings_from_records(self, rename_records: List[dict]) -> Tuple[Dict[str, str], Dict[str, str]]:
+        temp_chain = ProcessingChain()
+        temp_chain.rename_history = list(rename_records)
+        return self._build_cross_ib_rename_mappings_for_chain(temp_chain)
+
+    def _detect_and_apply_cross_ib_rename_mapping(self):
+        from .node_cross_ib import CrossIBMatchMode
 
         valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
 
-        cross_ib_rename_chains = []
-        for chain in valid_chains:
-            has_cross_ib = any(n.bl_idname == _NODE_TYPE_CROSS_IB for n in chain.node_path)
-            has_rename = bool(chain.rename_history)
-            if has_cross_ib and has_rename:
-                cross_ib_rename_chains.append(chain)
+        for cross_ib_node in self.cross_ib_nodes:
+            cross_ib_node.save_original_params()
 
-        if not cross_ib_rename_chains:
+        has_cross_ib_rename = False
+        for cross_ib_node in self.cross_ib_nodes:
+            rename_records_by_node: Dict[str, List[dict]] = {}
+
+            for chain in valid_chains:
+                if cross_ib_node not in chain.node_path or not chain.rename_history:
+                    continue
+
+                for record in chain.rename_history:
+                    rename_node_name = record.get('node_name', '') or '__unknown_rename_node__'
+                    rename_records_by_node.setdefault(rename_node_name, []).append(record)
+
+            for rename_node_name, rename_records in rename_records_by_node.items():
+                indexcount_mapping, ibhash_mapping = self._build_cross_ib_rename_mappings_from_records(rename_records)
+                if not indexcount_mapping and not ibhash_mapping:
+                    continue
+
+                has_cross_ib_rename = True
+                match_mode = getattr(cross_ib_node, 'match_mode', CrossIBMatchMode.INDEX_COUNT)
+
+                if match_mode == CrossIBMatchMode.INDEX_COUNT and indexcount_mapping:
+                    cross_ib_node.apply_indexcount_mapping(indexcount_mapping)
+                    LOG.info(
+                        f"🔗 Rename节点 '{rename_node_name}' 向节点 '{cross_ib_node.name}' 追加IndexCount衍生映射 {len(indexcount_mapping)} 条"
+                    )
+                elif match_mode == CrossIBMatchMode.IB_HASH and ibhash_mapping:
+                    cross_ib_node.apply_ibhash_mapping(ibhash_mapping)
+                    LOG.info(
+                        f"🔗 Rename节点 '{rename_node_name}' 向节点 '{cross_ib_node.name}' 追加IBHash衍生映射 {len(ibhash_mapping)} 条"
+                    )
+
+        if not has_cross_ib_rename:
             LOG.info("🔗 未检测到同时包含跨IB节点和重命名节点的链路")
             return
-
-        LOG.info(f"🔗 检测到 {len(cross_ib_rename_chains)} 条链路同时包含跨IB节点和重命名节点，开始构建重命名映射")
-
-        indexcount_mapping = {}
-        ibhash_mapping = {}
-
-        for chain in cross_ib_rename_chains:
-            for record in chain.rename_history:
-                old_name = record.get('old_name', '')
-                new_name = record.get('new_name', '')
-
-                if not old_name or not new_name or old_name == new_name:
-                    continue
-
-                old_prefix_info = ObjectPrefixHelper.extract_prefix_info(old_name)
-                new_prefix_info = ObjectPrefixHelper.extract_prefix_info(new_name)
-
-                if not old_prefix_info or not new_prefix_info:
-                    continue
-
-                old_prefix = old_prefix_info[0]
-                new_prefix = new_prefix_info[0]
-
-                old_parts = ObjectPrefixHelper.parse_prefix_parts(old_prefix)
-                new_parts = ObjectPrefixHelper.parse_prefix_parts(new_prefix)
-
-                old_indexcount = old_parts.get('index_count', '')
-                new_indexcount = new_parts.get('index_count', '')
-                if old_indexcount and new_indexcount and old_indexcount != new_indexcount:
-                    if old_indexcount not in indexcount_mapping:
-                        indexcount_mapping[old_indexcount] = new_indexcount
-                        LOG.info(f"🔗   IndexCount映射: {old_indexcount} → {new_indexcount}")
-
-                old_ib_hash = old_parts.get('draw_ib', '')
-                new_ib_hash = new_parts.get('draw_ib', '')
-                old_first_index = old_parts.get('first_index', '')
-                new_first_index = new_parts.get('first_index', '')
-
-                if old_ib_hash and new_ib_hash and (old_ib_hash != new_ib_hash or old_first_index != new_first_index):
-                    old_key = f"{old_ib_hash}-{old_first_index}"
-                    new_key = f"{new_ib_hash}-{new_first_index}"
-                    if old_key not in ibhash_mapping:
-                        ibhash_mapping[old_key] = new_key
-                        LOG.info(f"🔗   IBHash映射: {old_key} → {new_key}")
-
-        if not indexcount_mapping and not ibhash_mapping:
-            LOG.info("🔗 未从重命名历史中提取到有效的映射规则")
-            return
-
-        applied_nodes = set()
-        for cross_ib_node in self.cross_ib_nodes:
-            match_mode = getattr(cross_ib_node, 'match_mode', CrossIBMatchMode.INDEX_COUNT)
-
-            if match_mode == CrossIBMatchMode.INDEX_COUNT and indexcount_mapping:
-                cross_ib_node.save_original_params()
-                cross_ib_node.apply_indexcount_mapping(indexcount_mapping)
-                applied_nodes.add(cross_ib_node.name)
-                LOG.info(f"🔗   节点 '{cross_ib_node.name}': 已应用IndexCount映射 ({len(indexcount_mapping)} 条)")
-            elif match_mode == CrossIBMatchMode.IB_HASH and ibhash_mapping:
-                cross_ib_node.save_original_params()
-                cross_ib_node.apply_ibhash_mapping(ibhash_mapping)
-                applied_nodes.add(cross_ib_node.name)
-                LOG.info(f"🔗   节点 '{cross_ib_node.name}': 已应用IBHash映射 ({len(ibhash_mapping)} 条)")
-
-        LOG.info(f"🔗 跨IB重命名映射应用完成: IndexCount映射 {len(indexcount_mapping)} 条, IBHash映射 {len(ibhash_mapping)} 条, 影响 {len(applied_nodes)} 个跨IB节点")
 
     def _process_cross_ib_nodes(self):
         LOG.info(f"🔗 开始处理跨IB节点，共 {len(self.cross_ib_nodes)} 个节点")
@@ -785,7 +797,18 @@ class BluePrintModel:
             LOG.info("🔗 没有找到跨IB节点，跳过处理")
             return
 
-        from .node_cross_ib import SSMTNode_CrossIB, CrossIBMatchMode
+        from .node_cross_ib import CrossIBMatchMode
+
+        self.cross_ib_info_dict.clear()
+        self.cross_ib_method_dict.clear()
+        self.cross_ib_mapping_objects.clear()
+        self.cross_ib_vb_condition_mapping.clear()
+        self.cross_ib_source_to_target_dict.clear()
+        self.cross_ib_object_vb_condition.clear()
+        self.cross_ib_target_info.clear()
+        self.cross_ib_object_names.clear()
+        self.cross_ib_match_mode = 'IB_HASH'
+        self.has_cross_ib = False
 
         for cross_ib_node in self.cross_ib_nodes:
             if hasattr(cross_ib_node, '_update_cross_ib_method'):
@@ -810,38 +833,6 @@ class BluePrintModel:
             if not self.cross_ib_match_mode or self.cross_ib_match_mode == 'IB_HASH':
                 self.cross_ib_match_mode = node_match_mode
 
-            for source_key, target_keys in node_ib_mapping.items():
-                if source_key not in self.cross_ib_info_dict:
-                    self.cross_ib_info_dict[source_key] = []
-                for target_key in target_keys:
-                    if target_key not in self.cross_ib_info_dict[source_key]:
-                        self.cross_ib_info_dict[source_key].append(target_key)
-
-                if source_key not in self.cross_ib_source_to_target_dict:
-                    self.cross_ib_source_to_target_dict[source_key] = []
-                for target_key in target_keys:
-                    if target_key not in self.cross_ib_source_to_target_dict[source_key]:
-                        self.cross_ib_source_to_target_dict[source_key].append(target_key)
-
-            for source_key, target_keys in node_ib_mapping.items():
-                for target_key in target_keys:
-                    mapping_key = (source_key, target_key)
-                    if mapping_key not in self.cross_ib_vb_condition_mapping:
-                        vb_condition_source = cross_ib_node.get_vb_condition_source()
-                        vb_condition_target = cross_ib_node.get_vb_condition_target()
-                        self.cross_ib_vb_condition_mapping[mapping_key] = {
-                            'source': vb_condition_source,
-                            'target': vb_condition_target
-                        }
-                        LOG.info(f"🔗   VS条件映射 {mapping_key}: source={vb_condition_source}, target={vb_condition_target}")
-
-            for source_key, target_keys in node_ib_mapping.items():
-                for target_key in target_keys:
-                    if target_key not in self.cross_ib_target_info:
-                        self.cross_ib_target_info[target_key] = []
-                    if source_key not in self.cross_ib_target_info[target_key]:
-                        self.cross_ib_target_info[target_key].append(source_key)
-
         valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
         LOG.info(f"🔗 有效处理链数量: {len(valid_chains)}")
 
@@ -853,10 +844,41 @@ class BluePrintModel:
 
             cross_ib_chain_count += 1
             obj_name = chain.object_name
+            export_obj_name = chain.get_export_object_name()
 
             for cross_ib_node in cross_ib_nodes_in_chain:
                 node_ib_mapping = cross_ib_node.get_ib_mapping_dict()
-                node_match_mode = getattr(cross_ib_node, 'match_mode', CrossIBMatchMode.INDEX_COUNT)
+                vb_condition_source = cross_ib_node.get_vb_condition_source()
+                vb_condition_target = cross_ib_node.get_vb_condition_target()
+
+                LOG.info(
+                    f"🔗   链路 '{obj_name}' (导出名 '{export_obj_name}') 在节点 '{cross_ib_node.name}' 上的节点映射: {node_ib_mapping}"
+                )
+
+                for source_key, target_keys in node_ib_mapping.items():
+                    if source_key not in self.cross_ib_info_dict:
+                        self.cross_ib_info_dict[source_key] = []
+                    if source_key not in self.cross_ib_source_to_target_dict:
+                        self.cross_ib_source_to_target_dict[source_key] = []
+
+                    for target_key in target_keys:
+                        if target_key not in self.cross_ib_info_dict[source_key]:
+                            self.cross_ib_info_dict[source_key].append(target_key)
+                        if target_key not in self.cross_ib_source_to_target_dict[source_key]:
+                            self.cross_ib_source_to_target_dict[source_key].append(target_key)
+
+                        mapping_key = (source_key, target_key)
+                        if mapping_key not in self.cross_ib_vb_condition_mapping:
+                            self.cross_ib_vb_condition_mapping[mapping_key] = {
+                                'source': vb_condition_source,
+                                'target': vb_condition_target
+                            }
+                            LOG.info(f"🔗   VS条件映射 {mapping_key}: source={vb_condition_source}, target={vb_condition_target}")
+
+                        if target_key not in self.cross_ib_target_info:
+                            self.cross_ib_target_info[target_key] = []
+                        if source_key not in self.cross_ib_target_info[target_key]:
+                            self.cross_ib_target_info[target_key].append(source_key)
 
                 obj_ib_keys = self._get_object_ib_keys(obj_name)
                 LOG.info(f"🔗 物体 '{obj_name}' 的 IB keys: {obj_ib_keys}")
@@ -868,18 +890,16 @@ class BluePrintModel:
                         break
 
                 if matched_source_key:
-                    self.cross_ib_object_names.add(obj_name)
-                    LOG.info(f"🔗   物体 '{obj_name}' 被标记为跨IB物体，匹配源: {matched_source_key}")
+                    self.cross_ib_object_names.add(export_obj_name)
+                    LOG.info(f"🔗   物体 '{obj_name}' 被标记为跨IB物体，导出名 '{export_obj_name}'，匹配源: {matched_source_key}")
 
                     for target_key in node_ib_mapping[matched_source_key]:
                         mapping_key = (matched_source_key, target_key)
                         if mapping_key not in self.cross_ib_mapping_objects:
                             self.cross_ib_mapping_objects[mapping_key] = set()
-                        self.cross_ib_mapping_objects[mapping_key].add(obj_name)
+                        self.cross_ib_mapping_objects[mapping_key].add(export_obj_name)
 
-                        vb_condition_source = cross_ib_node.get_vb_condition_source()
-                        vb_condition_target = cross_ib_node.get_vb_condition_target()
-                        object_mapping_key = (obj_name, matched_source_key, target_key)
+                        object_mapping_key = (export_obj_name, matched_source_key, target_key)
                         if object_mapping_key not in self.cross_ib_object_vb_condition:
                             self.cross_ib_object_vb_condition[object_mapping_key] = {
                                 'source': vb_condition_source,
@@ -898,6 +918,10 @@ class BluePrintModel:
                 LOG.info(f"🔗   映射 {mapping_key}: {obj_names}")
         else:
             LOG.info("🔗 跨IB处理完成: 没有有效的跨IB映射")
+
+        for cross_ib_node in self.cross_ib_nodes:
+            if getattr(cross_ib_node, 'original_cross_ib_data', ''):
+                cross_ib_node.restore_original_params()
 
     def _get_object_ib_key(self, obj_name: str, match_mode: str) -> Optional[str]:
         try:

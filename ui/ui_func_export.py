@@ -506,9 +506,119 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         LOG.info(f"   ✅ 所有物体引用已正确更新为副本")
 
 
+class SSMTQuickExportSelected(bpy.types.Operator):
+    bl_idname = "ssmt.quick_export_selected"
+    bl_label = TR.translate("快速局部导出")
+    bl_description = "无视蓝图，直接导出当前选中的网格物体"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not selected_meshes:
+            self.report({'WARNING'}, "请先选择至少一个网格物体")
+            return {'CANCELLED'}
+
+        GlobalConfig.read_from_main_json_ssmt4()
+
+        temp_tree = None
+        previous_runtime_tree_name = BlueprintExportHelper.runtime_blueprint_tree_name
+        previous_export_index = BlueprintExportHelper.current_export_index
+        previous_buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
+        export_success = False
+
+        try:
+            LOG.start_collecting()
+            TimerUtils.start_session("快速局部导出")
+
+            LOG.info("=" * 60)
+            LOG.info("🚀 开始快速局部导出")
+            LOG.info(f"📋 当前选择网格物体: {len(selected_meshes)} 个")
+            for obj in selected_meshes:
+                LOG.info(f"   - {obj.name}")
+
+            temp_tree = self._build_temp_blueprint_tree(selected_meshes)
+
+            round_plan = {
+                "round_index": 1,
+                "phase": "single",
+                "description": "快速局部导出",
+                "buffer_folder_name": "Meshes",
+                "export_index": 1,
+                "generate_ini": True,
+                "generate_classification_report": False,
+                "shapekey_mode": "unchanged",
+                "shapekey_slot_index": None,
+            }
+
+            result = ExportRoundExecutor.execute_round(
+                tree=temp_tree,
+                round_plan=round_plan,
+                allow_parallel_preprocess=True,
+            )
+
+            export_success = True
+            self.report({'INFO'}, f"快速局部导出完成，共导出 {result['object_count']} 个物体")
+            CommandUtils.OpenGeneratedModFolder()
+            return {'FINISHED'}
+        except Exception as e:
+            print(f"❌ 快速局部导出失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, f"快速局部导出失败: {e}")
+            return {'CANCELLED'}
+        finally:
+            BlueprintExportHelper.runtime_blueprint_tree_name = previous_runtime_tree_name
+            BlueprintExportHelper.set_current_export_index(previous_export_index)
+            BlueprintExportHelper.set_current_buffer_folder_name(previous_buffer_folder_name)
+
+            if temp_tree and bpy.data.node_groups.get(temp_tree.name):
+                bpy.data.node_groups.remove(temp_tree, do_unlink=True)
+
+            TimerUtils.print_summary()
+
+            LOG.stop_collecting()
+            if export_success:
+                log_name = LOG.save_to_text_editor()
+                if log_name:
+                    print(f"📄 快速局部导出日志已保存至文本编辑器: {log_name}")
+
+    def _build_temp_blueprint_tree(self, objects):
+        tree_name = f"SSMT_QuickExport_{len(bpy.data.node_groups) + 1}"
+        tree = bpy.data.node_groups.new(name=tree_name, type='SSMTBlueprintTreeType')
+
+        group_node = tree.nodes.new('SSMTNode_Object_Group')
+        group_node.label = "Quick Export"
+        group_node.location = (300, 0)
+
+        output_node = tree.nodes.new('SSMTNode_Result_Output')
+        output_node.label = "Quick Export"
+        output_node.location = (650, 0)
+        tree.links.new(group_node.outputs[0], output_node.inputs[0])
+
+        current_y = 0
+        for obj in objects:
+            node = tree.nodes.new('SSMTNode_Object_Info')
+            node.object_name = obj.name
+            node.object_id = str(obj.as_pointer())
+            node.label = obj.name
+            node.location = (0, current_y)
+            current_y -= 180
+
+            if group_node.inputs[-1].is_linked:
+                group_node.inputs.new('SSMTSocketObject', f"Input {len(group_node.inputs) + 1}")
+
+            tree.links.new(node.outputs[0], group_node.inputs[-1])
+
+        group_node.location = (300, max(0, (len(objects) - 1) * -90))
+        output_node.location = (650, group_node.location.y)
+        return tree
+
+
 def register():
+    bpy.utils.register_class(SSMTQuickExportSelected)
     bpy.utils.register_class(SSMTGenerateModBlueprint)
 
 
 def unregister():
+    bpy.utils.unregister_class(SSMTQuickExportSelected)
     bpy.utils.unregister_class(SSMTGenerateModBlueprint)

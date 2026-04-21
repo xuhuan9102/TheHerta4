@@ -28,7 +28,6 @@ class ExportHelper:
         for draw_call_model in blueprint_model.ordered_draw_obj_data_model_list:
             # 获取独立标识
             unique_str = draw_call_model.get_unique_str()
-            # print("解析DrawCallModel，Obj名称: " + draw_call_model.obj_name + " Unique标识: " + unique_str)
 
             # 根据unique_str，加入到字典中，这样每个unique_str都对应一个DrawCallModel列表，用于初始化SubMeshModel
             draw_call_model_list = draw_call_model_dict.get(unique_str,[])

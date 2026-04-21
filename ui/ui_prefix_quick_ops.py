@@ -5,9 +5,50 @@ from ..common.object_prefix_helper import ObjectPrefixHelper
 class SSMT_PrefixQuickItem(bpy.types.PropertyGroup):
     prefix: bpy.props.StringProperty(name="前缀", default="") # type: ignore
     separator: bpy.props.StringProperty(name="分隔符", default="-") # type: ignore
+    display_name: bpy.props.StringProperty(name="显示名称", default="") # type: ignore
 
 
 class PrefixQuickOpsHelper:
+    @staticmethod
+    def _build_display_name(prefix: str, object_name: str = "", alias_name: str = "") -> str:
+        clean_prefix = ObjectPrefixHelper.normalize_prefix(prefix)
+        if not clean_prefix:
+            return object_name or alias_name or ""
+
+        if object_name:
+            parsed_prefix, _, base_name = ObjectPrefixHelper.split_name_and_prefix(object_name, clean_prefix, ".")
+            if parsed_prefix == clean_prefix and base_name:
+                return object_name
+
+        clean_alias = (alias_name or "").strip()
+        if clean_alias:
+            return f"{clean_prefix}.{clean_alias}"
+
+        return clean_prefix
+
+    @staticmethod
+    def _upsert_prefix_item(items, prefix: str, separator: str, display_name: str) -> bool:
+        clean_prefix = ObjectPrefixHelper.normalize_prefix(prefix)
+        if not clean_prefix:
+            return False
+
+        for item in items:
+            if item.prefix != clean_prefix:
+                continue
+
+            item.separator = separator
+            current_name = (getattr(item, "display_name", "") or "").strip()
+            next_name = (display_name or "").strip()
+            if next_name and (not current_name or current_name == clean_prefix):
+                item.display_name = next_name
+            return False
+
+        item = items.add()
+        item.prefix = clean_prefix
+        item.separator = separator
+        item.display_name = (display_name or clean_prefix).strip() or clean_prefix
+        return True
+
     @staticmethod
     def _iter_object_info_nodes():
         for tree in bpy.data.node_groups:
@@ -47,7 +88,6 @@ class PrefixQuickOpsHelper:
     def merge_prefixes_from_objects(cls, context, objects) -> int:
         scene = context.scene
         items = scene.ssmt_prefix_quick_items
-        existing_prefixes = {item.prefix for item in items}
         added_count = 0
 
         for obj in objects:
@@ -56,14 +96,9 @@ class PrefixQuickOpsHelper:
                 continue
 
             prefix, separator = info
-            if prefix in existing_prefixes:
-                continue
-
-            item = items.add()
-            item.prefix = prefix
-            item.separator = separator
-            existing_prefixes.add(prefix)
-            added_count += 1
+            display_name = cls._build_display_name(prefix, object_name=getattr(obj, "name", ""))
+            if cls._upsert_prefix_item(items, prefix, separator, display_name):
+                added_count += 1
 
         return added_count
 
@@ -71,7 +106,6 @@ class PrefixQuickOpsHelper:
     def merge_prefixes_from_nodes(cls, context) -> int:
         scene = context.scene
         items = scene.ssmt_prefix_quick_items
-        existing_prefixes = {item.prefix for item in items}
         added_count = 0
 
         for node in cls._iter_object_info_nodes():
@@ -80,14 +114,13 @@ class PrefixQuickOpsHelper:
                 continue
 
             prefix, separator = info
-            if prefix in existing_prefixes:
-                continue
-
-            item = items.add()
-            item.prefix = prefix
-            item.separator = separator
-            existing_prefixes.add(prefix)
-            added_count += 1
+            display_name = cls._build_display_name(
+                prefix,
+                object_name=ObjectPrefixHelper.build_virtual_object_name_for_node(node),
+                alias_name=getattr(node, "alias_name", ""),
+            )
+            if cls._upsert_prefix_item(items, prefix, separator, display_name):
+                added_count += 1
 
         return added_count
 
@@ -95,7 +128,6 @@ class PrefixQuickOpsHelper:
     def merge_prefixes_from_selected_nodes(cls, context, objects) -> int:
         scene = context.scene
         items = scene.ssmt_prefix_quick_items
-        existing_prefixes = {item.prefix for item in items}
         selected_names = {obj.name for obj in objects}
         selected_ids = {str(obj.as_pointer()) for obj in objects}
         added_count = 0
@@ -111,14 +143,13 @@ class PrefixQuickOpsHelper:
                 continue
 
             prefix, separator = info
-            if prefix in existing_prefixes:
-                continue
-
-            item = items.add()
-            item.prefix = prefix
-            item.separator = separator
-            existing_prefixes.add(prefix)
-            added_count += 1
+            display_name = cls._build_display_name(
+                prefix,
+                object_name=ObjectPrefixHelper.build_virtual_object_name_for_node(node),
+                alias_name=getattr(node, "alias_name", ""),
+            )
+            if cls._upsert_prefix_item(items, prefix, separator, display_name):
+                added_count += 1
 
         return added_count
 
@@ -141,6 +172,38 @@ class PrefixQuickOpsHelper:
         object_count = cls.merge_prefixes_from_objects(context, selected_objects)
         node_count = cls.merge_prefixes_from_selected_nodes(context, selected_objects)
         return object_count + node_count
+
+    @classmethod
+    def resolve_display_name(cls, context, item) -> str:
+        current_name = (getattr(item, "display_name", "") or "").strip()
+        if current_name and current_name != item.prefix:
+            return current_name
+
+        for node in cls._iter_object_info_nodes():
+            info = ObjectPrefixHelper.get_node_prefix_info(node)
+            if not info:
+                continue
+
+            prefix, _ = info
+            if prefix != item.prefix:
+                continue
+
+            return cls._build_display_name(
+                prefix,
+                object_name=ObjectPrefixHelper.build_virtual_object_name_for_node(node),
+                alias_name=getattr(node, "alias_name", ""),
+            )
+
+        for obj in context.scene.objects:
+            info = cls.extract_prefix_info(getattr(obj, "name", ""))
+            if not info:
+                continue
+
+            prefix, _ = info
+            if prefix == item.prefix:
+                return cls._build_display_name(prefix, object_name=obj.name)
+
+        return item.prefix
 
 
 class SSMT_OT_PrefixQuickApply(bpy.types.Operator):
@@ -245,7 +308,21 @@ class SSMT_OT_PrefixQuickClear(bpy.types.Operator):
 
 def draw_prefix_quick_section(layout, context):
     box = layout.box()
-    box.label(text="前缀快捷操作", icon='BOOKMARKS')
+    header = box.row(align=True)
+    expanded = context.scene.global_properties.expand_prefix_quick_ops
+    header.prop(
+        context.scene.global_properties,
+        "expand_prefix_quick_ops",
+        text="",
+        icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT',
+        icon_only=True,
+        emboss=False,
+    )
+    header.label(text="前缀快捷操作", icon='BOOKMARKS')
+
+    if not expanded:
+        return
+
     box.prop(context.scene.global_properties, "prefix_quick_apply_to_object_name")
 
     toolbar = box.row(align=True)
@@ -260,7 +337,8 @@ def draw_prefix_quick_section(layout, context):
     box.label(text=f"已记录前缀: {len(items)}")
     flow = box.column(align=True)
     for item in items:
-        op = flow.operator(SSMT_OT_PrefixQuickApply.bl_idname, text=item.prefix)
+        button_text = PrefixQuickOpsHelper.resolve_display_name(context, item)
+        op = flow.operator(SSMT_OT_PrefixQuickApply.bl_idname, text=button_text)
         op.prefix = item.prefix
         op.separator = item.separator
 

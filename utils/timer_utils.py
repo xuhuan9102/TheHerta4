@@ -12,6 +12,7 @@ class StageTimer:
     end_time: datetime = None
     duration_seconds: float = 0.0
     is_completed: bool = False
+    _accumulated: float = field(default=0.0, repr=False)
 
 
 @dataclass
@@ -66,13 +67,22 @@ class TimerUtils:
         if cls._session is None:
             cls.start_session("Default Session")
 
-        stage_timer = StageTimer(
-            stage_name=stage_name,
-            start_time=datetime.now()
-        )
-        cls._session.stages[stage_name] = stage_timer
-        if stage_name not in cls._session.stage_order:
-            cls._session.stage_order.append(stage_name)
+        existing = cls._session.stages.get(stage_name)
+        if existing is not None and existing.is_completed:
+            existing._accumulated = existing.duration_seconds
+            existing.start_time = datetime.now()
+            existing.end_time = None
+            existing.duration_seconds = 0.0
+            existing.is_completed = False
+        else:
+            stage_timer = StageTimer(
+                stage_name=stage_name,
+                start_time=datetime.now()
+            )
+            stage_timer._accumulated = 0.0
+            cls._session.stages[stage_name] = stage_timer
+            if stage_name not in cls._session.stage_order:
+                cls._session.stage_order.append(stage_name)
         cls._session.current_stage = stage_name
 
     @classmethod
@@ -89,7 +99,7 @@ class TimerUtils:
             return
 
         stage_timer.end_time = datetime.now()
-        stage_timer.duration_seconds = (stage_timer.end_time - stage_timer.start_time).total_seconds()
+        stage_timer.duration_seconds = (stage_timer.end_time - stage_timer.start_time).total_seconds() + getattr(stage_timer, '_accumulated', 0.0)
         stage_timer.is_completed = True
 
         if cls._session.current_stage == target_stage:
