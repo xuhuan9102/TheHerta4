@@ -213,11 +213,13 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             import traceback
             traceback.print_exc()
 
-            PreProcessHelper.cleanup_copies()
+            PreProcessHelper.cleanup_copies(silent=True)
 
         LOG.info("")
         LOG.info("📍 清理阶段")
         LOG.info("-" * 40)
+
+        PreProcessHelper.cleanup_copies()
 
         if has_shapekey_export:
             BlueprintExportHelper.set_all_shapekey_values(0)

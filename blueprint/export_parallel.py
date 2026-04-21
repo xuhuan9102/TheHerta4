@@ -82,7 +82,7 @@ class ExportRoundExecutor:
                 "object_count": len(blueprint_model.ordered_draw_obj_data_model_list),
             }
         finally:
-            PreProcessHelper.cleanup_copies()
+            PreProcessHelper.cleanup_copies(silent=True)
 
     @classmethod
     def _prepare_round_state(cls, tree, round_plan: dict):

@@ -1094,7 +1094,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                 section_name = f"[Resource_{self._hash_to_resource_prefix(h)}_Position0000]"
                 if section_name not in sections and section_name not in generated_section_names:
                     stride = hash_to_stride.get(h_prefix, 40)
-                    new_resource_lines.extend([section_name, "type = Meshes", f"stride = {stride}", f"filename = Meshes0000/{actual_file_hash}-Position.buf", ""])
+                    new_resource_lines.extend([section_name, "type = Buffer", f"stride = {stride}", f"filename = Meshes0000/{actual_file_hash}-Position.buf", ""])
                     generated_section_names.add(section_name)
 
             for slot, names_data in slot_to_name_to_objects.items():
@@ -1120,14 +1120,14 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                             folder_name = f"Meshes1{slot:03d}"
                             filename = f"{folder_name}/{actual_file_hash}-Position{res_suffix}.buf"
                             if section_name not in sections and section_name not in generated_section_names:
-                                new_resource_lines.extend([section_name, "type = Meshes", f"stride = {stride}", f"filename = {filename}", ""])
+                                new_resource_lines.extend([section_name, "type = Buffer", f"stride = {stride}", f"filename = {filename}", ""])
                                 generated_section_names.add(section_name)
 
                         if use_packed:
                             map_section = f"[Resource_{self._hash_to_resource_prefix(h)}_Position1{slot:03d}_Map]"
                             folder_name = f"Meshes1{slot:03d}"
                             if map_section not in sections and map_section not in generated_section_names:
-                                new_resource_lines.extend([map_section, "type = Meshes", "stride = 4", f"filename = {folder_name}/{actual_file_hash}-Position_map.buf", ""])
+                                new_resource_lines.extend([map_section, "type = Buffer", "stride = 4", f"filename = {folder_name}/{actual_file_hash}-Position_map.buf", ""])
                                 generated_section_names.add(map_section)
 
             if use_optimized:
@@ -1135,7 +1135,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                     actual_file_hash = hash_to_actual_file_hash.get(h, h)
                     freq_idx_section = f"[Resource_{self._hash_to_resource_prefix(h)}_Position_FreqIndices]"
                     if freq_idx_section not in sections and freq_idx_section not in generated_section_names:
-                        new_resource_lines.extend([freq_idx_section, "type = Meshes", "stride = 4", f"filename = Meshes0000/{actual_file_hash}-Position_freq_indices.buf", ""])
+                        new_resource_lines.extend([freq_idx_section, "type = Buffer", "stride = 4", f"filename = Meshes0000/{actual_file_hash}-Position_freq_indices.buf", ""])
                         generated_section_names.add(freq_idx_section)
 
             if new_resource_lines:

@@ -442,14 +442,14 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
                             stride = 12
 
                             sections[pos_resource_section] = [
-                                'type = Meshes',
+                                'type = Buffer',
                                 f'stride = {stride}',
                                 f'filename = {Meshes_folder}/{base_name}-Position_packed_pos_delta.buf'
                             ]
 
                             map_resource_section = f'[Resource_{hash_prefix}_Position{folder_num:02d}_Map]'
                             sections[map_resource_section] = [
-                                'type = Meshes',
+                                'type = Buffer',
                                 'stride = 4',
                                 f'filename = {Meshes_folder}/{base_name}-Position_map.buf'
                             ]

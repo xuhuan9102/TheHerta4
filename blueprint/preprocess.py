@@ -509,8 +509,9 @@ class PreProcessHelper:
             LOG.info(f"   ✅ 已恢复 {restored_count} 个节点引用")
 
     @classmethod
-    def cleanup_copies(cls):
-        LOG.info(f"🧹 开始清理物体副本")
+    def cleanup_copies(cls, silent=False):
+        if not silent:
+            LOG.info(f"🧹 开始清理物体副本")
         
         copies_to_remove = []
         for obj in bpy.data.objects:
@@ -519,9 +520,12 @@ class PreProcessHelper:
         
         if not copies_to_remove:
             cls.restore_blueprint_node_references()
+            if not silent:
+                LOG.info(f"   未找到副本物体")
             return
         
-        LOG.info(f"   找到 {len(copies_to_remove)} 个副本物体")
+        if not silent:
+            LOG.info(f"   找到 {len(copies_to_remove)} 个副本物体")
         
         cleaned_count = 0
         for obj in copies_to_remove:
@@ -539,9 +543,42 @@ class PreProcessHelper:
         
         cls.created_copies.clear()
         cls.original_to_copy_map.clear()
-        LOG.info(f"   ✅ 清理完成，删除 {cleaned_count} 个副本")
+        if not silent:
+            LOG.info(f"   ✅ 清理完成，删除 {cleaned_count} 个副本")
         
         cls.restore_blueprint_node_references()
+        
+        cls._cleanup_orphan_data(silent)
+
+    @classmethod
+    def _cleanup_orphan_data(cls, silent=False):
+        if not silent:
+            LOG.info(f"   🧹 清理孤立数据...")
+        
+        orphan_meshes = [mesh for mesh in bpy.data.meshes if mesh.users == 0]
+        orphan_materials = [mat for mat in bpy.data.materials if mat.users == 0]
+        orphan_textures = [tex for tex in bpy.data.textures if tex.users == 0]
+        orphan_images = [img for img in bpy.data.images if img.users == 0]
+        
+        mesh_count = len(orphan_meshes)
+        mat_count = len(orphan_materials)
+        tex_count = len(orphan_textures)
+        img_count = len(orphan_images)
+        
+        for mesh in orphan_meshes:
+            bpy.data.meshes.remove(mesh)
+        for mat in orphan_materials:
+            bpy.data.materials.remove(mat)
+        for tex in orphan_textures:
+            bpy.data.textures.remove(tex)
+        for img in orphan_images:
+            bpy.data.images.remove(img)
+        
+        if not silent:
+            if mesh_count > 0 or mat_count > 0 or tex_count > 0 or img_count > 0:
+                LOG.info(f"   ✅ 清理孤立数据: {mesh_count} 网格, {mat_count} 材质, {tex_count} 纹理, {img_count} 图像")
+            else:
+                LOG.info(f"   ✅ 无孤立数据需要清理")
 
     @classmethod
     def get_copy_name(cls, original_name: str) -> str:
