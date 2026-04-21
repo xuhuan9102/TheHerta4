@@ -53,6 +53,7 @@ _MODULE_REGISTRY = [
     {"name": "preprocess_parallel", "required": True},
     {"name": "export_parallel", "required": True},
     {"name": "sync", "required": True},
+    {"name": "shader_quick_connect", "required": False},
     {"name": "node_menu", "required": True},
     {"name": "node_preset", "required": True},
     {"name": "node_datatype", "required": False},
@@ -76,7 +77,6 @@ _MODULE_REGISTRY = [
     {"name": "node_postprocess_resource_merge", "required": False},
     {"name": "node_postprocess_buffer_cleanup", "required": False},
     {"name": "node_postprocess_multifile", "required": False},
-    {"name": "shader_quick_connect", "required": False},
 ]
 
 _MODULE_AVAILABLE = {}
