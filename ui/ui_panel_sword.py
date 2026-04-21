@@ -280,7 +280,6 @@ class SwordImportAllReversed(bpy.types.Operator):
         reverse_collection = CollectionUtils.create_new_collection(collection_name=total_folder_name,color_tag=CollectionColor.Red)
         bpy.context.scene.collection.children.link(reverse_collection)
 
-        # 获取所有子文件夹
         subfolder_path_list = [f.path for f in os.scandir(reverse_output_folder_path) if f.is_dir()]
 
         for subfolder_path in subfolder_path_list:
@@ -289,31 +288,53 @@ class SwordImportAllReversed(bpy.types.Operator):
 
             datatype_collection = CollectionUtils.create_new_collection(collection_name=datatype_folder_name,color_tag=CollectionColor.White, link_to_parent_collection_name=reverse_collection.name)
 
-            # 获取所有.fmt文件
             fmt_files = []
             for file in os.listdir(subfolder_path):
                 if file.endswith('.fmt'):
                     fmt_files.append(os.path.join(subfolder_path, file))
 
             for fmt_filepath in fmt_files:
-                # 获取带后缀的文件名
                 filename_with_extension = os.path.basename(fmt_filepath)
-                # 去掉后缀
                 filename_without_extension = os.path.splitext(filename_with_extension)[0]
-                # 调用导入功能
                 mbf = MigotoBinaryFile(fmt_path=fmt_filepath,mesh_name=filename_without_extension)
                 MeshImportHelper.create_mesh_obj_from_mbf(mbf=mbf,import_collection=datatype_collection)
 
-                
-                # Nico: 注意，鸣潮Mod逆向的模型导入后，可能会出现法线不正确的问题
-                # 此时不应该自动处理，而是用户手动处理，因为部分模型有部分模型没有
-                # 强行清除可能会导致法线不正确
-
-
-
-        # 随后把图片路径指定为当前路径
         reload_textures_from_folder(reverse_output_folder_path)
 
+        return {'FINISHED'}
+
+
+class Sword_ExtractSubmesh(bpy.types.Operator):
+    bl_idname = "mesh.extract_submesh"
+    bl_label = "提取子网格"
+    bl_description = "根据起始索引和索引数量提取子网格"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    start_index: IntProperty(
+        name="起始索引",
+        description="起始顶点索引",
+        default=0,
+        min=0
+    ) # type: ignore
+
+    index_count: IntProperty(
+        name="索引数量",
+        description="要提取的索引数量",
+        default=0,
+        min=0
+    ) # type: ignore
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "请选择一个网格物体")
+            return {'CANCELLED'}
+        
+        if self.index_count <= 0:
+            self.report({'ERROR'}, "索引数量必须大于0")
+            return {'CANCELLED'}
+        
+        self.report({'WARNING'}, "此功能尚未完全实现")
         return {'FINISHED'}
 
 
@@ -397,7 +418,6 @@ class Sword_SplitModel_By_DrawIndexed_Panel(Panel):
         op.index_count = scene.submesh_count
 
 def register():
-    # 注册预览图集合
     pcoll = bpy.utils.previews.new()
     preview_collections["main"] = pcoll
 
@@ -407,19 +427,23 @@ def register():
     bpy.utils.register_class(Sword_ImportTexture_WM_OT_ApplyImageToMaterial)
     bpy.utils.register_class(Sword_ImportTexture_WM_OT_SelectImageFolder)
     bpy.utils.register_class(SwordImportAllReversed)
+    bpy.utils.register_class(Sword_ExtractSubmesh)
     bpy.utils.register_class(Sword_SplitModel_By_DrawIndexed_Panel)
 
     bpy.types.Scene.sword_image_list = CollectionProperty(type=Sword_ImportTexture_ImageListItem)
     bpy.types.Scene.sword_image_list_index = IntProperty(default=0)
+    bpy.types.Scene.submesh_start = IntProperty(name="起始索引", default=0, min=0)
+    bpy.types.Scene.submesh_count = IntProperty(name="索引数量", default=0, min=0)
 
 def unregister():
     try:
         del bpy.types.Scene.sword_image_list
         del bpy.types.Scene.sword_image_list_index
+        del bpy.types.Scene.submesh_start
+        del bpy.types.Scene.submesh_count
     except Exception:
         pass
 
-    # 移除预览图集合
     for pcoll in preview_collections.values():
         try:
             bpy.utils.previews.remove(pcoll)
@@ -428,6 +452,7 @@ def unregister():
     preview_collections.clear()
 
     bpy.utils.unregister_class(Sword_SplitModel_By_DrawIndexed_Panel)
+    bpy.utils.unregister_class(Sword_ExtractSubmesh)
     bpy.utils.unregister_class(SwordImportAllReversed)
     bpy.utils.unregister_class(Sword_ImportTexture_WM_OT_SelectImageFolder)
     bpy.utils.unregister_class(Sword_ImportTexture_WM_OT_ApplyImageToMaterial)

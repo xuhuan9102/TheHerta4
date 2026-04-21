@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..common.global_properties import GlobalProterties
 from ..utils.log_utils import LOG
+from ..utils.shapekey_utils import ShapeKeyUtils
 from .preprocess import PreProcessHelper
 from .preprocess_cache import PreProcessCache
 
@@ -29,6 +30,10 @@ class ParallelPreprocessCoordinator:
         if not unique_objects:
             LOG.info("🔧 前处理完成: 0 个物体")
             return {}
+
+        cleaned_count = ShapeKeyUtils.cleanup_invalid_shapekeys(unique_objects)
+        if cleaned_count > 0:
+            LOG.info(f"🔧 已清理 {cleaned_count} 个损坏的形态键")
 
         cache_enabled = GlobalProterties.enable_preprocess_cache()
         hash_map, cached_objects, uncached_objects = cls._classify_objects(unique_objects, cache_enabled)
@@ -398,6 +403,10 @@ def _run_worker(manifest_path: str):
         if not object_names:
             raise ParallelPreprocessError("任务中没有待处理物体")
 
+        cleaned_count = ShapeKeyUtils.cleanup_invalid_shapekeys(object_names)
+        if cleaned_count > 0:
+            LOG.info(f"🔧 已清理 {cleaned_count} 个损坏的形态键")
+
         PreProcessHelper.reset_runtime_state()
         PreProcessHelper.execute_objects_without_cache(object_names)
 
@@ -413,8 +422,14 @@ def _run_worker(manifest_path: str):
         result["status"] = "success"
         result["original_to_copy_map"] = copy_map
     except Exception as exc:
-        result["error"] = str(exc)
-        traceback.print_exc()
+        error_msg = str(exc)
+        if _is_blender_auto_fix_warning(error_msg):
+            LOG.warning(f"⚠️ Blender 自动修复了损坏的形态键，继续执行: {error_msg}")
+            result["status"] = "success"
+            result["original_to_copy_map"] = dict(PreProcessHelper.original_to_copy_map)
+        else:
+            result["error"] = error_msg
+            traceback.print_exc()
     finally:
         log_content = LOG.get_log_content()
         with open(manifest["log_path"], "w", encoding="utf-8") as file:
@@ -424,6 +439,20 @@ def _run_worker(manifest_path: str):
             json.dump(result, file, ensure_ascii=False, indent=2)
 
         LOG.stop_collecting()
+
+
+def _is_blender_auto_fix_warning(error_msg: str) -> bool:
+    '''
+    检查错误信息是否是 Blender 自动修复损坏形态键的警告
+    这些警告不应该导致任务失败
+    '''
+    auto_fix_patterns = [
+        "has an invalid 'from' pointer",
+        "it will be deleted",
+    ]
+    
+    error_lower = error_msg.lower()
+    return all(pattern.lower() in error_lower for pattern in auto_fix_patterns)
 
 
 def register():

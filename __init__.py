@@ -40,7 +40,7 @@ bl_info = {
     "name": "TheHerta4",
     "description": "Blender Plugin of SSMT4",
     "blender": (4, 5, 0),
-    "version": (4, 0, 7),
+    "version": (4, 1, 0),
     "location": "View3D",
     "category": "Generic"
 }
@@ -72,14 +72,15 @@ class UpdaterPanel(bpy.types.Panel):
     bl_idname = "HERTA_PT_UpdaterPanel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_context = "objectmode"
     bl_category = "TheHerta4"
     bl_order = 99
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
     def poll(cls, context):
-        return not getattr(context.scene, 'herta_show_toolkit', False)
+        if not hasattr(context.scene, 'herta_show_toolkit'):
+            return True
+        return not context.scene.herta_show_toolkit
 
     def draw(self, context):
         layout = self.layout

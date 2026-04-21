@@ -49,13 +49,18 @@ class SSMT_OT_RefreshNodeObjectIDs(bpy.types.Operator):
                                 obj = bpy.data.objects.get(obj_name)
                                 if obj:
                                     new_name = obj.name
+                                    new_obj_id = str(obj.as_pointer())
                                     if item.object_name != new_name:
                                         item.object_name = new_name
+                                        updated_count += 1
+                                    if getattr(item, 'object_id', '') != new_obj_id:
+                                        item.object_id = new_obj_id
                                         updated_count += 1
                                 elif getattr(item, 'original_object_name', ''):
                                     orig_obj = bpy.data.objects.get(item.original_object_name)
                                     if orig_obj:
                                         item.object_name = item.original_object_name
+                                        item.object_id = str(orig_obj.as_pointer())
                                         updated_count += 1
         
         if updated_count > 0:

@@ -7,10 +7,13 @@ class ToolkitPanel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'TheHerta4'
+    bl_order = 1
 
     @classmethod
     def poll(cls, context):
-        return getattr(context.scene, 'herta_show_toolkit', False)
+        if not hasattr(context.scene, 'herta_show_toolkit'):
+            return False
+        return context.scene.herta_show_toolkit
 
     def draw(self, context):
         layout = self.layout

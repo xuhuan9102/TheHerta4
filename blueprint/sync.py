@@ -46,24 +46,8 @@ def _node_has_object_id(node, object_id):
             return getattr(node, 'object_id', '') == object_id
         elif node.bl_idname == 'SSMTNode_MultiFile_Export':
             for item in getattr(node, 'object_list', []):
-                obj_name = getattr(item, 'object_name', '')
-                if obj_name:
-                    obj = bpy.data.objects.get(obj_name)
-                    if obj and str(obj.as_pointer()) == object_id:
+                if getattr(item, 'object_id', '') == object_id:
                         return True
-    except (AttributeError, ReferenceError):
-        pass
-    return False
-
-
-def _node_has_object_name(node, object_name):
-    try:
-        if node.bl_idname == 'SSMTNode_Object_Info':
-            return getattr(node, 'object_name', '') == object_name
-        elif node.bl_idname == 'SSMTNode_MultiFile_Export':
-            for item in getattr(node, 'object_list', []):
-                if getattr(item, 'object_name', '') == object_name:
-                    return True
     except (AttributeError, ReferenceError):
         pass
     return False
@@ -73,25 +57,18 @@ def _resolve_node_objects(node):
     objects = []
     try:
         if node.bl_idname == 'SSMTNode_Object_Info':
-            object_name = getattr(node, 'object_name', '')
-            obj = bpy.data.objects.get(object_name) if object_name else None
-            if not obj:
-                object_id = getattr(node, 'object_id', '')
-                if object_id:
-                    obj = find_object_by_id(object_id)
-                    if obj:
-                        node.object_name = obj.name
+            object_id = getattr(node, 'object_id', '')
+            obj = find_object_by_id(object_id) if object_id else None
             if obj:
                 objects.append(obj)
             else:
-                _log(f"_resolve_node_objects: 节点 '{getattr(node, 'name', '?')}' 未找到物体 (object_name='{object_name}')")
+                _log(f"_resolve_node_objects: 节点 '{getattr(node, 'name', '?')}' 未找到物体 (object_id='{object_id[:8] if object_id else ''}...')")
         elif node.bl_idname == 'SSMTNode_MultiFile_Export':
             for item in getattr(node, 'object_list', []):
-                obj_name = getattr(item, 'object_name', '')
-                if obj_name:
-                    obj = bpy.data.objects.get(obj_name)
-                    if obj:
-                        objects.append(obj)
+                object_id = getattr(item, 'object_id', '')
+                obj = find_object_by_id(object_id) if object_id else None
+                if obj:
+                    objects.append(obj)
     except (AttributeError, ReferenceError):
         pass
     return objects
@@ -108,15 +85,12 @@ def _update_object_name_in_node(node, old_name, new_name, object_id=None):
                 node.object_name = new_name
                 if not node_original_name:
                     node.original_object_name = old_name
-            elif node_object_name == old_name and not node_object_id:
-                node.object_name = new_name
-                if not node_original_name:
-                    node.original_object_name = old_name
         elif node.bl_idname == 'SSMTNode_MultiFile_Export':
             for item in getattr(node, 'object_list', []):
                 item_name = getattr(item, 'object_name', '')
+                item_id = getattr(item, 'object_id', '')
                 item_original = getattr(item, 'original_object_name', '')
-                if item_name == old_name:
+                if object_id and item_id == object_id and item_name != new_name:
                     item.object_name = new_name
                     if not item_original:
                         item.original_object_name = old_name
@@ -172,49 +146,6 @@ def find_nodes_by_object_id(tree, object_id):
     return nodes
 
 
-def find_nodes_by_object_name(tree, object_name):
-    """通过物体名称查找所有关联的节点"""
-    nodes = []
-    if not tree or not object_name:
-        return nodes
-
-    for node in tree.nodes:
-        if _is_sync_node(node) and _node_has_object_name(node, object_name):
-            nodes.append(node)
-    return nodes
-
-
-def find_nodes_by_prefix_match(tree, object_name):
-    """通过DrawIB前缀模糊匹配节点（回退策略）"""
-    nodes = []
-    if not tree or not object_name:
-        return nodes
-
-    try:
-        from ..common.object_prefix_helper import ObjectPrefixHelper
-    except ImportError:
-        return nodes
-
-    prefix_info = ObjectPrefixHelper.extract_prefix_info(object_name)
-    if not prefix_info:
-        return nodes
-
-    search_prefix, _ = prefix_info
-
-    for node in tree.nodes:
-        if not _is_sync_node(node):
-            continue
-        node_obj_name = getattr(node, 'object_name', '')
-        if not node_obj_name:
-            continue
-        node_prefix_info = ObjectPrefixHelper.extract_prefix_info(node_obj_name)
-        if node_prefix_info and node_prefix_info[0] == search_prefix:
-            nodes.append(node)
-            _log(f"  前缀匹配: 节点 '{getattr(node, 'name', '?')}' object_name='{node_obj_name}' ↔ 搜索前缀='{search_prefix}'")
-
-    return nodes
-
-
 def refresh_stale_node_ids(tree):
     """刷新节点中过期的object_id（物体存在但pointer已变）"""
     refreshed = 0
@@ -234,6 +165,17 @@ def refresh_stale_node_ids(tree):
                         refreshed += 1
                 elif obj_id:
                     _log(f"  清除无效ID: 节点 '{node.name}' 物体 '{obj_name}' 不存在")
+        elif node.bl_idname == 'SSMTNode_MultiFile_Export':
+            for item in getattr(node, 'object_list', []):
+                obj_name = getattr(item, 'object_name', '')
+                obj_id = getattr(item, 'object_id', '')
+                if obj_name:
+                    obj = bpy.data.objects.get(obj_name)
+                    if obj:
+                        current_id = str(obj.as_pointer())
+                        if obj_id != current_id:
+                            item.object_id = current_id
+                            refreshed += 1
     return refreshed
 
 
@@ -248,8 +190,30 @@ def find_object_by_id(object_id):
     return None
 
 
+def _try_select_object(obj, context):
+    """尝试选中物体。失败时不抛出异常，也不影响源侧选择。"""
+    if not obj:
+        return False
+
+    try:
+        if getattr(obj, 'hide_select', False):
+            return False
+    except (AttributeError, ReferenceError):
+        return False
+
+    try:
+        obj.select_set(True)
+        return bool(obj.select_get())
+    except Exception as exc:
+        _log(f"_try_select_object: 物体 '{getattr(obj, 'name', '?')}' 选择失败: {exc}")
+        return False
+
+
 def sync_nodes_to_objects(nodes, context):
-    """多个节点选择时同步选择对应的物体"""
+    """多个节点选择时同步选择对应的物体。
+
+    这是单向补选，不会清空当前物体选择；如果对应物体不可选，也不会影响节点当前选择。
+    """
     global _is_syncing, _last_synced_objects, _is_syncing_since
 
     if _is_syncing or not _sync_enabled:
@@ -275,33 +239,36 @@ def sync_nodes_to_objects(nodes, context):
     _is_syncing = True
     _is_syncing_since = time.time()
     try:
-        try:
-            for o in context.selected_objects:
-                if o not in objects_to_select:
-                    o.select_set(False)
-        except (AttributeError, ReferenceError):
-            for o in bpy.context.selected_objects:
-                if o not in objects_to_select:
-                    o.select_set(False)
-
+        selected_objects = []
         for obj in objects_to_select:
-            obj.select_set(True)
+            if _try_select_object(obj, context):
+                selected_objects.append(obj)
 
-        if objects_to_select:
+        if selected_objects:
             try:
-                context.view_layer.objects.active = objects_to_select[0]
+                context.view_layer.objects.active = selected_objects[0]
             except (AttributeError, ReferenceError):
-                bpy.context.view_layer.objects.active = objects_to_select[0]
+                try:
+                    bpy.context.view_layer.objects.active = selected_objects[0]
+                except Exception:
+                    pass
 
-        _last_synced_objects = set(objects_to_select)
-        _log(f"sync_nodes_to_objects: 已选中 {len(objects_to_select)} 个物体")
+        try:
+            _last_synced_objects = set(context.selected_objects)
+        except (AttributeError, ReferenceError):
+            _last_synced_objects = set(bpy.context.selected_objects)
+
+        _log(f"sync_nodes_to_objects: 成功补选 {len(selected_objects)} 个物体 / 请求 {len(objects_to_select)} 个")
     finally:
         _is_syncing = False
         _is_syncing_since = 0.0
 
 
 def sync_objects_to_nodes(objects, context):
-    """多个物体选择时同步选择对应的节点"""
+    """多个物体选择时同步选择对应的节点，只通过节点与物体ID精确匹配。
+
+    这是单向补选，不会清空当前节点选择；如果没有对应节点，也不会影响物体当前选择。
+    """
     global _is_syncing, _last_synced_nodes, _is_syncing_since
 
     if _is_syncing or not _sync_enabled:
@@ -325,33 +292,24 @@ def sync_objects_to_nodes(objects, context):
         if nodes:
             _log(f"  → 通过object_id匹配到 {len(nodes)} 个节点")
         else:
-            nodes = find_nodes_by_object_name(tree, object_name)
-            if nodes:
-                _log(f"  → 通过object_name匹配到 {len(nodes)} 个节点")
-            else:
-                _log(f"  → object_id和object_name均未匹配，尝试回退策略...")
+            _log(f"  → object_id未匹配，尝试刷新过期ID...")
 
-                stale_count = refresh_stale_node_ids(tree)
-                if stale_count > 0:
-                    _log(f"  → 刷新了 {stale_count} 个过期ID，重新搜索...")
-                    nodes = find_nodes_by_object_id(tree, object_id)
-                    if nodes:
-                        _log(f"  → 刷新ID后通过object_id匹配到 {len(nodes)} 个节点")
+            stale_count = refresh_stale_node_ids(tree)
+            if stale_count > 0:
+                _log(f"  → 刷新了 {stale_count} 个过期ID，重新搜索...")
+                nodes = find_nodes_by_object_id(tree, object_id)
+                if nodes:
+                    _log(f"  → 刷新ID后通过object_id匹配到 {len(nodes)} 个节点")
 
-                if not nodes:
-                    nodes = find_nodes_by_prefix_match(tree, object_name)
-                    if nodes:
-                        _log(f"  → 通过前缀匹配到 {len(nodes)} 个节点")
-
-                if not nodes:
-                    sync_nodes_in_tree = [n for n in tree.nodes if _is_sync_node(n)]
-                    _log(f"  → 所有回退策略均失败。树中共 {len(sync_nodes_in_tree)} 个同步节点:")
-                    for n in sync_nodes_in_tree[:5]:
-                        n_name = getattr(n, 'object_name', '')
-                        n_id = getattr(n, 'object_id', '')
-                        _log(f"     节点 '{n.name}': object_name='{n_name}', object_id='{n_id[:8] if n_id else '(空)'}...'")
-                    if len(sync_nodes_in_tree) > 5:
-                        _log(f"     ... 还有 {len(sync_nodes_in_tree) - 5} 个节点")
+            if not nodes:
+                sync_nodes_in_tree = [n for n in tree.nodes if _is_sync_node(n)]
+                _log(f"  → ID匹配失败。树中共 {len(sync_nodes_in_tree)} 个同步节点:")
+                for n in sync_nodes_in_tree[:5]:
+                    n_name = getattr(n, 'object_name', '')
+                    n_id = getattr(n, 'object_id', '')
+                    _log(f"     节点 '{n.name}': object_name='{n_name}', object_id='{n_id[:8] if n_id else '(空)'}...'")
+                if len(sync_nodes_in_tree) > 5:
+                    _log(f"     ... 还有 {len(sync_nodes_in_tree) - 5} 个节点")
 
         for node in nodes:
             if node not in nodes_to_select:
@@ -364,18 +322,26 @@ def sync_objects_to_nodes(objects, context):
     _is_syncing = True
     _is_syncing_since = time.time()
     try:
-        for node in tree.nodes:
-            if node not in nodes_to_select:
-                node.select = False
-
+        selected_nodes = []
         for node in nodes_to_select:
-            node.select = True
+            try:
+                node.select = True
+                selected_nodes.append(node)
+            except Exception as exc:
+                _log(f"sync_objects_to_nodes: 节点 '{getattr(node, 'name', '?')}' 选择失败: {exc}")
 
-        if nodes_to_select:
-            tree.nodes.active = nodes_to_select[0]
+        if selected_nodes:
+            try:
+                tree.nodes.active = selected_nodes[0]
+            except Exception:
+                pass
 
-        _last_synced_nodes = set(nodes_to_select)
-        _log(f"sync_objects_to_nodes: 已选中 {len(nodes_to_select)} 个节点")
+        try:
+            _last_synced_nodes = {n for n in tree.nodes if n.select}
+        except (AttributeError, ReferenceError):
+            _last_synced_nodes = set(selected_nodes)
+
+        _log(f"sync_objects_to_nodes: 成功补选 {len(selected_nodes)} 个节点 / 请求 {len(nodes_to_select)} 个")
     finally:
         _is_syncing = False
         _is_syncing_since = 0.0
@@ -762,15 +728,17 @@ class SSMT_OT_UpdateAllNodeReferences(bpy.types.Operator):
                         elif node.bl_idname == 'SSMTNode_MultiFile_Export':
                             for item in getattr(node, 'object_list', []):
                                 obj_name = getattr(item, 'object_name', '')
-                                if obj_name:
+                                object_id = getattr(item, 'object_id', '')
+                                if object_id:
+                                    obj = find_object_by_id(object_id)
+                                    if obj and obj.name != obj_name:
+                                        item.object_name = obj.name
+                                        updated_count += 1
+                                elif obj_name:
                                     obj = bpy.data.objects.get(obj_name)
-                                    if not obj:
-                                        original_name = getattr(item, 'original_object_name', '')
-                                        if original_name:
-                                            obj = bpy.data.objects.get(original_name)
-                                            if obj:
-                                                item.object_name = obj.name
-                                                updated_count += 1
+                                    if obj:
+                                        item.object_id = str(obj.as_pointer())
+                                        updated_count += 1
                     except (AttributeError, ReferenceError):
                         pass
 

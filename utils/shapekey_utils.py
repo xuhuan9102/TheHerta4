@@ -501,3 +501,83 @@ class ShapeKeyUtils:
                     # 如果不是当前正在处理的形态键，则归零
                     if key_block.name != current_shapekey_name:
                         key_block.value = 0.0
+
+    @classmethod
+    def cleanup_invalid_shapekeys(cls, obj_names=None):
+        '''
+        清理损坏的形态键（relative_key 指针无效的形态键）
+        obj_names: 要检查的物体名称列表，如果为 None 则检查所有物体
+        返回: 清理的形态键数量
+        
+        注意：Blender 会自动检测并删除 invalid 'from' pointer 的形态键，
+        此函数主要用于预防性检查，确保形态键数据结构正常。
+        '''
+        cleaned_count = 0
+        
+        if obj_names is None:
+            objects_to_check = list(bpy.data.objects)
+        else:
+            objects_to_check = [bpy.data.objects.get(name) for name in obj_names]
+            objects_to_check = [obj for obj in objects_to_check if obj is not None]
+        
+        for obj in objects_to_check:
+            if obj.type != 'MESH':
+                continue
+            
+            if not obj.data.shape_keys:
+                continue
+            
+            key_blocks = obj.data.shape_keys.key_blocks
+            if not key_blocks or len(key_blocks) == 0:
+                continue
+            
+            valid_key_names = set(kb.name for kb in key_blocks)
+            keys_to_remove = []
+            
+            for key_block in key_blocks:
+                try:
+                    relative_key = key_block.relative_key
+                    if relative_key is None:
+                        keys_to_remove.append(key_block.name)
+                        print(f"[ShapeKeyUtils] 检测到损坏的形态键: {obj.name}.{key_block.name} (relative_key 为 None)")
+                        continue
+                    
+                    rel_name = relative_key.name
+                    if rel_name not in valid_key_names:
+                        keys_to_remove.append(key_block.name)
+                        print(f"[ShapeKeyUtils] 检测到损坏的形态键: {obj.name}.{key_block.name} (relative_key '{rel_name}' 不在有效列表中)")
+                except ReferenceError:
+                    keys_to_remove.append(key_block.name)
+                    print(f"[ShapeKeyUtils] 检测到损坏的形态键: {obj.name}.{key_block.name} (ReferenceError: 指针已失效)")
+                except Exception as e:
+                    print(f"[ShapeKeyUtils] 检查形态键时发生异常: {obj.name}.{key_block.name} - {e} (跳过，由 Blender 自动处理)")
+            
+            if keys_to_remove:
+                original_active = bpy.context.view_layer.objects.active
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                
+                for key_name in reversed(keys_to_remove):
+                    try:
+                        key_index = -1
+                        for i, kb in enumerate(obj.data.shape_keys.key_blocks):
+                            if kb.name == key_name:
+                                key_index = i
+                                break
+                        
+                        if key_index >= 0:
+                            obj.active_shape_key_index = key_index
+                            bpy.ops.object.shape_key_remove(all=False)
+                            cleaned_count += 1
+                            print(f"[ShapeKeyUtils] 已删除损坏的形态键: {obj.name}.{key_name}")
+                    except Exception as e:
+                        print(f"[ShapeKeyUtils] 删除形态键失败: {obj.name}.{key_name} - {e}")
+                
+                if original_active:
+                    bpy.context.view_layer.objects.active = original_active
+        
+        if cleaned_count > 0:
+            print(f"[ShapeKeyUtils] 共清理 {cleaned_count} 个损坏的形态键")
+        
+        return cleaned_count

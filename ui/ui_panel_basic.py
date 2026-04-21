@@ -37,16 +37,21 @@ class PanelBasicInformation(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'TheHerta4'
+    bl_order = 0
 
     @classmethod
     def poll(cls, context):
-        return not getattr(context.scene, 'herta_show_toolkit', False)
+        if not hasattr(context.scene, 'herta_show_toolkit'):
+            return True
+        return not context.scene.herta_show_toolkit
 
     def draw(self, context):
         layout = self.layout
         
         GlobalConfig.read_from_main_json_ssmt4()
 
+        layout.label(text="TheHerta4 v4.1.0", icon='INFO')
+        
         layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.ssmtlocation)
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)
         layout.label(text=TR.translate("当前游戏预设: ") + GlobalConfig.logic_name)
