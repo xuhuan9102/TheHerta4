@@ -1165,9 +1165,9 @@ def draw_node_context_menu(self, context):
     layout.operator("ssmt.update_all_node_references", text="更新所有节点引用", icon='FILE_REFRESH')
 
 
-_is_context_menu_hooked = False
 _is_add_menu_hooked = False
 _is_object_context_menu_hooked = False
+_is_node_context_menu_hooked = False
 
 
 def _remove_legacy_node_context_keymaps():
@@ -1188,33 +1188,19 @@ def _remove_legacy_node_context_keymaps():
                     continue
 
 
-def _custom_node_context_menu_draw(self, context):
-    original_draw = getattr(_custom_node_context_menu_draw, '_original_draw', None)
-    
+def draw_node_context_menu_append(self, context):
     if not isinstance(context.space_data, bpy.types.SpaceNodeEditor):
-        if original_draw:
-            original_draw(self, context)
         return
 
     node_tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
     if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
-        if original_draw:
-            original_draw(self, context)
         return
 
-    if original_draw:
-        original_draw(self, context)
     draw_node_context_menu(self, context)
 
 
-def _is_our_custom_draw(draw_func):
-    if draw_func is None:
-        return False
-    return getattr(draw_func, '__name__', '') == '_custom_node_context_menu_draw'
-
-
 def register():
-    global _is_context_menu_hooked, _is_add_menu_hooked, _is_object_context_menu_hooked
+    global _is_add_menu_hooked, _is_object_context_menu_hooked, _is_node_context_menu_hooked
 
     bpy.utils.register_class(SSMT_OT_CreateGroupFromSelection)
     bpy.utils.register_class(SSMT_OT_CreateInternalSwitch)
@@ -1239,25 +1225,21 @@ def register():
         bpy.types.VIEW3D_MT_object_context_menu.append(draw_objects_context_menu_add)
         _is_object_context_menu_hooked = True
 
-    _remove_legacy_node_context_keymaps()
+    if not _is_node_context_menu_hooked:
+        bpy.types.NODE_MT_context_menu.append(draw_node_context_menu_append)
+        _is_node_context_menu_hooked = True
 
-    current_draw = bpy.types.NODE_MT_context_menu.draw
-    if not _is_our_custom_draw(current_draw):
-        _custom_node_context_menu_draw._original_draw = current_draw
-        bpy.types.NODE_MT_context_menu.draw = _custom_node_context_menu_draw
-    _is_context_menu_hooked = True
+    _remove_legacy_node_context_keymaps()
 
 
 def unregister():
-    global _is_context_menu_hooked, _is_add_menu_hooked, _is_object_context_menu_hooked
+    global _is_add_menu_hooked, _is_object_context_menu_hooked, _is_node_context_menu_hooked
 
     _remove_legacy_node_context_keymaps()
 
-    if _is_context_menu_hooked:
-        original_draw = getattr(_custom_node_context_menu_draw, '_original_draw', None)
-        if original_draw:
-            bpy.types.NODE_MT_context_menu.draw = original_draw
-        _is_context_menu_hooked = False
+    if _is_node_context_menu_hooked:
+        bpy.types.NODE_MT_context_menu.remove(draw_node_context_menu_append)
+        _is_node_context_menu_hooked = False
 
     if _is_add_menu_hooked:
         bpy.types.NODE_MT_add.remove(draw_node_add_menu)

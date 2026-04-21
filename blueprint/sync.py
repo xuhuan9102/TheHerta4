@@ -859,6 +859,9 @@ classes = (
     SSMT_OT_SyncDebugStatus,
 )
 
+_is_view3d_menu_hooked = False
+_is_node_header_hooked = False
+
 
 def _init_object_cache():
     """初始化物体名称缓存"""
@@ -872,7 +875,7 @@ def _init_object_cache():
 
 
 def register():
-    global _timer_handle
+    global _timer_handle, _is_view3d_menu_hooked, _is_node_header_hooked
 
     for cls in classes:
         bpy.utils.register_class(cls)
@@ -888,15 +891,25 @@ def register():
 
     bpy.app.timers.register(_init_object_cache, first_interval=0.1)
 
-    bpy.types.VIEW3D_MT_object_context_menu.append(draw_view3d_sync_menu)
-    bpy.types.NODE_HT_header.append(draw_node_header)
+    if not _is_view3d_menu_hooked:
+        bpy.types.VIEW3D_MT_object_context_menu.append(draw_view3d_sync_menu)
+        _is_view3d_menu_hooked = True
+
+    if not _is_node_header_hooked:
+        bpy.types.NODE_HT_header.append(draw_node_header)
+        _is_node_header_hooked = True
 
 
 def unregister():
-    global _timer_handle
+    global _timer_handle, _is_view3d_menu_hooked, _is_node_header_hooked
 
-    bpy.types.NODE_HT_header.remove(draw_node_header)
-    bpy.types.VIEW3D_MT_object_context_menu.remove(draw_view3d_sync_menu)
+    if _is_node_header_hooked:
+        bpy.types.NODE_HT_header.remove(draw_node_header)
+        _is_node_header_hooked = False
+
+    if _is_view3d_menu_hooked:
+        bpy.types.VIEW3D_MT_object_context_menu.remove(draw_view3d_sync_menu)
+        _is_view3d_menu_hooked = False
 
     if load_post_handler in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(load_post_handler)

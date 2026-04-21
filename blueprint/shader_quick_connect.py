@@ -429,14 +429,22 @@ classes = (
     SSMT_OT_ShaderQuickPrincipled,
 )
 
+_is_menu_hooked = False
+
 
 def register():
+    global _is_menu_hooked
     for cls in classes:
         bpy.utils.register_class(cls)
-    bpy.types.NODE_MT_context_menu.append(draw_shader_context_menu)
+    if not _is_menu_hooked:
+        bpy.types.NODE_MT_context_menu.append(draw_shader_context_menu)
+        _is_menu_hooked = True
 
 
 def unregister():
-    bpy.types.NODE_MT_context_menu.remove(draw_shader_context_menu)
+    global _is_menu_hooked
+    if _is_menu_hooked:
+        bpy.types.NODE_MT_context_menu.remove(draw_shader_context_menu)
+        _is_menu_hooked = False
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
