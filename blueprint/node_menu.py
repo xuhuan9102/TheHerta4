@@ -1168,6 +1168,7 @@ def draw_node_context_menu(self, context):
 _is_add_menu_hooked = False
 _is_object_context_menu_hooked = False
 _is_node_context_menu_hooked = False
+_original_node_context_menu_draw = None
 
 
 def _remove_legacy_node_context_keymaps():
@@ -1188,19 +1189,23 @@ def _remove_legacy_node_context_keymaps():
                     continue
 
 
-def draw_node_context_menu_append(self, context):
+def _custom_node_context_menu_draw(self, context):
     if not isinstance(context.space_data, bpy.types.SpaceNodeEditor):
+        if _original_node_context_menu_draw:
+            _original_node_context_menu_draw(self, context)
         return
 
     node_tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
     if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
+        if _original_node_context_menu_draw:
+            _original_node_context_menu_draw(self, context)
         return
 
     draw_node_context_menu(self, context)
 
 
 def register():
-    global _is_add_menu_hooked, _is_object_context_menu_hooked, _is_node_context_menu_hooked
+    global _is_add_menu_hooked, _is_object_context_menu_hooked, _is_node_context_menu_hooked, _original_node_context_menu_draw
 
     bpy.utils.register_class(SSMT_OT_CreateGroupFromSelection)
     bpy.utils.register_class(SSMT_OT_CreateInternalSwitch)
@@ -1226,19 +1231,21 @@ def register():
         _is_object_context_menu_hooked = True
 
     if not _is_node_context_menu_hooked:
-        bpy.types.NODE_MT_context_menu.append(draw_node_context_menu_append)
+        _original_node_context_menu_draw = bpy.types.NODE_MT_context_menu.draw
+        bpy.types.NODE_MT_context_menu.draw = _custom_node_context_menu_draw
         _is_node_context_menu_hooked = True
 
     _remove_legacy_node_context_keymaps()
 
 
 def unregister():
-    global _is_add_menu_hooked, _is_object_context_menu_hooked, _is_node_context_menu_hooked
+    global _is_add_menu_hooked, _is_object_context_menu_hooked, _is_node_context_menu_hooked, _original_node_context_menu_draw
 
     _remove_legacy_node_context_keymaps()
 
-    if _is_node_context_menu_hooked:
-        bpy.types.NODE_MT_context_menu.remove(draw_node_context_menu_append)
+    if _is_node_context_menu_hooked and _original_node_context_menu_draw:
+        bpy.types.NODE_MT_context_menu.draw = _original_node_context_menu_draw
+        _original_node_context_menu_draw = None
         _is_node_context_menu_hooked = False
 
     if _is_add_menu_hooked:
