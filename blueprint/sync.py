@@ -14,9 +14,12 @@ _SYNC_NODE_TYPES = {'SSMTNode_Object_Info', 'SSMTNode_MultiFile_Export'}
 
 _sync_enabled = True
 _is_syncing = False
-_is_syncing_since = 0.0
-_last_synced_objects = set()
-_last_synced_nodes = set()
+_last_object_snapshot = None
+_last_node_snapshot = None
+_pending_object_snapshot = None
+_pending_node_snapshot = None
+_last_active_object_id = ""
+_last_active_node_id = ""
 _msgbus_owner = object()
 
 _object_id_to_name = {}
@@ -24,7 +27,6 @@ _timer_handle = None
 _check_counter = 0
 _heartbeat_counter = 0
 
-_SYNC_STUCK_TIMEOUT = 2.0
 _SYNC_DEBUG = False
 
 
@@ -38,6 +40,12 @@ def _is_sync_node(node):
         return getattr(node, 'bl_idname', '') in _SYNC_NODE_TYPES
     except (AttributeError, ReferenceError):
         return False
+
+
+def _iter_sync_nodes(tree):
+    if not tree:
+        return []
+    return [node for node in tree.nodes if _is_sync_node(node)]
 
 
 def _node_has_object_id(node, object_id):
@@ -72,6 +80,20 @@ def _resolve_node_objects(node):
     except (AttributeError, ReferenceError):
         pass
     return objects
+
+
+def _resolve_object_nodes(tree, obj):
+    if not tree or not obj:
+        return []
+
+    object_id = str(obj.as_pointer())
+    nodes = find_nodes_by_object_id(tree, object_id)
+    if nodes:
+        return nodes
+
+    if refresh_stale_node_ids(tree) > 0:
+        nodes = find_nodes_by_object_id(tree, object_id)
+    return nodes
 
 
 def _update_object_name_in_node(node, old_name, new_name, object_id=None):
@@ -190,6 +212,16 @@ def find_object_by_id(object_id):
     return None
 
 
+def _get_selected_objects(context):
+    try:
+        return list(context.selected_objects)
+    except (AttributeError, ReferenceError):
+        try:
+            return list(bpy.context.selected_objects)
+        except Exception:
+            return []
+
+
 def _try_select_object(obj, context):
     """尝试选中物体。失败时不抛出异常，也不影响源侧选择。"""
     if not obj:
@@ -209,147 +241,306 @@ def _try_select_object(obj, context):
         return False
 
 
-def sync_nodes_to_objects(nodes, context):
-    """多个节点选择时同步选择对应的物体。
+def _get_active_object(context):
+    try:
+        return context.view_layer.objects.active
+    except (AttributeError, ReferenceError):
+        try:
+            return bpy.context.view_layer.objects.active
+        except Exception:
+            return None
 
-    这是单向补选，不会清空当前物体选择；如果对应物体不可选，也不会影响节点当前选择。
-    """
-    global _is_syncing, _last_synced_objects, _is_syncing_since
 
-    if _is_syncing or not _sync_enabled:
-        _log(f"sync_nodes_to_objects: 被阻止 (_is_syncing={_is_syncing}, _sync_enabled={_sync_enabled})")
-        return
+def _get_active_sync_node(tree):
+    try:
+        active_node = tree.nodes.active
+    except (AttributeError, ReferenceError):
+        return None
 
-    objects_to_select = []
+    if active_node and _is_sync_node(active_node):
+        return active_node
+    return None
 
+
+def _get_node_runtime_id(node):
+    if not node:
+        return ""
+
+    try:
+        return str(node.as_pointer())
+    except Exception:
+        return getattr(node, 'name', '')
+
+
+def _build_object_snapshot(context):
+    selected_objects = _get_selected_objects(context)
+    active_object = _get_active_object(context)
+
+    if active_object and active_object not in selected_objects:
+        active_object = None
+
+    selected_ids = tuple(sorted(str(obj.as_pointer()) for obj in selected_objects))
+    active_id = str(active_object.as_pointer()) if active_object else ""
+    return selected_ids, active_id
+
+
+def _build_node_snapshot(tree):
+    if not tree:
+        return tuple(), ""
+
+    try:
+        selected_nodes = [node for node in tree.nodes if node.select and _is_sync_node(node)]
+    except (AttributeError, ReferenceError):
+        selected_nodes = []
+
+    active_node = _get_active_sync_node(tree)
+    if active_node and active_node not in selected_nodes:
+        active_node = None
+
+    selected_ids = tuple(sorted(_get_node_runtime_id(node) for node in selected_nodes))
+    active_id = _get_node_runtime_id(active_node)
+    return selected_ids, active_id
+
+
+def _clear_object_selection(context):
+    try:
+        all_objects = list(context.view_layer.objects)
+    except (AttributeError, ReferenceError):
+        try:
+            all_objects = list(bpy.context.view_layer.objects)
+        except Exception:
+            all_objects = []
+
+    for obj in all_objects:
+        try:
+            if obj.select_get():
+                obj.select_set(False)
+        except (AttributeError, ReferenceError):
+            continue
+
+
+def _apply_object_selection(target_objects, active_object, context):
+    selected_objects = []
+    _clear_object_selection(context)
+
+    if active_object and active_object in target_objects and _try_select_object(active_object, context):
+        selected_objects.append(active_object)
+
+    for obj in target_objects:
+        if obj in selected_objects:
+            continue
+        if _try_select_object(obj, context):
+            selected_objects.append(obj)
+
+    chosen_active = None
+    if active_object and active_object in selected_objects:
+        chosen_active = active_object
+    elif selected_objects:
+        chosen_active = selected_objects[0]
+
+    if chosen_active:
+        try:
+            context.view_layer.objects.active = chosen_active
+        except (AttributeError, ReferenceError):
+            try:
+                bpy.context.view_layer.objects.active = chosen_active
+            except Exception:
+                pass
+
+    return selected_objects, chosen_active
+
+
+def _apply_node_selection(tree, target_nodes, active_node):
+    for node in _iter_sync_nodes(tree):
+        try:
+            node.select = False
+        except (AttributeError, ReferenceError):
+            continue
+
+    selected_nodes = []
+    if active_node and active_node in target_nodes:
+        try:
+            active_node.select = True
+            selected_nodes.append(active_node)
+        except Exception as exc:
+            _log(f"_apply_node_selection: 节点 '{getattr(active_node, 'name', '?')}' 选择失败: {exc}")
+
+    for node in target_nodes:
+        if node in selected_nodes:
+            continue
+        try:
+            node.select = True
+            selected_nodes.append(node)
+        except Exception as exc:
+            _log(f"_apply_node_selection: 节点 '{getattr(node, 'name', '?')}' 选择失败: {exc}")
+
+    chosen_active = None
+    if active_node and active_node in selected_nodes:
+        chosen_active = active_node
+    elif selected_nodes:
+        chosen_active = selected_nodes[0]
+
+    if chosen_active:
+        try:
+            tree.nodes.active = chosen_active
+        except Exception:
+            pass
+
+    return selected_nodes, chosen_active
+
+
+def _mark_pending_object_snapshot(context):
+    global _pending_object_snapshot, _last_object_snapshot, _last_active_object_id
+
+    snapshot = _build_object_snapshot(context)
+    _pending_object_snapshot = snapshot
+    _last_object_snapshot = snapshot
+    _last_active_object_id = snapshot[1]
+
+
+def _mark_pending_node_snapshot(tree):
+    global _pending_node_snapshot, _last_node_snapshot, _last_active_node_id
+
+    snapshot = _build_node_snapshot(tree)
+    _pending_node_snapshot = snapshot
+    _last_node_snapshot = snapshot
+    _last_active_node_id = snapshot[1]
+
+
+def _collect_objects_from_nodes(nodes):
+    ordered_objects = []
     for node in nodes:
         if not _is_sync_node(node):
             continue
-
-        _log(f"sync_nodes_to_objects: 搜索节点 '{getattr(node, 'name', '?')}' (object_name='{getattr(node, 'object_name', '')}', object_id='{getattr(node, 'object_id', '')[:8]}...')")
-
         for obj in _resolve_node_objects(node):
-            if obj not in objects_to_select:
-                objects_to_select.append(obj)
+            if obj not in ordered_objects:
+                ordered_objects.append(obj)
+    return ordered_objects
+
+
+def _collect_nodes_from_objects(tree, objects):
+    ordered_nodes = []
+    for obj in objects:
+        for node in _resolve_object_nodes(tree, obj):
+            if node not in ordered_nodes:
+                ordered_nodes.append(node)
+    return ordered_nodes
+
+
+def _sync_object_selection(target_objects, context):
+    """将物体选择状态同步到目标集合，避免历史同步选择不断累积。"""
+    target_set = set(target_objects)
+
+    try:
+        current_objects = list(context.view_layer.objects)
+    except (AttributeError, ReferenceError):
+        current_objects = list(bpy.context.view_layer.objects)
+
+    for obj in current_objects:
+        try:
+            if obj.select_get() and obj not in target_set:
+                obj.select_set(False)
+        except (AttributeError, ReferenceError):
+            continue
+
+    selected_objects = []
+    for obj in target_objects:
+        if _try_select_object(obj, context):
+            selected_objects.append(obj)
+
+    return selected_objects
+
+
+def _sync_node_selection(tree, target_nodes):
+    """将节点选择状态同步到目标集合，避免历史同步选择不断累积。"""
+    target_set = set(target_nodes)
+
+    for node in tree.nodes:
+        if not _is_sync_node(node):
+            continue
+        try:
+            node.select = node in target_set
+        except (AttributeError, ReferenceError):
+            continue
+
+    selected_nodes = []
+    for node in target_nodes:
+        try:
+            node.select = True
+            selected_nodes.append(node)
+        except Exception as exc:
+            _log(f"_sync_node_selection: 节点 '{getattr(node, 'name', '?')}' 选择失败: {exc}")
+
+    return selected_nodes
+
+
+def sync_nodes_to_objects(nodes, context):
+    """将当前节点选择完整映射到物体选择。"""
+    global _is_syncing
+
+    if _is_syncing or not _sync_enabled:
+        return
+
+    tree, _, _ = get_active_blueprint_tree(context)
+    active_node = None
+    if tree:
+        active_node = _get_active_sync_node(tree)
+        if active_node not in nodes:
+            active_node = None
+
+    objects_to_select = _collect_objects_from_nodes(nodes)
 
     if not objects_to_select:
-        _log(f"sync_nodes_to_objects: 未找到关联物体 ({len(nodes)} 个节点)")
         return
 
     _is_syncing = True
-    _is_syncing_since = time.time()
     try:
-        selected_objects = []
-        for obj in objects_to_select:
-            if _try_select_object(obj, context):
-                selected_objects.append(obj)
+        active_object = None
+        if active_node:
+            resolved_objects = _resolve_node_objects(active_node)
+            if resolved_objects:
+                active_object = resolved_objects[0]
 
-        if selected_objects:
-            try:
-                context.view_layer.objects.active = selected_objects[0]
-            except (AttributeError, ReferenceError):
-                try:
-                    bpy.context.view_layer.objects.active = selected_objects[0]
-                except Exception:
-                    pass
-
-        try:
-            _last_synced_objects = set(context.selected_objects)
-        except (AttributeError, ReferenceError):
-            _last_synced_objects = set(bpy.context.selected_objects)
-
-        _log(f"sync_nodes_to_objects: 成功补选 {len(selected_objects)} 个物体 / 请求 {len(objects_to_select)} 个")
+        _apply_object_selection(objects_to_select, active_object, context)
+        _mark_pending_object_snapshot(context)
     finally:
         _is_syncing = False
-        _is_syncing_since = 0.0
 
 
 def sync_objects_to_nodes(objects, context):
-    """多个物体选择时同步选择对应的节点，只通过节点与物体ID精确匹配。
-
-    这是单向补选，不会清空当前节点选择；如果没有对应节点，也不会影响物体当前选择。
-    """
-    global _is_syncing, _last_synced_nodes, _is_syncing_since
+    """将当前物体选择完整映射到节点选择。"""
+    global _is_syncing
 
     if _is_syncing or not _sync_enabled:
-        _log(f"sync_objects_to_nodes: 被阻止 (_is_syncing={_is_syncing}, _sync_enabled={_sync_enabled})")
         return
 
     tree, window, area = get_active_blueprint_tree(context)
     if not tree:
-        _log("sync_objects_to_nodes: 未找到蓝图树")
         return
 
-    nodes_to_select = []
-
-    for obj in objects:
-        object_id = str(obj.as_pointer())
-        object_name = obj.name
-
-        _log(f"sync_objects_to_nodes: 搜索物体 '{object_name}' (id={object_id[:8]}...)")
-
-        nodes = find_nodes_by_object_id(tree, object_id)
-        if nodes:
-            _log(f"  → 通过object_id匹配到 {len(nodes)} 个节点")
-        else:
-            _log(f"  → object_id未匹配，尝试刷新过期ID...")
-
-            stale_count = refresh_stale_node_ids(tree)
-            if stale_count > 0:
-                _log(f"  → 刷新了 {stale_count} 个过期ID，重新搜索...")
-                nodes = find_nodes_by_object_id(tree, object_id)
-                if nodes:
-                    _log(f"  → 刷新ID后通过object_id匹配到 {len(nodes)} 个节点")
-
-            if not nodes:
-                sync_nodes_in_tree = [n for n in tree.nodes if _is_sync_node(n)]
-                _log(f"  → ID匹配失败。树中共 {len(sync_nodes_in_tree)} 个同步节点:")
-                for n in sync_nodes_in_tree[:5]:
-                    n_name = getattr(n, 'object_name', '')
-                    n_id = getattr(n, 'object_id', '')
-                    _log(f"     节点 '{n.name}': object_name='{n_name}', object_id='{n_id[:8] if n_id else '(空)'}...'")
-                if len(sync_nodes_in_tree) > 5:
-                    _log(f"     ... 还有 {len(sync_nodes_in_tree) - 5} 个节点")
-
-        for node in nodes:
-            if node not in nodes_to_select:
-                nodes_to_select.append(node)
+    nodes_to_select = _collect_nodes_from_objects(tree, objects)
 
     if not nodes_to_select:
-        _log(f"sync_objects_to_nodes: 未找到关联节点 ({len(objects)} 个物体)")
         return
 
     _is_syncing = True
-    _is_syncing_since = time.time()
     try:
-        selected_nodes = []
-        for node in nodes_to_select:
-            try:
-                node.select = True
-                selected_nodes.append(node)
-            except Exception as exc:
-                _log(f"sync_objects_to_nodes: 节点 '{getattr(node, 'name', '?')}' 选择失败: {exc}")
+        active_object = _get_active_object(context)
+        active_node = None
+        if active_object and active_object in objects:
+            resolved_nodes = _resolve_object_nodes(tree, active_object)
+            if resolved_nodes:
+                active_node = resolved_nodes[0]
 
-        if selected_nodes:
-            try:
-                tree.nodes.active = selected_nodes[0]
-            except Exception:
-                pass
-
-        try:
-            _last_synced_nodes = {n for n in tree.nodes if n.select}
-        except (AttributeError, ReferenceError):
-            _last_synced_nodes = set(selected_nodes)
-
-        _log(f"sync_objects_to_nodes: 成功补选 {len(selected_nodes)} 个节点 / 请求 {len(nodes_to_select)} 个")
+        _apply_node_selection(tree, nodes_to_select, active_node)
+        _mark_pending_node_snapshot(tree)
     finally:
         _is_syncing = False
-        _is_syncing_since = 0.0
 
 
 def check_node_selection():
-    """检查节点选择状态变化"""
-    global _last_synced_nodes, _check_counter
+    """检查节点选择变化并同步到物体。"""
+    global _last_node_snapshot, _pending_node_snapshot, _check_counter, _last_active_node_id
 
     if _is_syncing or not _sync_enabled:
         return
@@ -367,58 +558,57 @@ def check_node_selection():
     if not tree:
         return
 
-    try:
-        selected_nodes = [n for n in tree.nodes if n.select]
-    except (AttributeError, ReferenceError):
+    snapshot = _build_node_snapshot(tree)
+    if snapshot == _pending_node_snapshot:
+        _pending_node_snapshot = None
+        _last_node_snapshot = snapshot
+        _last_active_node_id = snapshot[1]
         return
 
-    if not selected_nodes:
-        if _last_synced_nodes:
-            _last_synced_nodes = set()
+    if snapshot == _last_node_snapshot:
         return
 
-    current_selection = set(selected_nodes)
-    if current_selection == _last_synced_nodes:
-        return
+    _last_node_snapshot = snapshot
+    _last_active_node_id = snapshot[1]
 
-    _last_synced_nodes = current_selection
-
-    sync_nodes = [n for n in selected_nodes if _is_sync_node(n)]
-    if sync_nodes:
-        _log(f"检测到节点选择变化: {[n.name for n in sync_nodes]}")
-        sync_nodes_to_objects(sync_nodes, context)
+    selected_nodes = [node for node in tree.nodes if node.select and _is_sync_node(node)]
+    if selected_nodes:
+        sync_nodes_to_objects(selected_nodes, context)
 
 
 def check_object_selection():
-    """检查物体选择状态变化"""
-    global _last_synced_objects
+    """检查物体选择变化并同步到节点。"""
+    global _last_object_snapshot, _pending_object_snapshot, _last_active_object_id
 
     if _is_syncing or not _sync_enabled:
         return
 
     try:
         context = bpy.context
-        selected_objects = set(context.selected_objects)
     except (AttributeError, ReferenceError):
         return
 
-    if not selected_objects:
-        if _last_synced_objects:
-            _last_synced_objects = set()
+    snapshot = _build_object_snapshot(context)
+    if snapshot == _pending_object_snapshot:
+        _pending_object_snapshot = None
+        _last_object_snapshot = snapshot
+        _last_active_object_id = snapshot[1]
         return
 
-    if selected_objects == _last_synced_objects:
+    if snapshot == _last_object_snapshot:
         return
 
-    _last_synced_objects = selected_objects
+    _last_object_snapshot = snapshot
+    _last_active_object_id = snapshot[1]
 
-    _log(f"检测到物体选择变化: {[o.name for o in selected_objects]}")
-    sync_objects_to_nodes(list(selected_objects), context)
+    selected_objects = _get_selected_objects(context)
+    if selected_objects:
+        sync_objects_to_nodes(selected_objects, context)
 
 
 def timer_callback():
     """定时器回调函数"""
-    global _is_syncing, _is_syncing_since, _heartbeat_counter
+    global _heartbeat_counter
 
     _heartbeat_counter += 1
     if _heartbeat_counter > 100000:
@@ -426,17 +616,6 @@ def timer_callback():
 
     if _SYNC_DEBUG and _heartbeat_counter % 200 == 1:
         _log(f"心跳 #{_heartbeat_counter}: 定时器运行中 (enabled={_sync_enabled}, syncing={_is_syncing})")
-
-    if _is_syncing:
-        if _is_syncing_since > 0:
-            elapsed = time.time() - _is_syncing_since
-            if elapsed > _SYNC_STUCK_TIMEOUT:
-                _log(f"_is_syncing 已卡住 {elapsed:.1f}s，自动重置")
-                _is_syncing = False
-                _is_syncing_since = 0.0
-        else:
-            _is_syncing = False
-            _is_syncing_since = 0.0
 
     if _sync_enabled:
         try:
@@ -488,64 +667,13 @@ def on_object_renamed_by_id(object_id, old_name, new_name):
 
 
 def on_node_selection_changed():
-    """节点选择变化回调（手动触发）"""
-    global _last_synced_nodes
-
-    if _is_syncing or not _sync_enabled:
-        return
-
-    try:
-        context = bpy.context
-    except (AttributeError, ReferenceError):
-        return
-
-    if not is_blueprint_editor(context):
-        return
-
-    space_data = context.space_data
-    tree = getattr(space_data, 'edit_tree', None) or getattr(space_data, 'node_tree', None)
-    if not tree:
-        return
-
-    selected_nodes = [n for n in tree.nodes if n.select]
-
-    if not selected_nodes:
-        _last_synced_nodes = set()
-        return
-
-    if set(selected_nodes) == _last_synced_nodes:
-        return
-
-    _last_synced_nodes = set(selected_nodes)
-
-    sync_nodes = [n for n in selected_nodes if _is_sync_node(n)]
-    if sync_nodes:
-        sync_nodes_to_objects(sync_nodes, context)
+    """保留兼容入口，实际同步由定时器统一处理。"""
+    return
 
 
 def on_object_selection_changed():
-    """物体选择变化回调（手动触发）"""
-    global _last_synced_objects
-
-    if _is_syncing or not _sync_enabled:
-        return
-
-    try:
-        context = bpy.context
-        selected_objects = set(context.selected_objects)
-    except (AttributeError, ReferenceError):
-        return
-
-    if not selected_objects:
-        _last_synced_objects = set()
-        return
-
-    if selected_objects == _last_synced_objects:
-        return
-
-    _last_synced_objects = selected_objects
-
-    sync_objects_to_nodes(list(selected_objects), context)
+    """保留兼容入口，实际同步由定时器统一处理。"""
+    return
 
 
 def msgbus_callback_node_selection(*args):
@@ -621,17 +749,8 @@ def load_post_handler(scene):
 
 
 def subscribe_msgbus():
-    """订阅msgbus消息"""
-    subscribe_to = bpy.types.LayerObjects, "active"
-    bpy.msgbus.subscribe_rna(
-        key=subscribe_to,
-        owner=_msgbus_owner,
-        args=(),
-        notify=msgbus_callback_object_selection,
-        options={'PERSISTENT'}
-    )
-
-    bpy.msgbus.publish_rna(key=subscribe_to)
+    """保留接口，不再依赖 msgbus 触发同步。"""
+    return
 
 
 def unsubscribe_msgbus():
@@ -801,11 +920,12 @@ class SSMT_OT_SyncDebugStatus(bpy.types.Operator):
         lines = []
         lines.append(f"同步开关: {'开启' if _sync_enabled else '关闭'}")
         lines.append(f"正在同步中: {_is_syncing}")
-        lines.append(f"同步卡住时间: {_is_syncing_since}")
         lines.append(f"调试模式: {'开启' if _SYNC_DEBUG else '关闭'}")
         lines.append(f"定时器运行: {_timer_handle is not None and bpy.app.timers.is_registered(_timer_handle) if _timer_handle else False}")
-        lines.append(f"上次同步物体数: {len(_last_synced_objects)}")
-        lines.append(f"上次同步节点数: {len(_last_synced_nodes)}")
+        lines.append(f"当前物体快照: {_last_object_snapshot}")
+        lines.append(f"当前节点快照: {_last_node_snapshot}")
+        lines.append(f"待忽略物体快照: {_pending_object_snapshot}")
+        lines.append(f"待忽略节点快照: {_pending_node_snapshot}")
         lines.append(f"物体缓存数: {len(_object_id_to_name)}")
 
         tree, window, area = get_active_blueprint_tree(context)

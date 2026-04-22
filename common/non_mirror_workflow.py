@@ -1,6 +1,6 @@
 import bmesh
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 
 from ..utils.log_utils import LOG
 
@@ -43,6 +43,7 @@ class NonMirrorWorkflowHelper:
     def _mirror_apply_and_flip(cls, obj: bpy.types.Object):
         mesh = obj.data
         mirror_matrix = Matrix.Scale(-1.0, 4, cls._AXIS_VECTOR)
+        source_vertex_normals = cls._capture_vertex_normals(mesh)
 
         mesh.transform(mirror_matrix)
 
@@ -58,3 +59,45 @@ class NonMirrorWorkflowHelper:
         mesh.update()
         if hasattr(mesh, "calc_normals"):
             mesh.calc_normals()
+        cls._restore_mirrored_vertex_normals(mesh, source_vertex_normals, mirror_matrix)
+        mesh.update()
+
+    @classmethod
+    def _capture_vertex_normals(cls, mesh: bpy.types.Mesh) -> list[tuple[float, float, float]]:
+        if len(mesh.vertices) == 0:
+            return []
+
+        if hasattr(mesh, "calc_normals"):
+            mesh.calc_normals()
+
+        raw_normals = [0.0] * (len(mesh.vertices) * 3)
+        mesh.vertices.foreach_get("normal", raw_normals)
+
+        return [
+            (raw_normals[index], raw_normals[index + 1], raw_normals[index + 2])
+            for index in range(0, len(raw_normals), 3)
+        ]
+
+    @classmethod
+    def _restore_mirrored_vertex_normals(
+        cls,
+        mesh: bpy.types.Mesh,
+        source_vertex_normals: list[tuple[float, float, float]],
+        mirror_matrix: Matrix,
+    ):
+        if not source_vertex_normals or len(source_vertex_normals) != len(mesh.vertices):
+            return
+
+        normal_matrix = mirror_matrix.inverted_safe().transposed().to_3x3()
+        mirrored_normals = []
+
+        for normal in source_vertex_normals:
+            mirrored = normal_matrix @ Vector(normal)
+            if mirrored.length_squared > 0.0:
+                mirrored.normalize()
+            mirrored_normals.append((mirrored.x, mirrored.y, mirrored.z))
+
+        try:
+            mesh.normals_split_custom_set_from_vertices(mirrored_normals)
+        except Exception as exc:
+            LOG.warning(f"   ⚠️ 非镜像工作流重建自定义法线失败 {getattr(mesh, 'name', '<未知网格>')}: {exc}")
