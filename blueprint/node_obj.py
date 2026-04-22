@@ -1,4 +1,5 @@
 import bpy
+import os
 from bpy.types import NodeTree, Node, NodeSocket
 
 from ..common.logic_name import LogicName
@@ -177,8 +178,33 @@ class SSMT_OT_PickObjectModal(bpy.types.Operator):
                     _picking_node_name = None
                     _picking_tree_name = None
                     return {'FINISHED'}
-        
-        return {'PASS_THROUGH'}
+
+                return {'PASS_THROUGH'}
+
+
+class SSMT_OT_SelectGenerateModFolder(bpy.types.Operator):
+    '''选择 Generate Mod 输出目录'''
+    bl_idname = "ssmt.select_generate_mod_folder"
+    bl_label = "选择 Generate Mod 输出目录"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    directory: bpy.props.StringProperty(subtype='DIR_PATH')
+
+    def invoke(self, context, event):
+        current_dir = context.scene.global_properties.generate_mod_folder_path
+        if current_dir:
+            self.directory = bpy.path.abspath(current_dir)
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        selected_dir = bpy.path.abspath(self.directory).strip()
+        if not selected_dir:
+            self.report({'WARNING'}, "未选择输出目录")
+            return {'CANCELLED'}
+
+        context.scene.global_properties.generate_mod_folder_path = os.path.normpath(selected_dir)
+        return {'FINISHED'}
 
 
 def draw_view3d_header(self, context):
@@ -365,9 +391,7 @@ class SSMTNode_Result_Output(SSMTNodeBase):
         if GlobalProterties.use_specific_generate_mod_folder_path():
             box = layout.box()
             box.label(text="当前生成Mod位置文件夹:")
-            box.label(text=context.scene.global_properties.generate_mod_folder_path)
-
-            layout.operator("ssmt.select_generate_mod_folder", icon='FILE_FOLDER')
+            box.prop(context.scene.global_properties, "generate_mod_folder_path", text="")
 
         row = layout.row()
         row.prop(self, "show_vertex_deduplication_panel", 
@@ -502,6 +526,7 @@ classes = (
     SSMT_OT_SelectNodeObject,
     SSMT_OT_StartPickObject,
     SSMT_OT_PickObjectModal,
+    SSMT_OT_SelectGenerateModFolder,
     SSMT_OT_View_Group_Objects,
     SSMTNode_Object_Info,
     SSMTNode_Object_Group,
