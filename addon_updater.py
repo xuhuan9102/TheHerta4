@@ -671,27 +671,22 @@ class SingletonUpdater:
         try:
             context = ssl._create_unverified_context()
         except:
-            # Some blender packaged python versions don't have this, largely
-            # useful for local network setups otherwise minimal impact.
             context = None
 
-        # Setup private request headers if appropriate.
         if self._engine.token is not None:
             if self._engine.name == "gitlab":
                 request.add_header('PRIVATE-TOKEN', self._engine.token)
             else:
                 self.print_verbose("Tokens not setup for engine yet")
 
-        # Always set user agent.
         request.add_header(
             'User-Agent', "Python/" + str(platform.python_version()))
 
-        # Run the request.
         try:
-            if context:
-                result = urllib.request.urlopen(request, context=context)
-            else:
-                result = urllib.request.urlopen(request)
+            proxies = urllib.request.getproxies()
+            handler = urllib.request.ProxyHandler(proxies)
+            opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=context) if context else urllib.request.HTTPSHandler())
+            result = opener.open(request)
         except urllib.error.HTTPError as e:
             if str(e.code) == "403":
                 self._error = "HTTP error (access denied)"
@@ -777,7 +772,6 @@ class SingletonUpdater:
             request = urllib.request.Request(url)
             context = ssl._create_unverified_context()
 
-            # Setup private token if appropriate.
             if self._engine.token is not None:
                 if self._engine.name == "gitlab":
                     request.add_header('PRIVATE-TOKEN', self._engine.token)
@@ -785,13 +779,13 @@ class SingletonUpdater:
                     self.print_verbose(
                         "Tokens not setup for selected engine yet")
 
-            # Always set user agent
             request.add_header(
                 'User-Agent', "Python/" + str(platform.python_version()))
 
-            self.url_retrieve(urllib.request.urlopen(request, context=context),
-                              self._source_zip)
-            # Add additional checks on file size being non-zero.
+            proxies = urllib.request.getproxies()
+            handler = urllib.request.ProxyHandler(proxies)
+            opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=context) if context else urllib.request.HTTPSHandler())
+            self.url_retrieve(opener.open(request), self._source_zip)
             self.print_verbose("Successfully downloaded update zip")
             return True
         except Exception as e:
@@ -1231,22 +1225,17 @@ class SingletonUpdater:
 
         This function is not async, will always return in sequential fashion
         but should have a parent which calls it in another thread.
+        直接拉取主线分支，不再检查版本号。
         """
         self.print_verbose("Checking for update function")
 
-        # clear the errors if any
         self._error = None
         self._error_msg = None
 
-        # avoid running again in, just return past result if found
-        # but if force now check, then still do it
         if self._update_ready is not None and not now:
             return (self._update_ready,
                     self._update_version,
                     self._update_link)
-
-        if self._current_version is None:
-            raise ValueError("current_version not yet defined")
 
         if self._repo is None:
             raise ValueError("repo not yet defined")
@@ -1254,15 +1243,13 @@ class SingletonUpdater:
         if self._user is None:
             raise ValueError("username not yet defined")
 
-        self.set_updater_json()  # self._json
+        self.set_updater_json()
 
         if not now and not self.past_interval_timestamp():
             self.print_verbose(
                 "Aborting check for updated, check interval not reached")
             return (False, None, None)
 
-        # check if using tags or releases
-        # note that if called the first time, this will pull tags from online
         if self._fake_install:
             self.print_verbose(
                 "fake_install = True, setting fake version as ready")
@@ -1274,69 +1261,19 @@ class SingletonUpdater:
                     self._update_version,
                     self._update_link)
 
-        # Primary internet call, sets self._tags and self._tag_latest.
-        self.get_tags()
-
+        branch_name = "main"
+        if self._include_branch_list and len(self._include_branch_list) > 0:
+            branch_name = self._include_branch_list[0]
+        
+        link = self.form_branch_url(branch_name)
+        
         self._json["last_check"] = str(datetime.now())
+        self._update_ready = True
+        self._update_version = branch_name
+        self._update_link = link
         self.save_updater_json()
-
-        # Can be () or ('master') in addition to branches, and version tag.
-        new_version = self.version_tuple_from_text(self.tag_latest)
-
-        if len(self._tags) == 0:
-            self._update_ready = False
-            self._update_version = None
-            self._update_link = None
-            return (False, None, None)
-
-        if not self._include_branches:
-            link = self.select_link(self, self._tags[0])
-        else:
-            n = len(self._include_branch_list)
-            if len(self._tags) == n:
-                # effectively means no tags found on repo
-                # so provide the first one as default
-                link = self.select_link(self, self._tags[0])
-            else:
-                link = self.select_link(self, self._tags[n])
-
-        if new_version == ():
-            self._update_ready = False
-            self._update_version = None
-            self._update_link = None
-            return (False, None, None)
-        elif str(new_version).lower() in self._include_branch_list:
-            # Handle situation where master/whichever branch is included
-            # however, this code effectively is not triggered now
-            # as new_version will only be tag names, not branch names.
-            if not self._include_branch_auto_check:
-                # Don't offer update as ready, but set the link for the
-                # default branch for installing.
-                self._update_ready = False
-                self._update_version = new_version
-                self._update_link = link
-                self.save_updater_json()
-                return (True, new_version, link)
-            else:
-                # Bypass releases and look at timestamp of last update from a
-                # branch compared to now, see if commit values match or not.
-                raise ValueError("include_branch_autocheck: NOT YET DEVELOPED")
-
-        else:
-            # Situation where branches not included.
-            if new_version > self._current_version:
-
-                self._update_ready = True
-                self._update_version = new_version
-                self._update_link = link
-                self.save_updater_json()
-                return (True, new_version, link)
-
-        # If no update, set ready to False from None to show it was checked.
-        self._update_ready = False
-        self._update_version = None
-        self._update_link = None
-        return (False, None, None)
+        
+        return (True, branch_name, link)
 
     def set_tag(self, name):
         """Assign the tag name and url to update to"""
