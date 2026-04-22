@@ -19,6 +19,7 @@ _NODE_TYPE_DATA_TYPE = 'SSMTNode_DataType'
 _NODE_TYPE_VERTEX_GROUP_PROCESS = 'SSMTNode_VertexGroupProcess'
 _NODE_TYPE_VERTEX_GROUP_MATCH = 'SSMTNode_VertexGroupMatch'
 _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT = 'SSMTNode_VertexGroupMappingInput'
+_NODE_TYPE_BONE_PALETTE_EXPORT = 'SSMTNode_BonePalette_Export'
 _NODE_TYPE_BLUEPRINT_NEST = 'SSMTNode_Blueprint_Nest'
 _NODE_TYPE_CROSS_IB = 'SSMTNode_CrossIB'
 _NODE_TYPE_MULTI_FILE_EXPORT = 'SSMTNode_MultiFile_Export'
@@ -35,6 +36,7 @@ _KNOWN_NODE_TYPES = {
     _NODE_TYPE_VERTEX_GROUP_PROCESS,
     _NODE_TYPE_VERTEX_GROUP_MATCH,
     _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT,
+    _NODE_TYPE_BONE_PALETTE_EXPORT,
     _NODE_TYPE_BLUEPRINT_NEST,
     _NODE_TYPE_CROSS_IB,
     _NODE_TYPE_MULTI_FILE_EXPORT,
@@ -333,6 +335,10 @@ class ChainTraverser:
 
         elif node_type == _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT:
             chain.vertex_group_mapping_nodes.append(current_node)
+            chain.node_path.append(current_node)
+            chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
+
+        elif node_type == _NODE_TYPE_BONE_PALETTE_EXPORT:
             chain.node_path.append(current_node)
             chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
 

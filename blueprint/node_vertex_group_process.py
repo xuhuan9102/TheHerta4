@@ -21,6 +21,12 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
     _mapping_cache: Dict[str, Dict[str, str]] = {}
     _cache_lock = threading.Lock()
 
+    fill_missing_groups: bpy.props.BoolProperty(
+        name='填充缺失组',
+        description='是否自动补齐 0 到最大编号之间缺失的数字顶点组',
+        default=True,
+    )
+
     def init(self, context):
         self.inputs.new('SSMTSocketObject', "物体")
         self.inputs.new('SSMTSocketObject', "映射表 1")
@@ -36,6 +42,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
 
         box.separator()
         box.label(text="映射表配置:", icon='SETTINGS')
+        box.prop(self, 'fill_missing_groups')
 
         for i, socket in enumerate(self.inputs):
             if i > 0:
@@ -531,7 +538,8 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
 
             stats["merged"] = self._merge_vertex_groups_by_prefix(obj)
             stats["cleaned"] = self._remove_non_numeric_vertex_groups(obj)
-            stats["filled"] = self._fill_vertex_group_gaps(obj)
+            if self.fill_missing_groups:
+                stats["filled"] = self._fill_vertex_group_gaps(obj)
             self._sort_vertex_groups(obj)
         except Exception as e:
             print(f"[VGProcess] 处理物体 {obj.name} 时发生错误: {e}")

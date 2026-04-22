@@ -745,6 +745,7 @@ class SSMT_MT_NodeMenu_Blueprint(bpy.types.Menu):
         _add_node_entry(layout, "蓝图嵌套", 'NODETREE', "SSMTNode_Blueprint_Nest")
         _add_node_entry(layout, "跨IB节点", 'ARROW_LEFTRIGHT', "SSMTNode_CrossIB")
         _add_node_entry(layout, "多文件导出", 'FILE', "SSMTNode_MultiFile_Export")
+        _add_node_entry(layout, "Bone Palette 导出", 'ARMATURE_DATA', "SSMTNode_BonePalette_Export")
 
 
 class SSMT_MT_NodeMenu_PostProcess(bpy.types.Menu):

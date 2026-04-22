@@ -22,6 +22,7 @@ _NODE_TYPE_DATA_TYPE = 'SSMTNode_DataType'
 _NODE_TYPE_VERTEX_GROUP_PROCESS = 'SSMTNode_VertexGroupProcess'
 _NODE_TYPE_VERTEX_GROUP_MATCH = 'SSMTNode_VertexGroupMatch'
 _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT = 'SSMTNode_VertexGroupMappingInput'
+_NODE_TYPE_BONE_PALETTE_EXPORT = 'SSMTNode_BonePalette_Export'
 _NODE_TYPE_BLUEPRINT_NEST = 'SSMTNode_Blueprint_Nest'
 _NODE_TYPE_CROSS_IB = 'SSMTNode_CrossIB'
 _NODE_TYPE_MULTI_FILE_EXPORT = 'SSMTNode_MultiFile_Export'
@@ -38,6 +39,7 @@ _KNOWN_NODE_TYPES = {
     _NODE_TYPE_VERTEX_GROUP_PROCESS,
     _NODE_TYPE_VERTEX_GROUP_MATCH,
     _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT,
+    _NODE_TYPE_BONE_PALETTE_EXPORT,
     _NODE_TYPE_BLUEPRINT_NEST,
     _NODE_TYPE_CROSS_IB,
     _NODE_TYPE_MULTI_FILE_EXPORT,
@@ -73,6 +75,7 @@ class ProcessingChain:
 
     vertex_group_process_nodes: List[bpy.types.Node] = field(default_factory=list)
     vertex_group_mapping_nodes: List[bpy.types.Node] = field(default_factory=list)
+    export_object_name_override: str = ""
 
     reached_output: bool = False
     is_valid: bool = True
@@ -132,6 +135,7 @@ class ProcessingChain:
             process_mode = getattr(node, 'process_mode', '')
             if process_mode:
                 params.append(f"mode={process_mode}")
+            params.append(f"fill={'on' if getattr(node, 'fill_missing_groups', True) else 'off'}")
             return f"VertexGroupProcess[{','.join(params)}]" if params else "VertexGroupProcess[]"
 
         elif node_type == 'VertexGroupMatch':
@@ -150,6 +154,13 @@ class ProcessingChain:
             if target_hash:
                 params.append(f"hash={target_hash}")
             return f"VertexGroupMappingInput[{','.join(params)}]" if params else "VertexGroupMappingInput[]"
+
+        elif node_type == 'BonePalette_Export':
+            params = []
+            output_dir = getattr(node, 'output_dir', '')
+            if output_dir:
+                params.append(f"out={output_dir}")
+            return f"BonePaletteExport[{','.join(params)}]" if params else "BonePaletteExport[]"
 
         elif node_type == 'Blueprint_Nest':
             params = []
@@ -244,6 +255,7 @@ class ProcessingChain:
         new_chain.swap_node_option_values = copy.deepcopy(self.swap_node_option_values, memo)
         new_chain.vertex_group_process_nodes = list(self.vertex_group_process_nodes)
         new_chain.vertex_group_mapping_nodes = list(self.vertex_group_mapping_nodes)
+        new_chain.export_object_name_override = self.export_object_name_override
         new_chain.reached_output = self.reached_output
         new_chain.is_valid = self.is_valid
         return new_chain
@@ -268,6 +280,8 @@ class ProcessingChain:
         return obj_model
 
     def get_export_object_name(self) -> str:
+        if self.export_object_name_override:
+            return self.export_object_name_override
         export_object_name = self.object_name
         if self.source_node and getattr(self.source_node, 'bl_idname', '') == _NODE_TYPE_OBJECT_INFO:
             if not self.rename_history:
@@ -506,8 +520,11 @@ class BluePrintModel:
 
         has_rename_chains = any(c.rename_history for c in valid_chains)
         has_vg_chains = any(c.vertex_group_process_nodes for c in valid_chains)
+        has_bone_palette_export_chains = any(
+            any(node.bl_idname == _NODE_TYPE_BONE_PALETTE_EXPORT for node in c.node_path) for c in valid_chains
+        )
 
-        if not has_rename_chains and not has_vg_chains:
+        if not has_rename_chains and not has_vg_chains and not has_bone_palette_export_chains:
             return
 
         if BluePrintModel._has_executed_rename:
@@ -519,14 +536,19 @@ class BluePrintModel:
                     LOG.debug(f"   🔄 使用映射名称: '{original_obj_name}' → '{mapped_name}'")
             if has_vg_chains:
                 self._integrate_vertex_group_nodes()
+            if has_bone_palette_export_chains:
+                self._integrate_bone_palette_export_nodes()
             return
 
-        if not has_vg_chains:
+        if not has_vg_chains and not has_bone_palette_export_chains:
             self._execute_object_rename_nodes()
             return
 
         if not has_rename_chains:
-            self._integrate_vertex_group_nodes()
+            if has_vg_chains:
+                self._integrate_vertex_group_nodes()
+            if has_bone_palette_export_chains:
+                self._integrate_bone_palette_export_nodes()
             return
 
         LOG.info("🔗 开始链路顺序执行（重命名 + 顶点组处理）")
@@ -545,12 +567,14 @@ class BluePrintModel:
             original_obj_name = chain.object_name
             current_name = obj.name
             chain_had_rename = False
+            chain_processed_vg = False
 
             for node in chain.node_path:
                 if node.bl_idname == _NODE_TYPE_VERTEX_GROUP_PROCESS:
                     if obj.type == 'MESH':
                         stats = node.process_object(obj)
                         vg_count += 1
+                        chain_processed_vg = True
                         LOG.info(f"   🔧 顶点组处理: 节点 '{node.name}', 物体 '{current_name}' "
                                 f"(重命名={stats.get('renamed', 0)}, 合并={stats.get('merged', 0)}, "
                                 f"清理={stats.get('cleaned', 0)}, 填充={stats.get('filled', 0)})")
@@ -577,6 +601,8 @@ class BluePrintModel:
         SSMTNode_Object_Rename.log_rename_summary(rename_chains)
 
         LOG.info(f"   ✅ 链路顺序执行完成: {rename_count} 次重命名, {vg_count} 次顶点组处理")
+        if has_bone_palette_export_chains:
+            self._integrate_bone_palette_export_nodes()
 
     def _execute_object_rename_nodes(self):
         valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
@@ -698,6 +724,27 @@ class BluePrintModel:
         except Exception as e:
             import traceback
             LOG.warning(f"⚠️ 顶点组处理节点集成遇到错误: {e}")
+            traceback.print_exc()
+
+    def _integrate_bone_palette_export_nodes(self):
+        try:
+            from .node_bone_palette_export import SSMTNode_BonePalette_Export
+
+            valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
+            if not valid_chains:
+                LOG.warning("   ⚠️ 没有有效的处理链，跳过 Bone Palette 导出节点")
+                return
+
+            result = SSMTNode_BonePalette_Export.execute_batch_from_chains(valid_chains)
+            if result.get('node_count', 0) > 0:
+                LOG.info(
+                    f"   ✅ Bone Palette 导出节点执行完成: {result.get('node_count', 0)} 个节点, {result.get('processed_count', 0)} 个物体"
+                )
+        except ImportError:
+            LOG.debug("⊘ Bone Palette 导出节点模块未找到（可选功能）")
+        except Exception as e:
+            import traceback
+            LOG.warning(f"⚠️ Bone Palette 导出节点集成遇到错误: {e}")
             traceback.print_exc()
 
     def _build_cross_ib_rename_mappings_for_chain(self, chain: ProcessingChain) -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -1064,6 +1111,12 @@ class BluePrintModel:
         except ImportError:
             debug_lines.append(f"顶点组处理节点数: {len(self.vertex_group_process_nodes)}")
 
+        try:
+            from .node_bone_palette_export import SSMTNode_BonePalette_Export
+            debug_lines.append(SSMTNode_BonePalette_Export.generate_debug_summary(self.processing_chains))
+        except ImportError:
+            pass
+
         debug_lines.append(f"多文件导出节点数: {len(self.multi_file_export_nodes)}")
 
         try:
@@ -1175,6 +1228,15 @@ class BluePrintModel:
         except ImportError:
             pass
 
+        try:
+            from .node_bone_palette_export import SSMTNode_BonePalette_Export
+            bone_detail = SSMTNode_BonePalette_Export.generate_debug_detail(chain)
+            if bone_detail:
+                debug_lines.extend(bone_detail)
+                debug_lines.append("")
+        except ImportError:
+            pass
+
     def _backward_parse_legacy(self, output_node: bpy.types.Node):
         LOG.warning("⚠️ 使用旧版反向解析模式（不推荐）")
 
@@ -1221,6 +1283,9 @@ class BluePrintModel:
             self.parse_current_node(unknown_node, chain_key_list)
 
         elif unknown_node.bl_idname == _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT:
+            self.parse_current_node(unknown_node, chain_key_list)
+
+        elif unknown_node.bl_idname == _NODE_TYPE_BONE_PALETTE_EXPORT:
             self.parse_current_node(unknown_node, chain_key_list)
 
         elif unknown_node.bl_idname == _NODE_TYPE_BLUEPRINT_NEST:

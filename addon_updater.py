@@ -800,8 +800,7 @@ class SingletonUpdater:
         """Save a backup of the current installed addon prior to an update."""
         self.print_verbose("Backing up current addon folder")
         local = os.path.join(self._updater_path, "backup")
-        tempdest = os.path.join(
-            self._addon_root, os.pardir, self._addon + "_updater_backup_temp")
+        tempdest = os.path.join(self._updater_path, "backup_temp")
 
         self.print_verbose("Backup destination path: " + str(local))
 
@@ -813,8 +812,6 @@ class SingletonUpdater:
                     "Failed to removed previous backup folder, continuing")
                 self.print_trace()
 
-        # Remove the temp folder.
-        # Shouldn't exist but could if previously interrupted.
         if os.path.isdir(tempdest):
             try:
                 shutil.rmtree(tempdest)
@@ -823,11 +820,26 @@ class SingletonUpdater:
                     "Failed to remove existing temp folder, continuing")
                 self.print_trace()
 
-        # Make a full addon copy, temporarily placed outside the addon folder.
+        # Also clean up legacy temp folder from parent directory if it exists
+        # from previous versions that placed it there.
+        legacy_tempdest = os.path.join(
+            self._addon_root, os.pardir, self._addon + "_updater_backup_temp")
+        if os.path.isdir(legacy_tempdest):
+            try:
+                shutil.rmtree(legacy_tempdest)
+                self.print_verbose(
+                    "Removed legacy backup temp folder from parent directory")
+            except:
+                self.print_verbose(
+                    "Failed to remove legacy backup temp folder, continuing")
+                self.print_trace()
+
+        updater_dir_name = os.path.basename(self._updater_path)
         if self._backup_ignore_patterns is not None:
             try:
                 shutil.copytree(self._addon_root, tempdest,
                                 ignore=shutil.ignore_patterns(
+                                    updater_dir_name,
                                     *self._backup_ignore_patterns))
             except:
                 print("Failed to create backup, still attempting update.")
@@ -835,7 +847,9 @@ class SingletonUpdater:
                 return
         else:
             try:
-                shutil.copytree(self._addon_root, tempdest)
+                shutil.copytree(self._addon_root, tempdest,
+                                ignore=shutil.ignore_patterns(
+                                    updater_dir_name))
             except:
                 print("Failed to create backup, still attempting update.")
                 self.print_trace()
@@ -853,10 +867,10 @@ class SingletonUpdater:
         self.print_verbose("Restoring backup, backing up current addon folder")
         backuploc = os.path.join(self._updater_path, "backup")
         tempdest = os.path.join(
-            self._addon_root, os.pardir, self._addon + "_updater_backup_temp")
+            self._addon_root, os.pardir,
+            "." + self._addon + "_updater_restore_temp")
         tempdest = os.path.abspath(tempdest)
 
-        # Move instead contents back in place, instead of copy.
         shutil.move(backuploc, tempdest)
         shutil.rmtree(self._addon_root)
         os.rename(tempdest, self._addon_root)
