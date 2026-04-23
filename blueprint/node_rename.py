@@ -151,6 +151,11 @@ class SSMTNode_Object_Rename(SSMTNodeBase):
         default=False,
         description="全局反转映射：所有规则执行完后，按反向顺序再执行一遍（search ↔ replace 互换）"
     )
+    defer_until_after_vertex_group_process: bpy.props.BoolProperty(
+        name="顶点组处理后再改名",
+        default=False,
+        description="开启后，当链路中存在顶点组处理节点时，不再按链路内立即改名，而是在该链路的顶点组处理全部完成后再统一执行重命名"
+    )
 
     def init(self, context):
         self.inputs.new('SSMTSocketObject', "Input")
@@ -185,6 +190,15 @@ class SSMTNode_Object_Rename(SSMTNodeBase):
 
         rev = layout.row(align=True)
         rev.prop(self, "reverse_mapping", text="↔️ 全局反转映射", toggle=True, icon='LOOP_BACK')
+
+        defer_row = layout.row(align=True)
+        defer_row.prop(
+            self,
+            "defer_until_after_vertex_group_process",
+            text="顶点组处理后再改名",
+            toggle=True,
+            icon='SORTTIME'
+        )
 
     @staticmethod
     def apply_to_object_name(object_name: str, node=None) -> tuple:
@@ -225,7 +239,11 @@ class SSMTNode_Object_Rename(SSMTNodeBase):
             reverse_mapping=reverse_mapping
         )
 
-        signature = SSMTNode_Object_Rename.generate_signature(rules_list, reverse_mapping)
+        signature = SSMTNode_Object_Rename.generate_signature(
+            rules_list,
+            reverse_mapping,
+            defer_until_after_vertex_group_process=getattr(node, 'defer_until_after_vertex_group_process', False)
+        )
 
         return (new_name, was_modified, history, signature)
 
@@ -325,7 +343,11 @@ class SSMTNode_Object_Rename(SSMTNodeBase):
         return (current_name, total_modified, history)
 
     @staticmethod
-    def generate_signature(rename_rules: list, reverse_mapping: bool = False) -> str:
+    def generate_signature(
+        rename_rules: list,
+        reverse_mapping: bool = False,
+        defer_until_after_vertex_group_process: bool = False,
+    ) -> str:
         """
         生成节点的参数签名（用于处理链哈希计算）
 
@@ -363,6 +385,9 @@ class SSMTNode_Object_Rename(SSMTNodeBase):
 
         if reverse_mapping:
             params.append("rev=global")
+
+        if defer_until_after_vertex_group_process:
+            params.append("after_vg=deferred")
 
         return f"Rename[{','.join(params)}]" if params else "Rename[]"
 

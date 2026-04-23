@@ -122,7 +122,8 @@ class ProcessingChain:
                 from .node_rename import SSMTNode_Object_Rename
                 return SSMTNode_Object_Rename.generate_signature(
                     [{'search_str': r.search_str, 'replace_str': r.replace_str} for r in getattr(node, 'rename_rules', [])],
-                    getattr(node, 'reverse_mapping', False)
+                    getattr(node, 'reverse_mapping', False),
+                    getattr(node, 'defer_until_after_vertex_group_process', False),
                 )
             except ImportError:
                 return "Object_Rename[unavailable]"
@@ -555,6 +556,7 @@ class BluePrintModel:
 
         rename_count = 0
         vg_count = 0
+        deferred_chain_count = 0
 
         for chain in valid_chains:
             obj_name = chain.object_name
@@ -567,19 +569,43 @@ class BluePrintModel:
             original_obj_name = chain.object_name
             current_name = obj.name
             chain_had_rename = False
-            chain_processed_vg = False
+            chain_defer_rename = any(
+                node.bl_idname == _NODE_TYPE_OBJECT_RENAME
+                and getattr(node, 'defer_until_after_vertex_group_process', False)
+                for node in chain.node_path
+            )
+            deferred_rename_nodes = []
+
+            if chain_defer_rename:
+                deferred_chain_count += 1
 
             for node in chain.node_path:
                 if node.bl_idname == _NODE_TYPE_VERTEX_GROUP_PROCESS:
                     if obj.type == 'MESH':
                         stats = node.process_object(obj)
                         vg_count += 1
-                        chain_processed_vg = True
                         LOG.info(f"   🔧 顶点组处理: 节点 '{node.name}', 物体 '{current_name}' "
                                 f"(重命名={stats.get('renamed', 0)}, 合并={stats.get('merged', 0)}, "
                                 f"清理={stats.get('cleaned', 0)}, 填充={stats.get('filled', 0)})")
 
                 elif node.bl_idname == _NODE_TYPE_OBJECT_RENAME:
+                    if chain_defer_rename:
+                        deferred_rename_nodes.append(node)
+                        continue
+
+                    new_name, was_modified, _, _ = SSMTNode_Object_Rename.apply_to_object_name(
+                        current_name, node
+                    )
+                    if was_modified:
+                        current_name = new_name
+                        obj.name = current_name
+                        current_name = obj.name
+                        rename_count += 1
+                        chain_had_rename = True
+
+            if deferred_rename_nodes:
+                LOG.info(f"   ⏩ 延后改名: 物体 '{current_name}' 在顶点组处理完成后统一执行 {len(deferred_rename_nodes)} 个重命名节点")
+                for node in deferred_rename_nodes:
                     new_name, was_modified, _, _ = SSMTNode_Object_Rename.apply_to_object_name(
                         current_name, node
                     )
@@ -600,7 +626,10 @@ class BluePrintModel:
         rename_chains = [c for c in valid_chains if c.rename_history]
         SSMTNode_Object_Rename.log_rename_summary(rename_chains)
 
-        LOG.info(f"   ✅ 链路顺序执行完成: {rename_count} 次重命名, {vg_count} 次顶点组处理")
+        LOG.info(
+            f"   ✅ 链路顺序执行完成: {rename_count} 次重命名, {vg_count} 次顶点组处理, "
+            f"{deferred_chain_count} 条链路启用延后改名"
+        )
         if has_bone_palette_export_chains:
             self._integrate_bone_palette_export_nodes()
 

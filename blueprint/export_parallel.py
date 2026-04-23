@@ -31,6 +31,13 @@ from ..ui.universal.yysls import ExportYYSLS
 from ..ui.universal.zzmi import ExportZZMI
 
 
+def _raise_for_unknown_logic_name() -> None:
+    raise ParallelExportError(
+        "当前游戏预设未加载或不受支持，未执行任何主导出逻辑。"
+        f" 当前 logic_name='{GlobalConfig.logic_name}'，请先确认全局设置中的游戏预设已正确加载。"
+    )
+
+
 class ParallelExportError(RuntimeError):
     pass
 
@@ -138,6 +145,8 @@ class ExportRoundExecutor:
             ExportYYSLS(blueprint_model=blueprint_model).export()
         elif GlobalConfig.logic_name in (LogicName.Naraka, LogicName.NarakaM, LogicName.GF2, LogicName.AILIMIT):
             ExportUnity(blueprint_model=blueprint_model).export()
+        else:
+            _raise_for_unknown_logic_name()
 
     @staticmethod
     def export_buffers_only(blueprint_model):
@@ -161,6 +170,8 @@ class ExportRoundExecutor:
             ExportYYSLS(blueprint_model=blueprint_model).export_buffers_only()
         elif GlobalConfig.logic_name in (LogicName.Naraka, LogicName.NarakaM, LogicName.GF2, LogicName.AILIMIT):
             ExportUnity(blueprint_model=blueprint_model).export_buffers_only()
+        else:
+            _raise_for_unknown_logic_name()
 
     @staticmethod
     def collect_object_names_from_tree(tree) -> list:

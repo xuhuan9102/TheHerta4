@@ -29,6 +29,13 @@ from ..common.global_properties import GlobalProterties
 from ..common.object_prefix_helper import ObjectPrefixHelper
 
 
+def _raise_for_unknown_logic_name() -> None:
+    raise ValueError(
+        "当前游戏预设未加载或不受支持，未执行任何主导出逻辑。"
+        f" 当前 logic_name='{GlobalConfig.logic_name}'，请先确认全局设置中的游戏预设已正确加载。"
+    )
+
+
 class SSMTGenerateModBlueprint(bpy.types.Operator):
     bl_idname = "ssmt.generate_mod_blueprint"
     bl_label = TR.translate("生成Mod")
@@ -77,6 +84,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
 
     def execute(self, context):
         LOG.start_collecting()
+        GlobalConfig.read_from_main_json_ssmt4()
         
         TimerUtils.start_session("Mod导出")
 
@@ -402,6 +410,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             ExportYYSLS(blueprint_model=blueprint_model).export()
         elif GlobalConfig.logic_name in (LogicName.Naraka, LogicName.NarakaM, LogicName.GF2, LogicName.AILIMIT):
             ExportUnity(blueprint_model=blueprint_model).export()
+        else:
+            _raise_for_unknown_logic_name()
 
     def _export_buffers_only(self, blueprint_model):
         if GlobalConfig.logic_name == LogicName.EFMI:
@@ -424,6 +434,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             ExportYYSLS(blueprint_model=blueprint_model).export_buffers_only()
         elif GlobalConfig.logic_name in (LogicName.Naraka, LogicName.NarakaM, LogicName.GF2, LogicName.AILIMIT):
             ExportUnity(blueprint_model=blueprint_model).export_buffers_only()
+        else:
+            _raise_for_unknown_logic_name()
 
     def _get_folder_size(self, folder_path: str) -> int:
         total_size = 0
