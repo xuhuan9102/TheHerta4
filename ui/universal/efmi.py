@@ -683,7 +683,7 @@ class ExportEFMI:
 
     def _copy_cross_ib_hlsl_files(self):
         addon_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-        source_dir = os.path.join(addon_dir, "Toolset")
+        source_dir = os.path.join(addon_dir, "Toolset", "old")
 
         if not os.path.exists(source_dir):
             print(f"[CrossIB] 警告: Toolset目录不存在: {source_dir}")
