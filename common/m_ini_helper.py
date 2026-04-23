@@ -633,11 +633,12 @@ class M_IniHelper:
                 constants_section.SectionName = "Constants"
                 ini_builder.append_section(constants_section)
 
-            # 声明 $active0 变量，用于物体切换功能的激活控制
-            active_line = "global $active0"
-            already_exists = any(active_line in line for line in constants_section.SectionLineList)
-            if not already_exists:
-                constants_section.append(active_line)
+            mod_count = GlobalKeyCountHelper.generated_mod_number
+            for i in range(mod_count):
+                active_line = f"global $active{i}"
+                already_exists = any(active_line in line for line in constants_section.SectionLineList)
+                if not already_exists:
+                    constants_section.append(active_line)
 
             for mkey in key_name_mkey_dict.values():
                 # 跳过 swapkey，它们由 node_swap_ini.py 单独处理
@@ -654,8 +655,9 @@ class M_IniHelper:
             present_section = M_IniSection(M_SectionType.Present)
             present_section.SectionName = "Present"
             
-            # 在 Present 中重置 $active0，确保每次帧开始时为 0
-            present_section.append("post $active0 = 0")
+            mod_count = GlobalKeyCountHelper.generated_mod_number
+            for i in range(mod_count):
+                present_section.append(f"post $active{i} = 0")
             ini_builder.append_section(present_section)
         
         key_number = 0
