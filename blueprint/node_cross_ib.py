@@ -593,8 +593,7 @@ class SSMTNode_PostProcess_CrossIB(SSMTNodeBase):
         self._copy_hlsl_files(mod_export_path)
 
     def _copy_hlsl_files(self, mod_export_path):
-        addon_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        source_dir = os.path.join(addon_dir, "Toolset")
+        source_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "Toolset", "old")
 
         if not os.path.exists(source_dir):
             print(f"[CrossIB] 警告: Toolset目录不存在: {source_dir}")
