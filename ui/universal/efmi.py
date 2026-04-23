@@ -465,14 +465,6 @@ class ExportEFMI:
                             continue
                         texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
 
-            if self.has_cross_ib and (is_source_ib or is_target_ib):
-                texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
-                texture_override_ib_section.append(f"    cs-t2 = ResourceID_{current_identifier}")
-                texture_override_ib_section.append("    run = CustomShader_RecordBones")
-                texture_override_ib_section.append("    run = CustomShader_RedirectCB1")
-                texture_override_ib_section.append("    vs-t0 = ResourceFakeT0_SRV")
-                texture_override_ib_section.append("    vs-cb1 = ResourceFakeCB1")
-
             is_both_source_and_target = is_source_ib and is_target_ib and self.has_cross_ib
 
             if is_both_source_and_target:
@@ -516,6 +508,13 @@ class ExportEFMI:
                             texture_override_ib_section.append(drawindexed_str)
 
                 if is_target_ib and source_ib_list_for_target:
+                    texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
+                    texture_override_ib_section.append(f"    cs-t2 = ResourceID_{current_identifier}")
+                    texture_override_ib_section.append("    run = CustomShader_RecordBones")
+                    texture_override_ib_section.append("    run = CustomShader_RedirectCB1")
+                    texture_override_ib_section.append("    vs-t0 = ResourceFakeT0_SRV")
+                    texture_override_ib_section.append("    vs-cb1 = ResourceFakeCB1")
+
                     self._append_target_cross_ib_blocks(
                         texture_override_ib_section, source_ib_list_for_target, current_ib_key
                     )
@@ -536,6 +535,13 @@ class ExportEFMI:
                     texture_override_ib_section.append(line)
 
             elif is_target_ib and self.has_cross_ib and source_ib_list_for_target:
+                texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
+                texture_override_ib_section.append(f"    cs-t2 = ResourceID_{current_identifier}")
+                texture_override_ib_section.append("    run = CustomShader_RecordBones")
+                texture_override_ib_section.append("    run = CustomShader_RedirectCB1")
+                texture_override_ib_section.append("    vs-t0 = ResourceFakeT0_SRV")
+                texture_override_ib_section.append("    vs-cb1 = ResourceFakeCB1")
+
                 all_target_drawcalls = submesh_model.drawcall_model_list
                 if all_target_drawcalls:
                     drawindexed_str_list = M_IniHelper.get_drawindexed_instanced_str_list(all_target_drawcalls)
