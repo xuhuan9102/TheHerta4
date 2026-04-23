@@ -620,11 +620,15 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
             return 0
 
         source_index_to_target = {}
+        target_vg_indices = set()
+        vg_index_to_name = {vg.index: vg.name for vg in obj.vertex_groups}
         for prefix, source_groups in merge_needed.items():
             target_vg = vg_by_name.get(prefix)
             if not target_vg:
                 target_vg = obj.vertex_groups.new(name=prefix)
                 vg_by_name[prefix] = target_vg
+                vg_index_to_name[target_vg.index] = target_vg.name
+            target_vg_indices.add(target_vg.index)
             for src_vg in source_groups:
                 if src_vg != target_vg:
                     source_index_to_target[src_vg.index] = prefix
@@ -638,10 +642,20 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
 
         for vert in obj.data.vertices:
             for g in vert.groups:
+                if g.weight <= 0:
+                    continue
                 target_prefix = source_index_to_target.get(g.group)
-                if target_prefix and g.weight > 0:
+                if target_prefix:
                     existing = target_weights[target_prefix].get(vert.index, 0.0)
                     target_weights[target_prefix][vert.index] = existing + g.weight
+                elif g.group in target_vg_indices:
+                    vg_name = vg_index_to_name.get(g.group, "")
+                    match = re.match(r'^(\d+)', vg_name)
+                    if match:
+                        prefix = match.group(1)
+                        if prefix in target_vg_map:
+                            existing = target_weights[prefix].get(vert.index, 0.0)
+                            target_weights[prefix][vert.index] = existing + g.weight
 
         for prefix, w_dict in target_weights.items():
             target_vg = target_vg_map.get(prefix)
