@@ -212,6 +212,25 @@ class DrawIBModelWWMI:
         if self.blend_remap_vertex_vg_buffer is not None and self.blend_remap_vertex_vg_buffer.size != 0:
             BufferExportHelper.write_buf_blendindices_uint16(self.blend_remap_vertex_vg_buffer, self.draw_ib + "-BlendRemapVertexVG.buf")
 
+    def _should_duplicate_source_for_merge(self, source_obj: bpy.types.Object) -> bool:
+        """决定合并前是否需要再复制一份临时物体。
+
+        非多文件导出时，蓝图节点已经被重定向到前处理阶段生成的 _copy 副本，
+        这些副本会在轮次结束后统一清理，可以直接作为破坏性 join 的输入，
+        避免再复制一次 TEMP_* 物体。
+
+        多文件导出保留复制策略，避免同一轮里预处理副本被过早消耗后影响
+        多文件节点对象列表的后续使用或调试排查。
+        """
+
+        if source_obj is None:
+            return True
+
+        if self.blueprint_model.multi_file_export_nodes:
+            return True
+
+        return not source_obj.name.endswith('_copy')
+
     def build_merged_object(self, extracted_object: ExtractedObject) -> MergedObject:
         components: list[MergedObjectComponent] = []
         for _component in extracted_object.components:
@@ -232,12 +251,15 @@ class DrawIBModelWWMI:
                 processed_obj_name_list.append(obj_name)
 
                 source_obj = ObjUtils.get_obj_by_name(obj_name)
-                temp_obj = ObjUtils.copy_object(
-                    bpy.context,
-                    source_obj,
-                    name=f"TEMP_{source_obj.name}",
-                    collection=workspace_collection,
-                )
+                if self._should_duplicate_source_for_merge(source_obj):
+                    temp_obj = ObjUtils.copy_object(
+                        bpy.context,
+                        source_obj,
+                        name=f"TEMP_{source_obj.name}",
+                        collection=workspace_collection,
+                    )
+                else:
+                    temp_obj = source_obj
 
                 components[component_id].objects.append(
                     TempObject(

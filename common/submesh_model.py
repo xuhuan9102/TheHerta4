@@ -23,12 +23,15 @@ import hashlib
 import re
 import struct
 from concurrent.futures import ThreadPoolExecutor
+from time import perf_counter
 
 
 @dataclass
 class SubMeshModel:
     # 初始化时需要填入此属性
     drawcall_model_list:list[DrawCallModel] = field(default_factory=list)
+    source_obj_unique_str_count:dict[str, int] = field(default_factory=dict, repr=False)
+    has_multi_file_export_nodes:bool = False
 
     # post_init中计算得到这些属性
     match_draw_ib:str = field(init=False, default="")
@@ -109,6 +112,13 @@ class SubMeshModel:
         data_hash_cache = {}
 
         reuse_count = 0
+        direct_source_reuse_count = 0
+        duplicated_temp_count = 0
+        merged_obj_uses_preprocessed_copy = False
+        copy_duration = 0.0
+        join_duration = 0.0
+        normalize_duration = 0.0
+        rotate_duration = 0.0
 
         temp_collection = CollectionUtils.create_new_collection("TEMP_SUBMESH_COLLECTION_" + self.unique_str)
         bpy.context.scene.collection.children.link(temp_collection)
@@ -158,11 +168,18 @@ class SubMeshModel:
 
             print(f"  🆕 处理: '{blender_obj_name}' (原始: {original_name}, hash={obj_hash[:16]}...)")
 
-            new_obj = source_obj.copy()
-            new_obj.data = source_obj.data.copy()
-            new_obj.name = source_obj.name + "_temp"
-            temp_collection.objects.link(new_obj)
-            temp_obj = new_obj
+            if self._should_duplicate_source_for_merge(source_obj):
+                copy_start = perf_counter()
+                new_obj = source_obj.copy()
+                new_obj.data = source_obj.data.copy()
+                new_obj.name = source_obj.name + "_temp"
+                temp_collection.objects.link(new_obj)
+                temp_obj = new_obj
+                duplicated_temp_count += 1
+                copy_duration += perf_counter() - copy_start
+            else:
+                temp_obj = source_obj
+                direct_source_reuse_count += 1
 
             draw_call_model.vertex_count = len(temp_obj.data.vertices)
             draw_call_model.index_count = len(temp_obj.data.polygons) * 3
@@ -181,6 +198,7 @@ class SubMeshModel:
             print(f"[SubMeshModel] 数据复用统计: {reuse_count}/{total} 个对象复用, {total - reuse_count}/{total} 个对象独立处理")
         else:
             print(f"[SubMeshModel] 数据复用统计: 无复用, 全部 {total} 个对象独立处理")
+        print(f"[SubMeshModel] 合并输入统计: 直接复用前处理副本 {direct_source_reuse_count} 个, 额外复制临时物体 {duplicated_temp_count} 个")
 
         if submesh_temp_obj_list:
             bpy.ops.object.select_all(action='DESELECT')
@@ -188,17 +206,25 @@ class SubMeshModel:
             target_active.select_set(True)
             bpy.context.view_layer.objects.active = target_active
 
+        join_start = perf_counter()
         ObjUtils.join_objects(bpy.context, submesh_temp_obj_list)
+        join_duration += perf_counter() - join_start
 
         submesh_merged_obj = submesh_temp_obj_list[0]
-        merged_obj_name = "TEMP_SUBMESH_MERGED_" + self.unique_str
-        ObjUtils.rename_object(submesh_merged_obj, merged_obj_name)
+        merged_obj_uses_preprocessed_copy = submesh_merged_obj.name.endswith('_copy')
+        if not merged_obj_uses_preprocessed_copy:
+            merged_obj_name = "TEMP_SUBMESH_MERGED_" + self.unique_str
+            ObjUtils.rename_object(submesh_merged_obj, merged_obj_name)
 
         if need_normalize:
+            normalize_start = perf_counter()
             self._normalize_temp_obj_for_export(submesh_merged_obj)
+            normalize_duration += perf_counter() - normalize_start
 
         if need_rotate:
+            rotate_start = perf_counter()
             self._apply_export_rotation_for_logic(submesh_merged_obj)
+            rotate_duration += perf_counter() - rotate_start
 
         TimerUtils.end_stage("对象处理与合并")
 
@@ -215,16 +241,40 @@ class SubMeshModel:
         self.shape_key_buffer_dict = obj_buffer_result.shape_key_buffer_dict
 
         # 计算完成后，删除临时对象
-        bpy.data.objects.remove(submesh_merged_obj, do_unlink=True)
+        if not merged_obj_uses_preprocessed_copy:
+            bpy.data.objects.remove(submesh_merged_obj, do_unlink=True)
 
         if temp_collection.name in bpy.data.collections:
             if temp_collection.name in bpy.context.scene.collection.children:
                 bpy.context.scene.collection.children.unlink(temp_collection)
             bpy.data.collections.remove(temp_collection)
 
-        print("SubMeshModel: " + self.unique_str + " 计算完成，临时对象已删除")
+        if merged_obj_uses_preprocessed_copy:
+            print("SubMeshModel: " + self.unique_str + " 计算完成，复用的前处理副本保留到轮次清理阶段")
+        else:
+            print("SubMeshModel: " + self.unique_str + " 计算完成，临时对象已删除")
+        print(
+            f"[SubMeshModel] 阶段细分: copy={copy_duration:.3f}s, join={join_duration:.3f}s, "
+            f"normalize={normalize_duration:.3f}s, rotate={rotate_duration:.3f}s"
+        )
 
         self._deduplicate_draw_calls()
+
+    def _should_duplicate_source_for_merge(self, source_obj: bpy.types.Object) -> bool:
+        if source_obj is None:
+            return True
+
+        if len(self.drawcall_model_list) != 1:
+            return True
+
+        if self.has_multi_file_export_nodes:
+            return True
+
+        if not source_obj.name.endswith('_copy'):
+            return True
+
+        unique_str_count = self.source_obj_unique_str_count.get(source_obj.name, 0)
+        return unique_str_count > 1
 
     def _deduplicate_draw_calls(self):
         if len(self.drawcall_model_list) <= 1:
@@ -354,47 +404,47 @@ class SubMeshModel:
     @staticmethod
     def _normalize_vertex_groups_numpy(obj: bpy.types.Object):
         mesh = obj.data
-        n_verts = len(mesh.vertices)
         vgroups = obj.vertex_groups
-        n_vgroups = len(vgroups)
 
-        if n_verts == 0 or n_vgroups == 0:
+        if len(mesh.vertices) == 0 or len(vgroups) == 0:
             return
 
         for vg in vgroups:
             if vg.lock_weight:
                 vg.lock_weight = False
 
-        weights = numpy.zeros((n_verts, n_vgroups), dtype=numpy.float32)
-        for vi, vert in enumerate(mesh.vertices):
-            for group in vert.groups:
-                vg_idx = group.group
-                if vg_idx < n_vgroups:
-                    weights[vi, vg_idx] = group.weight
+        import bmesh
 
-        row_sums = numpy.sum(weights, axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1.0
-        normalized = weights / row_sums
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(mesh)
+            deform_layer = bm.verts.layers.deform.verify()
 
-        changed_mask = numpy.any(numpy.abs(normalized - weights) > 1e-7, axis=1)
-        changed_indices = numpy.nonzero(changed_mask)[0]
+            changed_count = 0
+            for vert in bm.verts:
+                deform_data = vert[deform_layer]
+                if not deform_data:
+                    continue
 
-        if len(changed_indices) == 0:
+                total_weight = sum(deform_data.values())
+                if total_weight <= 0.0 or abs(total_weight - 1.0) <= 1e-7:
+                    continue
+
+                inv_total = 1.0 / total_weight
+                for group_index in list(deform_data.keys()):
+                    deform_data[group_index] *= inv_total
+                changed_count += 1
+
+            if changed_count == 0:
+                return
+
+            bm.to_mesh(mesh)
+            mesh.update()
+        finally:
+            bm.free()
+
+        if not obj.data.vertices:
             return
-
-        for vg_idx, vg in enumerate(vgroups):
-            col = normalized[:, vg_idx]
-            vert_indices_to_update = []
-            vert_weights_to_update = []
-            for vi in changed_indices:
-                old_w = weights[vi, vg_idx]
-                new_w = col[vi]
-                if old_w > 0 and abs(new_w - old_w) > 1e-7:
-                    vert_indices_to_update.append(int(vi))
-                    vert_weights_to_update.append(float(new_w))
-            if vert_indices_to_update:
-                for vi, w in zip(vert_indices_to_update, vert_weights_to_update):
-                    vg.add([vi], w, 'REPLACE')
 
     def _apply_export_rotation_for_logic(self, temp_obj: bpy.types.Object):
         if (GlobalConfig.logic_name == LogicName.SRMI

@@ -12,6 +12,22 @@ class ExportHelper:
     pass
 
     @staticmethod
+    def _build_source_obj_unique_str_count(blueprint_model:BluePrintModel) -> dict[str, int]:
+        source_obj_unique_str_map:dict[str,set[str]] = {}
+
+        for draw_call_model in blueprint_model.ordered_draw_obj_data_model_list:
+            source_obj_name = draw_call_model.source_obj_name or draw_call_model.get_blender_obj_name()
+            if not source_obj_name:
+                continue
+            unique_str = draw_call_model.get_unique_str()
+            source_obj_unique_str_map.setdefault(source_obj_name, set()).add(unique_str)
+
+        return {
+            source_obj_name: len(unique_str_set)
+            for source_obj_name, unique_str_set in source_obj_unique_str_map.items()
+        }
+
+    @staticmethod
     def parse_submesh_model_list_from_blueprint_model(blueprint_model:BluePrintModel) -> list[SubMeshModel]:
         '''
         从蓝图中解析出一个Submesh Model列表
@@ -20,6 +36,8 @@ class ExportHelper:
         这样拆分流程更加清晰，逻辑更容易理解
         '''
         submesh_model_list:list[SubMeshModel] = []
+        source_obj_unique_str_count = ExportHelper._build_source_obj_unique_str_count(blueprint_model)
+        has_multi_file_export_nodes = len(blueprint_model.multi_file_export_nodes) > 0
 
         # 根据唯一标识符，把相同的DrawCallModel分在一起，形成SubMeshModel
         draw_call_model_dict:dict[str,list[DrawCallModel]] = {}
@@ -36,7 +54,11 @@ class ExportHelper:
 
         # 根据draw_call_model_dict，初始化SubMeshModel列表
         for unique_str, draw_call_model_list in draw_call_model_dict.items():
-            submesh_model = SubMeshModel(drawcall_model_list=draw_call_model_list)
+            submesh_model = SubMeshModel(
+                drawcall_model_list=draw_call_model_list,
+                source_obj_unique_str_count=source_obj_unique_str_count,
+                has_multi_file_export_nodes=has_multi_file_export_nodes,
+            )
             submesh_model_list.append(submesh_model)
         
         return submesh_model_list

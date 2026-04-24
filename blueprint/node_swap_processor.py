@@ -328,6 +328,27 @@ class DebugOutputGenerator:
 
 # ============= 集成到蓝图模型的接口函数 =============
 
+def _collect_stable_swap_nodes(blueprint_model) -> List[bpy.types.Node]:
+    """按稳定顺序收集唯一的物体切换节点。
+
+    导出 INI 时物体切换节点按名称排序分配索引；这里必须保持同一策略，
+    否则处理链条件里引用的 $swapkeyN 会和导出段落中的变量编号错位。
+    """
+
+    unique_nodes: Dict[str, bpy.types.Node] = {}
+
+    tree = getattr(blueprint_model, '_tree', None)
+    if tree is not None:
+        for node in tree.nodes:
+            if node.bl_idname == 'SSMTNode_ObjectSwap':
+                unique_nodes.setdefault(node.name, node)
+
+    for chain in blueprint_model.processing_chains:
+        for _, node in ObjectSwapChainProcessor.collect_swap_nodes_from_chain(chain.node_path):
+            unique_nodes.setdefault(node.name, node)
+
+    return [unique_nodes[name] for name in sorted(unique_nodes)]
+
 def integrate_object_swap_to_blueprint_model(blueprint_model):
     """将物体切换节点集成到蓝图模型中
     
@@ -348,6 +369,9 @@ def integrate_object_swap_to_blueprint_model(blueprint_model):
     registry = SwapKeyRegistry()
     logged_conditions = set()
     chains_with_swap = 0
+
+    for node in _collect_stable_swap_nodes(blueprint_model):
+        registry.register_node(node)
     
     for chain in blueprint_model.processing_chains:
         swap_nodes = ObjectSwapChainProcessor.collect_swap_nodes_from_chain(chain.node_path)

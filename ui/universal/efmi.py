@@ -69,6 +69,35 @@ class ExportEFMI:
         else:
             return f"{submesh_model.match_draw_ib}_{submesh_model.match_first_index}"
 
+    def _get_all_cross_ib_identifiers(self):
+        all_identifiers = set()
+
+        if self.cross_ib_match_mode == 'INDEX_COUNT':
+            for source_key, target_key_list in self.cross_ib_info_dict.items():
+                if source_key.startswith('indexcount_'):
+                    index_count = source_key.replace('indexcount_', '')
+                    all_identifiers.add(index_count)
+                for target_key in target_key_list:
+                    if target_key.startswith('indexcount_'):
+                        index_count = target_key.replace('indexcount_', '')
+                        all_identifiers.add(index_count)
+
+            for submesh_model in self.submesh_model_list:
+                if submesh_model.match_index_count:
+                    all_identifiers.add(submesh_model.match_index_count)
+        else:
+            for source_ib, target_ib_list in self.cross_ib_info_dict.items():
+                source_hash = source_ib.split("_")[0]
+                all_identifiers.add(source_hash)
+                for target_ib in target_ib_list:
+                    target_hash = target_ib.split("_")[0]
+                    all_identifiers.add(target_hash)
+
+            for drawib_model in self.drawib_model_list:
+                all_identifiers.add(drawib_model.draw_ib)
+
+        return all_identifiers
+
     def _get_vb_condition_for_mapping(self, source_ib_key, target_ib_key, condition_type='source'):
         mapping_key = (source_ib_key, target_ib_key)
         condition_info = self.cross_ib_vb_condition_mapping.get(mapping_key, {})
@@ -159,10 +188,10 @@ class ExportEFMI:
             lines.append(vb_condition)
             lines.append("    run = CustomShader_ExtractCB1")
             lines.append(f"    cs-t2 = ResourceID_{source_identifier}")
-            lines.append("    run = CustomShader_RecordBones")
-            lines.append("    run = CustomShader_RedirectCB1")
-            lines.append("    vs-t0 = ResourceFakeT0_SRV")
-            lines.append("    vs-cb1 = ResourceFakeCB1")
+            lines.append(f"    run = CustomShader_RecordBones_{source_identifier}")
+            lines.append(f"    run = CustomShader_RedirectCB1_{source_identifier}")
+            lines.append(f"    vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
+            lines.append(f"    vs-cb1 = ResourceFakeCB1_{source_identifier}")
             lines.append(";所有需要跨 Ib 的物体引用")
 
             drawindexed_str_list = M_IniHelper.get_drawindexed_instanced_str_list(objects)
@@ -181,9 +210,9 @@ class ExportEFMI:
                     lines.append(drawindexed_str)
 
         lines.append("")
-        lines.append("post vs-cb1 = null")
-        lines.append("post vs-t0 = null")
-        lines.append("post cs-t2 = null")
+        lines.append(f"post vs-cb1 = null")
+        lines.append(f"post vs-t0 = null")
+        lines.append(f"post cs-t2 = null")
 
         return lines
 
@@ -209,18 +238,33 @@ class ExportEFMI:
         present_section.append("array = 4096")
         present_section.new_line()
 
-        present_section.append("[ResourceFakeCB1_UAV]")
-        present_section.append("type = RWStructuredBuffer")
-        present_section.append("stride = 16")
-        present_section.append("array = 4096")
-        present_section.new_line()
+        all_identifiers = self._get_all_cross_ib_identifiers()
 
-        present_section.append("[ResourceFakeCB1]")
-        present_section.append("type = Buffer")
-        present_section.append("stride = 16")
-        present_section.append("format = R32G32B32A32_UINT")
-        present_section.append("array = 4096")
-        present_section.new_line()
+        for identifier in sorted(all_identifiers):
+            present_section.append(f"[ResourceFakeCB1_UAV_{identifier}]")
+            present_section.append("type = RWStructuredBuffer")
+            present_section.append("stride = 16")
+            present_section.append("array = 4096")
+            present_section.new_line()
+
+            present_section.append(f"[ResourceFakeCB1_{identifier}]")
+            present_section.append("type = Buffer")
+            present_section.append("stride = 16")
+            present_section.append("format = R32G32B32A32_UINT")
+            present_section.append("array = 4096")
+            present_section.new_line()
+
+            present_section.append(f"[ResourceFakeT0_UAV_{identifier}]")
+            present_section.append("type = RWStructuredBuffer")
+            present_section.append("stride = 16")
+            present_section.append("array = 200000")
+            present_section.new_line()
+
+            present_section.append(f"[ResourceFakeT0_SRV_{identifier}]")
+            present_section.append("type = StructuredBuffer")
+            present_section.append("stride = 16")
+            present_section.append("array = 200000")
+            present_section.new_line()
 
         present_section.append("[ResourceFakeT0_UAV]")
         present_section.append("type = RWStructuredBuffer")
@@ -253,28 +297,29 @@ class ExportEFMI:
         present_section.append("ResourceDumpedCB1_SRV = copy ResourceDumpedCB1_UAV")
         present_section.new_line()
 
-        present_section.append("[CustomShader_RecordBones]")
-        present_section.append("cs = ./res/record_bones_cs.hlsl")
-        present_section.append("cs-t0 = vs-t0")
-        present_section.append("cs-t1 = ResourceDumpedCB1_SRV")
-        present_section.append("cs-u1 = ResourceFakeT0_UAV")
-        present_section.append("dispatch = 12, 1, 1")
-        present_section.append("cs-u1 = null")
-        present_section.append("cs-t0 = null")
-        present_section.append("cs-t1 = null")
-        present_section.append("ResourceFakeT0_SRV = copy ResourceFakeT0_UAV")
-        present_section.new_line()
+        for identifier in sorted(all_identifiers):
+            present_section.append(f"[CustomShader_RecordBones_{identifier}]")
+            present_section.append("cs = ./res/record_bones_cs.hlsl")
+            present_section.append("cs-t0 = vs-t0")
+            present_section.append("cs-t1 = ResourceDumpedCB1_SRV")
+            present_section.append(f"cs-u1 = ResourceFakeT0_UAV_{identifier}")
+            present_section.append("dispatch = 12, 1, 1")
+            present_section.append("cs-u1 = null")
+            present_section.append("cs-t0 = null")
+            present_section.append("cs-t1 = null")
+            present_section.append(f"ResourceFakeT0_SRV_{identifier} = copy ResourceFakeT0_UAV_{identifier}")
+            present_section.new_line()
 
-        present_section.append("[CustomShader_RedirectCB1]")
-        present_section.append("cs = ./res/redirect_cb1_cs.hlsl")
-        present_section.append("cs-t0 = ResourceDumpedCB1_SRV")
-        present_section.append("ResourceFakeCB1_UAV = copy ResourceDumpedCB1_SRV")
-        present_section.append("cs-u0 = ResourceFakeCB1_UAV")
-        present_section.append("dispatch = 4, 1, 1")
-        present_section.append("cs-u0 = null")
-        present_section.append("cs-t0 = null")
-        present_section.append("ResourceFakeCB1 = copy ResourceFakeCB1_UAV")
-        present_section.new_line()
+            present_section.append(f"[CustomShader_RedirectCB1_{identifier}]")
+            present_section.append("cs = ./res/redirect_cb1_cs.hlsl")
+            present_section.append("cs-t0 = ResourceDumpedCB1_SRV")
+            present_section.append(f"ResourceFakeCB1_UAV_{identifier} = copy ResourceDumpedCB1_SRV")
+            present_section.append(f"cs-u0 = ResourceFakeCB1_UAV_{identifier}")
+            present_section.append("dispatch = 4, 1, 1")
+            present_section.append("cs-u0 = null")
+            present_section.append("cs-t0 = null")
+            present_section.append(f"ResourceFakeCB1_{identifier} = copy ResourceFakeCB1_UAV_{identifier}")
+            present_section.new_line()
 
         shader_overrides = [
             ("ShaderOverridevs1000", "241383a9d64b4978", "200"),
@@ -486,10 +531,10 @@ class ExportEFMI:
                     texture_override_ib_section.append(vb_condition)
                     texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
                     texture_override_ib_section.append(f"    cs-t2 = ResourceID_{current_identifier}")
-                    texture_override_ib_section.append("    run = CustomShader_RecordBones")
-                    texture_override_ib_section.append("    run = CustomShader_RedirectCB1")
-                    texture_override_ib_section.append("    vs-t0 = ResourceFakeT0_SRV")
-                    texture_override_ib_section.append("    vs-cb1 = ResourceFakeCB1")
+                    texture_override_ib_section.append(f"    run = CustomShader_RecordBones_{current_identifier}")
+                    texture_override_ib_section.append(f"    run = CustomShader_RedirectCB1_{current_identifier}")
+                    texture_override_ib_section.append(f"    vs-t0 = ResourceFakeT0_SRV_{current_identifier}")
+                    texture_override_ib_section.append(f"    vs-cb1 = ResourceFakeCB1_{current_identifier}")
                     texture_override_ib_section.append(";所有需要跨 Ib 的物体引用")
 
                     drawindexed_str_list = M_IniHelper.get_drawindexed_instanced_str_list(objects)
@@ -508,13 +553,6 @@ class ExportEFMI:
                             texture_override_ib_section.append(drawindexed_str)
 
                 if is_target_ib and source_ib_list_for_target:
-                    texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
-                    texture_override_ib_section.append(f"    cs-t2 = ResourceID_{current_identifier}")
-                    texture_override_ib_section.append("    run = CustomShader_RecordBones")
-                    texture_override_ib_section.append("    run = CustomShader_RedirectCB1")
-                    texture_override_ib_section.append("    vs-t0 = ResourceFakeT0_SRV")
-                    texture_override_ib_section.append("    vs-cb1 = ResourceFakeCB1")
-
                     self._append_target_cross_ib_blocks(
                         texture_override_ib_section, source_ib_list_for_target, current_ib_key
                     )
@@ -535,13 +573,6 @@ class ExportEFMI:
                     texture_override_ib_section.append(line)
 
             elif is_target_ib and self.has_cross_ib and source_ib_list_for_target:
-                texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
-                texture_override_ib_section.append(f"    cs-t2 = ResourceID_{current_identifier}")
-                texture_override_ib_section.append("    run = CustomShader_RecordBones")
-                texture_override_ib_section.append("    run = CustomShader_RedirectCB1")
-                texture_override_ib_section.append("    vs-t0 = ResourceFakeT0_SRV")
-                texture_override_ib_section.append("    vs-cb1 = ResourceFakeCB1")
-
                 all_target_drawcalls = submesh_model.drawcall_model_list
                 if all_target_drawcalls:
                     drawindexed_str_list = M_IniHelper.get_drawindexed_instanced_str_list(all_target_drawcalls)
@@ -667,7 +698,9 @@ class ExportEFMI:
                 if vb_condition_target:
                     section.append(vb_condition_target)
                 section.append(f"    cs-t2 = ResourceID_{source_identifier}")
-                section.append("    run = CustomShader_RedirectCB1")
+                section.append(f"    run = CustomShader_RedirectCB1_{source_identifier}")
+                section.append(f"    vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
+                section.append(f"    vs-cb1 = ResourceFakeCB1_{source_identifier}")
                 section.append("    ;跨 IB 块数据区域")
 
                 source_unique_str = source_submesh.unique_str
