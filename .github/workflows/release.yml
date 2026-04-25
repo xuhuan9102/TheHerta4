@@ -1,0 +1,71 @@
+name: Release Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Create Release Package
+        id: package
+        run: |
+          # 排除的文件和目录
+          EXCLUDE_PATTERN=$(cat << 'EOF'
+            --exclude=.gitignore
+            --exclude=.github
+            --exclude=README.md
+            --exclude=README_DEV.md
+            --exclude=LICENSE.txt
+            --exclude=requirements.txt
+            --exclude=*.md
+            --exclude=docs
+            --exclude=__pycache__
+            --exclude=*.pyc
+          EOF
+          )
+
+          # 创建 zip 包，名称使用 tag 去掉 v 前缀
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          ZIP_NAME="TheHerta4-${TAG_NAME#v}.zip"
+
+          # 打包
+          zip -r "$ZIP_NAME" . $EXCLUDE_PATTERN
+
+          # 计算 SHA256
+          SHA256=$(sha256sum "$ZIP_NAME" | cut -d' ' -f1)
+
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+          ls -la "$ZIP_NAME"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip_name }}
+          body: |
+            ## 自动打包版本
+
+            **SHA256**: `${{ steps.package.outputs.sha256 }}`
+
+            使用方法:
+            1. 下载 zip 包
+            2. 在 Blender 中打开 `编辑 > 偏好设置 > 插件 > 安装`
+            3. 选择下载的 zip 文件
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
