@@ -881,7 +881,7 @@ def update_settings_ui(self, context, element=None):
                          icon="ERROR")
             return
 
-    row.label(text="点击更新将拉取主线分支最新代码")
+    row.label(text="自动检查更新并安装最新版本")
 
     row = box.row()
     col = row.column()
@@ -920,11 +920,17 @@ def update_settings_ui(self, context, element=None):
         split = sub_col.split(align=True)
         split.scale_y = 2
         split.operator(AddonUpdaterUpdateNow.bl_idname,
-                       text="立即更新 (主线分支)")
+                       text=f"立即更新 (最新版本: {updater.update_version})")
         split = sub_col.split(align=True)
         split.scale_y = 2
         split.operator(AddonUpdaterCheckNow.bl_idname,
                        text="", icon="FILE_REFRESH")
+        
+        # Add version selection button
+        if len(updater.tags) > 1:
+            col = box.row()
+            col.operator(AddonUpdaterUpdateTarget.bl_idname,
+                         text="选择特定版本", icon="DOWNARROW_HLT")
 
     else:
         col.scale_y = 2
@@ -1019,7 +1025,7 @@ def update_settings_ui_condensed(self, context, element=None):
         split = sub_col.split(align=True)
         split.scale_y = 2
         split.operator(AddonUpdaterUpdateNow.bl_idname,
-                       text="立即更新 (主线分支)")
+                       text=f"立即更新 (最新版本: {updater.update_version})")
         split = sub_col.split(align=True)
         split.scale_y = 2
         split.operator(AddonUpdaterCheckNow.bl_idname,
@@ -1030,7 +1036,7 @@ def update_settings_ui_condensed(self, context, element=None):
         col.operator(AddonUpdaterCheckNow.bl_idname, text="检查更新")
 
     row = element.row()
-    row.label(text="点击更新将拉取主线分支最新代码")
+    row.label(text="自动检查更新并安装最新版本")
 
     row = element.row()
     row.scale_y = 0.7

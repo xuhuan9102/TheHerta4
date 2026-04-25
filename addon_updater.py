@@ -1239,7 +1239,6 @@ class SingletonUpdater:
 
         This function is not async, will always return in sequential fashion
         but should have a parent which calls it in another thread.
-        直接拉取主线分支，不再检查版本号。
         """
         self.print_verbose("Checking for update function")
 
@@ -1275,19 +1274,54 @@ class SingletonUpdater:
                     self._update_version,
                     self._update_link)
 
-        branch_name = "main"
-        if self._include_branch_list and len(self._include_branch_list) > 0:
-            branch_name = self._include_branch_list[0]
+        # Get tags from repository
+        self.get_tags()
         
-        link = self.form_branch_url(branch_name)
+        if not self._tags:
+            self.print_verbose("No tags found")
+            self._json["last_check"] = str(datetime.now())
+            self.save_updater_json()
+            return (False, None, None)
+
+        # Find latest version
+        latest_tag = None
+        latest_version = ()
         
+        for tag in self._tags:
+            if "name" not in tag:
+                continue
+            
+            version = self.version_tuple_from_text(tag["name"])
+            if not isinstance(version, tuple) or not version:
+                continue
+            
+            if version > latest_version:
+                latest_version = version
+                latest_tag = tag
+
+        if not latest_tag:
+            self.print_verbose("No valid version tags found")
+            self._json["last_check"] = str(datetime.now())
+            self.save_updater_json()
+            return (False, None, None)
+
+        # Compare with current version
+        current_version = self._current_version
+        if latest_version > current_version:
+            self._update_ready = True
+            self._update_version = latest_tag["name"]
+            self._update_link = self.select_link(self, latest_tag)
+            self.print_verbose(f"Found update: {latest_tag['name']}")
+        else:
+            self._update_ready = False
+            self._update_version = None
+            self._update_link = None
+            self.print_verbose("No update available")
+
         self._json["last_check"] = str(datetime.now())
-        self._update_ready = True
-        self._update_version = branch_name
-        self._update_link = link
         self.save_updater_json()
         
-        return (True, branch_name, link)
+        return (self._update_ready, self._update_version, self._update_link)
 
     def set_tag(self, name):
         """Assign the tag name and url to update to"""
@@ -1297,14 +1331,13 @@ class SingletonUpdater:
                 tg = tag
                 break
         if tg:
-            new_version = self.version_tuple_from_text(self.tag_latest)
-            self._update_version = new_version
+            self._update_version = tg["name"]
             self._update_link = self.select_link(self, tg)
         elif self._include_branches and name in self._include_branch_list:
             # scenario if reverting to a specific branch name instead of tag
             tg = name
             link = self.form_branch_url(tg)
-            self._update_version = name  # this will break things
+            self._update_version = name
             self._update_link = link
         if not tg:
             raise ValueError("Version tag not found: " + name)
