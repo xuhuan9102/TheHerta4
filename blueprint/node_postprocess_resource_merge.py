@@ -56,13 +56,10 @@ class SSMTNode_PostProcess_ResourceMerge(SSMTNode_PostProcess_Base):
         with open(ini_file, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        slider_panel_content = ""
-        slider_marker = "; --- AUTO-APPENDED SLIDER CONTROL PANEL ---"
-        if slider_marker in content:
-            marker_pos = content.find(slider_marker)
-            slider_panel_content = content[marker_pos:]
-            content = content[:marker_pos]
-            print("[ResourceMerge] 检测到滑块面板内容，将保留")
+        preserved_tail_content = ""
+        content, preserved_tail_content = self.split_auto_appended_tail_content(content)
+        if preserved_tail_content:
+            print("[ResourceMerge] 检测到自动追加尾块，将保留")
 
         lines = content.splitlines()
 
@@ -140,9 +137,9 @@ class SSMTNode_PostProcess_ResourceMerge(SSMTNode_PostProcess_Base):
                 new_content.extend(lines)
                 new_content.append('')
 
-            if slider_panel_content:
+            if preserved_tail_content:
                 new_content.append('')
-                new_content.append(slider_panel_content)
+                new_content.append(preserved_tail_content)
 
             with open(ini_file, 'w', encoding='utf-8') as f:
                 f.write("\n".join(new_content))

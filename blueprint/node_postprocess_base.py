@@ -10,6 +10,11 @@ from .node_base import SSMTNodeBase
 class SSMTNode_PostProcess_Base(SSMTNodeBase):
     bl_icon = 'FILE_REFRESH'
     bl_width_min = 300
+    AUTO_APPENDED_SECTION_MARKERS = (
+        "; --- AUTO-APPENDED SLIDER CONTROL PANEL ---",
+        "; --- AUTO-APPENDED HEALTH DETECTION MODULE ---",
+        "; --- AUTO-APPENDED WEB PANEL PRESET START ---",
+    )
 
     def init(self, context):
         self.inputs.new('SSMTSocketPostProcess', "Input")
@@ -37,6 +42,23 @@ class SSMTNode_PostProcess_Base(SSMTNodeBase):
             print(f"已创建备份: {backup_path}")
         except Exception as e:
             print(f"创建备份失败: {e}")
+
+    @classmethod
+    def split_auto_appended_tail_content(cls, content: str):
+        first_marker_position = None
+
+        for marker in cls.AUTO_APPENDED_SECTION_MARKERS:
+            marker_position = content.find(marker)
+            if marker_position == -1:
+                continue
+
+            if first_marker_position is None or marker_position < first_marker_position:
+                first_marker_position = marker_position
+
+        if first_marker_position is None:
+            return content, ""
+
+        return content[:first_marker_position], content[first_marker_position:]
 
 
 def register():

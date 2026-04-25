@@ -75,6 +75,7 @@ _MODULE_REGISTRY = [
     {"name": "node_postprocess_material", "required": False},
     {"name": "node_postprocess_health", "required": False},
     {"name": "node_postprocess_slider", "required": False},
+    {"name": "node_postprocess_web_panel", "required": False},
     {"name": "node_postprocess_resource_merge", "required": False},
     {"name": "node_postprocess_buffer_cleanup", "required": False},
     {"name": "node_postprocess_multifile", "required": False},

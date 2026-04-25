@@ -25,22 +25,11 @@ importlib.reload(global_properties)
 importlib.reload(blueprint)
 importlib.reload(ui_prefix_quick_ops)
 
-_global_config_timer_handle = None
-_GLOBAL_CONFIG_REFRESH_INTERVAL = 1.0
-
-def _global_config_refresh_timer_callback():
-    global _global_config_timer_handle
-    try:
-        GlobalConfig.read_from_main_json_ssmt4()
-    except Exception:
-        pass
-    return _GLOBAL_CONFIG_REFRESH_INTERVAL
-
 bl_info = {
     "name": "TheHerta4",
     "description": "Blender Plugin of SSMT4",
     "blender": (4, 5, 0),
-    "version": (4, 1, 9),
+    "version": (4, 2, 0),
     "location": "View3D",
     "category": "Generic"
 }
@@ -145,9 +134,8 @@ class HertaUpdatePreference(bpy.types.AddonPreferences):
         addon_updater_ops.update_settings_ui(self, context)
 
 def register():
-    global _global_config_timer_handle
-    
     global_properties.register()
+    GlobalConfig.read_from_main_json_ssmt4()
     
     bpy.types.Scene.herta_show_toolkit = bpy.props.BoolProperty(
         name="显示工具集",
@@ -171,20 +159,10 @@ def register():
     ui_func_export.register()
     
     toolkit.register()
-    
-    _global_config_timer_handle = bpy.app.timers.register(
-        _global_config_refresh_timer_callback, 
-        persistent=True
-    )
 
 
 
 def unregister():
-    global _global_config_timer_handle
-    
-    if _global_config_timer_handle and bpy.app.timers.is_registered(_global_config_timer_handle):
-        bpy.app.timers.unregister(_global_config_timer_handle)
-    
     toolkit.unregister()
     
     ui_func_export.unregister()

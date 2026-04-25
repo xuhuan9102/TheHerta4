@@ -5,9 +5,11 @@
 2. 物体选择时自动选择对应的节点（物体→节点）- 支持多选
 3. 防循环选择机制
 4. 物体名称变化时自动更新节点引用（支持撤销/重做）
+5. 物体视图显示禁用时自动禁用对应节点（双向同步）
 """
-import bpy
 import time
+
+import bpy
 from bpy.app.handlers import persistent
 
 _SYNC_NODE_TYPES = {'SSMTNode_Object_Info', 'SSMTNode_MultiFile_Export'}
@@ -23,9 +25,16 @@ _last_active_node_id = ""
 _msgbus_owner = object()
 
 _object_id_to_name = {}
+_object_hide_state_cache = {}
+_msgbus_subscribed = False
 _timer_handle = None
-_check_counter = 0
-_heartbeat_counter = 0
+_next_maintenance_run_at = 0.0
+
+_SELECTION_SYNC_ACTIVE_INTERVAL = 0.2
+_SELECTION_SYNC_IDLE_INTERVAL = 1.0
+_MAINTENANCE_ACTIVE_INTERVAL = 2.0
+_MAINTENANCE_IDLE_INTERVAL = 5.0
+_VISIBILITY_AUTO_MUTE_KEY = "ssmt_auto_muted_by_visibility"
 
 _SYNC_DEBUG = False
 
@@ -61,24 +70,121 @@ def _node_has_object_id(node, object_id):
     return False
 
 
+def _iter_node_object_references(node):
+    try:
+        if node.bl_idname == 'SSMTNode_Object_Info':
+            return (node,)
+        if node.bl_idname == 'SSMTNode_MultiFile_Export':
+            return tuple(getattr(node, 'object_list', []))
+    except (AttributeError, ReferenceError):
+        pass
+    return tuple()
+
+
+def _resolve_reference_state(reference):
+    object_id = getattr(reference, 'object_id', '')
+    object_name = getattr(reference, 'object_name', '')
+    original_object_name = getattr(reference, 'original_object_name', '')
+
+    if object_id:
+        cached_name = _object_id_to_name.get(object_id)
+        if cached_name:
+            return object_id, cached_name, _object_hide_state_cache.get(object_id, False), True
+
+    for candidate_name in (object_name, original_object_name):
+        if not candidate_name:
+            continue
+        obj = bpy.data.objects.get(candidate_name)
+        if not obj:
+            continue
+
+        current_id = str(obj.as_pointer())
+        current_name = obj.name
+        is_hidden = bool(obj.hide_viewport or obj.hide_get())
+        _object_id_to_name[current_id] = current_name
+        _object_hide_state_cache[current_id] = is_hidden
+        return current_id, current_name, is_hidden, True
+
+    return object_id, object_name, False, False
+
+
+def _apply_reference_state(reference, object_id, object_name):
+    changed = False
+
+    try:
+        previous_name = getattr(reference, 'object_name', '')
+        if object_name and previous_name != object_name:
+            reference.object_name = object_name
+            changed = True
+
+            if previous_name and previous_name != object_name and not getattr(reference, 'original_object_name', ''):
+                reference.original_object_name = previous_name
+
+        if object_id and getattr(reference, 'object_id', '') != object_id:
+            reference.object_id = object_id
+            changed = True
+        elif not object_name and getattr(reference, 'object_id', ''):
+            reference.object_id = ""
+            changed = True
+    except (AttributeError, ReferenceError):
+        return False
+
+    return changed
+
+
+def _resolve_reference_object(reference):
+    object_id, object_name, _, exists = _resolve_reference_state(reference)
+    if not exists:
+        return None
+
+    obj = bpy.data.objects.get(object_name) if object_name else None
+    if obj:
+        _apply_reference_state(reference, str(obj.as_pointer()), obj.name)
+        return obj
+
+    return find_object_by_id(object_id) if object_id else None
+
+
+def _set_node_visibility_state(node, any_hidden):
+    try:
+        auto_muted = bool(node.get(_VISIBILITY_AUTO_MUTE_KEY, False))
+
+        if any_hidden:
+            if not node.mute:
+                node.mute = True
+                node[_VISIBILITY_AUTO_MUTE_KEY] = True
+                print(f"[Sync] 物体视图显示被禁用，自动禁用节点: {node.name}")
+            return
+
+        if auto_muted:
+            if node.mute:
+                node.mute = False
+                print(f"[Sync] 物体视图显示已恢复，自动启用节点: {node.name}")
+            if _VISIBILITY_AUTO_MUTE_KEY in node:
+                del node[_VISIBILITY_AUTO_MUTE_KEY]
+    except (AttributeError, ReferenceError):
+        return
+
+
 def _resolve_node_objects(node):
     objects = []
     try:
-        if node.bl_idname == 'SSMTNode_Object_Info':
-            object_id = getattr(node, 'object_id', '')
-            obj = find_object_by_id(object_id) if object_id else None
-            if obj:
+        for reference in _iter_node_object_references(node):
+            obj = _resolve_reference_object(reference)
+            if obj and obj not in objects:
                 objects.append(obj)
-            else:
-                _log(f"_resolve_node_objects: 节点 '{getattr(node, 'name', '?')}' 未找到物体 (object_id='{object_id[:8] if object_id else ''}...')")
-        elif node.bl_idname == 'SSMTNode_MultiFile_Export':
-            for item in getattr(node, 'object_list', []):
-                object_id = getattr(item, 'object_id', '')
-                obj = find_object_by_id(object_id) if object_id else None
-                if obj:
-                    objects.append(obj)
     except (AttributeError, ReferenceError):
         pass
+
+    if not objects and getattr(node, 'bl_idname', '') == 'SSMTNode_Object_Info':
+        object_id = getattr(node, 'object_id', '')
+        object_name = getattr(node, 'object_name', '')
+        if object_id or object_name:
+            _log(
+                f"_resolve_node_objects: 节点 '{getattr(node, 'name', '?')}' 未找到物体 "
+                f"(object_id='{object_id[:8] if object_id else ''}...', object_name='{object_name}')"
+            )
+
     return objects
 
 
@@ -103,19 +209,36 @@ def _update_object_name_in_node(node, old_name, new_name, object_id=None):
             node_object_id = getattr(node, 'object_id', '')
             node_original_name = getattr(node, 'original_object_name', '')
 
-            if object_id and node_object_id == object_id and node_object_name != new_name:
-                node.object_name = new_name
-                if not node_original_name:
+            matched = (object_id and node_object_id == object_id) or node_object_name == old_name
+            if matched:
+                if node_object_name != new_name:
+                    node.object_name = new_name
+                if object_id and node_object_id != object_id:
+                    node.object_id = object_id
+                if old_name and old_name != new_name and not node_original_name:
                     node.original_object_name = old_name
         elif node.bl_idname == 'SSMTNode_MultiFile_Export':
+            any_changed = False
             for item in getattr(node, 'object_list', []):
                 item_name = getattr(item, 'object_name', '')
                 item_id = getattr(item, 'object_id', '')
                 item_original = getattr(item, 'original_object_name', '')
-                if object_id and item_id == object_id and item_name != new_name:
+                matched = (object_id and item_id == object_id) or item_name == old_name
+                if not matched:
+                    continue
+
+                if item_name != new_name:
                     item.object_name = new_name
-                    if not item_original:
-                        item.original_object_name = old_name
+                    any_changed = True
+                if object_id and item_id != object_id:
+                    item.object_id = object_id
+                    any_changed = True
+                if old_name and old_name != new_name and not item_original:
+                    item.original_object_name = old_name
+                    any_changed = True
+
+            if any_changed:
+                node.update_node_width([item.object_name for item in getattr(node, 'object_list', [])])
     except (AttributeError, ReferenceError):
         pass
 
@@ -174,30 +297,19 @@ def refresh_stale_node_ids(tree):
     for node in tree.nodes:
         if not _is_sync_node(node):
             continue
-        if node.bl_idname == 'SSMTNode_Object_Info':
-            obj_name = getattr(node, 'object_name', '')
-            obj_id = getattr(node, 'object_id', '')
-            if obj_name:
-                obj = bpy.data.objects.get(obj_name)
-                if obj:
-                    current_id = str(obj.as_pointer())
-                    if obj_id != current_id:
-                        _log(f"  刷新过期ID: 节点 '{node.name}' object_id '{obj_id[:8]}...' → '{current_id[:8]}...'")
-                        node.object_id = current_id
-                        refreshed += 1
-                elif obj_id:
-                    _log(f"  清除无效ID: 节点 '{node.name}' 物体 '{obj_name}' 不存在")
-        elif node.bl_idname == 'SSMTNode_MultiFile_Export':
-            for item in getattr(node, 'object_list', []):
-                obj_name = getattr(item, 'object_name', '')
-                obj_id = getattr(item, 'object_id', '')
-                if obj_name:
-                    obj = bpy.data.objects.get(obj_name)
-                    if obj:
-                        current_id = str(obj.as_pointer())
-                        if obj_id != current_id:
-                            item.object_id = current_id
-                            refreshed += 1
+        node_changed = False
+        for reference in _iter_node_object_references(node):
+            object_id, object_name, _, exists = _resolve_reference_state(reference)
+            if exists and _apply_reference_state(reference, object_id, object_name):
+                refreshed += 1
+                node_changed = True
+            elif not object_name and getattr(reference, 'object_id', ''):
+                if _apply_reference_state(reference, "", ""):
+                    refreshed += 1
+                    node_changed = True
+
+        if node_changed and node.bl_idname == 'SSMTNode_MultiFile_Export':
+            node.update_node_width([item.object_name for item in getattr(node, 'object_list', [])])
     return refreshed
 
 
@@ -205,6 +317,12 @@ def find_object_by_id(object_id):
     """通过物体ID查找物体"""
     if not object_id:
         return None
+
+    cached_name = _object_id_to_name.get(object_id)
+    if cached_name:
+        obj = bpy.data.objects.get(cached_name)
+        if obj and str(obj.as_pointer()) == object_id:
+            return obj
 
     for obj in bpy.data.objects:
         if str(obj.as_pointer()) == object_id:
@@ -260,6 +378,31 @@ def _get_active_sync_node(tree):
     if active_node and _is_sync_node(active_node):
         return active_node
     return None
+
+
+def _rebuild_object_name_cache():
+    global _object_id_to_name
+
+    _object_id_to_name = {}
+    try:
+        for obj in bpy.data.objects:
+            _object_id_to_name[str(obj.as_pointer())] = obj.name
+    except (AttributeError, ReferenceError):
+        pass
+
+
+def _rebuild_object_hide_state_cache():
+    global _object_hide_state_cache
+
+    _object_hide_state_cache = {}
+    try:
+        for obj in bpy.data.objects:
+            try:
+                _object_hide_state_cache[str(obj.as_pointer())] = bool(obj.hide_viewport or obj.hide_get())
+            except (AttributeError, ReferenceError):
+                continue
+    except (AttributeError, ReferenceError):
+        pass
 
 
 def _get_node_runtime_id(node):
@@ -540,13 +683,9 @@ def sync_objects_to_nodes(objects, context):
 
 def check_node_selection():
     """检查节点选择变化并同步到物体。"""
-    global _last_node_snapshot, _pending_node_snapshot, _check_counter, _last_active_node_id
+    global _last_node_snapshot, _pending_node_snapshot, _last_active_node_id
 
     if _is_syncing or not _sync_enabled:
-        return
-
-    _check_counter += 1
-    if _check_counter % 2 != 0:
         return
 
     try:
@@ -606,55 +745,99 @@ def check_object_selection():
         sync_objects_to_nodes(selected_objects, context)
 
 
-def timer_callback():
-    """定时器回调函数"""
-    global _heartbeat_counter
+def sync_object_visibility_for_object_ids(object_ids, previous_hide_state=None):
+    """根据发生变化的物体，局部同步关联节点的静音状态。"""
+    if _is_syncing or not object_ids:
+        return
 
-    _heartbeat_counter += 1
-    if _heartbeat_counter > 100000:
-        _heartbeat_counter = 1
-
-    if _SYNC_DEBUG and _heartbeat_counter % 200 == 1:
-        _log(f"心跳 #{_heartbeat_counter}: 定时器运行中 (enabled={_sync_enabled}, syncing={_is_syncing})")
-
-    if _sync_enabled:
-        try:
-            check_node_selection()
-        except Exception as e:
-            _log(f"check_node_selection 异常: {e}")
-
-        try:
-            check_object_selection()
-        except Exception as e:
-            _log(f"check_object_selection 异常: {e}")
-
-        try:
-            update_node_references_check()
-        except Exception as e:
-            _log(f"update_node_references_check 异常: {e}")
-
-    return 0.05
-
-
-def update_node_references_check():
-    """定期检查并更新节点引用"""
-    global _object_id_to_name
+    changed_ids = set(object_ids)
 
     try:
-        current_objects = {}
-        for obj in bpy.data.objects:
-            obj_id = str(obj.as_pointer())
-            current_objects[obj_id] = obj.name
+        for tree in bpy.data.node_groups:
+            if tree.bl_idname != 'SSMTBlueprintTreeType':
+                continue
 
-        for obj_id, old_name in _object_id_to_name.items():
-            if obj_id in current_objects:
-                new_name = current_objects[obj_id]
-                if old_name != new_name:
-                    on_object_renamed_by_id(obj_id, old_name, new_name)
+            for node in tree.nodes:
+                if not _is_sync_node(node):
+                    continue
 
-        _object_id_to_name = current_objects
-    except (AttributeError, ReferenceError):
-        pass
+                objects = _resolve_node_objects(node)
+                if not objects:
+                    continue
+
+                obj_ids = [str(obj.as_pointer()) for obj in objects]
+                if not changed_ids.intersection(obj_ids):
+                    continue
+
+                any_hidden = any(_object_hide_state_cache.get(obj_id, False) for obj_id in obj_ids)
+                _set_node_visibility_state(node, any_hidden)
+    except Exception as exc:
+        print(f"[Sync] sync_object_visibility_for_object_ids 异常: {exc}")
+
+
+def _sync_all_node_reference_states():
+    updated_count = 0
+
+    try:
+        for tree in bpy.data.node_groups:
+            if tree.bl_idname != 'SSMTBlueprintTreeType':
+                continue
+
+            for node in tree.nodes:
+                if not _is_sync_node(node):
+                    continue
+
+                node_changed = False
+                for reference in _iter_node_object_references(node):
+                    object_id, object_name, _, exists = _resolve_reference_state(reference)
+                    if exists and _apply_reference_state(reference, object_id, object_name):
+                        updated_count += 1
+                        node_changed = True
+
+                if node_changed and node.bl_idname == 'SSMTNode_MultiFile_Export':
+                    node.update_node_width([item.object_name for item in getattr(node, 'object_list', [])])
+    except Exception as exc:
+        _log(f"_sync_all_node_reference_states 异常: {exc}")
+
+    return updated_count
+
+
+def _sync_all_node_visibility_states():
+    try:
+        for tree in bpy.data.node_groups:
+            if tree.bl_idname != 'SSMTBlueprintTreeType':
+                continue
+
+            for node in tree.nodes:
+                if not _is_sync_node(node):
+                    continue
+
+                objects = _resolve_node_objects(node)
+                if not objects:
+                    continue
+
+                any_hidden = any(
+                    _object_hide_state_cache.get(str(obj.as_pointer()), bool(obj.hide_viewport or obj.hide_get()))
+                    for obj in objects
+                )
+                _set_node_visibility_state(node, any_hidden)
+    except Exception as exc:
+        _log(f"_sync_all_node_visibility_states 异常: {exc}")
+
+
+def _run_periodic_reference_and_visibility_maintenance(has_active_blueprint_tree):
+    global _next_maintenance_run_at
+
+    now = time.monotonic()
+    interval = _MAINTENANCE_ACTIVE_INTERVAL if has_active_blueprint_tree else _MAINTENANCE_IDLE_INTERVAL
+    if now < _next_maintenance_run_at:
+        return
+
+    _next_maintenance_run_at = now + interval
+    _rebuild_object_name_cache()
+    _rebuild_object_hide_state_cache()
+    _sync_all_node_reference_states()
+    _sync_all_node_visibility_states()
 
 
 def on_object_renamed_by_id(object_id, old_name, new_name):
@@ -667,13 +850,17 @@ def on_object_renamed_by_id(object_id, old_name, new_name):
 
 
 def on_node_selection_changed():
-    """保留兼容入口，实际同步由定时器统一处理。"""
-    return
+    """节点选择变化时触发同步。"""
+    if not _sync_enabled:
+        return
+    check_node_selection()
 
 
 def on_object_selection_changed():
-    """保留兼容入口，实际同步由定时器统一处理。"""
-    return
+    """物体选择变化时触发同步。"""
+    if not _sync_enabled:
+        return
+    check_object_selection()
 
 
 def msgbus_callback_node_selection(*args):
@@ -688,74 +875,146 @@ def msgbus_callback_object_selection(*args):
 
 @persistent
 def depsgraph_update_handler(scene, depsgraph):
-    """depsgraph更新处理器，用于检测物体名称变化"""
-    global _object_id_to_name
+    """depsgraph更新处理器，用于检测物体名称和显示状态变化。"""
+    global _object_id_to_name, _object_hide_state_cache
 
     if not _sync_enabled:
         return
 
     try:
+        updated_object_ids = set()
+        previous_hide_state = {}
+
         for update in depsgraph.updates:
             obj = update.id
-            if isinstance(obj, bpy.types.Object):
-                obj_id = str(obj.as_pointer())
-                obj_name = obj.name
+            if not isinstance(obj, bpy.types.Object):
+                continue
 
-                if obj_id in _object_id_to_name:
-                    old_name = _object_id_to_name[obj_id]
-                    if old_name != obj_name:
-                        on_object_renamed_by_id(obj_id, old_name, obj_name)
+            obj_id = str(obj.as_pointer())
+            obj_name = obj.name
+            updated_object_ids.add(obj_id)
 
-                _object_id_to_name[obj_id] = obj_name
+            if obj_id in _object_id_to_name:
+                old_name = _object_id_to_name[obj_id]
+                if old_name != obj_name:
+                    on_object_renamed_by_id(obj_id, old_name, obj_name)
+
+            _object_id_to_name[obj_id] = obj_name
+
+            try:
+                previous_hide_state[obj_id] = _object_hide_state_cache.get(obj_id, False)
+                _object_hide_state_cache[obj_id] = bool(obj.hide_viewport or obj.hide_get())
+            except (AttributeError, ReferenceError):
+                pass
+
+        if updated_object_ids:
+            sync_object_visibility_for_object_ids(updated_object_ids, previous_hide_state)
     except (AttributeError, ReferenceError):
         pass
 
 
 @persistent
 def undo_post_handler(scene):
-    """撤销/重做后更新节点引用"""
-    global _object_id_to_name
+    """撤销/重做后重建缓存并修正节点引用。"""
 
     if not _sync_enabled:
         return
 
     try:
-        current_objects = {}
-        for obj in bpy.data.objects:
-            obj_id = str(obj.as_pointer())
-            current_objects[obj_id] = obj.name
+        old_name_cache = dict(_object_id_to_name)
+        _rebuild_object_name_cache()
+        _rebuild_object_hide_state_cache()
 
-            if obj_id in _object_id_to_name:
-                old_name = _object_id_to_name[obj_id]
-                if old_name != obj.name:
-                    on_object_renamed_by_id(obj_id, old_name, obj.name)
+        for obj_id, obj_name in _object_id_to_name.items():
+            old_name = old_name_cache.get(obj_id)
+            if old_name and old_name != obj_name:
+                on_object_renamed_by_id(obj_id, old_name, obj_name)
 
-        _object_id_to_name = current_objects
+        _sync_all_node_reference_states()
+        _sync_all_node_visibility_states()
     except (AttributeError, ReferenceError):
         pass
 
 
 @persistent
 def load_post_handler(scene):
-    """文件加载后重建物体名称缓存"""
-    global _object_id_to_name
-    _object_id_to_name = {}
-
-    try:
-        for obj in bpy.data.objects:
-            _object_id_to_name[str(obj.as_pointer())] = obj.name
-    except (AttributeError, ReferenceError):
-        pass
+    """文件加载后重建缓存并恢复消息订阅。"""
+    _rebuild_object_name_cache()
+    _rebuild_object_hide_state_cache()
+    subscribe_msgbus()
+    _sync_all_node_reference_states()
+    _sync_all_node_visibility_states()
 
 
 def subscribe_msgbus():
-    """保留接口，不再依赖 msgbus 触发同步。"""
-    return
+    """订阅选择变化，改为事件触发同步。"""
+    global _msgbus_subscribed
+
+    if _msgbus_subscribed:
+        return
+
+    subscriptions = (
+        ((bpy.types.LayerObjects, "selected"), msgbus_callback_object_selection),
+        ((bpy.types.LayerObjects, "active"), msgbus_callback_object_selection),
+        ((bpy.types.Node, "select"), msgbus_callback_node_selection),
+    )
+
+    for key, callback in subscriptions:
+        try:
+            bpy.msgbus.subscribe_rna(
+                key=key,
+                owner=_msgbus_owner,
+                args=(),
+                notify=callback,
+            )
+        except Exception as exc:
+            _log(f"订阅消息总线失败 {key}: {exc}")
+
+    _msgbus_subscribed = True
 
 
 def unsubscribe_msgbus():
     """取消订阅msgbus消息"""
+    global _msgbus_subscribed
+
     bpy.msgbus.clear_by_owner(_msgbus_owner)
+    _msgbus_subscribed = False
+
+
+def selection_sync_timer_callback():
+    """兼容性回退：低频检查选择联动，仅在蓝图编辑器存在时工作。"""
+    has_active_blueprint_tree = False
+
+    if not _sync_enabled:
+        return _SELECTION_SYNC_IDLE_INTERVAL
+
+    try:
+        context = bpy.context
+    except (AttributeError, ReferenceError):
+        context = None
+
+    tree = None
+    if context is not None:
+        tree, _, _ = get_active_blueprint_tree(context)
+        has_active_blueprint_tree = tree is not None
+
+    if tree is not None:
+        try:
+            check_node_selection()
+        except Exception as exc:
+            _log(f"check_node_selection 异常: {exc}")
+
+        try:
+            check_object_selection()
+        except Exception as exc:
+            _log(f"check_object_selection 异常: {exc}")
+
+    try:
+        _run_periodic_reference_and_visibility_maintenance(has_active_blueprint_tree)
+    except Exception as exc:
+        _log(f"_run_periodic_reference_and_visibility_maintenance 异常: {exc}")
+
+    return _SELECTION_SYNC_ACTIVE_INTERVAL if has_active_blueprint_tree else _SELECTION_SYNC_IDLE_INTERVAL
 
 
 class SSMT_OT_ToggleSync(bpy.types.Operator):
@@ -921,7 +1180,8 @@ class SSMT_OT_SyncDebugStatus(bpy.types.Operator):
         lines.append(f"同步开关: {'开启' if _sync_enabled else '关闭'}")
         lines.append(f"正在同步中: {_is_syncing}")
         lines.append(f"调试模式: {'开启' if _SYNC_DEBUG else '关闭'}")
-        lines.append(f"定时器运行: {_timer_handle is not None and bpy.app.timers.is_registered(_timer_handle) if _timer_handle else False}")
+        lines.append(f"消息总线订阅: {_msgbus_subscribed}")
+        lines.append(f"兼容定时器运行: {_timer_handle is not None and bpy.app.timers.is_registered(_timer_handle) if _timer_handle else False}")
         lines.append(f"当前物体快照: {_last_object_snapshot}")
         lines.append(f"当前节点快照: {_last_node_snapshot}")
         lines.append(f"待忽略物体快照: {_pending_object_snapshot}")
@@ -984,32 +1244,37 @@ _is_node_header_hooked = False
 
 
 def _init_object_cache():
-    """初始化物体名称缓存"""
-    global _object_id_to_name
-    _object_id_to_name = {}
-    try:
-        for obj in bpy.data.objects:
-            _object_id_to_name[str(obj.as_pointer())] = obj.name
-    except (AttributeError, ReferenceError):
-        pass
+    """初始化同步所需缓存。"""
+    _rebuild_object_name_cache()
+    _rebuild_object_hide_state_cache()
 
 
 def register():
-    global _timer_handle, _is_view3d_menu_hooked, _is_node_header_hooked
+    global _timer_handle, _next_maintenance_run_at, _is_view3d_menu_hooked, _is_node_header_hooked
 
     for cls in classes:
         bpy.utils.register_class(cls)
 
     subscribe_msgbus()
 
-    _timer_handle = bpy.app.timers.register(timer_callback, persistent=True)
+    if depsgraph_update_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_handler)
+    if load_post_handler not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(load_post_handler)
+    if undo_post_handler not in bpy.app.handlers.undo_post:
+        bpy.app.handlers.undo_post.append(undo_post_handler)
+    if undo_post_handler not in bpy.app.handlers.redo_post:
+        bpy.app.handlers.redo_post.append(undo_post_handler)
 
-    bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_handler)
-    bpy.app.handlers.load_post.append(load_post_handler)
-    bpy.app.handlers.undo_post.append(undo_post_handler)
-    bpy.app.handlers.redo_post.append(undo_post_handler)
+    if not _timer_handle or not bpy.app.timers.is_registered(_timer_handle):
+        _timer_handle = bpy.app.timers.register(
+            selection_sync_timer_callback,
+            first_interval=_SELECTION_SYNC_ACTIVE_INTERVAL,
+            persistent=True,
+        )
 
-    bpy.app.timers.register(_init_object_cache, first_interval=0.1)
+    _next_maintenance_run_at = 0.0
+    _init_object_cache()
 
     if not _is_view3d_menu_hooked:
         bpy.types.VIEW3D_MT_object_context_menu.append(draw_view3d_sync_menu)
@@ -1021,7 +1286,7 @@ def register():
 
 
 def unregister():
-    global _timer_handle, _is_view3d_menu_hooked, _is_node_header_hooked
+    global _timer_handle, _next_maintenance_run_at, _is_view3d_menu_hooked, _is_node_header_hooked
 
     if _is_node_header_hooked:
         bpy.types.NODE_HT_header.remove(draw_node_header)
@@ -1045,6 +1310,8 @@ def unregister():
 
     if _timer_handle and bpy.app.timers.is_registered(_timer_handle):
         bpy.app.timers.unregister(_timer_handle)
+    _timer_handle = None
+    _next_maintenance_run_at = 0.0
 
     unsubscribe_msgbus()
 

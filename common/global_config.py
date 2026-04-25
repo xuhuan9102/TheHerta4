@@ -14,34 +14,88 @@ class GlobalConfig:
     ssmtlocation = ""
     current_game_migoto_folder = ""
     logic_name = ""
+    _main_settings_cache = {}
+    _game_settings_cache = {}
+    _main_json_mtime = None
+    _game_config_json_mtime = None
+    _game_config_json_path = ""
+
+    @classmethod
+    def _safe_getmtime(cls, file_path: str):
+        try:
+            return os.path.getmtime(file_path)
+        except OSError:
+            return None
+
+    @classmethod
+    def _read_json_file(cls, file_path: str):
+        with open(file_path, encoding="utf-8") as json_file:
+            return json.load(json_file)
+
+    @classmethod
+    def _clear_main_settings(cls):
+        cls._main_settings_cache = {}
+        cls._main_json_mtime = None
+        cls.workspacename = ""
+        cls.gamename = ""
+        cls.ssmtlocation = ""
+
+    @classmethod
+    def _clear_game_settings(cls, game_config_json_path: str = ""):
+        cls._game_settings_cache = {}
+        cls._game_config_json_mtime = None
+        cls._game_config_json_path = game_config_json_path
+        cls.current_game_migoto_folder = ""
+        cls.logic_name = ""
 
     @classmethod
     def read_from_main_json_ssmt4(cls) :
         try:
-            main_json_path = GlobalConfig.path_main_json_ssmt4()
-            # 先从main_json_path里读取ssmt位置，也就是ssmt总工作空间的位置
-            # 在新架构中，总工作空间位置已不会再发生改变，所以用户只需要选择一次就可以了
-            if os.path.exists(main_json_path):
-                main_setting_file = open(main_json_path)
-                main_setting_json = json.load(main_setting_file)
-                main_setting_file.close()
-                cls.workspacename = main_setting_json.get("CurrentWorkSpace","")
-                cls.gamename = main_setting_json.get("CurrentGameName","")
-                cls.ssmtlocation = (
+            main_json_path = cls.path_main_json_ssmt4()
+            main_json_mtime = cls._safe_getmtime(main_json_path)
+
+            if main_json_mtime is None:
+                cls._clear_main_settings()
+                cls._clear_game_settings()
+                return
+
+            if cls._main_json_mtime != main_json_mtime:
+                main_setting_json = cls._read_json_file(main_json_path)
+                cls._main_settings_cache = main_setting_json
+                cls._main_json_mtime = main_json_mtime
+                cls.workspacename = main_setting_json.get("CurrentWorkSpace", "")
+                cls.gamename = main_setting_json.get("CurrentGameName", "")
+
+                base_folder = (
                     main_setting_json.get("SSMTWorkFolder")
                     or main_setting_json.get("DBMTWorkFolder", "")
-                ) + "\\" # 理论上应该绞杀所有旧时代孑遗, 然考虑到兼容性, 不得不保留 fallback.
-            else:
-                print("Can't find: " + main_json_path)
-            
-            game_config_json_path = os.path.join(GlobalConfig.path_ssmt4_global_configs_folder(),"Games\\" + cls.gamename + "\\Config.json")
-            if os.path.exists(game_config_json_path):
-                game_config_json_file = open(game_config_json_path)
-                game_config_json = json.load(game_config_json_file)
-                game_config_json_file.close()
+                )
+                cls.ssmtlocation = base_folder + "\\" if base_folder else ""
 
-                cls.current_game_migoto_folder = game_config_json.get("installDir","")
-                cls.logic_name = game_config_json.get("gamePreset","")
+            game_config_json_path = os.path.join(
+                cls.path_ssmt4_global_configs_folder(),
+                "Games\\" + cls.gamename + "\\Config.json",
+            )
+
+            if not cls.gamename:
+                cls._clear_game_settings(game_config_json_path)
+                return
+
+            game_config_json_mtime = cls._safe_getmtime(game_config_json_path)
+            if game_config_json_mtime is None:
+                cls._clear_game_settings(game_config_json_path)
+                return
+
+            if (
+                cls._game_config_json_path != game_config_json_path
+                or cls._game_config_json_mtime != game_config_json_mtime
+            ):
+                game_config_json = cls._read_json_file(game_config_json_path)
+                cls._game_settings_cache = game_config_json
+                cls._game_config_json_path = game_config_json_path
+                cls._game_config_json_mtime = game_config_json_mtime
+                cls.current_game_migoto_folder = game_config_json.get("installDir", "")
+                cls.logic_name = game_config_json.get("gamePreset", "")
         except Exception as e:
             print(e)
             
@@ -64,18 +118,9 @@ class GlobalConfig:
     
     @classmethod
     def path_reverse_output_folder(cls):
-        # 先从main_json_path里读取ssmt位置，也就是ssmt总工作空间的位置
-        # 在新架构中，总工作空间位置已不会再发生改变，所以用户只需要选择一次就可以了
-        if os.path.exists(cls.path_main_json_ssmt4()):
-            main_setting_file = open(cls.path_main_json_ssmt4())
-            main_setting_json = json.load(main_setting_file)
-            main_setting_file.close()
-            reverse_output_folder = main_setting_json.get("ReverseOutputFolder","") + "\\"
-            
-            print(reverse_output_folder)
-            return reverse_output_folder
-        else:
-            return ""
+        cls.read_from_main_json_ssmt4()
+        reverse_output_folder = cls._main_settings_cache.get("ReverseOutputFolder", "")
+        return reverse_output_folder + "\\" if reverse_output_folder else ""
 
     @classmethod
     def path_mods_folder(cls):

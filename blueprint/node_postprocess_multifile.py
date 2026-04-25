@@ -264,18 +264,15 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
     def _read_ini_to_ordered_dict(self, ini_file_path):
         sections = OrderedDict()
         current_section = None
-        slider_panel_content = ""
-        slider_marker = "; --- AUTO-APPENDED SLIDER CONTROL PANEL ---"
+        preserved_tail_content = ""
 
         try:
             with open(ini_file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            if slider_marker in content:
-                marker_pos = content.find(slider_marker)
-                slider_panel_content = content[marker_pos:]
-                content = content[:marker_pos]
-                print("[MultiFile] 检测到滑块面板内容，将保留")
+            content, preserved_tail_content = self.split_auto_appended_tail_content(content)
+            if preserved_tail_content:
+                print("[MultiFile] 检测到自动追加尾块，将保留")
 
             for line in content.splitlines():
                 stripped_line = line.strip()
@@ -286,9 +283,9 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
                     sections[current_section].append(line)
         except FileNotFoundError:
             return None, ""
-        return sections, slider_panel_content
+        return sections, preserved_tail_content
 
-    def _write_ordered_dict_to_ini(self, sections, ini_file_path, slider_panel_content=""):
+    def _write_ordered_dict_to_ini(self, sections, ini_file_path, preserved_tail_content=""):
         with open(ini_file_path, 'w', encoding='utf-8') as f:
             for section_name, lines in sections.items():
                 f.write(f"{section_name}\n")
@@ -296,9 +293,9 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
                     f.write(f"{line}\n")
                 f.write("\n")
 
-            if slider_panel_content:
+            if preserved_tail_content:
                 f.write("\n")
-                f.write(slider_panel_content)
+                f.write(preserved_tail_content)
 
     def execute_postprocess(self, mod_export_path):
         print(f"多文件配置后处理节点开始执行，Mod导出路径: {mod_export_path}")
@@ -325,7 +322,7 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
             for ini_file in ini_files:
                 ini_file_path = os.path.join(mod_export_path, ini_file)
                 self._create_cumulative_backup(ini_file_path, mod_export_path)
-                sections, slider_panel_content = self._read_ini_to_ordered_dict(ini_file_path)
+                sections, preserved_tail_content = self._read_ini_to_ordered_dict(ini_file_path)
                 if not sections:
                     continue
 
@@ -568,7 +565,7 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
 
                 sections[present_section] = present_lines
 
-                self._write_ordered_dict_to_ini(sections, ini_file, slider_panel_content)
+                self._write_ordered_dict_to_ini(sections, ini_file, preserved_tail_content)
 
             os.chdir(original_cwd)
             print("多文件配置生成完成！")

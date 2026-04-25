@@ -50,7 +50,7 @@ class PanelBasicInformation(bpy.types.Panel):
         
         GlobalConfig.read_from_main_json_ssmt4()
 
-        layout.label(text="TheHerta4 v4.1.9", icon='INFO')
+        layout.label(text="TheHerta4 v4.2.0", icon='INFO')
         
         layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.ssmtlocation)
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)

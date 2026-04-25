@@ -32,6 +32,7 @@ class SSMTNode_Blueprint_Nest(SSMTNodeBase):
         'SSMTNode_PostProcess_Material': '材质转资源',
         'SSMTNode_PostProcess_HealthDetection': '血量检测',
         'SSMTNode_PostProcess_SliderPanel': '滑块面板',
+        'SSMTNode_PostProcess_WebPanel': '网页面板',
         'SSMTNode_PostProcess_ResourceMerge': '资源合并',
         'SSMTNode_PostProcess_BufferCleanup': '缓冲区清理',
         'SSMTNode_PostProcess_MultiFile': '多文件配置',
