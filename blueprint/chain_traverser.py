@@ -405,12 +405,16 @@ class ChainTraverser:
         if not next_nodes:
             return
 
+        if output_connections is None:
+            output_connections = []
+
+        socket_index_map = self._build_socket_index_map(next_nodes, output_connections)
+
         if len(next_nodes) == 1:
             next_node = next_nodes[0]
-            if output_connections:
-                socket_index = next((si for n, si in output_connections if n == next_node), 0)
-                if next_node.bl_idname == _NODE_TYPE_OBJECT_SWAP:
-                    chain.swap_node_option_values[next_node.name] = socket_index
+            socket_index = socket_index_map.get(id(next_node), 0)
+            if next_node.bl_idname == _NODE_TYPE_OBJECT_SWAP:
+                chain.swap_node_option_values[next_node.name] = socket_index
             self._traverse_forward(chain, next_node, visited_nodes, completed_chains, current_group_name)
             return
 
@@ -422,11 +426,30 @@ class ChainTraverser:
             branch_chain = branch_chains[i]
             if i > 0:
                 self._duplicate_chain_object(branch_chain, i)
-            if output_connections:
-                socket_index = next((si for n, si in output_connections if n == next_node), 0)
-                if next_node.bl_idname == _NODE_TYPE_OBJECT_SWAP:
-                    branch_chain.swap_node_option_values[next_node.name] = socket_index
+            socket_index = socket_index_map.get(id(next_node), 0)
+            if next_node.bl_idname == _NODE_TYPE_OBJECT_SWAP:
+                branch_chain.swap_node_option_values[next_node.name] = socket_index
             self._traverse_forward(branch_chain, next_node, visited_nodes, completed_chains, current_group_name)
+
+    @staticmethod
+    def _build_socket_index_map(next_nodes: list, output_connections: list) -> Dict[int, int]:
+        socket_index_map: Dict[int, int] = {}
+        used_connection_indices: Set[int] = set()
+
+        for next_node in next_nodes:
+            node_id = id(next_node)
+            if node_id in socket_index_map:
+                continue
+
+            for conn_idx, (n, si) in enumerate(output_connections):
+                if conn_idx in used_connection_indices:
+                    continue
+                if n == next_node:
+                    socket_index_map[node_id] = si
+                    used_connection_indices.add(conn_idx)
+                    break
+
+        return socket_index_map
 
     def _duplicate_chain_object(self, chain: ProcessingChain, branch_index: int):
         obj_name = chain.object_name

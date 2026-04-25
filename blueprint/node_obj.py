@@ -1,5 +1,6 @@
 import bpy
 import os
+import time
 from bpy.types import NodeTree, Node, NodeSocket
 
 from ..common.logic_name import LogicName
@@ -13,6 +14,7 @@ BLENDER_VERSION = bpy.app.version[:2]
 _picking_node_name = None
 _picking_tree_name = None
 _is_viewing_group_objects = False
+_PICK_OBJECT_TIMEOUT_SECONDS = 30.0
 
 
 
@@ -132,6 +134,54 @@ class SSMT_OT_PickObjectModal(bpy.types.Operator):
     bl_idname = "ssmt.pick_object_modal"
     bl_label = "Pick Object"
     bl_options = {'REGISTER', 'INTERNAL'}
+
+    def _finish_picking(self, context, status, clear_globals=True):
+        global _picking_node_name, _picking_tree_name
+
+        timer = getattr(self, "_timer", None)
+        if timer is not None:
+            context.window_manager.event_timer_remove(timer)
+            self._timer = None
+
+        if clear_globals:
+            _picking_node_name = None
+            _picking_tree_name = None
+
+        return status
+
+    def _get_current_selected_object(self, context):
+        active_obj = getattr(context.view_layer.objects, "active", None)
+        if active_obj and active_obj in context.selected_objects:
+            return active_obj
+
+        if context.selected_objects:
+            return context.selected_objects[0]
+
+        return None
+
+    def _try_apply_selected_object(self, context):
+        global _picking_node_name, _picking_tree_name
+
+        current_obj = self._get_current_selected_object(context)
+        if current_obj is None:
+            return None
+
+        if current_obj == self._last_selected_obj and current_obj in self._initial_selected_objs:
+            return None
+
+        tree = bpy.data.node_groups.get(_picking_tree_name)
+        if tree is None:
+            self.report({'WARNING'}, "节点树已失效，已取消吸管选择")
+            return self._finish_picking(context, {'CANCELLED'})
+
+        node = tree.nodes.get(_picking_node_name)
+        if node is None:
+            self.report({'WARNING'}, "目标节点已不存在，已取消吸管选择")
+            return self._finish_picking(context, {'CANCELLED'})
+
+        node.object_name = current_obj.name
+        self.report({'INFO'}, f"已选择物体: {current_obj.name}")
+        return self._finish_picking(context, {'FINISHED'})
     
     def invoke(self, context, event):
         global _picking_node_name
@@ -140,46 +190,44 @@ class SSMT_OT_PickObjectModal(bpy.types.Operator):
             return {'CANCELLED'}
         
         self._initial_selected_objs = set(context.selected_objects)
-        if context.selected_objects:
-            self._last_selected_obj = context.selected_objects[0]
-        else:
-            self._last_selected_obj = None
+        self._last_selected_obj = self._get_current_selected_object(context)
+        self._started_at = time.monotonic()
+        self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
         
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
     
     def modal(self, context, event):
         global _picking_node_name, _picking_tree_name
-        
-        if event.type == 'ESC':
-            _picking_node_name = None
-            _picking_tree_name = None
-            return {'CANCELLED'}
-        
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            for area in context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
-                    if region and area.x <= event.mouse_x <= area.x + area.width and area.y <= event.mouse_y <= area.y + area.height:
-                        return {'PASS_THROUGH'}
-        
-        if event.type == 'MOUSEMOVE':
-            current_selected = context.selected_objects
-            if current_selected:
-                current_obj = current_selected[0]
-                if current_obj != self._last_selected_obj and current_obj not in self._initial_selected_objs:
-                    tree = bpy.data.node_groups.get(_picking_tree_name)
-                    if tree:
-                        node = tree.nodes.get(_picking_node_name)
-                        if node:
-                            node.object_name = current_obj.name
-                            self.report({'INFO'}, f"已选择物体: {current_obj.name}")
-                    
-                    _picking_node_name = None
-                    _picking_tree_name = None
-                    return {'FINISHED'}
 
-                return {'PASS_THROUGH'}
+        if not _picking_node_name or not _picking_tree_name:
+            return self._finish_picking(context, {'CANCELLED'}, clear_globals=False)
+
+        if time.monotonic() - self._started_at > _PICK_OBJECT_TIMEOUT_SECONDS:
+            self.report({'WARNING'}, "吸管选择超时，已自动取消")
+            return self._finish_picking(context, {'CANCELLED'})
+        
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            return self._finish_picking(context, {'CANCELLED'})
+
+        if event.type == 'TIMER':
+            result = self._try_apply_selected_object(context)
+            if result is not None:
+                return result
+            return {'RUNNING_MODAL'}
+
+        if event.type in {
+            'LEFTMOUSE',
+            'MIDDLEMOUSE',
+            'MOUSEMOVE',
+            'WHEELUPMOUSE',
+            'WHEELDOWNMOUSE',
+            'TRACKPADPAN',
+            'TRACKPADZOOM',
+        }:
+            return {'PASS_THROUGH'}
+
+        return {'RUNNING_MODAL'}
 
 
 class SSMT_OT_SelectGenerateModFolder(bpy.types.Operator):

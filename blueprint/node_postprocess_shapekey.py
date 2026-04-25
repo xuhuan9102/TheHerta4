@@ -959,7 +959,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
             for name, param in shapekey_freq_params.items():
                 if param not in constants_content:
                     constants_lines.append(f"; 控制形态键 '{name}' 的强度")
-                    constants_lines.append(f"global {param} = 0.0")
+                    constants_lines.append(f"global persist {param} = 0.0")
 
             constants_lines.append("\n; --- Auto-generated Vertex Ranges for Shape Keys ---")
             existing_vertex_range_names = set()

@@ -190,6 +190,20 @@ class ProcessingChain:
                 params.append(f"ib={draw_ib_match}")
             return f"DataType[{','.join(params)}]" if params else "DataType[]"
 
+        elif node_type == 'ObjectSwap':
+            params = []
+            custom_var_name = getattr(node, 'custom_var_name', '')
+            if custom_var_name:
+                params.append(f"var={custom_var_name}")
+            swap_type = getattr(node, 'swap_type', '')
+            if swap_type:
+                params.append(f"type={swap_type}")
+            input_slot_count = getattr(node, 'input_slot_count', 0)
+            params.append(f"slots={input_slot_count}")
+            condition_operator = getattr(node, 'condition_operator', '&&')
+            params.append(f"op={condition_operator}")
+            return f"ObjectSwap[{','.join(params)}]"
+
         else:
             return f"{node_type}[]"
 
@@ -202,6 +216,13 @@ class ProcessingChain:
             signature_parts.append(f"[{i}]{sig}")
 
         path_with_params = "|".join(signature_parts)
+
+        if self.swap_node_option_values:
+            swap_parts = []
+            for swap_name in sorted(self.swap_node_option_values.keys()):
+                swap_parts.append(f"{swap_name}={self.swap_node_option_values[swap_name]}")
+            path_with_params += "|SWAP:" + ",".join(swap_parts)
+
         return f"CHAIN:{path_with_params}"
 
     def get_simple_hash(self) -> str:

@@ -16,6 +16,9 @@ class M_IniHelperGUI:
         :param src_dir: 源目录路径
         :param dst_dir: 目标目录路径
         """
+        if not os.path.isdir(src_dir):
+            raise FileNotFoundError(f"分支GUI资源目录不存在: {src_dir}")
+
         # 确保目标目录存在
         os.makedirs(dst_dir, exist_ok=True)
 
@@ -29,6 +32,23 @@ class M_IniHelperGUI:
                 if not os.path.exists(dst_file):
                     shutil.copy2(src_file, dst_file)  # 使用 copy2 保留元数据
                 print(f"复制文件: {src_file} -> {dst_file}")
+
+    @classmethod
+    def get_branch_gui_resource_dir(cls):
+        addon_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidate_dirs = [
+            os.path.join(addon_root, "resources"),
+            os.path.join(addon_root, "res"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "res"),
+        ]
+
+        for candidate_dir in candidate_dirs:
+            if os.path.isfile(os.path.join(candidate_dir, "draw_2d.hlsl")):
+                return candidate_dir
+
+        raise FileNotFoundError(
+            "未找到分支GUI资源目录，已检查: " + ", ".join(candidate_dirs)
+        )
                 
     @classmethod
     def add_branch_mod_gui_section(cls,ini_builder:M_IniBuilder,key_name_mkey_dict:dict[str,M_Key]):
@@ -48,17 +68,11 @@ class M_IniHelperGUI:
             return
         else:
             # 在这里把所有的res下面的东西，复制到当前生成的Mod文件夹的res目录下
-            res_path = os.path.join(GlobalConfig.path_generate_mod_folder(),"res\\")
+            res_path = os.path.join(GlobalConfig.path_generate_mod_folder(), "res")
             if not os.path.exists(res_path):
                 os.makedirs(res_path)
 
-            script_path = os.path.abspath(__file__)
-
-            # 获取当前插件的工作目录
-            plugin_directory = os.path.dirname(script_path)
-
-            # 构建保存文件的路径
-            res_source_path = os.path.join(plugin_directory, 'res\\')
+            res_source_path = cls.get_branch_gui_resource_dir()
 
             cls.copy_files(res_source_path,res_path)
 
