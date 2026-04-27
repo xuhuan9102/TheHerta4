@@ -200,15 +200,23 @@ class SubMeshModel:
             print(f"[SubMeshModel] 数据复用统计: 无复用, 全部 {total} 个对象独立处理")
         print(f"[SubMeshModel] 合并输入统计: 直接复用前处理副本 {direct_source_reuse_count} 个, 额外复制临时物体 {duplicated_temp_count} 个")
 
-        if submesh_temp_obj_list:
-            bpy.ops.object.select_all(action='DESELECT')
-            target_active = submesh_temp_obj_list[0]
-            target_active.select_set(True)
-            bpy.context.view_layer.objects.active = target_active
-
         join_start = perf_counter()
-        ObjUtils.join_objects(bpy.context, submesh_temp_obj_list)
+        if submesh_temp_obj_list:
+            valid_temp_obj_list = []
+            for temp_obj in submesh_temp_obj_list:
+                try:
+                    if temp_obj is not None and temp_obj.name in bpy.data.objects:
+                        valid_temp_obj_list.append(temp_obj)
+                except ReferenceError:
+                    continue
+            if valid_temp_obj_list:
+                ObjUtils.join_objects_fast(valid_temp_obj_list[0], valid_temp_obj_list[1:])
+            submesh_temp_obj_list = valid_temp_obj_list
         join_duration += perf_counter() - join_start
+
+        if not submesh_temp_obj_list:
+            from ..utils.ssmt_error_utils import SSMTErrorUtils
+            SSMTErrorUtils.raise_fatal(f"SubMesh {self.unique_str} 没有有效的对象可供合并导出")
 
         submesh_merged_obj = submesh_temp_obj_list[0]
         merged_obj_uses_preprocessed_copy = submesh_merged_obj.name.endswith('_copy')

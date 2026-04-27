@@ -1,7 +1,3 @@
-"""
-物体切换节点的处理链集成 - 处理蓝图模型中节点的解析和 INI 生成
-"""
-
 import bpy
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -9,6 +5,12 @@ from dataclasses import dataclass
 from ..utils.log_utils import LOG
 from ..common.m_key import M_Key
 from .node_swap import SSMTNode_ObjectSwap, SwapKeyConfig
+from .export_helper import BlueprintExportHelper
+
+
+def _get_node_unique_key(node: bpy.types.Node) -> str:
+    tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
+    return f"{tree_name}::{node.name}"
 
 
 @dataclass
@@ -20,12 +22,12 @@ class SwapKeyRegistry:
     
     Attributes:
         next_index: 下一个待分配的索引
-        node_swapkey_map: 节点 name -> swapkey 索引的映射字典
+        node_swapkey_map: 节点唯一键(tree::name) -> swapkey 索引的映射字典
         swapkey_nodes: 按序号排列的节点列表
     """
     
     next_index: int = 0  # 下一个待分配的索引
-    node_swapkey_map: Dict[str, int] = None  # 节点 name -> swapkey 索引的映射
+    node_swapkey_map: Dict[str, int] = None  # 节点唯一键(tree::name) -> swapkey 索引
     swapkey_nodes: List[bpy.types.Node] = None  # 按序号排列的节点列表
     
     def __post_init__(self):
@@ -36,22 +38,12 @@ class SwapKeyRegistry:
             self.swapkey_nodes = []
     
     def register_node(self, node: bpy.types.Node) -> int:
-        """为节点分配一个 swapkey 索引
-        
-        如果节点已经注册过，则返回之前分配的索引。
-        否则分配新索引并记录映射关系。
-        
-        Args:
-            node: 物体切换节点实例
-            
-        Returns:
-            int: 分配的索引（从0开始递增）
-        """
-        if node.name in self.node_swapkey_map:
-            return self.node_swapkey_map[node.name]
+        node_key = _get_node_unique_key(node)
+        if node_key in self.node_swapkey_map:
+            return self.node_swapkey_map[node_key]
         
         index = self.next_index
-        self.node_swapkey_map[node.name] = index
+        self.node_swapkey_map[node_key] = index
         self.swapkey_nodes.append(node)
         self.next_index += 1
         
@@ -137,7 +129,7 @@ class ObjectSwapChainProcessor:
                 custom_var_name = getattr(node, 'custom_var_name', '')
                 
                 # 从 swap_node_option_values 获取选项值
-                option_value = swap_node_option_values.get(node.name, 0)
+                option_value = swap_node_option_values.get(_get_node_unique_key(node), 0)
                 
                 config = SwapKeyConfig(
                     index=swap_index,
@@ -329,25 +321,28 @@ class DebugOutputGenerator:
 # ============= 集成到蓝图模型的接口函数 =============
 
 def _collect_stable_swap_nodes(blueprint_model) -> List[bpy.types.Node]:
-    """按稳定顺序收集唯一的物体切换节点。
-
-    导出 INI 时物体切换节点按名称排序分配索引；这里必须保持同一策略，
-    否则处理链条件里引用的 $swapkeyN 会和导出段落中的变量编号错位。
-    """
-
     unique_nodes: Dict[str, bpy.types.Node] = {}
 
     tree = getattr(blueprint_model, '_tree', None)
     if tree is not None:
+        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, 'SSMTNode_Result_Output')
         for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_ObjectSwap':
-                unique_nodes.setdefault(node.name, node)
+            if node.bl_idname == 'SSMTNode_ObjectSwap' and not node.mute:
+                if output_node and BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    unique_nodes.setdefault(_get_node_unique_key(node), node)
+
+    for nested_tree in getattr(blueprint_model, 'nested_blueprint_trees', []):
+        nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, 'SSMTNode_Result_Output')
+        for node in nested_tree.nodes:
+            if node.bl_idname == 'SSMTNode_ObjectSwap' and not node.mute:
+                if nested_output and BlueprintExportHelper._is_node_connected_to_output(nested_tree, node):
+                    unique_nodes.setdefault(_get_node_unique_key(node), node)
 
     for chain in blueprint_model.processing_chains:
         for _, node in ObjectSwapChainProcessor.collect_swap_nodes_from_chain(chain.node_path):
-            unique_nodes.setdefault(node.name, node)
+            unique_nodes.setdefault(_get_node_unique_key(node), node)
 
-    return [unique_nodes[name] for name in sorted(unique_nodes)]
+    return [unique_nodes[key] for key in sorted(unique_nodes)]
 
 def integrate_object_swap_to_blueprint_model(blueprint_model):
     """将物体切换节点集成到蓝图模型中

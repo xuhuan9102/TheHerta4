@@ -32,6 +32,11 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
     INTENSITY_START_INDEX = 100
     VERTEX_RANGE_START_INDEX = 200
 
+    @staticmethod
+    def clear_cache():
+        global _name_mapping_cache
+        _name_mapping_cache.clear()
+
     use_packed_Meshess: bpy.props.BoolProperty(
         name="使用紧凑缓冲区",
         description="仅存储变化的顶点数据，大幅减小体积。需要 'numpy' 库。",

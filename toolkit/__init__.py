@@ -16,7 +16,7 @@ from .ui_panel_toolkit import (
     BMTP_ModifierToolsPanel,
     TT_MainPanel,
     TT_DDSConversionPanel,
-    TT_NormalMapPanel,
+    TT_ChannelCompositePanel,
     TT_ColorBakePanel,
     TT_AlphaExtractPanel,
     TT_MaterialToolsPanel,
@@ -88,7 +88,7 @@ __all__ = [
     'BMTP_ModifierToolsPanel',
     'TT_MainPanel',
     'TT_DDSConversionPanel',
-    'TT_NormalMapPanel',
+    'TT_ChannelCompositePanel',
     'TT_ColorBakePanel',
     'TT_AlphaExtractPanel',
     'TT_MaterialToolsPanel',
@@ -396,7 +396,7 @@ def register():
     bpy.utils.register_class(BMTP_ModifierToolsPanel)
     bpy.utils.register_class(TT_MainPanel)
     bpy.utils.register_class(TT_DDSConversionPanel)
-    bpy.utils.register_class(TT_NormalMapPanel)
+    bpy.utils.register_class(TT_ChannelCompositePanel)
     bpy.utils.register_class(TT_ColorBakePanel)
     bpy.utils.register_class(TT_AlphaExtractPanel)
     bpy.utils.register_class(TT_MaterialToolsPanel)
@@ -433,7 +433,7 @@ def unregister():
     bpy.utils.unregister_class(TT_MaterialToolsPanel)
     bpy.utils.unregister_class(TT_AlphaExtractPanel)
     bpy.utils.unregister_class(TT_ColorBakePanel)
-    bpy.utils.unregister_class(TT_NormalMapPanel)
+    bpy.utils.unregister_class(TT_ChannelCompositePanel)
     bpy.utils.unregister_class(TT_DDSConversionPanel)
     bpy.utils.unregister_class(TT_MainPanel)
     bpy.utils.unregister_class(BMTP_ModifierToolsPanel)

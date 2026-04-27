@@ -78,11 +78,12 @@ class ExportUtils:
 
         mesh = ObjUtils.get_mesh_evaluate_from_obj(obj=resolved_obj)
         if len(mesh.polygons) > 0:
+            uv_map_name = "TEXCOORD.xy" if "TEXCOORD.xy" in mesh.uv_layers else None
             try:
-                mesh.calc_tangents()
+                mesh.calc_tangents(uvmap=uv_map_name)
             except RuntimeError:
                 ObjUtils.mesh_triangulate(mesh)
-                mesh.calc_tangents()
+                mesh.calc_tangents(uvmap=uv_map_name)
 
         original_elementname_data_dict = ObjBufferHelper.parse_elementname_data_dict(
             mesh=mesh,
@@ -281,7 +282,8 @@ class ExportUtils:
                 shapekey.value = 1.0
 
                 mesh_eval = ObjUtils.get_mesh_evaluate_from_obj(obj=obj)
-                mesh_eval.calc_tangents()
+                uv_map_name = "TEXCOORD.xy" if "TEXCOORD.xy" in mesh_eval.uv_layers else None
+                mesh_eval.calc_tangents(uvmap=uv_map_name)
 
                 shape_key_buffer_dict[shapekey_name] = ExportUtils.build_shape_key_buffer_result(
                     name=shapekey_name,

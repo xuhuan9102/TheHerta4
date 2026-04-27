@@ -14,6 +14,13 @@ class TT_OT_generate_lightmap_template(bpy.types.Operator):
             self.report({'ERROR'}, "请选择至少一个网格物体")
             return {'CANCELLED'}
         
+        active_obj = context.active_object
+        if not active_obj or active_obj.type != 'MESH':
+            self.report({'ERROR'}, "请确保活动物体是网格物体")
+            return {'CANCELLED'}
+        
+        mat_prefix = active_obj.name
+        
         generate_lightmap = props.lightmap_generate_lightmap
         generate_materialmap = props.lightmap_generate_materialmap
         
@@ -22,29 +29,28 @@ class TT_OT_generate_lightmap_template(bpy.types.Operator):
             return {'CANCELLED'}
         
         mode = props.lightmap_mode
-        processed_count = 0
         
-        for obj in selected_objects:
-            if mode == 'REPLACE':
-                obj.data.materials.clear()
-            
-            if generate_lightmap:
-                lightmap_mat = self._create_lightmap_material(obj.name)
+        if generate_lightmap:
+            lightmap_mat = self._create_lightmap_material(mat_prefix)
+            for obj in selected_objects:
+                if mode == 'REPLACE':
+                    obj.data.materials.clear()
                 obj.data.materials.append(lightmap_mat)
-            
-            if generate_materialmap:
-                materialmap_mat = self._create_materialmap_material(obj.name)
+        
+        if generate_materialmap:
+            materialmap_mat = self._create_materialmap_material(mat_prefix)
+            for obj in selected_objects:
+                if mode == 'REPLACE':
+                    obj.data.materials.clear()
                 obj.data.materials.append(materialmap_mat)
-            
-            processed_count += 1
         
         generated_types = []
         if generate_lightmap:
-            generated_types.append("LightMap")
+            generated_types.append(f"LightMap_{mat_prefix}")
         if generate_materialmap:
-            generated_types.append("MaterialMap")
+            generated_types.append(f"MaterialMap_{mat_prefix}")
         
-        self.report({'INFO'}, f"已为 {processed_count} 个物体生成 {' + '.join(generated_types)} 模板")
+        self.report({'INFO'}, f"已为 {len(selected_objects)} 个物体生成共用材质: {', '.join(generated_types)}")
         return {'FINISHED'}
     
     def _create_lightmap_material(self, obj_name):

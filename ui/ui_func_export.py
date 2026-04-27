@@ -452,8 +452,12 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
     def _collect_object_names_from_tree(self, tree) -> list:
         object_names = []
 
+        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, 'SSMTNode_Result_Output')
+
         for node in tree.nodes:
             if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
+                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    continue
                 obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
                 if obj_name:
                     object_names.append(obj_name)
@@ -461,6 +465,8 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         nested_count = 0
         for node in tree.nodes:
             if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
+                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    continue
                 nested_names = self._collect_nested_object_names(node)
                 object_names.extend(nested_names)
                 nested_count += len(nested_names)
@@ -478,9 +484,13 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         if not nested_tree:
             return []
 
+        nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, 'SSMTNode_Result_Output')
+
         object_names = []
         for node in nested_tree.nodes:
             if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
+                if nested_output and not BlueprintExportHelper._is_node_connected_to_output(nested_tree, node):
+                    continue
                 obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
                 if obj_name:
                     object_names.append(obj_name)
@@ -489,8 +499,11 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
 
     def _collect_nested_trees(self, tree) -> list:
         nested_trees = []
+        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, 'SSMTNode_Result_Output')
         for node in tree.nodes:
             if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
+                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    continue
                 blueprint_name = getattr(node, 'blueprint_name', '')
                 if blueprint_name and blueprint_name != 'NONE':
                     nested_tree = bpy.data.node_groups.get(blueprint_name)

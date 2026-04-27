@@ -16,6 +16,7 @@ from .export_helper import ExportHelper
 from ...utils.timer_utils import TimerUtils
 
 import os
+import re
 import shutil
 
 @dataclass
@@ -503,7 +504,14 @@ class ExportEFMI:
                         if texture_markup_info.mark_name in ["DiffuseMap", "LightMap", "NormalMap"]:
                             pass
                         else:
-                            texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+                            slot = texture_markup_info.mark_slot
+                            if slot and not slot.lower().startswith("ps-t"):
+                                num_match = re.search(r'\d+', slot)
+                                if num_match:
+                                    slot = "ps-t" + num_match.group()
+                                else:
+                                    slot = "ps-t" + slot
+                            texture_override_ib_section.append(slot + " = " + texture_markup_info.get_resource_name())
                 else:
                     for texture_markup_info in texture_markup_info_list:
                         if getattr(texture_markup_info, "mark_type", "") != "Slot":
@@ -765,7 +773,9 @@ class ExportEFMI:
             if not blueprint_tree:
                 return
 
-            SwapKeyINIIntegrator.integrate_to_export(ini_builder, blueprint_tree)
+            registry = getattr(self.blueprint_model, '_swap_key_registry', None)
+
+            SwapKeyINIIntegrator.integrate_to_export(ini_builder, blueprint_tree, registry=registry)
 
         except ImportError:
             pass

@@ -6,7 +6,7 @@ from ..utils.log_utils import LOG
 from ..common.m_key import M_Key
 from ..common.object_prefix_helper import ObjectPrefixHelper
 from .export_helper import BlueprintExportHelper
-from .model import ProcessingChain
+from .model import ProcessingChain, _get_node_unique_key
 
 _NODE_TYPE_OBJECT_INFO = 'SSMTNode_Object_Info'
 _NODE_TYPE_OBJECT_GROUP = 'SSMTNode_Object_Group'
@@ -59,30 +59,38 @@ class ChainTraverser:
         self._duplicate_counter: Dict[str, int] = {}
 
     def traverse_all_chains(self, tree: bpy.types.NodeTree, output_node: bpy.types.Node) -> List[ProcessingChain]:
-        object_info_nodes = BlueprintExportHelper.get_nodes_from_bl_idname(tree, _NODE_TYPE_OBJECT_INFO)
+        object_info_nodes = []
+
+        for node in BlueprintExportHelper.get_nodes_from_bl_idname(tree, _NODE_TYPE_OBJECT_INFO):
+            if not node.mute and BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                object_info_nodes.append(node)
 
         nest_object_info_nodes = self._collect_nested_object_info_nodes()
         object_info_nodes.extend(nest_object_info_nodes)
 
         multi_file_export_nodes = BlueprintExportHelper.get_nodes_from_bl_idname(tree, _NODE_TYPE_MULTI_FILE_EXPORT)
         for node in multi_file_export_nodes:
-            if not node.mute:
+            if not node.mute and BlueprintExportHelper._is_node_connected_to_output(tree, node):
                 object_info_nodes.append(node)
 
         nested_counts = {}
+        nested_mf_count = 0
         for n_oi in nest_object_info_nodes:
             n_tree = n_oi.id_data
             tree_name = n_tree.name
             if tree_name not in nested_counts:
                 nested_counts[tree_name] = 0
             nested_counts[tree_name] += 1
+            if n_oi.bl_idname == _NODE_TYPE_MULTI_FILE_EXPORT:
+                nested_mf_count += 1
 
         nested_info = ", ".join([f"{name}({count}个)" for name, count in nested_counts.items()])
-        multi_file_count = len(multi_file_export_nodes)
+        multi_file_count = len(multi_file_export_nodes) + nested_mf_count
+        main_oi_count = len(object_info_nodes) - len(nest_object_info_nodes) - len(multi_file_export_nodes)
         if nested_info:
-            LOG.info(f"🔄 正向解析: 主蓝图 {tree.name}({len(object_info_nodes) - len(nest_object_info_nodes) - multi_file_count}个Object_Info, {multi_file_count}个MultiFile_Export), 嵌套蓝图 {nested_info}")
+            LOG.info(f"🔄 正向解析: 主蓝图 {tree.name}({main_oi_count}个Object_Info, {len(multi_file_export_nodes)}个MultiFile_Export), 嵌套蓝图 {nested_info}")
         else:
-            LOG.info(f"🔄 正向解析: 主蓝图 {tree.name}({len(object_info_nodes) - len(nest_object_info_nodes) - multi_file_count}个Object_Info, {multi_file_count}个MultiFile_Export)")
+            LOG.info(f"🔄 正向解析: 主蓝图 {tree.name}({main_oi_count}个Object_Info, {len(multi_file_export_nodes)}个MultiFile_Export)")
 
         visited_chains: Set[str] = set()
         all_chains: List[ProcessingChain] = []
@@ -229,16 +237,23 @@ class ChainTraverser:
             LOG.info(f"   📋 物体 '{obj_name}' 被 {len(shared_chains)} 条链路引用，已复制 {len(shared_chains) - 1} 份独立副本")
 
     def _collect_nested_object_info_nodes(self) -> List[bpy.types.Node]:
-        nested_obj_info_nodes = []
+        nested_start_nodes = []
 
         for nested_tree in self._model.nested_blueprint_trees:
+            nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, _NODE_TYPE_RESULT_OUTPUT)
             for node in nested_tree.nodes:
-                if node.bl_idname == _NODE_TYPE_OBJECT_INFO and not node.mute:
+                if node.mute:
+                    continue
+                if nested_output and not BlueprintExportHelper._is_node_connected_to_output(nested_tree, node):
+                    continue
+                if node.bl_idname == _NODE_TYPE_OBJECT_INFO:
                     obj_name = getattr(node, 'object_name', '')
                     if obj_name:
-                        nested_obj_info_nodes.append(node)
+                        nested_start_nodes.append(node)
+                elif node.bl_idname == _NODE_TYPE_MULTI_FILE_EXPORT:
+                    nested_start_nodes.append(node)
 
-        return nested_obj_info_nodes
+        return nested_start_nodes
 
     def _traverse_forward(
         self,
@@ -414,7 +429,7 @@ class ChainTraverser:
             next_node = next_nodes[0]
             socket_index = socket_index_map.get(id(next_node), 0)
             if next_node.bl_idname == _NODE_TYPE_OBJECT_SWAP:
-                chain.swap_node_option_values[next_node.name] = socket_index
+                chain.swap_node_option_values[_get_node_unique_key(next_node)] = socket_index
             self._traverse_forward(chain, next_node, visited_nodes, completed_chains, current_group_name)
             return
 
@@ -428,7 +443,7 @@ class ChainTraverser:
                 self._duplicate_chain_object(branch_chain, i)
             socket_index = socket_index_map.get(id(next_node), 0)
             if next_node.bl_idname == _NODE_TYPE_OBJECT_SWAP:
-                branch_chain.swap_node_option_values[next_node.name] = socket_index
+                branch_chain.swap_node_option_values[_get_node_unique_key(next_node)] = socket_index
             self._traverse_forward(branch_chain, next_node, visited_nodes, completed_chains, current_group_name)
 
     @staticmethod

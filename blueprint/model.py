@@ -46,6 +46,11 @@ _KNOWN_NODE_TYPES = {
 }
 
 
+def _get_node_unique_key(node: bpy.types.Node) -> str:
+    tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
+    return f"{tree_name}::{node.name}"
+
+
 def _is_postprocess_node(bl_idname: str) -> bool:
     return bl_idname.startswith('SSMTNode_PostProcess_')
 
@@ -192,6 +197,9 @@ class ProcessingChain:
 
         elif node_type == 'ObjectSwap':
             params = []
+            tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
+            if tree_name:
+                params.append(f"tree={tree_name}")
             custom_var_name = getattr(node, 'custom_var_name', '')
             if custom_var_name:
                 params.append(f"var={custom_var_name}")
@@ -401,6 +409,7 @@ class BluePrintModel:
 
         self._collect_postprocess_nodes(output_node)
         self._collect_special_nodes(tree)
+        self._collect_nested_postprocess_nodes()
 
         if self.FORWARD_PARSE_MODE:
             self._forward_parse_blueprint(tree, output_node)
@@ -420,26 +429,62 @@ class BluePrintModel:
             for pp_node in self.postprocess_nodes:
                 LOG.debug(f"      - {pp_node.bl_idname}: {pp_node.name}")
 
-    def _traverse_postprocess_chain(self, node: bpy.types.Node, visited: Optional[Set[str]] = None):
+    def _collect_nested_postprocess_nodes(self):
+        if not self.nested_blueprint_trees:
+            return
+
+        existing_pp_keys = {_get_node_unique_key(n) for n in self.postprocess_nodes}
+        nested_pp_count = 0
+
+        for nested_tree in self.nested_blueprint_trees:
+            nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, _NODE_TYPE_RESULT_OUTPUT)
+            if not nested_output:
+                continue
+
+            for output_socket in nested_output.outputs:
+                if output_socket.bl_idname == 'SSMTSocketPostProcess' and output_socket.is_linked:
+                    for link in output_socket.links:
+                        self._traverse_postprocess_chain(link.to_node, existing_keys=existing_pp_keys)
+
+            if not any(_get_node_unique_key(n) in existing_pp_keys for n in nested_tree.nodes if _is_postprocess_node(n.bl_idname)):
+                for input_socket in nested_output.inputs:
+                    if not input_socket.is_linked:
+                        continue
+                    for link in input_socket.links:
+                        source = link.from_node
+                        if _is_postprocess_node(source.bl_idname):
+                            self._traverse_postprocess_chain(source, existing_keys=existing_pp_keys)
+
+            nested_in_tree = sum(1 for n in self.postprocess_nodes if _get_node_unique_key(n) not in existing_pp_keys)
+            existing_pp_keys.update(_get_node_unique_key(n) for n in self.postprocess_nodes)
+            nested_pp_count += nested_in_tree
+
+        if nested_pp_count > 0:
+            LOG.info(f"   🔧 从嵌套蓝图收集到 {nested_pp_count} 个后处理节点")
+
+    def _traverse_postprocess_chain(self, node: bpy.types.Node, visited: Optional[Set[str]] = None, existing_keys: Optional[Set[str]] = None):
         if visited is None:
             visited = set()
 
-        node_key = f"{node.bl_idname}:{node.name}"
+        node_key = _get_node_unique_key(node)
         if node_key in visited:
             return
         visited.add(node_key)
 
         if _is_postprocess_node(node.bl_idname):
             if not node.mute:
-                self.postprocess_nodes.append(node)
-                LOG.debug(f"   🔧 发现后处理节点: {node.bl_idname} ({node.name})")
+                if existing_keys is None or node_key not in existing_keys:
+                    self.postprocess_nodes.append(node)
+                    if existing_keys is not None:
+                        existing_keys.add(node_key)
+                    LOG.debug(f"   🔧 发现后处理节点: {node.bl_idname} ({node.name})")
             else:
                 LOG.debug(f"   ⏭️ 跳过禁用的后处理节点: {node.bl_idname} ({node.name})")
 
         for output_socket in node.outputs:
             if output_socket.is_linked:
                 for link in output_socket.links:
-                    self._traverse_postprocess_chain(link.to_node, visited)
+                    self._traverse_postprocess_chain(link.to_node, visited, existing_keys)
 
     def _collect_special_nodes(self, tree: bpy.types.NodeTree):
         self.vertex_group_process_nodes = []
@@ -447,24 +492,31 @@ class BluePrintModel:
         self.nested_blueprint_trees = []
         self.cross_ib_nodes = []
 
+        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, _NODE_TYPE_RESULT_OUTPUT)
+
         for node in tree.nodes:
             if node.mute:
                 continue
 
             if node.bl_idname == _NODE_TYPE_VERTEX_GROUP_PROCESS:
-                self.vertex_group_process_nodes.append(node)
-                LOG.debug(f"   🔧 发现顶点组处理节点: {node.name}")
+                if output_node and BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    self.vertex_group_process_nodes.append(node)
+                    LOG.debug(f"   🔧 发现顶点组处理节点: {node.name}")
 
             elif node.bl_idname == _NODE_TYPE_MULTI_FILE_EXPORT:
-                self.multi_file_export_nodes.append(node)
-                LOG.debug(f"   🔧 发现多文件导出节点: {node.name}")
+                if output_node and BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    self.multi_file_export_nodes.append(node)
+                    LOG.debug(f"   🔧 发现多文件导出节点: {node.name}")
 
             elif node.bl_idname == _NODE_TYPE_BLUEPRINT_NEST:
                 self._resolve_nested_blueprint_collect(node)
 
             elif node.bl_idname == _NODE_TYPE_CROSS_IB:
-                self.cross_ib_nodes.append(node)
-                LOG.debug(f"   🔧 发现跨IB节点: {node.name}")
+                if output_node and BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    self.cross_ib_nodes.append(node)
+                    LOG.debug(f"   🔧 发现跨IB节点: {node.name}")
+
+        self._collect_special_nodes_from_nested_trees()
 
         if self.vertex_group_process_nodes:
             LOG.info(f"   🔧 收集到 {len(self.vertex_group_process_nodes)} 个顶点组处理节点")
@@ -474,6 +526,41 @@ class BluePrintModel:
             LOG.info(f"   🔧 收集到 {len(self.nested_blueprint_trees)} 个嵌套蓝图")
         if self.cross_ib_nodes:
             LOG.info(f"   🔧 收集到 {len(self.cross_ib_nodes)} 个跨IB节点")
+
+    def _collect_special_nodes_from_nested_trees(self):
+        existing_vg_keys = {_get_node_unique_key(n) for n in self.vertex_group_process_nodes}
+        existing_mf_keys = {_get_node_unique_key(n) for n in self.multi_file_export_nodes}
+        existing_cross_keys = {_get_node_unique_key(n) for n in self.cross_ib_nodes}
+
+        for nested_tree in self.nested_blueprint_trees:
+            nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, _NODE_TYPE_RESULT_OUTPUT)
+
+            for node in nested_tree.nodes:
+                if node.mute:
+                    continue
+
+                if nested_output and not BlueprintExportHelper._is_node_connected_to_output(nested_tree, node):
+                    continue
+
+                node_key = _get_node_unique_key(node)
+
+                if node.bl_idname == _NODE_TYPE_VERTEX_GROUP_PROCESS:
+                    if node_key not in existing_vg_keys:
+                        self.vertex_group_process_nodes.append(node)
+                        existing_vg_keys.add(node_key)
+                        LOG.debug(f"   🔧 发现嵌套蓝图顶点组处理节点: {node.name} (蓝图: {nested_tree.name})")
+
+                elif node.bl_idname == _NODE_TYPE_MULTI_FILE_EXPORT:
+                    if node_key not in existing_mf_keys:
+                        self.multi_file_export_nodes.append(node)
+                        existing_mf_keys.add(node_key)
+                        LOG.debug(f"   🔧 发现嵌套蓝图多文件导出节点: {node.name} (蓝图: {nested_tree.name})")
+
+                elif node.bl_idname == _NODE_TYPE_CROSS_IB:
+                    if node_key not in existing_cross_keys:
+                        self.cross_ib_nodes.append(node)
+                        existing_cross_keys.add(node_key)
+                        LOG.debug(f"   🔧 发现嵌套蓝图跨IB节点: {node.name} (蓝图: {nested_tree.name})")
 
     def _resolve_nested_blueprint_collect(self, nest_node: bpy.types.Node, visited: Optional[Set[str]] = None):
         if visited is None:
@@ -756,15 +843,16 @@ class BluePrintModel:
             LOG.warning(f"⚠️ 物体切换节点集成遇到错误: {e}")
 
     def _integrate_vertex_group_nodes(self):
-        if not self.vertex_group_process_nodes:
-            return
-
         try:
             from .node_vertex_group_process import SSMTNode_VertexGroupProcess
 
             valid_chains = [c for c in self.processing_chains if c.is_valid and c.reached_output]
             if not valid_chains:
                 LOG.warning("   ⚠️ 没有有效的处理链，跳过顶点组处理")
+                return
+
+            has_vg_in_chains = any(c.vertex_group_process_nodes or c.vertex_group_mapping_nodes for c in valid_chains)
+            if not self.vertex_group_process_nodes and not has_vg_in_chains:
                 return
 
             SSMTNode_VertexGroupProcess.execute_batch_from_chains(valid_chains)
@@ -1056,6 +1144,25 @@ class BluePrintModel:
     def execute_postprocess_nodes(self, mod_export_path: str):
         if not self.postprocess_nodes:
             return
+
+        for pp_node in self.postprocess_nodes:
+            node_class = type(pp_node)
+            clear_cache = getattr(node_class, 'clear_cache', None)
+            if clear_cache and callable(clear_cache):
+                try:
+                    clear_cache()
+                except Exception:
+                    pass
+
+        name_mapping = dict(BluePrintModel._object_name_mapping)
+        if name_mapping:
+            LOG.info(f"📋 传递名称映射到后处理节点: {len(name_mapping)} 条规则")
+            for pp_node in self.postprocess_nodes:
+                if hasattr(pp_node, 'apply_name_mapping'):
+                    try:
+                        pp_node.apply_name_mapping(name_mapping)
+                    except Exception as e:
+                        LOG.warning(f"   ⚠️ 后处理节点 '{pp_node.name}' 应用名称映射失败: {e}")
 
         LOG.info(f"🔧 后处理节点开始执行: {len(self.postprocess_nodes)} 个节点")
 

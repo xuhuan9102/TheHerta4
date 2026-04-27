@@ -14,6 +14,7 @@ DDS_DEFAULT_RULES = [
     {"pattern": r"(?i)(ao|ambient|occlusion)", "format": "bc7_unorm", "enabled": True},
 ]
 
+
 def find_texconv():
     props = bpy.context.scene.texture_tools_props
     
@@ -33,83 +34,112 @@ def find_texconv():
 
 class TT_OT_convert_to_dds(bpy.types.Operator):
     bl_idname = "toolkit.tt_convert_to_dds"
-    bl_label = "转换为DDS"
-    bl_description = "将选中的贴图转换为DDS格式"
+    bl_label = "批量转换为 .dds"
+    bl_description = "使用texconv.exe将输出目录的图片转换为指定DDS格式，并更新项目引用"
     bl_options = {'REGISTER', 'UNDO'}
     
-    def execute(self, context):
-        texconv_path = find_texconv()
-        if not texconv_path:
-            self.report({'ERROR'}, "未找到 texconv.exe，请将其放置到 Toolset 文件夹或手动指定路径")
-            return {'CANCELLED'}
-        
-        props = context.scene.texture_tools_props
-        output_dir = props.output_dir if props.output_dir else "//"
-        
-        converted_count = 0
-        
-        for img in bpy.data.images:
-            if not img.filepath:
-                continue
-            
-            source_path = bpy.path.abspath(img.filepath)
-            if not os.path.exists(source_path):
-                continue
-            
-            dds_format = self._get_dds_format(img.name, props)
-            
-            output_folder = bpy.path.abspath(output_dir) if output_dir != "//" else os.path.dirname(source_path)
-            
-            try:
-                cmd = [
-                    texconv_path,
-                    "-f", dds_format,
-                    "-o", output_folder,
-                    "-y",
-                    source_path
-                ]
-                
-                result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-                
-                if result.returncode == 0:
-                    dds_path = os.path.join(output_folder, os.path.splitext(os.path.basename(source_path))[0] + ".dds")
-                    
-                    if props.dds_delete_originals:
-                        try:
-                            os.remove(source_path)
-                        except:
-                            pass
-                    
-                    converted_count += 1
-                else:
-                    print(f"DDS转换失败: {img.name} - {result.stderr}")
-            
-            except Exception as e:
-                print(f"DDS转换异常: {img.name} - {str(e)}")
-        
-        self.report({'INFO'}, f"已转换 {converted_count} 个贴图为DDS格式")
-        return {'FINISHED'}
-    
-    def _get_dds_format(self, image_name, props):
+    def _get_dds_format(self, filename, props):
         import re
         
         if props.dds_use_custom_rules:
             for rule in props.dds_rules:
-                if rule.enabled:
-                    try:
-                        if re.search(rule.pattern, image_name):
-                            return rule.format
-                    except:
-                        continue
+                if not rule.enabled:
+                    continue
+                try:
+                    if re.search(rule.pattern, filename):
+                        return rule.format
+                except:
+                    continue
         
         for rule in DDS_DEFAULT_RULES:
             try:
-                if re.search(rule["pattern"], image_name):
+                if re.search(rule["pattern"], filename):
                     return rule["format"]
             except:
                 continue
         
         return "bc7_unorm"
+    
+    def execute(self, context):
+        props = context.scene.texture_tools_props
+        if not props.output_dir:
+            self.report({'ERROR'}, "请先设置输出目录")
+            return {'CANCELLED'}
+        
+        output_dir_abs = os.path.normpath(bpy.path.abspath(props.output_dir))
+        if not os.path.isdir(output_dir_abs):
+            self.report({'ERROR'}, f"输出目录不存在: {output_dir_abs}")
+            return {'CANCELLED'}
+        
+        texconv_executable = find_texconv()
+        if not texconv_executable:
+            self.report({'ERROR'}, "未找到 texconv.exe。请将其放入插件目录的 'Toolset' 子文件夹，或手动指定路径。")
+            return {'CANCELLED'}
+        
+        supported_extensions = {'.png', '.jpg', '.jpeg', '.tga', '.bmp'}
+        conversion_map = {}
+        converted_files_count = 0
+        
+        for root, _, files in os.walk(output_dir_abs):
+            for filename in files:
+                name_no_ext, ext = os.path.splitext(filename)
+                if ext.lower() not in supported_extensions:
+                    continue
+                
+                old_path = os.path.normpath(os.path.join(root, filename))
+                
+                if not old_path.startswith(output_dir_abs):
+                    self.report({'WARNING'}, f"跳过输出目录外的文件: {filename}")
+                    continue
+                
+                if os.path.normpath(old_path).startswith(os.path.normpath(bpy.path.abspath("//"))):
+                    blend_dir = os.path.normpath(bpy.path.abspath("//"))
+                    if old_path.startswith(blend_dir) and not old_path.startswith(output_dir_abs):
+                        self.report({'WARNING'}, f"跳过工程目录内的源文件: {filename}")
+                        continue
+                
+                new_path = os.path.normpath(os.path.join(root, f"{name_no_ext}.dds"))
+                
+                dds_format = self._get_dds_format(filename, props)
+                
+                command = [texconv_executable, "-f", dds_format, "-o", root, "-y", old_path]
+                if "_srgb" in dds_format:
+                    command.append("-srgb")
+                
+                try:
+                    process = subprocess.run(command, capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore')
+                    if process.returncode == 0:
+                        conversion_map[old_path] = new_path
+                        converted_files_count += 1
+                        if props.dds_delete_originals:
+                            try:
+                                os.remove(old_path)
+                            except:
+                                pass
+                    else:
+                        self.report({'WARNING'}, f"转换文件 {filename} 失败: {process.stderr}")
+                except Exception as e:
+                    self.report({'WARNING'}, f"处理文件 {filename} 时出错: {e}")
+                    continue
+        
+        if converted_files_count == 0:
+            self.report({'INFO'}, "在输出目录中未找到支持的图片文件进行转换。")
+            return {'CANCELLED'}
+        
+        updated_images_count = 0
+        for image in bpy.data.images:
+            if image.source == 'FILE' and image.filepath:
+                try:
+                    abs_filepath = os.path.normpath(bpy.path.abspath(image.filepath_raw))
+                    if abs_filepath in conversion_map:
+                        image.filepath = conversion_map[abs_filepath]
+                        image.reload()
+                        updated_images_count += 1
+                except Exception as e:
+                    self.report({'WARNING'}, f"更新图片 '{image.name}' 的路径时出错: {e}")
+        
+        self.report({'INFO'}, f"成功将 {converted_files_count} 个图片文件转换为 .dds 格式。更新了 {updated_images_count} 个图片引用。")
+        return {'FINISHED'}
 
 
 class TT_OT_add_dds_rule(bpy.types.Operator):

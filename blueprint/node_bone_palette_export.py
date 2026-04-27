@@ -896,15 +896,17 @@ class SSMTNode_BonePalette_Export(SSMTNodeBase):
     @staticmethod
     def execute_batch_from_chains(valid_chains: list) -> dict:
         ordered_nodes = []
-        seen_node_names = set()
+        seen_node_keys = set()
         for chain in valid_chains:
             for node in chain.node_path:
                 if node.bl_idname != 'SSMTNode_BonePalette_Export':
                     continue
-                if node.name in seen_node_names:
+                tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
+                node_key = f"{tree_name}::{node.name}"
+                if node_key in seen_node_keys:
                     continue
                 ordered_nodes.append(node)
-                seen_node_names.add(node.name)
+                seen_node_keys.add(node_key)
 
         if not ordered_nodes:
             return {"processed_count": 0, "node_count": 0}

@@ -351,11 +351,15 @@ class SSMTNode_Object_Info(SSMTNodeBase):
         if self.object_name:
             obj = bpy.data.objects.get(self.object_name)
             if obj:
-                op = row.operator("ssmt.select_node_object", text="", icon='RESTRICT_SELECT_OFF')
-                op.object_name = self.object_name
-                
-                if not self.object_id:
-                    self.object_id = str(obj.as_pointer())
+                if obj.type != 'MESH':
+                    row.label(text="", icon='ERROR')
+                    layout.label(text="错误: 仅支持网格物体", icon='ERROR')
+                else:
+                    op = row.operator("ssmt.select_node_object", text="", icon='RESTRICT_SELECT_OFF')
+                    op.object_name = self.object_name
+                    
+                    if not self.object_id:
+                        self.object_id = str(obj.as_pointer())
             else:
                 row.label(text="", icon='ERROR')
 

@@ -653,40 +653,76 @@ class TT_DDSConversionPanel(bpy.types.Panel):
             row.operator("toolkit.tt_load_dds_rules", text="加载规则", icon='FILE_FOLDER')
 
 
-class TT_NormalMapPanel(bpy.types.Panel):
-    bl_label = "法线贴图生成"
-    bl_idname = "VIEW3D_PT_Herta_TT_NormalMap_Panel"
+class TT_ChannelCompositePanel(bpy.types.Panel):
+    bl_label = "通道合成器"
+    bl_idname = 'VIEW3D_PT_Herta_TT_ChannelComposite_Panel'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'TheHerta4'
     bl_parent_id = 'VIEW3D_PT_Herta_TT_Main_Panel'
-    bl_options = {'DEFAULT_CLOSED'}
     bl_order = 1
     
     def draw(self, context):
         layout = self.layout
         props = context.scene.texture_tools_props
         
-        from .tt_dependency_check import is_dependency_installed
+        preset_box = layout.box()
+        preset_box.label(text="预设模板", icon='PRESET')
         
-        if not is_dependency_installed('scipy'):
-            layout.box().label(text="请先安装依赖项 Scipy", icon='ERROR')
-            return
+        col = preset_box.column(align=True)
+        col.operator("toolkit.tt_channel_composite_add_preset", text="标准法线贴图").preset_index = 0
+        col.operator("toolkit.tt_channel_composite_add_preset", text="ORM贴图").preset_index = 1
+        col.operator("toolkit.tt_channel_composite_add_preset", text="粗糙度贴图").preset_index = 2
+        col.operator("toolkit.tt_channel_composite_add_preset", text="通道分离").preset_index = 3
         
-        box = layout.box()
-        box.label(text="生成参数", icon='SETTINGS')
-        box.prop(props, "normal_map_strength")
-        box.prop(props, "normal_map_blur_radius")
-        box.prop(props, "normal_map_blue_channel_value")
-        box.prop(props, "normal_map_invert")
+        rules_box = layout.box()
+        rules_box.label(text="合成规则列表", icon='SETTINGS')
         
-        box = layout.box()
-        box.label(text="材质选项", icon='MATERIAL')
-        box.prop(props, "normal_map_create_materials")
-        box.prop(props, "normal_map_material_prefix")
+        if len(props.composite_rules) == 0:
+            rules_box.label(text="暂无规则，请点击上方预设添加", icon='INFO')
+        else:
+            for i, rule in enumerate(props.composite_rules):
+                rule_box = rules_box.box()
+                
+                header_row = rule_box.row(align=True)
+                header_row.prop(rule, "enabled", text="")
+                header_row.label(text=rule.rule_name or f"规则 {i+1}")
+                
+                remove_op = header_row.operator("toolkit.tt_channel_composite_remove_rule", text="", icon='X', emboss=False)
+                remove_op.index = i
+                
+                rule_box.prop(rule, "output_name_prefix", text="输出前缀")
+                
+                rule_box.separator(factor=0.3)
+                
+                for ch_idx in range(min(4, len(rule.output_channels))):
+                    ch = rule.output_channels[ch_idx]
+                    
+                    ch_row = rule_box.row(align=True)
+                    ch_row.label(text=f"{['R','G','B','A'][ch_idx]}:")
+                    ch_row.prop(ch, "source_type", text="")
+                    
+                    if ch.source_type == 'IMAGE_CHANNEL':
+                        ch_row.prop(ch, "source_image_name", text="图像")
+                        ch_row.prop(ch, "source_channel", text="")
+                    elif ch.source_type == 'CONSTANT':
+                        ch_row.prop(ch, "constant_value", text="", slider=True)
+                    elif ch.source_type == 'GENERATED_NORMAL':
+                        ch_row.prop(rule, "normal_strength", slider=True, text="强度")
+                        ch_row.prop(rule, "normal_blur_radius", slider=True, text="模糊")
+                    
+                    ch_row.prop(ch, "invert", toggle=True, text="反转")
+                
+                while len(rule.output_channels) < 4:
+                    rule.output_channels.add()
         
         layout.separator()
-        layout.operator("toolkit.tt_generate_normal_maps", icon='EXPORT')
+        
+        options_box = layout.box()
+        options_box.prop(props, "normal_map_create_materials", text="创建材质")
+        
+        layout.separator()
+        layout.operator("toolkit.tt_execute_channel_composite", text="执行通道合成")
 
 
 class TT_ColorBakePanel(bpy.types.Panel):
@@ -697,7 +733,7 @@ class TT_ColorBakePanel(bpy.types.Panel):
     bl_category = 'TheHerta4'
     bl_parent_id = 'VIEW3D_PT_Herta_TT_Main_Panel'
     bl_options = {'DEFAULT_CLOSED'}
-    bl_order = 2
+    bl_order = 3
     
     def draw(self, context):
         layout = self.layout

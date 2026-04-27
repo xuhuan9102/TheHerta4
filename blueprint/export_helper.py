@@ -4,6 +4,12 @@ from bpy.types import NodeTree, Node, NodeSocket
 from ..common.global_config import GlobalConfig
 from ..common.m_key import M_Key
 
+
+def _get_node_unique_key(node) -> str:
+    tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
+    return f"{tree_name}::{node.name}"
+
+
 class BlueprintExportHelper:
 
     current_export_index = 1
@@ -180,29 +186,35 @@ class BlueprintExportHelper:
                     shapekey_output_node = node
                     break
 
-            if not shapekey_output_node:
-                return
+            if shapekey_output_node:
+                shapekey_nodes = BlueprintExportHelper.get_connected_nodes(shapekey_output_node)
 
-            shapekey_nodes = BlueprintExportHelper.get_connected_nodes(shapekey_output_node)
+                for shapekey_node in shapekey_nodes:
+                    if shapekey_node.mute:
+                        continue
+                    if shapekey_node.bl_idname != 'SSMTNode_ShapeKey':
+                        continue
 
-            for shapekey_node in shapekey_nodes:
-                if shapekey_node.mute:
-                    continue
-                if shapekey_node.bl_idname != 'SSMTNode_ShapeKey':
-                    continue
+                    shapekey_name = shapekey_node.shapekey_name
+                    key = shapekey_node.key
+                    comment = getattr(shapekey_node, 'comment', '')
 
-                shapekey_name = shapekey_node.shapekey_name
-                key = shapekey_node.key
-                comment = getattr(shapekey_node, 'comment', '')
+                    m_key = M_Key()
+                    m_key.key_name = "$shapekey" + str(key_index)
+                    m_key.initialize_value = 0
+                    m_key.initialize_vk_str = key
+                    m_key.comment = comment
 
-                m_key = M_Key()
-                m_key.key_name = "$shapekey" + str(key_index)
-                m_key.initialize_value = 0
-                m_key.initialize_vk_str = key
-                m_key.comment = comment
+                    shapekey_name_mkey_dict[shapekey_name] = m_key
+                    key_index += 1
 
-                shapekey_name_mkey_dict[shapekey_name] = m_key
-                key_index += 1
+            for node in current_tree.nodes:
+                if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
+                    bp_name = getattr(node, 'blueprint_name', '')
+                    if bp_name and bp_name != 'NONE':
+                        nested_tree = bpy.data.node_groups.get(bp_name)
+                        if nested_tree and getattr(nested_tree, 'bl_idname', '') == 'SSMTBlueprintTreeType':
+                            collect_shapekey_nodes(nested_tree)
 
 
 
@@ -233,6 +245,14 @@ class BlueprintExportHelper:
                 nodes = BlueprintExportHelper._find_datatype_nodes_connected_to_output(output_node)
                 datatype_nodes.extend(nodes)
 
+            for node in current_tree.nodes:
+                if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
+                    bp_name = getattr(node, 'blueprint_name', '')
+                    if bp_name and bp_name != 'NONE':
+                        nested_tree = bpy.data.node_groups.get(bp_name)
+                        if nested_tree and getattr(nested_tree, 'bl_idname', '') == 'SSMTBlueprintTreeType':
+                            collect_datatype_nodes(nested_tree)
+
 
         collect_datatype_nodes(tree)
 
@@ -255,13 +275,14 @@ class BlueprintExportHelper:
         if visited is None:
             visited = set()
 
-        if node.name in visited:
+        node_key = _get_node_unique_key(node)
+        if node_key in visited:
             return []
 
         if node.mute:
             return []
 
-        visited.add(node.name)
+        visited.add(node_key)
         datatype_nodes = []
 
         if node.bl_idname == 'SSMTNode_DataType':
@@ -278,15 +299,45 @@ class BlueprintExportHelper:
         if not tree:
             return []
 
-        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, 'SSMTNode_Result_Output')
-
         ordered_chain = []
         visited = set()
+        visited_trees = set()
+
+        def collect_from_tree(current_tree):
+            if current_tree.name in visited_trees:
+                return
+            visited_trees.add(current_tree.name)
+
+            output_node = BlueprintExportHelper.get_node_from_bl_idname(current_tree, 'SSMTNode_Result_Output')
+            if output_node:
+                follow_forward(output_node)
+
+                found_in_tree = any(
+                    n.bl_idname.startswith('SSMTNode_PostProcess_') and n.id_data.name == current_tree.name
+                    for n in ordered_chain
+                )
+                if not found_in_tree:
+                    for input_socket in output_node.inputs:
+                        if not input_socket.is_linked:
+                            continue
+                        for link in input_socket.links:
+                            source = link.from_node
+                            if source.bl_idname.startswith('SSMTNode_PostProcess_'):
+                                follow_backward(source)
+
+            for node in current_tree.nodes:
+                if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
+                    bp_name = getattr(node, 'blueprint_name', '')
+                    if bp_name and bp_name != 'NONE':
+                        nested_tree = bpy.data.node_groups.get(bp_name)
+                        if nested_tree and getattr(nested_tree, 'bl_idname', '') == 'SSMTBlueprintTreeType':
+                            collect_from_tree(nested_tree)
 
         def follow_forward(node):
-            if node.name in visited:
+            node_key = _get_node_unique_key(node)
+            if node_key in visited:
                 return
-            visited.add(node.name)
+            visited.add(node_key)
 
             if node.bl_idname.startswith('SSMTNode_PostProcess_') and node not in ordered_chain:
                 if not node.mute:
@@ -303,9 +354,10 @@ class BlueprintExportHelper:
                         follow_forward(target)
 
         def follow_backward(node):
-            if node.name in visited:
+            node_key = _get_node_unique_key(node)
+            if node_key in visited:
                 return
-            visited.add(node.name)
+            visited.add(node_key)
 
             for input_socket in node.inputs:
                 if getattr(input_socket, 'bl_idname', '') != 'SSMTSocketPostProcess':
@@ -321,19 +373,7 @@ class BlueprintExportHelper:
                 if not node.mute:
                     ordered_chain.append(node)
 
-        if output_node:
-            follow_forward(output_node)
-
-            if not ordered_chain:
-                for input_socket in output_node.inputs:
-                    if not input_socket.is_linked:
-                        continue
-                    for link in input_socket.links:
-                        source = link.from_node
-                        if source.bl_idname.startswith('SSMTNode_PostProcess_'):
-                            follow_backward(source)
-
-        chain_names = {n.name for n in ordered_chain}
+        collect_from_tree(tree)
 
         return ordered_chain
 
@@ -350,9 +390,10 @@ class BlueprintExportHelper:
         visited = set()
         
         def check_reverse_connection(current_node, target_node):
-            if current_node.name in visited:
+            node_key = _get_node_unique_key(current_node)
+            if node_key in visited:
                 return False
-            visited.add(current_node.name)
+            visited.add(node_key)
             
             if current_node == target_node:
                 return True
@@ -419,15 +460,34 @@ class BlueprintExportHelper:
         BlueprintExportHelper.multi_file_export_nodes = []
         if not tree:
             return []
-        
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_MultiFile_Export' and not node.mute:
-                if BlueprintExportHelper._is_node_connected_to_output(tree, node):
-                    BlueprintExportHelper.multi_file_export_nodes.append(node)
-                    print(f"[MultiFileExport] 节点 '{node.name}' 已连接到输出")
-                else:
-                    print(f"[MultiFileExport] 节点 '{node.name}' 未连接到输出，跳过")
-        
+
+        visited_trees = set()
+
+        def collect_from_tree(current_tree):
+            if current_tree.name in visited_trees:
+                return
+            visited_trees.add(current_tree.name)
+
+            for node in current_tree.nodes:
+                if node.bl_idname == 'SSMTNode_MultiFile_Export' and not node.mute:
+                    if BlueprintExportHelper._is_node_connected_to_output(current_tree, node):
+                        BlueprintExportHelper.multi_file_export_nodes.append(node)
+                        print(f"[MultiFileExport] 节点 '{node.name}' 已连接到输出")
+                    else:
+                        print(f"[MultiFileExport] 节点 '{node.name}' 未连接到输出，跳过")
+
+                elif node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
+                    if not BlueprintExportHelper._is_node_connected_to_output(current_tree, node):
+                        print(f"[MultiFileExport] 嵌套蓝图节点 '{node.name}' 未连接到输出，跳过")
+                        continue
+                    bp_name = getattr(node, 'blueprint_name', '')
+                    if bp_name and bp_name != 'NONE':
+                        nested_tree = bpy.data.node_groups.get(bp_name)
+                        if nested_tree and getattr(nested_tree, 'bl_idname', '') == 'SSMTBlueprintTreeType':
+                            collect_from_tree(nested_tree)
+
+        collect_from_tree(tree)
+
         return BlueprintExportHelper.multi_file_export_nodes
 
     @staticmethod
@@ -511,18 +571,33 @@ class BlueprintExportHelper:
     def has_shapekey_postprocess_node(tree) -> bool:
         if not tree:
             return False
-        
+
         connected_postprocess_nodes = BlueprintExportHelper._collect_postprocess_nodes(tree)
-        
+
         for node in connected_postprocess_nodes:
             if node.bl_idname == 'SSMTNode_PostProcess_ShapeKey':
                 print(f"[ShapeKeyExport] 检测到形态键配置节点 '{node.name}' 已连接到输出")
                 return True
-        
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_PostProcess_ShapeKey' and not node.mute:
-                print(f"[ShapeKeyExport] 形态键配置节点 '{node.name}' 未连接到输出，跳过")
-        
+
+        visited_trees = set()
+
+        def check_unconnected(current_tree):
+            if current_tree.name in visited_trees:
+                return
+            visited_trees.add(current_tree.name)
+
+            for node in current_tree.nodes:
+                if node.bl_idname == 'SSMTNode_PostProcess_ShapeKey' and not node.mute:
+                    print(f"[ShapeKeyExport] 形态键配置节点 '{node.name}' 未连接到输出，跳过")
+                elif node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
+                    bp_name = getattr(node, 'blueprint_name', '')
+                    if bp_name and bp_name != 'NONE':
+                        nested_tree = bpy.data.node_groups.get(bp_name)
+                        if nested_tree and getattr(nested_tree, 'bl_idname', '') == 'SSMTBlueprintTreeType':
+                            check_unconnected(nested_tree)
+
+        check_unconnected(tree)
+
         return False
 
     @staticmethod
@@ -530,13 +605,13 @@ class BlueprintExportHelper:
         BlueprintExportHelper.shapekey_postprocess_nodes = []
         if not tree:
             return []
-        
+
         connected_postprocess_nodes = BlueprintExportHelper._collect_postprocess_nodes(tree)
-        
+
         for node in connected_postprocess_nodes:
             if node.bl_idname == 'SSMTNode_PostProcess_ShapeKey':
                 BlueprintExportHelper.shapekey_postprocess_nodes.append(node)
-        
+
         return BlueprintExportHelper.shapekey_postprocess_nodes
 
     @staticmethod
@@ -544,37 +619,43 @@ class BlueprintExportHelper:
         BlueprintExportHelper.shapekey_objects = []
         if not tree:
             return []
-        
+
         visited_trees = set()
-        
+
         def collect_from_tree(current_tree):
             if current_tree.name in visited_trees:
                 return
             visited_trees.add(current_tree.name)
-            
+
+            output_node = BlueprintExportHelper.get_node_from_bl_idname(current_tree, 'SSMTNode_Result_Output')
+
             for node in current_tree.nodes:
                 if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
+                    if output_node and not BlueprintExportHelper._is_node_connected_to_output(current_tree, node):
+                        continue
                     obj_name = getattr(node, 'object_name', '')
                     if obj_name and obj_name not in BlueprintExportHelper.shapekey_objects:
                         BlueprintExportHelper.shapekey_objects.append(obj_name)
-                
+
                 elif node.bl_idname == 'SSMTNode_MultiFile_Export' and not node.mute:
+                    if output_node and not BlueprintExportHelper._is_node_connected_to_output(current_tree, node):
+                        continue
                     obj_list = getattr(node, 'object_list', [])
                     if obj_list:
                         item = obj_list[0]
                         obj_name = getattr(item, 'object_name', '')
                         if obj_name and obj_name not in BlueprintExportHelper.shapekey_objects:
                             BlueprintExportHelper.shapekey_objects.append(obj_name)
-                
+
                 elif node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
                     nested_tree_name = getattr(node, 'blueprint_name', '')
                     if nested_tree_name and nested_tree_name != 'NONE':
                         nested_tree = bpy.data.node_groups.get(nested_tree_name)
                         if nested_tree:
                             collect_from_tree(nested_tree)
-        
+
         collect_from_tree(tree)
-        
+
         print(f"[ShapeKeyExport] 收集到 {len(BlueprintExportHelper.shapekey_objects)} 个物体")
         return BlueprintExportHelper.shapekey_objects
 

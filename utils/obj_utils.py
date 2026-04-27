@@ -488,6 +488,64 @@ class ObjUtils:
             remove_mesh(mesh)
 
     @staticmethod
+    def join_objects_fast(target_obj: bpy.types.Object, source_objs: list) -> bpy.types.Object:
+        '''
+        使用批量选择 + 单次 bpy.ops.object.join() 合并多个网格对象
+        相比逐个 join，避免重复的 UI 更新和依赖图重建开销
+        同时保证与原始 join_objects 完全一致的数据结果
+        '''
+        if not source_objs:
+            return target_obj
+
+        valid_source_objs = []
+        for obj in source_objs:
+            try:
+                if obj is not None and obj.name in bpy.data.objects:
+                    valid_source_objs.append(obj)
+            except ReferenceError:
+                continue
+
+        if not valid_source_objs:
+            return target_obj
+
+        all_objects = [target_obj] + valid_source_objs
+        unused_meshes = [obj.data for obj in valid_source_objs]
+        
+        context = bpy.context
+        user_context = get_user_context(context)
+        
+        try:
+            deselect_all_objects()
+            
+            for obj in all_objects:
+                unhide_object(obj)
+                if obj.mode == 'EDIT':
+                    obj.update_from_editmode()
+                select_object(obj)
+            
+            set_active_object(context, target_obj)
+            set_mode(context, mode='OBJECT')
+            
+            bpy.ops.object.join()
+        finally:
+            try:
+                set_user_context(context, user_context)
+            except (ReferenceError, ValueError):
+                deselect_all_objects()
+                try:
+                    set_active_object(context, target_obj)
+                except (ReferenceError, ValueError):
+                    pass
+        
+        for mesh in unused_meshes:
+            try:
+                remove_mesh(mesh)
+            except:
+                pass
+        
+        return target_obj
+
+    @staticmethod
     def get_vertex_groups(obj):
         obj = ObjUtils.assert_object(obj)
         return obj.vertex_groups
@@ -506,8 +564,12 @@ class ObjUtils:
     def assert_object(obj)->bpy.types.Object:
         if isinstance(obj, str):
             obj = ObjUtils.get_object(obj)
-        elif obj not in bpy.data.objects.values():
-            raise ValueError('Not of object type: %s' % str(obj))
+        else:
+            try:
+                if obj not in bpy.data.objects.values():
+                    raise ValueError('Not of object type: %s' % str(obj))
+            except ReferenceError:
+                raise ValueError('Not of object type: %s (invalid reference)' % str(obj))
         return obj
 
 
@@ -517,31 +579,21 @@ class ObjUtils:
 
     @staticmethod
     def select_obj(target_obj:bpy.types.Object):
-        # 假设 obj_copy 已经是你新建/复制的物体
         view_layer = bpy.context.view_layer
 
-        # 1. 清空当前所有选中（可选，但通常需要）
-        # bpy.ops.object.select_all(action='DESELECT')
-        # Nico: 注意，这里不能用 bpy.ops.object.select_all(action='DESELECT')，
-        # 因为这个操作有 poll() 检查，
-        # bpy.ops.object.select_all 
-        # 通常要求当前的上下文是 3D 视图（3D Viewport）。
-        # 如果你的脚本是在其他面板（比如属性面板）的按钮回调中运行，或者在后台运行，
-        # 当前的 Context 可能不满足这个要求，导致 poll() 检查失败。
-        # 修复方法：
-        # 不要使用 bpy.ops.object.select_all(action='DESELECT') 这种依赖 Context 的操作符，
-        # 而是直接使用 Blender 的数据 API 来修改对象的选中状态。
-        # 这种方式更底层，不受 Context 限制，更加稳定。
+        if target_obj.name not in view_layer.objects:
+            scene = bpy.context.scene
+            is_in_scene = any(target_obj.name in col.objects for col in scene.collection.children_recursive)
+            if not is_in_scene and target_obj.name not in scene.collection.objects:
+                scene.collection.objects.link(target_obj)
+
         for obj in bpy.context.selected_objects:
             obj.select_set(False)
 
-        # 2. 设活动对象
         view_layer.objects.active = target_obj
 
-        # 3. 选中它
         target_obj.select_set(True)
 
-        # 4. 强制刷新（某些模式下需要）
         view_layer.update()
 
     @staticmethod

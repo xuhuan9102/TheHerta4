@@ -62,6 +62,27 @@ def _get_active_blueprint_tree(context):
     return None
 
 
+def _sort_objects_by_trailing_number(objects):
+    """根据物体名称末尾的数字排序
+    
+    例如：_001, _002, _003 这样的顺序
+    
+    Args:
+        objects: bpy.types.Object 列表
+    
+    Returns:
+        排序后的物体列表
+    """
+    def get_trailing_number(obj):
+        # 查找物体名称末尾的数字
+        match = re.search(r'_([0-9]+)$', obj.name)
+        if match:
+            return int(match.group(1))
+        return 0
+    
+    return sorted(objects, key=get_trailing_number)
+
+
 def _add_node_entry(layout, text, icon, node_type):
     try:
         layout.operator("node.add_node", text=text, icon=icon).type = node_type
@@ -310,23 +331,26 @@ class SSMT_OT_CreateInternalSwitch(bpy.types.Operator):
         for node in nodes:
             node.select = False
 
-        group_node = nodes.new(type='SSMTNode_Object_Group')
-        group_node.location = (base_x + 600, base_y)
+        sorted_objects = _sort_objects_by_trailing_number(selected_objects)
+
+        swap_node = nodes.new(type='SSMTNode_ObjectSwap')
+        swap_node.location = (base_x + 600, base_y)
+        swap_node.input_slot_count = len(sorted_objects)
 
         obj_nodes = []
-        for i, obj in enumerate(selected_objects):
+        for i, obj in enumerate(sorted_objects):
             obj_node = nodes.new(type='SSMTNode_Object_Info')
             obj_node.location = (base_x, base_y - i * 150)
             obj_node.object_name = obj.name
             obj_node.select = True
             obj_nodes.append(obj_node)
 
-            if i < len(group_node.inputs):
-                links.new(obj_node.outputs[0], group_node.inputs[i])
+            if i < len(swap_node.inputs):
+                links.new(obj_node.outputs[0], swap_node.inputs[i])
 
-        group_node.select = True
+        swap_node.select = True
 
-        self.report({'INFO'}, f"已在蓝图 '{node_tree.name}' 中创建 {len(obj_nodes)} 个物体节点并连接到组节点")
+        self.report({'INFO'}, f"已在蓝图 '{node_tree.name}' 中创建 {len(obj_nodes)} 个物体节点并连接到切换节点")
         return {'FINISHED'}
 
 

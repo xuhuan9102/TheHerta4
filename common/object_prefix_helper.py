@@ -7,12 +7,21 @@ _PREFIX_START_PATTERN = re.compile(r"^[A-Za-z0-9]{6,}$")
 _PREFIX_PART_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
 _KNOWN_SEPARATORS = ("__", "_", " ")
 _PREFIX_CHECK_SEPARATORS = (".", "-", "_", " ", "__")
+_BLENDER_SUFFIX_PATTERN = re.compile(r"\.\d{3,}$")
+_BLENDER_SUFFIX_INNER_PATTERN = re.compile(r"\.\d{3,}")
 
 
 class ObjectPrefixHelper:
     @staticmethod
     def normalize_prefix(prefix: str) -> str:
         return (prefix or "").strip().strip("-_. ")
+
+    @staticmethod
+    def _strip_blender_suffix(name: str) -> tuple[str, str]:
+        match = _BLENDER_SUFFIX_PATTERN.search(name)
+        if match:
+            return name[:match.start()], match.group()
+        return name, ""
 
     @classmethod
     def _is_structured_prefix(cls, prefix_candidate: str) -> bool:
@@ -54,12 +63,17 @@ class ObjectPrefixHelper:
             if cls._is_structured_prefix(prefix):
                 return prefix, "."
 
+        name_without_suffix, blender_suffix = cls._strip_blender_suffix(clean_name)
+
         for separator in _KNOWN_SEPARATORS:
-            if separator not in clean_name:
+            if separator not in name_without_suffix:
                 continue
-            prefix = cls.normalize_prefix(clean_name.split(separator, 1)[0])
-            if prefix:
-                return prefix, separator
+            prefix_candidate = cls.normalize_prefix(name_without_suffix.rsplit(separator, 1)[0])
+            if not prefix_candidate:
+                continue
+            if _BLENDER_SUFFIX_INNER_PATTERN.search(prefix_candidate):
+                continue
+            return prefix_candidate, separator
 
         return cls._extract_hyphen_prefix(clean_name)
 

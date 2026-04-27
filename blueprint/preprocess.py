@@ -1,4 +1,5 @@
 import bpy
+import re
 from typing import List, Dict
 
 from ..utils.log_utils import LOG
@@ -85,6 +86,9 @@ class PreProcessHelper:
         LOG.info(f"🔧 对所有副本物体应用形态键...")
         cls._apply_shape_keys(copy_names)
 
+        LOG.info(f"🔧 对所有副本物体重命名活动UV为TEXCOORD.xy...")
+        cls._rename_uv_layers(copy_names)
+
         if GlobalProterties.enable_non_mirror_workflow():
             LOG.info(f"🔧 对所有副本物体执行非镜像工作流恢复...")
             cls._restore_non_mirror_objects(copy_names)
@@ -137,6 +141,9 @@ class PreProcessHelper:
             
             LOG.info(f"🔧 对未缓存副本物体应用形态键...")
             cls._apply_shape_keys(copy_names)
+
+            LOG.info(f"🔧 对未缓存副本物体重命名活动UV为TEXCOORD.xy...")
+            cls._rename_uv_layers(copy_names)
 
             if GlobalProterties.enable_non_mirror_workflow():
                 LOG.info(f"🔧 对未缓存副本物体执行非镜像工作流恢复...")
@@ -410,6 +417,42 @@ class PreProcessHelper:
         LOG.info(f"   ✅ 应用形态键: {applied_count} 个物体, {no_shapekey_count} 个无形态键")
 
     @classmethod
+    def _rename_uv_layers(cls, object_names: List[str]):
+        renamed_count = 0
+        skipped_count = 0
+
+        for obj_name in object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj or obj.type != 'MESH':
+                continue
+
+            uv_layers = obj.data.uv_layers
+            if not uv_layers:
+                continue
+
+            active_uv = uv_layers.active
+            if not active_uv:
+                continue
+
+            if active_uv.name == "TEXCOORD.xy":
+                skipped_count += 1
+                continue
+
+            if "TEXCOORD.xy" in uv_layers:
+                uv_layers["TEXCOORD.xy"].name = "_TEXCOORD_xy_conflict"
+                LOG.warning(f"   {obj_name}: 名称冲突，已有TEXCOORD.xy UV层，将其临时重命名")
+
+            old_name = active_uv.name
+            active_uv.name = "TEXCOORD.xy"
+            renamed_count += 1
+            LOG.info(f"   {obj_name}: 活动UV '{old_name}' -> 'TEXCOORD.xy'")
+
+        if renamed_count > 0:
+            LOG.info(f"   ✅ UV重命名: {renamed_count} 个物体, {skipped_count} 个无需修改")
+        elif skipped_count > 0:
+            LOG.info(f"   ✅ UV重命名: 所有 {skipped_count} 个物体活动UV已为TEXCOORD.xy，无需修改")
+
+    @classmethod
     def _restore_non_mirror_objects(cls, object_names: List[str]):
         objects = []
         for obj_name in object_names:
@@ -515,8 +558,15 @@ class PreProcessHelper:
         
         copies_to_remove = []
         for obj in bpy.data.objects:
-            if obj.name.endswith('_copy'):
+            obj_name = obj.name
+            if obj_name.endswith('_copy'):
                 copies_to_remove.append(obj)
+            elif '_chain' in obj_name:
+                if re.search(r'_chain\d+$', obj_name) or re.search(r'_chain\d+_copy$', obj_name):
+                    copies_to_remove.append(obj)
+            elif '_dup' in obj_name:
+                if re.search(r'_dup\d+$', obj_name) or re.search(r'_dup\d+_copy$', obj_name):
+                    copies_to_remove.append(obj)
         
         if not copies_to_remove:
             cls.restore_blueprint_node_references()

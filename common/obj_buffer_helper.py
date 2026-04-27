@@ -33,6 +33,8 @@ class ObjBufferHelper:
         COLOR
         TEXCOORD、TEXCOORD1、TEXCOORD2、TEXCOORD3
         '''
+        original_active_uv = obj.data.uv_layers.active
+
         for d3d11_element_name in d3d11_game_type.OrderedFullElementList:
             d3d11_element = d3d11_game_type.ElementNameD3D11ElementDict[d3d11_element_name]
             # 校验并补全所有COLOR的存在
@@ -48,17 +50,24 @@ class ObjBufferHelper:
             # 校验TEXCOORD是否存在
             if d3d11_element_name.startswith("TEXCOORD"):
                 if d3d11_element_name + ".xy" not in obj.data.uv_layers:
-                    # 此时如果只有一个UV，则自动改名为TEXCOORD.xy
                     if len(obj.data.uv_layers) == 1 and d3d11_element_name == "TEXCOORD":
-                            obj.data.uv_layers[0].name = d3d11_element_name + ".xy"
+                        existing_uv = obj.data.uv_layers[0]
+                        if not existing_uv.name.startswith("TEXCOORD"):
+                            existing_uv.name = d3d11_element_name + ".xy"
+                            print("当前obj ["+ obj.name +"] 只有一个UV层，已自动改名为: ["+ d3d11_element_name + ".xy" + "]")
+                        else:
+                            obj.data.uv_layers.new(name=d3d11_element_name + ".xy")
+                            print("当前obj ["+ obj.name +"] 缺少游戏渲染所需的TEXCOORD: ["+ d3d11_element_name + ".xy" + "]，已自动补全")
                     else:
-                        # 否则就自动补一个UV，防止后续calc_tangents失败
                         obj.data.uv_layers.new(name=d3d11_element_name + ".xy")
-            
-            # Check if BLENDINDICES exists
+                        print("当前obj ["+ obj.name +"] 缺少游戏渲染所需的TEXCOORD: ["+ d3d11_element_name + ".xy" + "]，已自动补全")
+
             if d3d11_element_name.startswith("BLENDINDICES"):
                 if not obj.vertex_groups:
                     raise Fatal("your object [" +obj.name + "] need at leat one valid Vertex Group, Please check if your model's Vertex Group is correct.")
+
+        if original_active_uv and obj.data.uv_layers.active != original_active_uv:
+            obj.data.uv_layers.active = original_active_uv
 
     @staticmethod
     def get_obj_data_model_list_by_draw_ib(ordered_draw_obj_data_model_list:list[DrawCallModel], draw_ib:str):

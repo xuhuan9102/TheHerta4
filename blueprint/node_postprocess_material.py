@@ -15,13 +15,243 @@ def clear_name_mapping_cache():
     global _name_mapping_cache, _reverse_name_mapping_cache
     _name_mapping_cache.clear()
     _reverse_name_mapping_cache.clear()
-    print("[MaterialToResource] 已清除名称映射缓存")
+
+
+class MaterialPrefixItem(bpy.types.PropertyGroup):
+    prefix: bpy.props.StringProperty(
+        name="前缀",
+        description="材质名称前缀，用于筛选检测的材质",
+        default=""
+    )
+
+
+class DetectedMaterialItem(bpy.types.PropertyGroup):
+    object_name: bpy.props.StringProperty(name="物体名称", default="")
+    missing_prefix: bpy.props.StringProperty(name="缺失前缀", default="")
+
+
+MATERIAL_DETECT_PRESETS = [
+    "DiffuseMap",
+    "NormalMap",
+    "LightMap",
+    "MaterialMap",
+    "RampMap",
+    "HighLightMap",
+    "StockingMap",
+]
+
+
+class SSMT_OT_MaterialDetectAddPrefix(bpy.types.Operator):
+    bl_idname = "ssmt.material_detect_add_prefix"
+    bl_label = "添加前缀"
+    bl_description = "按预设顺序添加下一个材质检测前缀"
+    bl_options = {'INTERNAL'}
+
+    node_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+        if not tree:
+            return {'CANCELLED'}
+        node = tree.nodes.get(self.node_name)
+        if not node or node.bl_idname != 'SSMTNode_PostProcess_Material':
+            return {'CANCELLED'}
+
+        existing = {item.prefix for item in node.material_detect_prefixes}
+        for preset in MATERIAL_DETECT_PRESETS:
+            if preset not in existing:
+                new_item = node.material_detect_prefixes.add()
+                new_item.prefix = preset
+                return {'FINISHED'}
+
+        self.report({'WARNING'}, "所有预设前缀已添加")
+        return {'CANCELLED'}
+
+
+class SSMT_OT_MaterialDetectRemovePrefix(bpy.types.Operator):
+    bl_idname = "ssmt.material_detect_remove_prefix"
+    bl_label = "移除前缀"
+    bl_description = "移除指定索引的材质检测前缀"
+    bl_options = {'INTERNAL'}
+
+    node_name: bpy.props.StringProperty()
+    item_index: bpy.props.IntProperty()
+
+    def execute(self, context):
+        tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+        if not tree:
+            return {'CANCELLED'}
+        node = tree.nodes.get(self.node_name)
+        if node and node.bl_idname == 'SSMTNode_PostProcess_Material':
+            if 0 <= self.item_index < len(node.material_detect_prefixes):
+                node.material_detect_prefixes.remove(self.item_index)
+        return {'FINISHED'}
+
+
+class SSMT_OT_MaterialDetectAddCustomPrefix(bpy.types.Operator):
+    bl_idname = "ssmt.material_detect_add_custom_prefix"
+    bl_label = "添加自定义前缀"
+    bl_description = "添加手动输入的材质检测前缀"
+    bl_options = {'INTERNAL'}
+
+    node_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+        if not tree:
+            return {'CANCELLED'}
+        node = tree.nodes.get(self.node_name)
+        if not node or node.bl_idname != 'SSMTNode_PostProcess_Material':
+            return {'CANCELLED'}
+
+        custom = node.temp_prefix_input.strip()
+        if not custom:
+            self.report({'WARNING'}, "请输入前缀")
+            return {'CANCELLED'}
+
+        existing = {item.prefix for item in node.material_detect_prefixes}
+        if custom in existing:
+            self.report({'WARNING'}, f"前缀 '{custom}' 已存在")
+            return {'CANCELLED'}
+
+        new_item = node.material_detect_prefixes.add()
+        new_item.prefix = custom
+        node.temp_prefix_input = ""
+        return {'FINISHED'}
+
+
+class SSMT_OT_MaterialDetect(bpy.types.Operator):
+    bl_idname = "ssmt.material_detect"
+    bl_label = "检测材质"
+    bl_description = "检测节点树中连接的物体是否缺少指定前缀的材质"
+    bl_options = {'INTERNAL'}
+
+    node_name: bpy.props.StringProperty()
+
+    def _find_result_output(self, node, visited=None):
+        if visited is None:
+            visited = set()
+        tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
+        node_key = f"{tree_name}::{node.name}"
+        if node_key in visited:
+            return None
+        visited.add(node_key)
+
+        if node.bl_idname == 'SSMTNode_Result_Output':
+            return node
+
+        for input_socket in node.inputs:
+            if input_socket.bl_idname == 'SSMTSocketPostProcess' and input_socket.is_linked:
+                for link in input_socket.links:
+                    result = self._find_result_output(link.from_node, visited)
+                    if result:
+                        return result
+        return None
+
+    def _collect_object_info_nodes(self, node, visited=None):
+        if visited is None:
+            visited = set()
+        tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
+        node_key = f"{tree_name}::{node.name}"
+        if node_key in visited:
+            return []
+        visited.add(node_key)
+
+        obj_info_nodes = []
+        if node.bl_idname == 'SSMTNode_Object_Info':
+            obj_info_nodes.append(node)
+
+        for input_socket in node.inputs:
+            if input_socket.is_linked:
+                for link in input_socket.links:
+                    obj_info_nodes.extend(self._collect_object_info_nodes(link.from_node, visited))
+        return obj_info_nodes
+
+    def execute(self, context):
+        tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+        if not tree:
+            self.report({'WARNING'}, "无法获取节点树")
+            return {'CANCELLED'}
+        node = tree.nodes.get(self.node_name)
+        if not node or node.bl_idname != 'SSMTNode_PostProcess_Material':
+            return {'CANCELLED'}
+
+        prefixes = [item.prefix.strip() for item in node.material_detect_prefixes if item.prefix.strip()]
+        if not prefixes:
+            self.report({'WARNING'}, "请先添加至少一个检测前缀")
+            return {'CANCELLED'}
+
+        result_output = self._find_result_output(node)
+        if not result_output:
+            self.report({'WARNING'}, "未找到连接的 Result_Output 节点")
+            return {'CANCELLED'}
+
+        obj_info_nodes = self._collect_object_info_nodes(result_output)
+        if not obj_info_nodes:
+            self.report({'WARNING'}, "未找到连接的物体节点")
+            return {'CANCELLED'}
+
+        node.detected_materials.clear()
+
+        missing_count = 0
+        for oi_node in obj_info_nodes:
+            obj_name = getattr(oi_node, 'object_name', '')
+            if not obj_name:
+                continue
+            obj = bpy.data.objects.get(obj_name)
+            if not obj:
+                continue
+
+            for prefix in prefixes:
+                has_prefix_material = False
+                for material_slot in obj.material_slots:
+                    material = material_slot.material
+                    if material and material.name.startswith(prefix):
+                        has_prefix_material = True
+                        break
+
+                if not has_prefix_material:
+                    item = node.detected_materials.add()
+                    item.object_name = obj_name
+                    item.missing_prefix = prefix
+                    missing_count += 1
+
+        node.detect_all_ok = (missing_count == 0)
+
+        if missing_count > 0:
+            self.report({'WARNING'}, f"检测完成: {missing_count} 个缺失 (来自 {len(obj_info_nodes)} 个物体)")
+        else:
+            self.report({'INFO'}, f"检测完成: 全部正确 ({len(obj_info_nodes)} 个物体)")
+        return {'FINISHED'}
+
+
+class SSMT_OT_MaterialDetectClear(bpy.types.Operator):
+    bl_idname = "ssmt.material_detect_clear"
+    bl_label = "清除结果"
+    bl_description = "清除检测结果"
+    bl_options = {'INTERNAL'}
+
+    node_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        tree = getattr(context.space_data, "edit_tree", None) or getattr(context.space_data, "node_tree", None)
+        if not tree:
+            return {'CANCELLED'}
+        node = tree.nodes.get(self.node_name)
+        if node and node.bl_idname == 'SSMTNode_PostProcess_Material':
+            node.detected_materials.clear()
+            node.detect_all_ok = False
+        return {'FINISHED'}
 
 
 class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
     bl_idname = 'SSMTNode_PostProcess_Material'
     bl_label = '材质转资源'
     bl_description = '根据场景物体的材质和纹理创建资源引用'
+
+    @staticmethod
+    def clear_cache():
+        clear_name_mapping_cache()
 
     material_to_resource_override: bpy.props.BoolProperty(
         name="覆盖现有资源",
@@ -33,6 +263,15 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
         description="用于材质切换的起始变量名(会自动递增)",
         default="$swapkey150",
         update=lambda self, context: self.update_node_width([self.material_switch_var])
+    )
+    material_detect_prefixes: bpy.props.CollectionProperty(type=MaterialPrefixItem)
+    temp_prefix_input: bpy.props.StringProperty(name="自定义前缀", default="")
+    detected_materials: bpy.props.CollectionProperty(type=DetectedMaterialItem)
+    detect_all_ok: bpy.props.BoolProperty(name="全部正确", default=False)
+    show_detect_panel: bpy.props.BoolProperty(
+        name="材质检测",
+        description="展开/收起材质检测面板",
+        default=False
     )
 
     def apply_name_mapping(self, mapping):
@@ -47,7 +286,7 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
 
         print(f"[MaterialToResource] 已应用名称映射: {len(mapping)} 条规则")
         for original_name, new_name in mapping.items():
-            print(f"  原始 '{original_name}' -> 修改后 '{new_name}'")
+            print(f"  映射: '{original_name}' -> '{new_name}'")
 
     def _get_name_mapping(self):
         global _name_mapping_cache
@@ -66,13 +305,59 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
             box = layout.box()
             box.label(text=f"已应用 {len(name_mapping)} 条名称映射", icon='INFO')
 
+        layout.separator()
+        header_row = layout.row(align=True)
+        header_row.prop(self, "show_detect_panel", icon='TRIA_DOWN' if self.show_detect_panel else 'TRIA_RIGHT', text="材质检测", emboss=False)
+
+        if self.show_detect_panel:
+            box = layout.box()
+
+            prefix_row = box.row(align=True)
+            prefix_row.label(text="检测前缀:", icon='FILTER')
+            op = prefix_row.operator("ssmt.material_detect_add_prefix", text="", icon='ADD')
+            op.node_name = self.name
+
+            for i, item in enumerate(self.material_detect_prefixes):
+                row = box.row(align=True)
+                row.label(text=item.prefix, icon='MATERIAL')
+                op = row.operator("ssmt.material_detect_remove_prefix", text="", icon='X')
+                op.node_name = self.name
+                op.item_index = i
+
+            input_row = box.row(align=True)
+            input_row.prop(self, "temp_prefix_input", text="", icon='CONSOLE')
+            op = input_row.operator("ssmt.material_detect_add_custom_prefix", text="", icon='ADD')
+            op.node_name = self.name
+
+            btn_row = box.row(align=True)
+            op = btn_row.operator("ssmt.material_detect", text="检测材质", icon='VIEWZOOM')
+            op.node_name = self.name
+            op = btn_row.operator("ssmt.material_detect_clear", text="清除", icon='X')
+            op.node_name = self.name
+
+            if self.detected_materials:
+                result_box = box.box()
+                result_box.label(text=f"缺失材质 ({len(self.detected_materials)} 个)", icon='ERROR')
+                for item in self.detected_materials:
+                    row = result_box.row(align=True)
+                    row.label(text=item.object_name, icon='OBJECT_DATA')
+                    row.label(text=f"缺少: {item.missing_prefix}", icon='ERROR')
+            elif self.detect_all_ok:
+                result_box = box.box()
+                result_box.label(text="全部正确", icon='CHECKMARK')
+
     def extract_mesh_name(self, line):
         match = re.search(r'\[mesh:([^\]]+)\]', line)
         return match.group(1) if match else None
 
     def find_object_by_mesh_name(self, mesh_name):
+        from ..utils.log_utils import LOG as _LOG
+        _LOG.debug(f"[find_object_by_mesh_name] 输入 mesh_name: '{mesh_name}'")
+        
         reverse_mapping = self._get_reverse_name_mapping()
         name_mapping = self._get_name_mapping()
+        _LOG.debug(f"  reverse_mapping 条目数: {len(reverse_mapping)}")
+        _LOG.debug(f"  name_mapping 条目数: {len(name_mapping)}")
 
         potential_names = []
 
@@ -81,22 +366,52 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
             base_name = re.sub(pattern, '', mesh_name)
             if base_name != mesh_name and base_name not in potential_names:
                 potential_names.append(base_name)
+                _LOG.debug(f"  后缀模式 '{pattern}' 生成: '{base_name}'")
 
         potential_names.append(mesh_name)
+        _LOG.debug(f"  初始 potential_names: {potential_names}")
 
         if reverse_mapping:
             for new_name, original_name in reverse_mapping.items():
-                if new_name in mesh_name:
+                if new_name == mesh_name:
+                    if original_name not in potential_names:
+                        potential_names.append(original_name)
+                        _LOG.debug(f"  反向映射精确匹配: '{new_name}' -> '{original_name}'")
+                    for pattern in suffix_patterns:
+                        original_base = re.sub(pattern, '', original_name)
+                        if original_base != original_name and original_base not in potential_names:
+                            potential_names.append(original_base)
+                            _LOG.debug(f"  反向映射+后缀: '{original_name}' -> '{original_base}'")
+                elif new_name in mesh_name:
                     original_mesh_name = mesh_name.replace(new_name, original_name)
                     if original_mesh_name not in potential_names:
                         potential_names.append(original_mesh_name)
+                        _LOG.debug(f"  反向映射部分匹配: '{new_name}' in '{mesh_name}' -> '{original_mesh_name}'")
+                    for pattern in suffix_patterns:
+                        original_base = re.sub(pattern, '', original_mesh_name)
+                        if original_base != original_mesh_name and original_base not in potential_names:
+                            potential_names.append(original_base)
+                            _LOG.debug(f"  反向映射部分+后缀: '{original_mesh_name}' -> '{original_base}'")
 
+        if name_mapping:
+            for original_name, new_name in name_mapping.items():
+                if original_name in mesh_name:
+                    renamed_mesh_name = mesh_name.replace(original_name, new_name)
+                    if renamed_mesh_name not in potential_names:
+                        potential_names.append(renamed_mesh_name)
+                        _LOG.debug(f"  正向映射: '{original_name}' -> '{new_name}' in '{mesh_name}' -> '{renamed_mesh_name}'")
+
+        _LOG.debug(f"  第一阶段 potential_names: {potential_names}")
         for name in potential_names:
             obj = bpy.data.objects.get(name)
             if obj:
+                _LOG.debug(f"  ✅ 找到物体: '{name}'")
                 return obj
+            else:
+                _LOG.debug(f"  ❌ 未找到物体: '{name}'")
 
         clean_name = re.sub(r'^[a-f0-9]+-[\d]+-', '', mesh_name)
+        _LOG.debug(f"  清理前缀后的名称: '{clean_name}' (原: '{mesh_name}')")
         if clean_name != mesh_name:
             potential_clean_names = []
 
@@ -104,22 +419,55 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                 base_clean_name = re.sub(pattern, '', clean_name)
                 if base_clean_name != clean_name and base_clean_name not in potential_clean_names:
                     potential_clean_names.append(base_clean_name)
+                    _LOG.debug(f"    清理后后缀模式 '{pattern}' 生成: '{base_clean_name}'")
 
             potential_clean_names.append(clean_name)
+            _LOG.debug(f"    初始 potential_clean_names: {potential_clean_names}")
 
-            for name in potential_clean_names:
-                obj = bpy.data.objects.get(name)
-                if obj:
-                    return obj
+            if name_mapping:
+                for original_name, new_name in name_mapping.items():
+                    if original_name in clean_name:
+                        renamed_clean_name = clean_name.replace(original_name, new_name)
+                        if renamed_clean_name not in potential_clean_names:
+                            potential_clean_names.append(renamed_clean_name)
+                            _LOG.debug(f"    清理后正向映射: '{original_name}' -> '{new_name}' -> '{renamed_clean_name}'")
+                        for pattern in suffix_patterns:
+                            renamed_base = re.sub(pattern, '', renamed_clean_name)
+                            if renamed_base != renamed_clean_name and renamed_base not in potential_clean_names:
+                                potential_clean_names.append(renamed_base)
+                                _LOG.debug(f"    清理后正向映射+后缀: '{renamed_clean_name}' -> '{renamed_base}'")
 
             if reverse_mapping:
                 for new_name, original_name in reverse_mapping.items():
+                    original_clean = re.sub(r'^[a-f0-9]+-[\d]+-', '', original_name)
+                    if original_clean and original_clean not in potential_clean_names:
+                        potential_clean_names.append(original_clean)
+                        _LOG.debug(f"    反向映射原始名清理前缀: '{original_name}' -> '{original_clean}'")
+                        for pattern in suffix_patterns:
+                            original_clean_base = re.sub(pattern, '', original_clean)
+                            if original_clean_base != original_clean and original_clean_base not in potential_clean_names:
+                                potential_clean_names.append(original_clean_base)
+                                _LOG.debug(f"    反向映射原始名清理+后缀: '{original_clean}' -> '{original_clean_base}'")
                     if new_name in clean_name:
                         original_clean_name = clean_name.replace(new_name, original_name)
-                        obj = bpy.data.objects.get(original_clean_name)
-                        if obj:
-                            return obj
+                        if original_clean_name not in potential_clean_names:
+                            potential_clean_names.append(original_clean_name)
+                            _LOG.debug(f"    清理后反向映射部分: '{new_name}' -> '{original_clean_name}'")
+                    elif new_name == clean_name:
+                        if original_name not in potential_clean_names:
+                            potential_clean_names.append(original_name)
+                            _LOG.debug(f"    清理后反向映射精确: '{new_name}' -> '{original_name}'")
 
+            _LOG.debug(f"  第二阶段 potential_clean_names: {potential_clean_names}")
+            for name in potential_clean_names:
+                obj = bpy.data.objects.get(name)
+                if obj:
+                    _LOG.debug(f"  ✅ 找到物体: '{name}'")
+                    return obj
+                else:
+                    _LOG.debug(f"  ❌ 未找到物体: '{name}'")
+
+        _LOG.debug(f"  ⚠️ 最终未找到匹配物体: '{mesh_name}'")
         return None
 
     def extract_transparency_info_from_mesh_name(self, mesh_name):
@@ -513,6 +861,13 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
 
 
 classes = (
+    MaterialPrefixItem,
+    DetectedMaterialItem,
+    SSMT_OT_MaterialDetectAddPrefix,
+    SSMT_OT_MaterialDetectAddCustomPrefix,
+    SSMT_OT_MaterialDetectRemovePrefix,
+    SSMT_OT_MaterialDetect,
+    SSMT_OT_MaterialDetectClear,
     SSMTNode_PostProcess_Material,
 )
 

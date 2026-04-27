@@ -285,7 +285,30 @@ class PreProcessCache:
 
         try:
             with bpy.data.libraries.load(cache_filepath) as (data_from, data_to):
-                data_to.objects = data_from.objects
+                all_cached_names = list(data_from.objects)
+                LOG.debug(f"   📦 缓存文件中的物体: {all_cached_names}")
+                
+                target_obj_name = None
+                for name in data_from.objects:
+                    if name == copy_name or name == obj_name or name == f"{obj_name}_copy":
+                        target_obj_name = name
+                        break
+                
+                if not target_obj_name:
+                    for name in data_from.objects:
+                        if name.endswith('_copy') and name[:-5] == obj_name:
+                            target_obj_name = name
+                            break
+                
+                if not target_obj_name and data_from.objects:
+                    target_obj_name = data_from.objects[0]
+                    LOG.warning(f"   ⚠️ 缓存文件中未找到精确匹配的物体，使用第一个: {target_obj_name}")
+                
+                if target_obj_name:
+                    data_to.objects = [target_obj_name]
+                else:
+                    LOG.warning(f"⚠️ 缓存文件中未找到物体 {obj_name}")
+                    return False
 
             if not data_to.objects or len(data_to.objects) == 0:
                 LOG.warning(f"⚠️ 缓存文件中未找到物体 {obj_name}")

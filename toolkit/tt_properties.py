@@ -13,6 +13,102 @@ class TT_BakeResolutionRule(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(name="启用", description="是否启用此规则", default=True)
 
 
+class TT_ChannelSource(bpy.types.PropertyGroup):
+    """定义单个通道的数据来源"""
+    
+    source_type: bpy.props.EnumProperty(
+        name="来源类型",
+        description="选择此通道的数据来源",
+        items=[
+            ('IMAGE_CHANNEL', "图像通道", "从图像的指定通道获取"),
+            ('GRAYSCALE', "灰度值", "RGB亮度平均值"),
+            ('INVERT', "反转值", "1.0 - 亮度"),
+            ('CONSTANT', "固定值", "使用固定的常量值"),
+            ('GENERATED_NORMAL', "法线贴图", "从颜色图计算的法线 (R=X, G=Y, B=Z)"),
+            ('GENERATED_HEIGHT', "高度图", "从颜色图推导的高度信息"),
+            ('GENERATED_ROUGHNESS', "粗糙度", "从颜色图计算粗糙度（亮→光滑，暗→粗糙）"),
+            ('GENERATED_GLOSSINESS', "光泽度", "粗糙度的反义词"),
+            ('GENERATED_AO', "环境光遮蔽", "模拟AO效果（暗部遮蔽更强）"),
+            ('GENERATED_METALLIC', "金属度", "基于颜色分析检测金属区域"),
+            ('GENERATED_SPECULAR', "高光强度", "镜面反射强度"),
+            ('GENERATED_EMISSION', "自发光", "检测过亮的自发光区域"),
+            ('GENERATED_DETAIL', "细节/凹凸", "增强高频细节纹理"),
+        ],
+        default='IMAGE_CHANNEL'
+    )
+    
+    source_image_name: bpy.props.StringProperty(name="源图像名称", description="来源图像的名称", default="")
+    
+    source_channel: bpy.props.EnumProperty(
+        name="源通道",
+        description="从源图像中提取的通道",
+        items=[
+            ('R', "红色通道 (R)", ""),
+            ('G', "绿色通道 (G)", ""),
+            ('B', "蓝色通道 (B)", ""),
+            ('A', "Alpha通道 (A)", ""),
+            ('LUMINANCE', "亮度", ""),
+        ],
+        default='R'
+    )
+    
+    constant_value: bpy.props.FloatProperty(
+        name="常量值",
+        description="当来源为固定值时使用的数值",
+        default=1.0,
+        min=0.0,
+        max=1.0
+    )
+    
+    invert: bpy.props.BoolProperty(
+        name="反转",
+        description="反转此通道的值",
+        default=False
+    )
+
+
+class TT_CompositeRule(bpy.types.PropertyGroup):
+    """合成规则：定义如何将多个通道组合成一张输出贴图"""
+    
+    rule_name: bpy.props.StringProperty(name="规则名称", description="此规则的名称", default="新规则")
+    
+    output_name_prefix: bpy.props.StringProperty(
+        name="输出前缀",
+        description="输出贴图的文件名前缀",
+        default="Composite_"
+    )
+    
+    output_channels: bpy.props.CollectionProperty(
+        type=TT_ChannelSource,
+        name="输出通道配置",
+        description="R/G/B/A 四个通道的来源"
+    )
+    
+    enabled: bpy.props.BoolProperty(name="启用", description="是否启用此规则", default=True)
+    
+    normal_strength: bpy.props.FloatProperty(
+        name="法线强度",
+        description="法线计算的强度参数",
+        default=5.0,
+        min=0.1,
+        max=50.0
+    )
+    
+    normal_blur_radius: bpy.props.FloatProperty(
+        name="高斯模糊半径",
+        description="法线计算时的高斯模糊半径",
+        default=1.0,
+        min=0.0,
+        max=10.0
+    )
+    
+    normal_invert_height: bpy.props.BoolProperty(
+        name="反转高度",
+        description="反转高度图",
+        default=False
+    )
+
+
 class TT_TextureToolsProperties(bpy.types.PropertyGroup):
     output_dir: bpy.props.StringProperty(name="输出目录", description="所有生成贴图的统一输出文件夹", subtype='DIR_PATH')
     normal_map_strength: bpy.props.FloatProperty(name="强度", description="法线贴图的效果强度。值越大，凹凸感越强", default=5.0, min=0.1, max=50.0)
@@ -67,10 +163,15 @@ class TT_TextureToolsProperties(bpy.types.PropertyGroup):
     material_preview_pattern: bpy.props.StringProperty(name="材质名称模式", description="用于匹配材质名称的正则表达式", default=".*")
     material_preview_base_resolution: bpy.props.IntProperty(name="基础分辨率", description="基础分辨率参数（仅存储）", default=1024, min=256, max=8192)
     material_preview_active_index: bpy.props.IntProperty(name="活动索引", description="当前选中的材质预览项索引", default=0)
+    
+    composite_rules: bpy.props.CollectionProperty(type=TT_CompositeRule, name="通道合成规则", description="通道合成规则列表")
+    composite_active_rule_index: bpy.props.IntProperty(name="活动规则索引", description="当前选中的合成规则索引", default=-1)
 
 
 tt_properties_list = (
     TT_DDSConversionRule,
     TT_BakeResolutionRule,
+    TT_ChannelSource,
+    TT_CompositeRule,
     TT_TextureToolsProperties,
 )
