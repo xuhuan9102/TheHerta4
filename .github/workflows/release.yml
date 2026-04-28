@@ -23,6 +23,7 @@ jobs:
       - name: Create Release Package
         id: package
         run: |
+          # 排除的文件和目录
           EXCLUDE_PATTERN=$(cat << 'EOF'
             --exclude=.gitignore
             --exclude=.github
@@ -37,12 +38,14 @@ jobs:
           EOF
           )
 
-          ZIP_NAME="TheHerta4.zip"
+          # 创建 zip 包，名称使用 tag 去掉 v 前缀，并将版本号的点号替换为连字符
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG_NAME#v}
+          VERSION=${VERSION//./-}
+          ZIP_NAME="TheHerta4-${VERSION}.zip"
 
-          PLUGIN_DIR="TheHerta4"
-          mkdir -p "$PLUGIN_DIR"
-          rsync -av --delete --exclude=.git . "$PLUGIN_DIR/" $EXCLUDE_PATTERN
-          zip -r "$ZIP_NAME" "$PLUGIN_DIR"
+          # 打包
+          zip -r "$ZIP_NAME" . $EXCLUDE_PATTERN
 
           # 计算 SHA256
           SHA256=$(sha256sum "$ZIP_NAME" | cut -d' ' -f1)
