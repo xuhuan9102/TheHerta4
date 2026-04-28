@@ -885,6 +885,118 @@ class SSMT_OT_UngroupNestedBlueprint(bpy.types.Operator):
         return {'FINISHED'}
 
 
+_CHAIN_HIGHLIGHT_STATE = {}
+
+
+class SSMT_OT_ViewChain(bpy.types.Operator):
+    bl_idname = "ssmt.view_chain"
+    bl_label = "查看链路"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        space_data = getattr(context, 'space_data', None)
+        if not space_data or space_data.type != 'NODE_EDITOR':
+            return False
+
+        node_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+        if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
+            return False
+
+        return True
+
+    def execute(self, context):
+        space_data = context.space_data
+        tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+        if not tree or tree.bl_idname != 'SSMTBlueprintTreeType':
+            return {'CANCELLED'}
+
+        tree_id = tree.name
+
+        if tree_id in _CHAIN_HIGHLIGHT_STATE:
+            self._restore_highlight(tree, tree_id)
+            return {'FINISHED'}
+
+        selected_oi_nodes = [n for n in tree.nodes if n.select and n.bl_idname == 'SSMTNode_Object_Info']
+        if not selected_oi_nodes:
+            self.report({'WARNING'}, "请先选择一个物体信息节点")
+            return {'CANCELLED'}
+
+        start_node = selected_oi_nodes[0]
+
+        chain_nodes, chain_links = self._trace_chain(tree, start_node)
+
+        if not chain_nodes:
+            self.report({'WARNING'}, f"节点 '{start_node.name}' 没有到输出节点的链路")
+            return {'CANCELLED'}
+
+        saved_state = {}
+        for node in tree.nodes:
+            saved_state[node.name] = {
+                'select': node.select,
+                'use_custom_color': node.use_custom_color,
+                'color': tuple(node.color),
+            }
+
+        _CHAIN_HIGHLIGHT_STATE[tree_id] = saved_state
+
+        for node in tree.nodes:
+            node.select = False
+
+        for node in chain_nodes:
+            node.select = True
+            node.use_custom_color = True
+            node.color = (0.0, 1.0, 0.2)
+
+        chain_count = len(chain_nodes) - 1
+        self.report({'INFO'}, f"链路高亮: {start_node.name} → 输出 ({chain_count} 个中间节点)，再次点击恢复")
+        return {'FINISHED'}
+
+    def _trace_chain(self, tree, start_node):
+        chain_nodes = set()
+        chain_links = set()
+        visited = set()
+        output_found = False
+
+        def trace_forward(node):
+            nonlocal output_found
+
+            if node in visited:
+                return
+            visited.add(node)
+            chain_nodes.add(node)
+
+            if node.bl_idname == 'SSMTNode_Result_Output':
+                output_found = True
+                return
+
+            for output_socket in node.outputs:
+                for link in output_socket.links:
+                    chain_links.add(link)
+                    trace_forward(link.to_node)
+
+        trace_forward(start_node)
+
+        if not output_found:
+            return set(), set()
+
+        return chain_nodes, chain_links
+
+    def _restore_highlight(self, tree, tree_id):
+        saved_state = _CHAIN_HIGHLIGHT_STATE.pop(tree_id, None)
+        if not saved_state:
+            return
+
+        for node in tree.nodes:
+            if node.name in saved_state:
+                state = saved_state[node.name]
+                node.select = state['select']
+                node.use_custom_color = state['use_custom_color']
+                node.color = state['color']
+
+        self.report({'INFO'}, "已恢复链路高亮")
+
+
 def draw_objects_context_menu_add(self, context):
     layout = self.layout
     layout.separator()
@@ -1370,6 +1482,8 @@ def draw_node_context_menu(self, context):
     layout.operator_context = 'EXEC_DEFAULT'
     layout.separator()
     layout.operator("ssmt.update_all_node_references", text="更新所有节点引用", icon='FILE_REFRESH')
+    layout.separator()
+    layout.operator("ssmt.view_chain", text="查看链路", icon='HIDE_OFF')
 
 
 _is_add_menu_hooked = False
@@ -1420,6 +1534,7 @@ def register():
     bpy.utils.register_class(SSMT_OT_QuickAddVertexGroupMatch)
     bpy.utils.register_class(SSMT_OT_GroupNodesToNestedBlueprint)
     bpy.utils.register_class(SSMT_OT_UngroupNestedBlueprint)
+    bpy.utils.register_class(SSMT_OT_ViewChain)
     bpy.utils.register_class(SSMT_OT_AlignNodes)
     bpy.utils.register_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.register_class(SSMT_MT_ObjectContextMenuSub)
@@ -1475,6 +1590,7 @@ def unregister():
     bpy.utils.unregister_class(SSMT_OT_AlignNodes)
     bpy.utils.unregister_class(SSMT_OT_GroupNodesToNestedBlueprint)
     bpy.utils.unregister_class(SSMT_OT_UngroupNestedBlueprint)
+    bpy.utils.unregister_class(SSMT_OT_ViewChain)
     bpy.utils.unregister_class(SSMT_OT_QuickAddVertexGroupMatch)
     bpy.utils.unregister_class(SSMT_OT_QuickAddRenameRule)
     bpy.utils.unregister_class(SSMT_OT_CreateInternalSwitch)

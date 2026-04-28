@@ -1,5 +1,7 @@
 import bpy
 
+from ..common.global_config import GlobalConfig
+
 
 class ToolkitPanel(bpy.types.Panel):
     bl_label = "工具集"
@@ -17,6 +19,8 @@ class ToolkitPanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        
+        GlobalConfig.read_from_main_json_ssmt4()
         
         row = layout.row()
         row.prop(context.scene, 'herta_show_toolkit', text="工具集模式")

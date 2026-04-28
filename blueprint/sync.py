@@ -12,6 +12,8 @@ import time
 import bpy
 from bpy.app.handlers import persistent
 
+from ..common.global_config import GlobalConfig
+
 _SYNC_NODE_TYPES = {'SSMTNode_Object_Info', 'SSMTNode_MultiFile_Export'}
 
 _sync_enabled = True
@@ -1223,6 +1225,8 @@ def draw_node_header(self, context):
         return
     if context.space_data.tree_type != 'SSMTBlueprintTreeType':
         return
+
+    GlobalConfig.read_from_main_json_ssmt4()
 
     layout = self.layout
     row = layout.row(align=True)
