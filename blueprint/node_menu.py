@@ -705,6 +705,186 @@ class SSMT_OT_GroupNodesToNestedBlueprint(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SSMT_OT_UngroupNestedBlueprint(bpy.types.Operator):
+    bl_idname = "ssmt.ungroup_nested_blueprint"
+    bl_label = "解组嵌套蓝图"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        space_data = getattr(context, 'space_data', None)
+        if not space_data or space_data.type != 'NODE_EDITOR':
+            return False
+
+        node_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+        if not node_tree or node_tree.bl_idname != 'SSMTBlueprintTreeType':
+            return False
+
+        for node in node_tree.nodes:
+            if node.select and node.bl_idname == 'SSMTNode_Blueprint_Nest':
+                return True
+        return False
+
+    def execute(self, context):
+        space_data = context.space_data
+        parent_tree = getattr(space_data, "edit_tree", None) or getattr(space_data, "node_tree", None)
+        if not parent_tree or parent_tree.bl_idname != 'SSMTBlueprintTreeType':
+            self.report({'ERROR'}, "当前不在 SSMT 蓝图编辑器中")
+            return {'CANCELLED'}
+
+        nest_nodes = [n for n in parent_tree.nodes if n.select and n.bl_idname == 'SSMTNode_Blueprint_Nest']
+        if not nest_nodes:
+            self.report({'WARNING'}, "请先选择一个嵌套蓝图节点")
+            return {'CANCELLED'}
+
+        if len(nest_nodes) > 1:
+            self.report({'WARNING'}, "一次只能解组一个嵌套蓝图节点")
+            return {'CANCELLED'}
+
+        nest_node = nest_nodes[0]
+        nested_tree_name = nest_node.blueprint_name
+        if not nested_tree_name:
+            self.report({'ERROR'}, "该嵌套节点未关联蓝图")
+            return {'CANCELLED'}
+
+        nested_tree = bpy.data.node_groups.get(nested_tree_name)
+        if not nested_tree or nested_tree.bl_idname != 'SSMTBlueprintTreeType':
+            self.report({'ERROR'}, f"关联的蓝图 '{nested_tree_name}' 不存在或不是SSMT蓝图")
+            return {'CANCELLED'}
+
+        output_nodes = [n for n in nested_tree.nodes if n.bl_idname == 'SSMTNode_Result_Output']
+        if not output_nodes:
+            self.report({'ERROR'}, "嵌套蓝图中没有输出节点，无法解组")
+            return {'CANCELLED'}
+
+        if len(output_nodes) > 1:
+            self.report({'ERROR'}, "嵌套蓝图中有多个输出节点，无法自动解组")
+            return {'CANCELLED'}
+
+        output_node = output_nodes[0]
+
+        incoming_links = []
+        for link in nested_tree.links:
+            if link.to_node == output_node:
+                from_socket_index = _get_socket_index(link.from_node.outputs, link.from_socket)
+                to_socket_index = _get_socket_index(output_node.inputs, link.to_socket)
+                if from_socket_index is not None and to_socket_index is not None:
+                    incoming_links.append((link.from_node, from_socket_index, to_socket_index))
+
+        if not incoming_links:
+            self.report({'ERROR'}, "嵌套蓝图输出节点没有输入连接，无法确定出口")
+            return {'CANCELLED'}
+
+        if len(set(idx for _, _, idx in incoming_links)) > 1:
+            self.report({'ERROR'}, "嵌套蓝图输出节点使用了多个输入口，无法自动解组")
+            return {'CANCELLED'}
+
+        exit_node_in_nested = incoming_links[0][0]
+        exit_socket_index = incoming_links[0][1]
+
+        external_output_links = []
+        for link in parent_tree.links:
+            if link.from_node == nest_node:
+                to_socket_index = _get_socket_index(link.to_node.inputs, link.to_socket)
+                if to_socket_index is not None:
+                    external_output_links.append((link.to_node, to_socket_index))
+
+        nodes_to_copy = [n for n in nested_tree.nodes if n.bl_idname not in ('SSMTNode_Result_Output', 'NodeFrame')]
+
+        if not nodes_to_copy:
+            self.report({'WARNING'}, "嵌套蓝图中没有可解组的节点")
+            return {'CANCELLED'}
+
+        dynamic_classes = set()
+        for source_node in nodes_to_copy:
+            if source_node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output'):
+                dynamic_classes.add(type(source_node))
+
+        saved_updates = {}
+        for cls in dynamic_classes:
+            if hasattr(cls, 'update'):
+                saved_updates[cls] = cls.update
+                cls.update = lambda self: None
+
+        created_nodes = {}
+        try:
+            for source_node in nodes_to_copy:
+                new_node = parent_tree.nodes.new(type=source_node.bl_idname)
+                new_node.location = (
+                    source_node.location.x + nest_node.location.x,
+                    source_node.location.y + nest_node.location.y,
+                )
+                new_node.width = source_node.width
+                new_node.label = source_node.label
+
+                try:
+                    new_node.name = source_node.name
+                except Exception:
+                    pass
+
+                _copy_scalar_and_collection_properties(source_node, new_node)
+                created_nodes[source_node] = new_node
+        finally:
+            for cls, original_update in saved_updates.items():
+                cls.update = original_update
+
+            for node in created_nodes.values():
+                if node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output'):
+                    try:
+                        node.update()
+                    except Exception:
+                        pass
+
+        required_input_counts = {}
+        for link in nested_tree.links:
+            if link.from_node not in created_nodes or link.to_node not in created_nodes:
+                continue
+            to_socket_index = _get_socket_index(link.to_node.inputs, link.to_socket)
+            if to_socket_index is not None:
+                target_copy = created_nodes[link.to_node]
+                required_input_counts[target_copy] = max(required_input_counts.get(target_copy, 0), to_socket_index + 1)
+
+        for node, required_count in required_input_counts.items():
+            _ensure_input_count(node, required_count)
+
+        for link in nested_tree.links:
+            source_copy = created_nodes.get(link.from_node)
+            target_copy = created_nodes.get(link.to_node)
+            if not source_copy or not target_copy:
+                continue
+            from_socket_index = _get_socket_index(link.from_node.outputs, link.from_socket)
+            to_socket_index = _get_socket_index(link.to_node.inputs, link.to_socket)
+            if from_socket_index is None or to_socket_index is None:
+                continue
+            if from_socket_index >= len(source_copy.outputs) or to_socket_index >= len(target_copy.inputs):
+                continue
+            parent_tree.links.new(source_copy.outputs[from_socket_index], target_copy.inputs[to_socket_index])
+
+        exit_copy = created_nodes.get(exit_node_in_nested)
+        if exit_copy and exit_socket_index < len(exit_copy.outputs):
+            for target_node, socket_index in external_output_links:
+                if socket_index >= len(target_node.inputs):
+                    continue
+                try:
+                    parent_tree.links.new(exit_copy.outputs[exit_socket_index], target_node.inputs[socket_index])
+                except Exception:
+                    continue
+
+        parent_tree.nodes.remove(nest_node)
+
+        nested_tree.use_fake_user = False
+        if nested_tree.users == 0:
+            bpy.data.node_groups.remove(nested_tree, do_unlink=True)
+
+        for node in parent_tree.nodes:
+            node.select = False
+        for node in created_nodes.values():
+            node.select = True
+
+        self.report({'INFO'}, f"已解组嵌套蓝图 '{nested_tree_name}'，还原 {len(created_nodes)} 个节点")
+        return {'FINISHED'}
+
+
 def draw_objects_context_menu_add(self, context):
     layout = self.layout
     layout.separator()
@@ -1182,6 +1362,7 @@ def draw_node_context_menu(self, context):
     layout.operator("ssmt.batch_connect_nodes", text="批量连接节点", icon='LINKED')
     layout.operator_context = 'INVOKE_DEFAULT'
     layout.operator("ssmt.group_nodes_to_nested_blueprint", text="打组到嵌套蓝图", icon='NODETREE')
+    layout.operator("ssmt.ungroup_nested_blueprint", text="解组嵌套蓝图", icon='NODETREE')
     layout.operator_context = 'EXEC_DEFAULT'
     layout.separator()
     layout.operator_context = 'INVOKE_DEFAULT'
@@ -1238,6 +1419,7 @@ def register():
     bpy.utils.register_class(SSMT_OT_QuickAddRenameRule)
     bpy.utils.register_class(SSMT_OT_QuickAddVertexGroupMatch)
     bpy.utils.register_class(SSMT_OT_GroupNodesToNestedBlueprint)
+    bpy.utils.register_class(SSMT_OT_UngroupNestedBlueprint)
     bpy.utils.register_class(SSMT_OT_AlignNodes)
     bpy.utils.register_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.register_class(SSMT_MT_ObjectContextMenuSub)
@@ -1292,6 +1474,7 @@ def unregister():
     bpy.utils.unregister_class(SSMT_OT_BatchConnectNodes)
     bpy.utils.unregister_class(SSMT_OT_AlignNodes)
     bpy.utils.unregister_class(SSMT_OT_GroupNodesToNestedBlueprint)
+    bpy.utils.unregister_class(SSMT_OT_UngroupNestedBlueprint)
     bpy.utils.unregister_class(SSMT_OT_QuickAddVertexGroupMatch)
     bpy.utils.unregister_class(SSMT_OT_QuickAddRenameRule)
     bpy.utils.unregister_class(SSMT_OT_CreateInternalSwitch)

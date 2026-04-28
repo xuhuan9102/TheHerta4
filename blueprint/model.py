@@ -509,7 +509,8 @@ class BluePrintModel:
                     LOG.debug(f"   🔧 发现多文件导出节点: {node.name}")
 
             elif node.bl_idname == _NODE_TYPE_BLUEPRINT_NEST:
-                self._resolve_nested_blueprint_collect(node)
+                if output_node and BlueprintExportHelper._is_node_connected_to_output(tree, node):
+                    self._resolve_nested_blueprint_collect(node)
 
             elif node.bl_idname == _NODE_TYPE_CROSS_IB:
                 if output_node and BlueprintExportHelper._is_node_connected_to_output(tree, node):
@@ -705,29 +706,32 @@ class BluePrintModel:
                         current_name, node
                     )
                     if was_modified:
+                        old_name = current_name
                         current_name = new_name
                         obj.name = current_name
                         current_name = obj.name
                         rename_count += 1
                         chain_had_rename = True
+                        LOG.info(f"   ✏️ 重命名: '{old_name}' → '{current_name}'")
 
             if deferred_rename_nodes:
-                LOG.info(f"   ⏩ 延后改名: 物体 '{current_name}' 在顶点组处理完成后统一执行 {len(deferred_rename_nodes)} 个重命名节点")
+                LOG.info(f"   ⏩ 延后改名: 物体 '{current_name}' 开始执行 {len(deferred_rename_nodes)} 个延后重命名节点")
                 for node in deferred_rename_nodes:
                     new_name, was_modified, _, _ = SSMTNode_Object_Rename.apply_to_object_name(
                         current_name, node
                     )
                     if was_modified:
+                        old_name = current_name
                         current_name = new_name
                         obj.name = current_name
                         current_name = obj.name
                         rename_count += 1
                         chain_had_rename = True
+                        LOG.info(f"   ✏️ 延后重命名: '{old_name}' → '{current_name}'")
 
             if chain_had_rename and obj.name != original_obj_name:
                 chain.object_name = obj.name
                 BluePrintModel._object_name_mapping[original_obj_name] = obj.name
-                LOG.info(f"   ✏️ 重命名: '{chain.original_object_name or original_obj_name}' → '{obj.name}'")
 
         BluePrintModel._has_executed_rename = True
 
@@ -885,11 +889,11 @@ class BluePrintModel:
             LOG.warning(f"⚠️ Bone Palette 导出节点集成遇到错误: {e}")
             traceback.print_exc()
 
-    def _build_cross_ib_rename_mappings_for_chain(self, chain: ProcessingChain) -> Tuple[Dict[str, str], Dict[str, str]]:
+    def _build_cross_ib_rename_mappings_for_chain(self, chain: ProcessingChain) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
         from ..common.object_prefix_helper import ObjectPrefixHelper
 
-        indexcount_mapping: Dict[str, str] = {}
-        ibhash_mapping: Dict[str, str] = {}
+        indexcount_mapping: Dict[str, List[str]] = {}
+        ibhash_mapping: Dict[str, List[str]] = {}
 
         for record in chain.rename_history:
             old_name = record.get('old_name', '')
@@ -913,7 +917,10 @@ class BluePrintModel:
             old_indexcount = old_parts.get('index_count', '')
             new_indexcount = new_parts.get('index_count', '')
             if old_indexcount and new_indexcount and old_indexcount != new_indexcount:
-                indexcount_mapping.setdefault(old_indexcount, new_indexcount)
+                if old_indexcount not in indexcount_mapping:
+                    indexcount_mapping[old_indexcount] = []
+                if new_indexcount not in indexcount_mapping[old_indexcount]:
+                    indexcount_mapping[old_indexcount].append(new_indexcount)
 
             old_ib_hash = old_parts.get('draw_ib', '')
             new_ib_hash = new_parts.get('draw_ib', '')
@@ -922,11 +929,14 @@ class BluePrintModel:
             if old_ib_hash and new_ib_hash and (old_ib_hash != new_ib_hash or old_first_index != new_first_index):
                 old_key = f"{old_ib_hash}_{old_first_index}"
                 new_key = f"{new_ib_hash}_{new_first_index}"
-                ibhash_mapping.setdefault(old_key, new_key)
+                if old_key not in ibhash_mapping:
+                    ibhash_mapping[old_key] = []
+                if new_key not in ibhash_mapping[old_key]:
+                    ibhash_mapping[old_key].append(new_key)
 
         return indexcount_mapping, ibhash_mapping
 
-    def _build_cross_ib_rename_mappings_from_records(self, rename_records: List[dict]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    def _build_cross_ib_rename_mappings_from_records(self, rename_records: List[dict]) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
         temp_chain = ProcessingChain()
         temp_chain.rename_history = list(rename_records)
         return self._build_cross_ib_rename_mappings_for_chain(temp_chain)
@@ -961,13 +971,15 @@ class BluePrintModel:
 
                 if match_mode == CrossIBMatchMode.INDEX_COUNT and indexcount_mapping:
                     cross_ib_node.apply_indexcount_mapping(indexcount_mapping)
+                    total_pairs = sum(len(v) for v in indexcount_mapping.values())
                     LOG.info(
-                        f"🔗 Rename节点 '{rename_node_name}' 向节点 '{cross_ib_node.name}' 追加IndexCount衍生映射 {len(indexcount_mapping)} 条"
+                        f"🔗 Rename节点 '{rename_node_name}' 向节点 '{cross_ib_node.name}' 追加IndexCount衍生映射 {len(indexcount_mapping)} 个源 → {total_pairs} 个目标"
                     )
                 elif match_mode == CrossIBMatchMode.IB_HASH and ibhash_mapping:
                     cross_ib_node.apply_ibhash_mapping(ibhash_mapping)
+                    total_pairs = sum(len(v) for v in ibhash_mapping.values())
                     LOG.info(
-                        f"🔗 Rename节点 '{rename_node_name}' 向节点 '{cross_ib_node.name}' 追加IBHash衍生映射 {len(ibhash_mapping)} 条"
+                        f"🔗 Rename节点 '{rename_node_name}' 向节点 '{cross_ib_node.name}' 追加IBHash衍生映射 {len(ibhash_mapping)} 个源 → {total_pairs} 个目标"
                     )
 
         if not has_cross_ib_rename:

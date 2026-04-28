@@ -642,10 +642,16 @@ class PreProcessHelper:
     def validate_copy_suffix(cls, object_name: str) -> bool:
         if not cls.has_copies():
             return True
-        
+
         if object_name.endswith('_copy'):
             return True
-        
+
+        if re.search(r'_chain\d+_copy$', object_name) or re.search(r'_chain\d+$', object_name):
+            return True
+
+        if re.search(r'_dup\d+_copy$', object_name) or re.search(r'_dup\d+$', object_name):
+            return True
+
         return False
 
 

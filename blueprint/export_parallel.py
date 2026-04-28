@@ -262,12 +262,23 @@ class ExportRoundExecutor:
 
         LOG.info("📋 验证物体引用是否为副本...")
 
+        copy_names = set(PreProcessHelper.original_to_copy_map.values())
+        reverse_rename = {v: k for k, v in BluePrintModel._object_name_mapping.items()}
+
         invalid_objects = []
         for chain in blueprint_model.processing_chains:
             if chain.is_valid:
                 obj_name = chain.object_name
-                if not PreProcessHelper.validate_copy_suffix(obj_name):
-                    invalid_objects.append(obj_name)
+                if obj_name in copy_names:
+                    continue
+                pre_rename = reverse_rename.get(obj_name)
+                if pre_rename and pre_rename in copy_names:
+                    continue
+                if PreProcessHelper.validate_copy_suffix(obj_name):
+                    continue
+                if chain.original_object_name and chain.original_object_name in copy_names:
+                    continue
+                invalid_objects.append(obj_name)
 
         if invalid_objects:
             raise ParallelExportError("前处理错误：物体引用未正确更新为副本")

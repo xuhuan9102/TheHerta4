@@ -350,6 +350,34 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
         match = re.search(r'\[mesh:([^\]]+)\]', line)
         return match.group(1) if match else None
 
+    def _strip_all_suffixes(self, name):
+        stripped_names = []
+        current = name
+        max_iterations = 20
+        iteration = 0
+        
+        suffix_patterns = [
+            r'_copy$',
+            r'_chain\d+$',
+            r'_dup\d+$',
+        ]
+        
+        while iteration < max_iterations:
+            changed = False
+            for pattern in suffix_patterns:
+                new_name = re.sub(pattern, '', current)
+                if new_name != current:
+                    if new_name not in stripped_names:
+                        stripped_names.append(new_name)
+                    current = new_name
+                    changed = True
+                    break
+            if not changed:
+                break
+            iteration += 1
+        
+        return stripped_names
+
     def find_object_by_mesh_name(self, mesh_name):
         from ..utils.log_utils import LOG as _LOG
         _LOG.debug(f"[find_object_by_mesh_name] 输入 mesh_name: '{mesh_name}'")
@@ -361,12 +389,11 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
 
         potential_names = []
 
-        suffix_patterns = [r'_chain\d+_copy$', r'_chain\d+$', r'_copy$']
-        for pattern in suffix_patterns:
-            base_name = re.sub(pattern, '', mesh_name)
-            if base_name != mesh_name and base_name not in potential_names:
-                potential_names.append(base_name)
-                _LOG.debug(f"  后缀模式 '{pattern}' 生成: '{base_name}'")
+        all_stripped = self._strip_all_suffixes(mesh_name)
+        for stripped in all_stripped:
+            if stripped not in potential_names:
+                potential_names.append(stripped)
+                _LOG.debug(f"  移除后缀生成: '{stripped}'")
 
         potential_names.append(mesh_name)
         _LOG.debug(f"  初始 potential_names: {potential_names}")
@@ -377,21 +404,19 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                     if original_name not in potential_names:
                         potential_names.append(original_name)
                         _LOG.debug(f"  反向映射精确匹配: '{new_name}' -> '{original_name}'")
-                    for pattern in suffix_patterns:
-                        original_base = re.sub(pattern, '', original_name)
-                        if original_base != original_name and original_base not in potential_names:
-                            potential_names.append(original_base)
-                            _LOG.debug(f"  反向映射+后缀: '{original_name}' -> '{original_base}'")
+                    for stripped in self._strip_all_suffixes(original_name):
+                        if stripped not in potential_names:
+                            potential_names.append(stripped)
+                            _LOG.debug(f"  反向映射+后缀: '{original_name}' -> '{stripped}'")
                 elif new_name in mesh_name:
                     original_mesh_name = mesh_name.replace(new_name, original_name)
                     if original_mesh_name not in potential_names:
                         potential_names.append(original_mesh_name)
                         _LOG.debug(f"  反向映射部分匹配: '{new_name}' in '{mesh_name}' -> '{original_mesh_name}'")
-                    for pattern in suffix_patterns:
-                        original_base = re.sub(pattern, '', original_mesh_name)
-                        if original_base != original_mesh_name and original_base not in potential_names:
-                            potential_names.append(original_base)
-                            _LOG.debug(f"  反向映射部分+后缀: '{original_mesh_name}' -> '{original_base}'")
+                    for stripped in self._strip_all_suffixes(original_mesh_name):
+                        if stripped not in potential_names:
+                            potential_names.append(stripped)
+                            _LOG.debug(f"  反向映射部分+后缀: '{original_mesh_name}' -> '{stripped}'")
 
         if name_mapping:
             for original_name, new_name in name_mapping.items():
@@ -415,11 +440,10 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
         if clean_name != mesh_name:
             potential_clean_names = []
 
-            for pattern in suffix_patterns:
-                base_clean_name = re.sub(pattern, '', clean_name)
-                if base_clean_name != clean_name and base_clean_name not in potential_clean_names:
-                    potential_clean_names.append(base_clean_name)
-                    _LOG.debug(f"    清理后后缀模式 '{pattern}' 生成: '{base_clean_name}'")
+            for stripped in self._strip_all_suffixes(clean_name):
+                if stripped not in potential_clean_names:
+                    potential_clean_names.append(stripped)
+                    _LOG.debug(f"    清理后移除后缀生成: '{stripped}'")
 
             potential_clean_names.append(clean_name)
             _LOG.debug(f"    初始 potential_clean_names: {potential_clean_names}")
@@ -431,11 +455,10 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                         if renamed_clean_name not in potential_clean_names:
                             potential_clean_names.append(renamed_clean_name)
                             _LOG.debug(f"    清理后正向映射: '{original_name}' -> '{new_name}' -> '{renamed_clean_name}'")
-                        for pattern in suffix_patterns:
-                            renamed_base = re.sub(pattern, '', renamed_clean_name)
-                            if renamed_base != renamed_clean_name and renamed_base not in potential_clean_names:
-                                potential_clean_names.append(renamed_base)
-                                _LOG.debug(f"    清理后正向映射+后缀: '{renamed_clean_name}' -> '{renamed_base}'")
+                        for stripped in self._strip_all_suffixes(renamed_clean_name):
+                            if stripped not in potential_clean_names:
+                                potential_clean_names.append(stripped)
+                                _LOG.debug(f"    清理后正向映射+后缀: '{renamed_clean_name}' -> '{stripped}'")
 
             if reverse_mapping:
                 for new_name, original_name in reverse_mapping.items():
@@ -443,11 +466,10 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                     if original_clean and original_clean not in potential_clean_names:
                         potential_clean_names.append(original_clean)
                         _LOG.debug(f"    反向映射原始名清理前缀: '{original_name}' -> '{original_clean}'")
-                        for pattern in suffix_patterns:
-                            original_clean_base = re.sub(pattern, '', original_clean)
-                            if original_clean_base != original_clean and original_clean_base not in potential_clean_names:
-                                potential_clean_names.append(original_clean_base)
-                                _LOG.debug(f"    反向映射原始名清理+后缀: '{original_clean}' -> '{original_clean_base}'")
+                        for stripped in self._strip_all_suffixes(original_clean):
+                            if stripped not in potential_clean_names:
+                                potential_clean_names.append(stripped)
+                                _LOG.debug(f"    反向映射原始名清理+后缀: '{original_clean}' -> '{stripped}'")
                     if new_name in clean_name:
                         original_clean_name = clean_name.replace(new_name, original_name)
                         if original_clean_name not in potential_clean_names:

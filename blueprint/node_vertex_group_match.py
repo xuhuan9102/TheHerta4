@@ -266,6 +266,12 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         default=""
     )
 
+    debug_link_id: bpy.props.StringProperty(
+        name="调试链接ID",
+        description="唯一标识，用于关联节点与调试物体",
+        default=""
+    )
+
     def init(self, context):
         self.outputs.new('SSMTSocketObject', "Output")
         self.width = 300
@@ -313,6 +319,20 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         
         row = box.row()
         row.prop(self, "exact_hash_match")
+
+        if self.mapping_text_name:
+            mapping_box = layout.box()
+            text = bpy.data.texts.get(self.mapping_text_name)
+            if text:
+                entry_count = 0
+                for line in text.lines:
+                    clean_line = re.sub(r'[#//].*', '', line.body).strip()
+                    if '=' in clean_line and clean_line:
+                        entry_count += 1
+                mapping_box.label(text=f"映射表: {self.mapping_text_name}", icon='TEXT')
+                mapping_box.label(text=f"条目数: {entry_count}", icon='INFO')
+            else:
+                mapping_box.label(text=f"映射表: {self.mapping_text_name} (文本已丢失)", icon='ERROR')
         
         layout.separator()
         row = layout.row(align=True)
@@ -996,9 +1016,12 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         source_scope_label = self.get_source_scope_label()
 
         if self.create_debug_objects:
+            if not self.debug_link_id:
+                self.debug_link_id = str(uuid.uuid4())
             parent_name = f"Debug_Match_{target_obj.name}_{int(time.time())}"
             debug_parent = bpy.data.objects.new(parent_name, None)
             context.scene.collection.objects.link(debug_parent)
+            debug_parent["vgtp_debug_link_id"] = self.debug_link_id
             debug_parent["vgtp_node_name"] = self.name
             debug_parent["vgtp_node_tree"] = self.id_data.name if getattr(self, 'id_data', None) else ""
             debug_parent["vgtp_source_name"] = self.source_object
@@ -1368,31 +1391,42 @@ class SSMT_OT_VertexGroupMatchToggleDebug(bpy.types.Operator):
 
 
 def find_debug_parents_for_node(node):
-    """优先按节点标识查找调试父级，兼容旧版按源/目标物体名回退。"""
-    node_tree_name = node.id_data.name if getattr(node, 'id_data', None) else ""
-    debug_parents = []
-    seen_names = set()
+    """通过 debug_link_id 精确查找调试父级，兼容旧版按节点名+树名回退。"""
+    link_id = getattr(node, 'debug_link_id', '')
 
+    if link_id:
+        primary_matches = []
+        for obj in bpy.data.objects:
+            if not obj.name.startswith("Debug_Match_"):
+                continue
+            if obj.get("vgtp_debug_link_id", "") == link_id:
+                primary_matches.append(obj)
+        if primary_matches:
+            return primary_matches
+
+    node_tree_name = node.id_data.name if getattr(node, 'id_data', None) else ""
+    node_name = node.name
+
+    fallback_matches = []
     for obj in bpy.data.objects:
         if not obj.name.startswith("Debug_Match_"):
             continue
 
-        if obj.get("vgtp_node_name", "") == node.name:
-            obj_tree_name = obj.get("vgtp_node_tree", "")
-            if not node_tree_name or obj_tree_name == node_tree_name:
-                if obj.name not in seen_names:
-                    debug_parents.append(obj)
-                    seen_names.add(obj.name)
-                continue
+        obj_node_name = obj.get("vgtp_node_name", "")
+        obj_tree_name = obj.get("vgtp_node_tree", "")
 
-        source_name = obj.get("vgtp_source_name", "")
-        target_name = obj.get("vgtp_target_name", "")
-        if source_name == getattr(node, 'source_object', '') and target_name == getattr(node, 'target_object', ''):
-            if obj.name not in seen_names:
-                debug_parents.append(obj)
-                seen_names.add(obj.name)
+        if obj_node_name == node_name and obj_tree_name == node_tree_name:
+            fallback_matches.append(obj)
+            continue
 
-    return debug_parents
+        if not obj.get("vgtp_debug_link_id", ""):
+            source_name = obj.get("vgtp_source_name", "")
+            target_name = obj.get("vgtp_target_name", "")
+            if source_name == getattr(node, 'source_object', '') and target_name == getattr(node, 'target_object', ''):
+                if obj_tree_name == node_tree_name:
+                    fallback_matches.append(obj)
+
+    return fallback_matches
 
 
 def get_debug_source_objects(debug_parent):
