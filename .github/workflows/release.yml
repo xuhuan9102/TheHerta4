@@ -23,26 +23,17 @@ jobs:
       - name: Create Release Package
         id: package
         run: |
-          EXCLUDE_PATTERN=$(cat << 'EOF'
-            --exclude=.gitignore
-            --exclude=.github
-            --exclude=README.md
-            --exclude=README_DEV.md
-            --exclude=LICENSE.txt
-            --exclude=requirements.txt
-            --exclude=*.md
-            --exclude=docs
-            --exclude=__pycache__
-            --exclude=*.pyc
-          EOF
-          )
-
           TAG_NAME=${GITHUB_REF#refs/tags/}
           ZIP_NAME="TheHerta4-${TAG_NAME#v}.zip"
 
           PLUGIN_DIR="TheHerta4"
           mkdir -p "$PLUGIN_DIR"
-          rsync -av --delete --exclude=.git . "$PLUGIN_DIR/" $EXCLUDE_PATTERN
+          cp -r * "$PLUGIN_DIR/" 2>/dev/null || true
+          rm -rf "$PLUGIN_DIR/.git" "$PLUGIN_DIR/.github" "$PLUGIN_DIR/docs"
+          find "$PLUGIN_DIR" -name "__pycache__" -type d -exec rm -rf {} +
+          find "$PLUGIN_DIR" -name "*.pyc" -delete
+          find "$PLUGIN_DIR" -name "*.md" -delete
+          rm -f "$PLUGIN_DIR/.gitignore" "$PLUGIN_DIR/README.md" "$PLUGIN_DIR/README_DEV.md" "$PLUGIN_DIR/LICENSE.txt" "$PLUGIN_DIR/requirements.txt"
           zip -r "$ZIP_NAME" "$PLUGIN_DIR"
 
           # 计算 SHA256
