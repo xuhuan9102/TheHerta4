@@ -5,7 +5,7 @@ import re
 import shutil
 import struct
 import datetime
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 
 try:
     import numpy as np
@@ -139,35 +139,76 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                                     break
                             if ib_path:
                                 try:
+                                    def safe_int_parse(s, default=0):
+                                        try:
+                                            s = s.strip()
+                                            if s.lstrip('-').isdigit():
+                                                return int(s)
+                                            return default
+                                        except:
+                                            return default
+                                    
                                     if lower_line.startswith('drawindexed '):
-                                        parts = [int(p.strip()) for p in stripped_line.split('=')[1].strip().split(',')]
+                                        parts = [p.strip() for p in stripped_line.split('=')[1].strip().split(',')]
                                         if len(parts) == 3:
-                                            info_item = {'draw_params': tuple(parts), 'ib_path': ib_path}
+                                            index_count = safe_int_parse(parts[0])
+                                            start_index_location = safe_int_parse(parts[1])
+                                            base_vertex_location = safe_int_parse(parts[2])
+                                            info_item = {'draw_params': (index_count, start_index_location, base_vertex_location), 'ib_path': ib_path}
+                                            print(f"    [DEBUG] drawindexed 解析: mesh={current_mesh_name}, index_count={index_count}, start_index_location={start_index_location}, base_vertex_location={base_vertex_location}")
                                     else:
                                         parts = [p.strip() for p in stripped_line.split('=')[1].strip().split(',')]
                                         if len(parts) >= 5:
-                                            index_count = int(parts[0])
-                                            start_index_location = int(parts[2]) if parts[2].lstrip('-').isdigit() else 0
-                                            base_vertex_location = int(parts[3]) if parts[3].lstrip('-').isdigit() else 0
+                                            index_count = safe_int_parse(parts[0])
+                                            start_index_location = safe_int_parse(parts[2])
+                                            base_vertex_location = safe_int_parse(parts[3])
                                             info_item = {'draw_params': (index_count, start_index_location, base_vertex_location), 'ib_path': ib_path}
+                                            print(f"    [DEBUG] drawindexedinstanced 解析: mesh={current_mesh_name}, index_count={index_count}, start_index_location={start_index_location}, base_vertex_location={base_vertex_location}")
                                     if current_mesh_name not in draw_info:
                                         draw_info[current_mesh_name] = []
                                     draw_info[current_mesh_name].append(info_item)
-                                except (ValueError, IndexError): pass
+                                except (ValueError, IndexError) as e:
+                                    print(f"    [WARNING] 解析 draw 命令失败: {e}")
                             current_mesh_name = None
         return draw_info
 
     def _calculate_vertex_range(self, ib_path, draw_params):
         index_count, start_index_location, base_vertex_location = draw_params
-        if not os.path.isfile(ib_path): return None, None
+        print(f"    [DEBUG] _calculate_vertex_range: ib_path={ib_path}, index_count={index_count}, start_index_location={start_index_location}, base_vertex_location={base_vertex_location}")
+        
+        if not os.path.isfile(ib_path):
+            print(f"    [WARNING] IB 文件不存在: {ib_path}")
+            return None, None
         try:
+            file_size = os.path.getsize(ib_path)
+            print(f"    [DEBUG] IB 文件大小: {file_size} 字节")
+            
             with open(ib_path, 'rb') as f:
-                f.seek(start_index_location * 4)
-                data = f.read(index_count * 4)
-                if len(data) < index_count * 4: return None, None
+                seek_pos = start_index_location * 4
+                read_size = index_count * 4
+                print(f"    [DEBUG] seek 位置: {seek_pos}, 读取大小: {read_size}")
+                
+                if seek_pos >= file_size:
+                    print(f"    [WARNING] seek 位置 {seek_pos} 超出文件大小 {file_size}")
+                    return None, None
+                
+                f.seek(seek_pos)
+                data = f.read(read_size)
+                if len(data) < read_size:
+                    print(f"    [WARNING] 读取数据不足: 期望 {read_size}, 实际 {len(data)}")
+                    return None, None
                 indices = [idx + base_vertex_location for idx in struct.unpack(f'<{index_count}I', data)]
-                return (min(indices), max(indices)) if indices else (None, None)
-        except Exception: return None, None
+                
+                min_idx = min(indices) if indices else None
+                max_idx = max(indices) if indices else None
+                print(f"    [DEBUG] 计算结果: min_index={min_idx}, max_index={max_idx}")
+                
+                return (min_idx, max_idx) if indices else (None, None)
+        except Exception as e:
+            print(f"    [ERROR] 计算顶点范围时出错: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
 
     def _extract_hash_from_name(self, obj_name):
         match = re.match(r'^([a-f0-9]{8}-[a-f0-9]+(?:-[a-f0-9]+)?)', obj_name)
@@ -177,6 +218,60 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         if match:
             return match.group(1)
         return None
+
+    def _extract_alias_from_name(self, obj_name):
+        obj_hash = self._extract_hash_from_name(obj_name)
+        if obj_hash:
+            remainder = obj_name[len(obj_hash):]
+            alias = remainder.lstrip('.').lstrip('_')
+            return alias if alias else obj_name
+        return obj_name
+
+    @staticmethod
+    def _strip_object_suffix(name):
+        stripped = re.sub(r'(\.\d{3,}|_(?:chain|dup|copy|BPE)\d*)+$', '', name, flags=re.IGNORECASE)
+        return stripped
+
+    def _merge_identical_ranges(self, calculated_ranges):
+        range_to_objects = OrderedDict()
+        for obj_name, (start_v, end_v) in calculated_ranges.items():
+            if start_v is None:
+                continue
+            key = (start_v, end_v)
+            if key not in range_to_objects:
+                range_to_objects[key] = []
+            range_to_objects[key].append(obj_name)
+
+        merged_ranges = OrderedDict()
+        old_to_new = {}
+
+        for (start_v, end_v), obj_names in range_to_objects.items():
+            if len(obj_names) == 1:
+                merged_ranges[obj_names[0]] = (start_v, end_v)
+                old_to_new[obj_names[0]] = obj_names[0]
+            else:
+                base_aliases = []
+                hash_prefix_for_group = None
+                for n in obj_names:
+                    obj_hash = self._extract_hash_from_name(n)
+                    if obj_hash and hash_prefix_for_group is None:
+                        hash_prefix_for_group = obj_hash
+                    alias = self._extract_alias_from_name(n)
+                    base_aliases.append(self._strip_object_suffix(alias))
+                counter = Counter(base_aliases)
+                base_name = counter.most_common(1)[0][0]
+                if hash_prefix_for_group:
+                    merged_name = f"{hash_prefix_for_group}.{base_name}_x{len(obj_names)}"
+                else:
+                    merged_name = f"{base_name}_x{len(obj_names)}"
+                merged_ranges[merged_name] = (start_v, end_v)
+                for n in obj_names:
+                    old_to_new[n] = merged_name
+                print(f"  [MERGE] 合并 {len(obj_names)} 个相同范围 ({start_v}-{end_v}) 的物体 -> '{merged_name}'")
+                for n in obj_names:
+                    print(f"    - {n}")
+
+        return merged_ranges, old_to_new
 
     def _extract_hash_prefix(self, hash_val):
         if hash_val:
@@ -832,15 +927,8 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
             print(f"  [DEBUG] draw_info_map 键: {list(draw_info_map.keys())}")
             print(f"  [DEBUG] all_objects: {all_objects}")
             
-            hash_prefix_to_range = {}
+            mesh_name_to_range = {}
             for mesh_name, info_list in draw_info_map.items():
-                mesh_hash = self._extract_hash_from_name(mesh_name)
-                if not mesh_hash:
-                    continue
-                mesh_prefix = self._extract_hash_prefix(mesh_hash)
-                if not mesh_prefix:
-                    continue
-                
                 all_ranges = []
                 for info in info_list:
                     start_v, end_v = self._calculate_vertex_range(info['ib_path'], info['draw_params'])
@@ -850,25 +938,66 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                 if all_ranges:
                     min_start = min(r[0] for r in all_ranges)
                     max_end = max(r[1] for r in all_ranges)
-                    if mesh_prefix not in hash_prefix_to_range:
-                        hash_prefix_to_range[mesh_prefix] = (min_start, max_end)
-                    else:
-                        existing_start, existing_end = hash_prefix_to_range[mesh_prefix]
-                        hash_prefix_to_range[mesh_prefix] = (
-                            min(existing_start, min_start),
-                            max(existing_end, max_end)
-                        )
+                    mesh_name_to_range[mesh_name] = (min_start, max_end)
             
             calculated_ranges = {}
             for obj_name in all_objects:
-                obj_hash = self._extract_hash_from_name(obj_name)
-                if obj_hash:
-                    obj_prefix = self._extract_hash_prefix(obj_hash)
-                    if obj_prefix and obj_prefix in hash_prefix_to_range:
-                        calculated_ranges[obj_name] = hash_prefix_to_range[obj_prefix]
-                        print(f"  [DEBUG] 映射物体 '{obj_name}' -> 哈希前缀 '{obj_prefix}' -> 范围 {hash_prefix_to_range[obj_prefix]}")
+                if obj_name in mesh_name_to_range:
+                    calculated_ranges[obj_name] = mesh_name_to_range[obj_name]
+                    print(f"  [DEBUG] 映射物体 '{obj_name}' -> 范围 {mesh_name_to_range[obj_name]}")
+                else:
+                    obj_hash = self._extract_hash_from_name(obj_name)
+                    if obj_hash:
+                        obj_prefix = self._extract_hash_prefix(obj_hash)
+                        for mesh_name, range_val in mesh_name_to_range.items():
+                            mesh_hash = self._extract_hash_from_name(mesh_name)
+                            if mesh_hash:
+                                mesh_prefix = self._extract_hash_prefix(mesh_hash)
+                                if obj_prefix == mesh_prefix:
+                                    calculated_ranges[obj_name] = range_val
+                                    print(f"  [DEBUG] 映射物体 '{obj_name}' -> 通过前缀匹配 '{mesh_name}' -> 范围 {range_val}")
+                                    break
             
-            print(f"  [DEBUG] calculated_ranges: {calculated_ranges}")
+            print(f"  [DEBUG] calculated_ranges (合并前): {len(calculated_ranges)} 个条目")
+            
+            calculated_ranges, range_name_mapping = self._merge_identical_ranges(calculated_ranges)
+            print(f"  [DEBUG] calculated_ranges (合并后): {len(calculated_ranges)} 个条目")
+            
+            if range_name_mapping:
+                new_all_objects = []
+                seen_merged = set()
+                for obj_name in all_objects:
+                    new_name = range_name_mapping.get(obj_name, obj_name)
+                    if new_name not in seen_merged:
+                        new_all_objects.append(new_name)
+                        seen_merged.add(new_name)
+                all_objects[:] = new_all_objects
+                
+                for slot in slot_to_name_to_objects:
+                    for name in slot_to_name_to_objects[slot]:
+                        new_objs = []
+                        seen = set()
+                        for obj in slot_to_name_to_objects[slot][name]:
+                            mapped = range_name_mapping.get(obj, obj)
+                            if mapped not in seen:
+                                new_objs.append(mapped)
+                                seen.add(mapped)
+                        slot_to_name_to_objects[slot][name] = new_objs
+                
+                for h in hash_to_objects:
+                    new_objs = []
+                    seen = set()
+                    for obj in hash_to_objects[h]:
+                        mapped = range_name_mapping.get(obj, obj)
+                        if mapped not in seen:
+                            new_objs.append(mapped)
+                            seen.add(mapped)
+                    hash_to_objects[h] = new_objs
+                
+                all_unique_objects = list(OrderedDict.fromkeys(
+                    range_name_mapping.get(obj, obj) for obj in all_unique_objects
+                ))
+                all_unique_names = list(OrderedDict.fromkeys(all_unique_names))
 
             vertex_counts = {}
             for s, ls in sections.items():

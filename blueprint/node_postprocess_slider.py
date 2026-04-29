@@ -104,7 +104,7 @@ class SSMTNode_PostProcess_SliderPanel(SSMTNode_PostProcess_Base):
             return
 
         freq_params = set()
-        param_pattern = re.compile(r'^\s*global\s+(\$Freq_[^\s=]+)')
+        param_pattern = re.compile(r'^\s*global\s+(?:persist\s+)?(\$Freq_[^\s=]+)')
         if '[Constants]' in sections:
             for line in sections['[Constants]']:
                 match = param_pattern.match(line)

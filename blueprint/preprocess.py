@@ -242,6 +242,7 @@ class PreProcessHelper:
     @classmethod
     def _apply_modifiers(cls, object_names: List[str]):
         applied_count = 0
+        removed_disabled_count = 0
         failed_count = 0
         shapekey_count = 0
         no_modifier_count = 0
@@ -296,10 +297,25 @@ class PreProcessHelper:
                         LOG.warning(f"   ❌ {obj_name}.{modifier_name}: 应用失败 - {e}")
                         failed_count += 1
             
+            disabled_modifier_names = [m.name for m in obj.modifiers if not m.show_viewport]
+            for mod_name in reversed(disabled_modifier_names):
+                try:
+                    mod = obj.modifiers.get(mod_name)
+                    if mod is not None:
+                        obj.modifiers.remove(mod)
+                        removed_disabled_count += 1
+                except Exception as e:
+                    LOG.warning(f"   ⚠️ {obj_name}: 删除禁用修改器 {mod_name} 失败 - {e}")
+            
+            if disabled_modifier_names:
+                LOG.info(f"   🗑️ {obj_name}: 已删除 {len(disabled_modifier_names)} 个禁用修改器")
+            
             if original_active:
                 bpy.context.view_layer.objects.active = original_active
         
-        if shapekey_count > 0:
+        if removed_disabled_count > 0:
+            LOG.info(f"   ✅ 应用修改器: {applied_count} 个, 删除禁用修改器: {removed_disabled_count} 个")
+        elif shapekey_count > 0:
             LOG.info(f"   ✅ 应用修改器: {applied_count} 个 (含 {shapekey_count} 个有形态键物体)")
         elif no_modifier_count > 0:
             LOG.info(f"   ✅ 应用修改器: {applied_count} 个 ({no_modifier_count} 个物体无修改器)")
