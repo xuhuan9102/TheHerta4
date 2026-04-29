@@ -32,10 +32,42 @@ class SSMTNode_PostProcess_SliderPanel(SSMTNode_PostProcess_Base):
         description="匹配索引数量 (如: 554564)，设为0则不生成match_index_count行"
     )
 
+    key_help: bpy.props.StringProperty(
+        name="显示/隐藏面板",
+        default="home",
+        description="显示/隐藏滑块面板的快捷键 (如: home, f1, insert 等)"
+    )
+
+    key_reset: bpy.props.StringProperty(
+        name="重置位置",
+        default="ctrl home",
+        description="重置滑块面板位置的快捷键"
+    )
+
+    key_zoom_in: bpy.props.StringProperty(
+        name="放大",
+        default="up",
+        description="放大滑块面板的快捷键"
+    )
+
+    key_zoom_out: bpy.props.StringProperty(
+        name="缩小",
+        default="down",
+        description="缩小滑块面板的快捷键"
+    )
+
     def draw_buttons(self, context, layout):
         layout.prop(self, "create_cumulative_backup")
         layout.prop(self, "check_hash")
         layout.prop(self, "match_index_count")
+        
+        layout.separator()
+        layout.label(text="快捷键设置:")
+        col = layout.column(align=True)
+        col.prop(self, "key_help")
+        col.prop(self, "key_reset")
+        col.prop(self, "key_zoom_in")
+        col.prop(self, "key_zoom_out")
 
     def execute_postprocess(self, mod_export_path):
         print(f"滑块面板后处理节点开始执行，Mod导出路径: {mod_export_path}")
@@ -201,10 +233,10 @@ class SSMTNode_PostProcess_SliderPanel(SSMTNode_PostProcess_Base):
         content.extend([
             "\n; 功能区 ---------------------------------------------------------",
             "\n; --- 统一快捷键配置 ---",
-            "[KeyHelp]", "condition = $active == 1", "key = home", "type = cycle", "$help = 0,1",
-            "\n[KeyResetPosition]", "condition = $help == 1 && $active == 1", "key = ctrl home", "type = cycle", *reset_lines,
-            "\n[KeyZoomIn]", "condition = $help == 1 && $active == 1", "key = up", "type = press", "run = CommandListZoomIn",
-            "\n[KeyZoomOut]", "condition = $help == 1 && $active == 1", "key = down", "type = press", "run = CommandListZoomOut",
+            f"\n[KeyHelp]", "condition = $active == 1", f"key = {self.key_help}", "type = cycle", "$help = 0,1",
+            f"\n[KeyResetPosition]", "condition = $help == 1 && $active == 1", f"key = {self.key_reset}", "type = cycle", *reset_lines,
+            f"\n[KeyZoomIn]", "condition = $help == 1 && $active == 1", f"key = {self.key_zoom_in}", "type = press", "run = CommandListZoomIn",
+            f"\n[KeyZoomOut]", "condition = $help == 1 && $active == 1", f"key = {self.key_zoom_out}", "type = press", "run = CommandListZoomOut",
             "\n; 鼠标拖拽检测", "[KeyMouseDrag]", "condition = $help == 1 && $active == 1", "key = VK_LBUTTON", "type = hold", "$mouse_clicked = 1",
             "\n; --- 指令集 ---", "[CommandListZoomIn]", *zoom_in_lines, "\n[CommandListZoomOut]", *zoom_out_lines,
         ])
