@@ -499,6 +499,17 @@ class SSMTNode_CrossIB(SSMTNodeBase):
             })
         return base_data
 
+    def _get_current_mapping_data(self):
+        current_data = []
+        for item in self.cross_ib_list:
+            current_data.append({
+                'source_ib': item.source_ib,
+                'target_ib': item.target_ib,
+                'source_index_count': item.source_index_count,
+                'target_index_count': item.target_index_count,
+            })
+        return current_data
+
     def _has_indexcount_pair(self, source_index_count, target_index_count):
         for item in self.cross_ib_list:
             if item.source_index_count == source_index_count and item.target_index_count == target_index_count:
@@ -540,7 +551,9 @@ class SSMTNode_CrossIB(SSMTNodeBase):
         print(f"[CrossIB] 开始应用IndexCount映射，共 {len(indexcount_mapping)} 个源")
 
         added_count = 0
-        for item_data in self._get_base_mapping_data():
+        # Expand from the current snapshot so remaps from earlier Rename nodes
+        # can be further transformed by later Rename nodes on the same Cross IB node.
+        for item_data in self._get_current_mapping_data():
             original_source = item_data.get('source_index_count', '')
             original_target = item_data.get('target_index_count', '')
             if not original_source or not original_target:
@@ -580,7 +593,9 @@ class SSMTNode_CrossIB(SSMTNodeBase):
         print(f"[CrossIB] 开始应用IBHash映射，共 {len(ibhash_mapping)} 个源")
 
         added_count = 0
-        for item_data in self._get_base_mapping_data():
+        # Expand from the current snapshot so remaps from earlier Rename nodes
+        # can be further transformed by later Rename nodes on the same Cross IB node.
+        for item_data in self._get_current_mapping_data():
             original_source = item_data.get('source_ib', '')
             original_target = item_data.get('target_ib', '')
             if not original_source or not original_target:

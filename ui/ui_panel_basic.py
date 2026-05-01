@@ -74,7 +74,7 @@ class PanelBasicInformation(bpy.types.Panel):
         elif not preferred_blueprint_name and global_properties.selected_blueprint_name != "__NONE__":
             global_properties.selected_blueprint_name = "__NONE__"
 
-        layout.label(text="TheHerta4 v4.2.5", icon='INFO')
+        layout.label(text="TheHerta4 v4.2.6", icon='INFO')
         layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.ssmtlocation)
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)
         layout.label(text=TR.translate("当前游戏预设: ") + GlobalConfig.logic_name)

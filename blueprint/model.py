@@ -891,50 +891,61 @@ class BluePrintModel:
             LOG.warning(f"⚠️ Bone Palette 导出节点集成遇到错误: {e}")
             traceback.print_exc()
 
-    def _build_cross_ib_rename_mappings_for_chain(self, chain: ProcessingChain) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    @staticmethod
+    def _append_cross_ib_mapping_from_name_pair(
+        old_name: str,
+        new_name: str,
+        indexcount_mapping: Dict[str, List[str]],
+        ibhash_mapping: Dict[str, List[str]],
+    ):
         from ..common.object_prefix_helper import ObjectPrefixHelper
 
+        if not old_name or not new_name or old_name == new_name:
+            return
+
+        old_prefix_info = ObjectPrefixHelper.extract_prefix_info(old_name)
+        new_prefix_info = ObjectPrefixHelper.extract_prefix_info(new_name)
+
+        if not old_prefix_info or not new_prefix_info:
+            return
+
+        old_prefix = old_prefix_info[0]
+        new_prefix = new_prefix_info[0]
+
+        old_parts = ObjectPrefixHelper.parse_prefix_parts(old_prefix)
+        new_parts = ObjectPrefixHelper.parse_prefix_parts(new_prefix)
+
+        old_indexcount = old_parts.get('index_count', '')
+        new_indexcount = new_parts.get('index_count', '')
+        if old_indexcount and new_indexcount and old_indexcount != new_indexcount:
+            if old_indexcount not in indexcount_mapping:
+                indexcount_mapping[old_indexcount] = []
+            if new_indexcount not in indexcount_mapping[old_indexcount]:
+                indexcount_mapping[old_indexcount].append(new_indexcount)
+
+        old_ib_hash = old_parts.get('draw_ib', '')
+        new_ib_hash = new_parts.get('draw_ib', '')
+        old_first_index = old_parts.get('first_index', '')
+        new_first_index = new_parts.get('first_index', '')
+        if old_ib_hash and new_ib_hash and (old_ib_hash != new_ib_hash or old_first_index != new_first_index):
+            old_key = f"{old_ib_hash}_{old_first_index}"
+            new_key = f"{new_ib_hash}_{new_first_index}"
+            if old_key not in ibhash_mapping:
+                ibhash_mapping[old_key] = []
+            if new_key not in ibhash_mapping[old_key]:
+                ibhash_mapping[old_key].append(new_key)
+
+    def _build_cross_ib_rename_mappings_for_chain(self, chain: ProcessingChain) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
         indexcount_mapping: Dict[str, List[str]] = {}
         ibhash_mapping: Dict[str, List[str]] = {}
 
         for record in chain.rename_history:
-            old_name = record.get('old_name', '')
-            new_name = record.get('new_name', '')
-
-            if not old_name or not new_name or old_name == new_name:
-                continue
-
-            old_prefix_info = ObjectPrefixHelper.extract_prefix_info(old_name)
-            new_prefix_info = ObjectPrefixHelper.extract_prefix_info(new_name)
-
-            if not old_prefix_info or not new_prefix_info:
-                continue
-
-            old_prefix = old_prefix_info[0]
-            new_prefix = new_prefix_info[0]
-
-            old_parts = ObjectPrefixHelper.parse_prefix_parts(old_prefix)
-            new_parts = ObjectPrefixHelper.parse_prefix_parts(new_prefix)
-
-            old_indexcount = old_parts.get('index_count', '')
-            new_indexcount = new_parts.get('index_count', '')
-            if old_indexcount and new_indexcount and old_indexcount != new_indexcount:
-                if old_indexcount not in indexcount_mapping:
-                    indexcount_mapping[old_indexcount] = []
-                if new_indexcount not in indexcount_mapping[old_indexcount]:
-                    indexcount_mapping[old_indexcount].append(new_indexcount)
-
-            old_ib_hash = old_parts.get('draw_ib', '')
-            new_ib_hash = new_parts.get('draw_ib', '')
-            old_first_index = old_parts.get('first_index', '')
-            new_first_index = new_parts.get('first_index', '')
-            if old_ib_hash and new_ib_hash and (old_ib_hash != new_ib_hash or old_first_index != new_first_index):
-                old_key = f"{old_ib_hash}_{old_first_index}"
-                new_key = f"{new_ib_hash}_{new_first_index}"
-                if old_key not in ibhash_mapping:
-                    ibhash_mapping[old_key] = []
-                if new_key not in ibhash_mapping[old_key]:
-                    ibhash_mapping[old_key].append(new_key)
+            self._append_cross_ib_mapping_from_name_pair(
+                record.get('old_name', ''),
+                record.get('new_name', ''),
+                indexcount_mapping,
+                ibhash_mapping,
+            )
 
         return indexcount_mapping, ibhash_mapping
 
@@ -942,6 +953,53 @@ class BluePrintModel:
         temp_chain = ProcessingChain()
         temp_chain.rename_history = list(rename_records)
         return self._build_cross_ib_rename_mappings_for_chain(temp_chain)
+
+    def _build_cross_ib_rename_mappings_from_node(self, rename_node: bpy.types.Node) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+        indexcount_mapping: Dict[str, List[str]] = {}
+        ibhash_mapping: Dict[str, List[str]] = {}
+
+        rename_rules = list(getattr(rename_node, 'rename_rules', []))
+        for rule in rename_rules:
+            search_str = getattr(rule, 'search_str', '')
+            replace_str = getattr(rule, 'replace_str', '')
+            self._append_cross_ib_mapping_from_name_pair(
+                search_str,
+                replace_str,
+                indexcount_mapping,
+                ibhash_mapping,
+            )
+
+        if getattr(rename_node, 'reverse_mapping', False):
+            for rule in reversed(rename_rules):
+                search_str = getattr(rule, 'search_str', '')
+                replace_str = getattr(rule, 'replace_str', '')
+                self._append_cross_ib_mapping_from_name_pair(
+                    replace_str,
+                    search_str,
+                    indexcount_mapping,
+                    ibhash_mapping,
+                )
+
+        return indexcount_mapping, ibhash_mapping
+
+    @staticmethod
+    def _merge_cross_ib_rename_mappings(
+        base_mapping: Dict[str, List[str]],
+        extra_mapping: Dict[str, List[str]],
+    ) -> Dict[str, List[str]]:
+        merged_mapping: Dict[str, List[str]] = {}
+
+        for source_key, target_keys in base_mapping.items():
+            merged_mapping[source_key] = list(target_keys)
+
+        for source_key, target_keys in extra_mapping.items():
+            if source_key not in merged_mapping:
+                merged_mapping[source_key] = []
+            for target_key in target_keys:
+                if target_key not in merged_mapping[source_key]:
+                    merged_mapping[source_key].append(target_key)
+
+        return merged_mapping
 
     def _detect_and_apply_cross_ib_rename_mapping(self):
         from .node_cross_ib import CrossIBMatchMode
@@ -954,22 +1012,55 @@ class BluePrintModel:
         has_cross_ib_rename = False
         for cross_ib_node in self.cross_ib_nodes:
             rename_records_by_node: Dict[str, List[dict]] = {}
+            rename_nodes_by_key: Dict[str, bpy.types.Node] = {}
 
             for chain in valid_chains:
                 if cross_ib_node not in chain.node_path or not chain.rename_history:
+                    pass
+                else:
+                    for record in chain.rename_history:
+                        rename_node_key = (
+                            record.get('node_key', '')
+                            or record.get('node_name', '')
+                            or '__unknown_rename_node__'
+                        )
+                        rename_records_by_node.setdefault(rename_node_key, []).append(record)
+
+                if cross_ib_node not in chain.node_path:
                     continue
 
-                for record in chain.rename_history:
-                    rename_node_key = (
-                        record.get('node_key', '')
-                        or record.get('node_name', '')
-                        or '__unknown_rename_node__'
-                    )
-                    rename_records_by_node.setdefault(rename_node_key, []).append(record)
+                for node in chain.node_path:
+                    if node.bl_idname != _NODE_TYPE_OBJECT_RENAME:
+                        continue
+                    rename_nodes_by_key[_get_node_unique_key(node)] = node
 
-            for rename_node_key, rename_records in rename_records_by_node.items():
-                rename_node_name = rename_records[0].get('node_name', '') or rename_node_key
+            rename_node_keys = set(rename_records_by_node.keys()) | set(rename_nodes_by_key.keys())
+            sorted_rename_nodes = sorted(
+                rename_node_keys,
+                key=lambda item: min(
+                    (
+                        record.get('operation_index', 10**9)
+                        for record in rename_records_by_node.get(item, [])
+                    ),
+                    default=10**9 if item not in rename_records_by_node else 10**8,
+                ),
+            )
+
+            for rename_node_key in sorted_rename_nodes:
+                rename_records = rename_records_by_node.get(rename_node_key, [])
+                rename_node = rename_nodes_by_key.get(rename_node_key)
+                rename_node_name = (
+                    rename_records[0].get('node_name', '')
+                    if rename_records
+                    else getattr(rename_node, 'name', rename_node_key)
+                ) or rename_node_key
+
                 indexcount_mapping, ibhash_mapping = self._build_cross_ib_rename_mappings_from_records(rename_records)
+                if rename_node is not None:
+                    node_indexcount_mapping, node_ibhash_mapping = self._build_cross_ib_rename_mappings_from_node(rename_node)
+                    indexcount_mapping = self._merge_cross_ib_rename_mappings(indexcount_mapping, node_indexcount_mapping)
+                    ibhash_mapping = self._merge_cross_ib_rename_mappings(ibhash_mapping, node_ibhash_mapping)
+
                 if not indexcount_mapping and not ibhash_mapping:
                     continue
 
