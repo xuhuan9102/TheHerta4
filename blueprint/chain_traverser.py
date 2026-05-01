@@ -315,8 +315,13 @@ class ChainTraverser:
             try:
                 from .node_rename import SSMTNode_Object_Rename
 
+                rename_input_name = (
+                    chain.virtual_object_name
+                    or chain.export_object_name_override
+                    or chain.object_name
+                )
                 new_name, was_modified, history, signature = SSMTNode_Object_Rename.apply_to_object_name(
-                    chain.object_name,
+                    rename_input_name,
                     current_node
                 )
 
@@ -328,9 +333,11 @@ class ChainTraverser:
                         operation = {
                             'operation_index': len(chain.rename_history) + 1,
                             'node_name': current_node.name,
+                            'node_key': _get_node_unique_key(current_node),
                             **record
                         }
                         chain.rename_history.append(operation)
+                    chain.virtual_object_name = new_name
 
                 chain.node_path.append(current_node)
                 chain.node_param_signatures.append(signature)

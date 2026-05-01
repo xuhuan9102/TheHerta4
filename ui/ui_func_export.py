@@ -44,8 +44,30 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
 
     _POSTPROCESS_NODE_PREFIX = 'SSMTNode_PostProcess_'
 
+    blueprint_name: bpy.props.StringProperty(
+        name="Blueprint Name",
+        default="",
+        options={'SKIP_SAVE'},
+    ) # type: ignore
+
+    def _resolve_target_tree(self, context):
+        requested_tree_name = str(getattr(self, "blueprint_name", "") or "").strip()
+        if requested_tree_name:
+            tree = BlueprintExportHelper.get_selected_blueprint_tree(
+                selected_name=requested_tree_name,
+                context=context,
+            )
+        else:
+            tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
+
+        global_properties = getattr(getattr(context, "scene", None), "global_properties", None)
+        if tree and global_properties and getattr(global_properties, "selected_blueprint_name", "") != tree.name:
+            global_properties.selected_blueprint_name = tree.name
+
+        return tree
+
     def invoke(self, context, event):
-        tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
+        tree = self._resolve_target_tree(context)
         if not tree:
             return self.execute(context)
 
@@ -89,7 +111,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         TimerUtils.start_session("Mod导出")
 
         TimerUtils.start_stage("蓝图验证")
-        tree = BlueprintExportHelper.get_current_blueprint_tree(context=context)
+        tree = self._resolve_target_tree(context)
         if not tree:
             self.report({'ERROR'}, "未找到当前蓝图，请在蓝图编辑器中点击 Generate Mod")
             return {'CANCELLED'}
@@ -402,7 +424,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             ExportSRMI(blueprint_model=blueprint_model).export()
         elif GlobalConfig.logic_name == LogicName.ZZMI:
             ExportZZMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.WWMI:
+        elif GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
             ExportWWMI(blueprint_model=blueprint_model).export()
         elif GlobalConfig.logic_name == LogicName.SnowBreak:
             ExportSnowBreak(blueprint_model=blueprint_model).export()
@@ -426,7 +448,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             ExportSRMI(blueprint_model=blueprint_model).export_buffers_only()
         elif GlobalConfig.logic_name == LogicName.ZZMI:
             ExportZZMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.WWMI:
+        elif GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
             ExportWWMI(blueprint_model=blueprint_model).export_buffers_only()
         elif GlobalConfig.logic_name == LogicName.SnowBreak:
             ExportSnowBreak(blueprint_model=blueprint_model).export_buffers_only()

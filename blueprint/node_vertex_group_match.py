@@ -703,6 +703,86 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
             for weight, vert_indices in weight_to_vertices.items():
                 vertex_group.add(vert_indices, weight, 'REPLACE')
 
+    def _clean_non_numeric_vertex_groups(self, obj):
+        """清理非数字名称的顶点组"""
+        groups_to_remove = [vg for vg in obj.vertex_groups if not vg.name.isdigit()]
+        for vg in reversed(groups_to_remove):
+            try:
+                obj.vertex_groups.remove(vg)
+            except Exception:
+                pass
+        return len(groups_to_remove)
+
+    def _fill_vertex_group_gaps(self, obj):
+        """填充缺失的数字顶点组"""
+        numeric_names = set()
+        for vg in obj.vertex_groups:
+            if vg.name.isdigit():
+                numeric_names.add(vg.name)
+
+        if not numeric_names:
+            return 0
+
+        try:
+            max_num = max(int(name) for name in numeric_names)
+        except (ValueError, TypeError):
+            return 0
+
+        if max_num > 1000:
+            return 0
+
+        filled_count = 0
+        for num in range(max_num + 1):
+            name = str(num)
+            if name not in numeric_names:
+                try:
+                    obj.vertex_groups.new(name=name)
+                    filled_count += 1
+                except Exception:
+                    pass
+
+        return filled_count
+
+    def _sort_vertex_groups(self, obj):
+        """按数字顺序排序顶点组"""
+        if not obj.vertex_groups:
+            return
+
+        if len(obj.vertex_groups) <= 1:
+            return
+
+        try:
+            vg_index_to_name = {vg.index: vg.name for vg in obj.vertex_groups}
+            vg_weights = {vg.name: defaultdict(list) for vg in obj.vertex_groups}
+
+            for vert in obj.data.vertices:
+                for g in vert.groups:
+                    vg_name = vg_index_to_name.get(g.group)
+                    if vg_name and g.weight > 0:
+                        vg_weights[vg_name][g.weight].append(vert.index)
+
+            def sort_key(name):
+                if name.isdigit():
+                    return (0, int(name))
+                else:
+                    return (1, name)
+
+            sorted_names = sorted(vg_weights.keys(), key=sort_key)
+
+            for vg in list(obj.vertex_groups):
+                try:
+                    obj.vertex_groups.remove(vg)
+                except Exception:
+                    pass
+
+            for name in sorted_names:
+                new_vg = obj.vertex_groups.new(name=name)
+                weight_dict = vg_weights[name]
+                for weight, vert_indices in weight_dict.items():
+                    new_vg.add(vert_indices, weight, 'REPLACE')
+        except Exception as e:
+            print(f"[VertexGroupMatch] 排序顶点组失败: {e}")
+
     def _remove_backup_objects_from_payload(self, backup_payload):
         return
 
@@ -800,6 +880,8 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         }
         renamed_count = 0
         merged_count = 0
+        cleaned_count = 0
+        filled_count = 0
         renamed_objects = 0
 
         for source_obj in source_objects:
@@ -820,9 +902,18 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
             changed_group_count, merged_group_count = self._apply_mapping_with_merge(source_obj, mapping)
             renamed_count += changed_group_count
             merged_count += merged_group_count
+
+            cleaned = self._clean_non_numeric_vertex_groups(source_obj)
+            cleaned_count += cleaned
+
+            filled = self._fill_vertex_group_gaps(source_obj)
+            filled_count += filled
+
+            self._sort_vertex_groups(source_obj)
+
             renamed_objects += 1
 
-        if renamed_count == 0:
+        if renamed_count == 0 and cleaned_count == 0 and filled_count == 0:
             self._remove_backup_objects_from_payload(backup_payload)
             return False, "源物体或源合集中没有顶点组命中当前映射表"
 
@@ -830,7 +921,18 @@ class SSMTNode_VertexGroupMatch(SSMTNodeBase):
         self.source_mapping_backup_object = self.source_collection or self.source_object
         self.source_mapping_applied = True
         scope_label = self.get_source_scope_label()
-        return True, f"已将映射表应用到{scope_label}，共处理 {renamed_objects} 个物体，重命名 {renamed_count} 个顶点组，合并 {merged_count} 组同名顶点组"
+
+        message_parts = [f"已将映射表应用到{scope_label}，共处理 {renamed_objects} 个物体"]
+        if renamed_count > 0:
+            message_parts.append(f"重命名 {renamed_count} 个顶点组")
+        if merged_count > 0:
+            message_parts.append(f"合并 {merged_count} 组同名顶点组")
+        if cleaned_count > 0:
+            message_parts.append(f"清理 {cleaned_count} 个非数字组")
+        if filled_count > 0:
+            message_parts.append(f"填充 {filled_count} 个缺失组")
+
+        return True, "，".join(message_parts)
 
     def revert_mapping_on_source_object(self):
         """撤回映射应用，恢复源物体原始顶点组名称。"""

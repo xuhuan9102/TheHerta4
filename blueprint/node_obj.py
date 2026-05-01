@@ -1,4 +1,4 @@
-import bpy
+﻿import bpy
 import os
 import time
 from bpy.types import NodeTree, Node, NodeSocket
@@ -434,7 +434,13 @@ class SSMTNode_Result_Output(SSMTNodeBase):
         if GlobalConfig.logic_name == LogicName.EFMI:
             layout.prop(context.scene.global_properties, "use_rabbitfx_slot")
 
-        layout.prop(context.scene.global_properties, "generate_branch_mod_gui",text="生成分支架构Mod面板(测试中)")
+        from .export_helper import BlueprintExportHelper
+        has_mod_panel_node = BlueprintExportHelper.has_mod_panel_node(tree=self.id_data)
+        info_box = layout.box()
+        if has_mod_panel_node:
+            info_box.label(text="已检测到 Mod面板 节点，导出时会生成分支 Mod 面板", icon='MENU_PANEL')
+        else:
+            info_box.label(text="如需生成分支 Mod 面板，请在蓝图中添加 Mod面板 节点", icon='INFO')
 
         layout.prop(context.scene.global_properties, "open_mod_folder_after_generate_mod",text="生成Mod后打开Mod所在文件夹")
 

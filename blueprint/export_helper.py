@@ -29,6 +29,66 @@ class BlueprintExportHelper:
         return tree is not None and getattr(tree, "bl_idname", "") == 'SSMTBlueprintTreeType'
 
     @staticmethod
+    def get_all_blueprint_trees():
+        blueprint_trees = [
+            node_group for node_group in bpy.data.node_groups
+            if BlueprintExportHelper._is_valid_blueprint_tree(node_group)
+        ]
+        blueprint_trees.sort(key=lambda tree: tree.name.casefold())
+        return blueprint_trees
+
+    @staticmethod
+    def get_blueprint_tree_by_name(tree_name):
+        if not tree_name:
+            return None
+
+        tree = bpy.data.node_groups.get(tree_name)
+        if BlueprintExportHelper._is_valid_blueprint_tree(tree):
+            return tree
+
+        return None
+
+    @staticmethod
+    def get_preferred_blueprint_name(selected_name="", context=None):
+        selected_tree = BlueprintExportHelper.get_blueprint_tree_by_name(selected_name)
+        if selected_tree:
+            return selected_tree.name
+
+        current_tree = BlueprintExportHelper._get_blueprint_tree_from_context(context)
+        if BlueprintExportHelper._is_valid_blueprint_tree(current_tree):
+            return current_tree.name
+
+        runtime_tree = BlueprintExportHelper.get_blueprint_tree_by_name(
+            BlueprintExportHelper.runtime_blueprint_tree_name,
+        )
+        if runtime_tree:
+            return runtime_tree.name
+
+        workspace_tree = BlueprintExportHelper.get_blueprint_tree_by_name(GlobalConfig.get_workspace_name())
+        if workspace_tree:
+            return workspace_tree.name
+
+        all_blueprints = BlueprintExportHelper.get_all_blueprint_trees()
+        if all_blueprints:
+            return all_blueprints[0].name
+
+        return ""
+
+    @staticmethod
+    def get_blueprint_enum_items(context=None):
+        items = []
+        preferred_name = BlueprintExportHelper.get_preferred_blueprint_name(context=context)
+
+        for tree in BlueprintExportHelper.get_all_blueprint_trees():
+            description = "当前默认蓝图" if tree.name == preferred_name else "选择该蓝图进行打开或生成 Mod"
+            items.append((tree.name, tree.name, description))
+
+        if not items:
+            items.append(("__NONE__", "当前没有蓝图", "当前没有可选蓝图，请先打开蓝图界面或执行一键导入"))
+
+        return items
+
+    @staticmethod
     def set_runtime_blueprint_tree(tree):
         if BlueprintExportHelper._is_valid_blueprint_tree(tree):
             BlueprintExportHelper.runtime_blueprint_tree_name = tree.name
@@ -74,7 +134,7 @@ class BlueprintExportHelper:
             if BlueprintExportHelper._is_valid_blueprint_tree(tree):
                 return tree
 
-        tree_name = GlobalConfig.workspacename
+        tree_name = GlobalConfig.get_workspace_name()
         if not tree_name:
             return None
 
@@ -84,6 +144,40 @@ class BlueprintExportHelper:
             return tree
 
         return None
+
+    @staticmethod
+    def get_selected_blueprint_tree(selected_name="", context=None):
+        requested_name = str(selected_name or "").strip()
+        if requested_name == "__NONE__":
+            return None
+        if requested_name:
+            return BlueprintExportHelper.get_blueprint_tree_by_name(requested_name)
+
+        preferred_name = BlueprintExportHelper.get_preferred_blueprint_name(
+            selected_name=selected_name,
+            context=context,
+        )
+        return BlueprintExportHelper.get_blueprint_tree_by_name(preferred_name)
+
+    @staticmethod
+    def get_active_mod_panel_nodes(context=None, tree=None):
+        current_tree = tree or BlueprintExportHelper.get_current_blueprint_tree(context=context)
+        if not current_tree:
+            return []
+
+        panel_nodes = BlueprintExportHelper.get_nodes_from_bl_idname(current_tree, 'SSMTNode_ModPanel')
+        return [node for node in panel_nodes if not getattr(node, "mute", False)]
+
+    @staticmethod
+    def has_mod_panel_node(context=None, tree=None):
+        return len(BlueprintExportHelper.get_active_mod_panel_nodes(context=context, tree=tree)) > 0
+
+    @staticmethod
+    def is_mod_panel_flow_effect_enabled(context=None, tree=None):
+        panel_nodes = BlueprintExportHelper.get_active_mod_panel_nodes(context=context, tree=tree)
+        if not panel_nodes:
+            return False
+        return any(getattr(node, "enable_flow_effect", True) for node in panel_nodes)
 
     @staticmethod
     def find_node_in_all_blueprints(node_name):

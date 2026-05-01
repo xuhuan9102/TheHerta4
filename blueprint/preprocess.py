@@ -123,7 +123,7 @@ class PreProcessHelper:
                 uncached_objects.append(obj_name)
         
         if uncached_objects:
-            cls._create_object_copies(uncached_objects)
+            cls._create_object_copies(uncached_objects, hash_map=hash_map)
             
             copy_names = [cls.original_to_copy_map[name] for name in uncached_objects if name in cls.original_to_copy_map]
             
@@ -160,29 +160,29 @@ class PreProcessHelper:
                         LOG.warning(f"⚠️ 缓存保存跳过: {obj_name} 哈希值为空")
 
     @classmethod
-    def _create_object_copies(cls, object_names: List[str]):
+    def _create_object_copies(cls, object_names: List[str], hash_map: Dict[str, str] = None):
         created_count = 0
         existing_count = 0
         failed_count = 0
         
         for obj_name in object_names:
-            obj = bpy.data.objects.get(obj_name)
-            source_obj_name = obj_name
-            if not obj:
-                source_obj_name = ObjectPrefixHelper.resolve_source_object_name(obj_name)
-                obj = bpy.data.objects.get(source_obj_name)
+            obj, source_obj_name = PreProcessCache.resolve_source_object(obj_name)
             if not obj:
                 LOG.warning(f"   找不到源物体 {obj_name} (解析源名称: {source_obj_name})")
                 failed_count += 1
                 continue
             
             copy_name = f"{obj_name}_copy"
+            expected_hash = hash_map.get(obj_name, "") if hash_map else ""
             
             existing_copy = bpy.data.objects.get(copy_name)
             if existing_copy:
-                existing_count += 1
-                cls.original_to_copy_map[obj_name] = copy_name
-                continue
+                if PreProcessCache.runtime_copy_matches(existing_copy, obj_name, source_obj_name, expected_hash):
+                    existing_count += 1
+                    cls.register_copy_result(obj_name, copy_name)
+                    continue
+
+                PreProcessCache.remove_runtime_copy(copy_name)
             
             obj_copy = obj.copy()
             obj_copy.name = copy_name
@@ -191,6 +191,7 @@ class PreProcessHelper:
                 obj_copy.data = obj.data.copy()
             
             bpy.context.scene.collection.objects.link(obj_copy)
+            PreProcessCache.tag_runtime_copy(obj_copy, obj_name, source_obj_name, expected_hash)
             
             original_shapekey_count = 0
             if obj.data.shape_keys:

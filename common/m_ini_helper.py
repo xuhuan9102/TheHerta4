@@ -212,13 +212,13 @@ class M_IniHelper:
             if condition_str != "":
                 drawindexed_str_list.append("if " + condition_str)
                 for obj_model in obj_model_list:
-                    display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
+                    display_name = str(getattr(obj_model, 'obj_name', '') or getattr(obj_model, 'display_name', '') or '')
                     drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
                     drawindexed_str_list.append("  " + obj_model.get_drawindexed_str(obj_name_draw_offset_dict))
                 drawindexed_str_list.append("endif")
             else:
                 for obj_model in obj_model_list:
-                    display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
+                    display_name = str(getattr(obj_model, 'obj_name', '') or getattr(obj_model, 'display_name', '') or '')
                     drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
                     drawindexed_str_list.append(obj_model.get_drawindexed_str(obj_name_draw_offset_dict))
             drawindexed_str_list.append("")
@@ -247,13 +247,13 @@ class M_IniHelper:
             if condition_str != "":
                 drawindexed_str_list.append("if " + condition_str)
                 for obj_model in obj_model_list:
-                    display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
+                    display_name = str(getattr(obj_model, 'obj_name', '') or getattr(obj_model, 'display_name', '') or '')
                     drawindexed_str_list.append("  ; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
                     drawindexed_str_list.append("  " + obj_model.get_drawindexed_instanced_str(obj_name_draw_offset_dict))
                 drawindexed_str_list.append("endif")
             else:
                 for obj_model in obj_model_list:
-                    display_name = getattr(obj_model, 'display_name', obj_model.obj_name)
+                    display_name = str(getattr(obj_model, 'obj_name', '') or getattr(obj_model, 'display_name', '') or '')
                     drawindexed_str_list.append("; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
                     drawindexed_str_list.append("  " + obj_model.get_drawindexed_instanced_str(obj_name_draw_offset_dict))
             drawindexed_str_list.append("")

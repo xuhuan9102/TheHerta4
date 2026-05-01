@@ -1,4 +1,4 @@
-import re
+﻿import re
 
 import bpy
 from bpy.types import NodeTree, Node, NodeSocket
@@ -1059,6 +1059,7 @@ class SSMT_MT_NodeMenu_Blueprint(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
         _add_node_entry(layout, "蓝图嵌套", 'NODETREE', "SSMTNode_Blueprint_Nest")
+        _add_node_entry(layout, "Mod面板", 'MENU_PANEL', "SSMTNode_ModPanel")
         _add_node_entry(layout, "跨IB节点", 'ARROW_LEFTRIGHT', "SSMTNode_CrossIB")
         _add_node_entry(layout, "多文件导出", 'FILE', "SSMTNode_MultiFile_Export")
         _add_node_entry(layout, "Bone Palette 导出", 'ARMATURE_DATA', "SSMTNode_BonePalette_Export")

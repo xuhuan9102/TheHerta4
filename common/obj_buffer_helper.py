@@ -147,7 +147,7 @@ class ObjBufferHelper:
             result[1::4] = normals[1::3]
             result[2::4] = normals[2::3]
             
-            if GlobalConfig.logic_name == LogicName.WWMI:
+            if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
                 bitangent_signs = numpy.empty(mesh_loops_length, dtype=numpy.float32)
                 mesh_loops.foreach_get("bitangent_sign", bitangent_signs)
                 result[3::4] = bitangent_signs * -1
@@ -226,7 +226,7 @@ class ObjBufferHelper:
             # 燕云十六声的TANGENT.w固定为1
             tangent_w = numpy.ones(mesh_loops_length, dtype=numpy.float32)
             result[3::4] = tangent_w
-        elif GlobalConfig.logic_name == LogicName.WWMI:
+        elif GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
             # Unreal引擎中这里要填写固定的1
             tangent_w = numpy.ones(mesh_loops_length, dtype=numpy.float32)
             result[3::4] = tangent_w
@@ -276,7 +276,7 @@ class ObjBufferHelper:
         binormals = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
         mesh_loops.foreach_get("bitangent", binormals)
         
-        if GlobalConfig.logic_name == LogicName.WWMI:
+        if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
             # 鸣潮逆向翻转：Binormal (-x, -y, z)
             binormals[0::3] *= -1
             binormals[1::3] *= -1
@@ -472,13 +472,13 @@ class ObjBufferHelper:
         # 预设的权重个数，也就是每个顶点组受多少个权重影响
         blend_size = 4
 
-        if GlobalConfig.logic_name == LogicName.WWMI:
+        if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
             blend_size = d3d11_game_type.get_blendindices_count_wwmi()
 
         normalize_weights = "Blend" in d3d11_game_type.OrderedCategoryNameList
 
         # normalize_weights = False
-        if GlobalConfig.logic_name == LogicName.WWMI:
+        if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
             # print("鸣潮专属测试版权重处理：")
             blendweights_dict, blendindices_dict = VertexGroupUtils.get_blendweights_blendindices_v4_fast(mesh=mesh,normalize_weights = normalize_weights,blend_size=blend_size)
 

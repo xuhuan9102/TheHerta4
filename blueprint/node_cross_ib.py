@@ -252,7 +252,11 @@ class SSMTNode_CrossIB(SSMTNodeBase):
             if self.cross_ib_method not in available_methods:
                 self.cross_ib_method = available_methods[0]
         else:
-            self.cross_ib_method = ''
+            raise RuntimeError(
+                f"Cross IB 节点不支持当前游戏模式 '{logic_name}'。\n"
+                f"Cross IB 仅支持: EFMI (终末地)、ZZMI (绝区零)\n"
+                f"请在蓝图树中移除 Cross IB 节点，或切换到支持的游戏模式。"
+            )
 
         if logic_name == 'ZZMI':
             self.match_mode = CrossIBMatchMode.IB_HASH
@@ -502,10 +506,32 @@ class SSMTNode_CrossIB(SSMTNodeBase):
         return False
 
     def _has_ibhash_pair(self, source_ib, target_ib):
+        source_key = self._ibhash_value_to_key(source_ib)
+        target_key = self._ibhash_value_to_key(target_ib)
         for item in self.cross_ib_list:
-            if item.source_ib == source_ib and item.target_ib == target_ib:
+            if self._ibhash_value_to_key(item.source_ib) == source_key and self._ibhash_value_to_key(item.target_ib) == target_key:
                 return True
         return False
+
+    @staticmethod
+    def _ibhash_value_to_key(ib_value):
+        if not ib_value:
+            return ""
+
+        normalized_value = str(ib_value).replace("_", "-")
+        ib_hash, first_index = CrossIBItem.parse_ib_with_first_index(normalized_value)
+        if not ib_hash:
+            return ""
+        return f"{ib_hash}_{first_index}"
+
+    @classmethod
+    def _ibhash_key_to_value(cls, ib_key):
+        normalized_key = cls._ibhash_value_to_key(ib_key)
+        if not normalized_key:
+            return ""
+
+        ib_hash, first_index = normalized_key.rsplit("_", 1)
+        return f"{ib_hash}-{first_index}"
 
     def apply_indexcount_mapping(self, indexcount_mapping):
         if not indexcount_mapping:
@@ -520,11 +546,11 @@ class SSMTNode_CrossIB(SSMTNodeBase):
             if not original_source or not original_target:
                 continue
 
-            if original_source not in indexcount_mapping or original_target not in indexcount_mapping:
-                continue
+            new_sources = indexcount_mapping.get(original_source, [original_source])
+            new_targets = indexcount_mapping.get(original_target, [original_target])
 
-            new_sources = indexcount_mapping[original_source]
-            new_targets = indexcount_mapping[original_target]
+            if original_source not in indexcount_mapping and original_target not in indexcount_mapping:
+                continue
 
             if isinstance(new_sources, str):
                 new_sources = [new_sources]
@@ -560,20 +586,30 @@ class SSMTNode_CrossIB(SSMTNodeBase):
             if not original_source or not original_target:
                 continue
 
-            if original_source not in ibhash_mapping or original_target not in ibhash_mapping:
+            original_source_key = self._ibhash_value_to_key(original_source)
+            original_target_key = self._ibhash_value_to_key(original_target)
+            if not original_source_key or not original_target_key:
                 continue
 
-            new_sources = ibhash_mapping[original_source]
-            new_targets = ibhash_mapping[original_target]
+            new_source_keys = ibhash_mapping.get(original_source_key, [original_source_key])
+            new_target_keys = ibhash_mapping.get(original_target_key, [original_target_key])
 
-            if isinstance(new_sources, str):
-                new_sources = [new_sources]
-            if isinstance(new_targets, str):
-                new_targets = [new_targets]
+            if original_source_key not in ibhash_mapping and original_target_key not in ibhash_mapping:
+                continue
 
-            for new_source in new_sources:
-                for new_target in new_targets:
-                    if new_source == original_source and new_target == original_target:
+            if isinstance(new_source_keys, str):
+                new_source_keys = [new_source_keys]
+            if isinstance(new_target_keys, str):
+                new_target_keys = [new_target_keys]
+
+            for new_source_key in new_source_keys:
+                for new_target_key in new_target_keys:
+                    if new_source_key == original_source_key and new_target_key == original_target_key:
+                        continue
+
+                    new_source = self._ibhash_key_to_value(new_source_key)
+                    new_target = self._ibhash_key_to_value(new_target_key)
+                    if not new_source or not new_target:
                         continue
 
                     if self._has_ibhash_pair(new_source, new_target):

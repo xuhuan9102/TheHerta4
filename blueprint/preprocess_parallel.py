@@ -327,6 +327,8 @@ class ParallelPreprocessCoordinator:
     def _integrate_results(cls, jobs: list[dict], hash_map: dict[str, str], cache_enabled: bool):
         LOG.info("📥 正在整合子进程结果...")
 
+        cache_items = []
+
         for job in sorted(jobs, key=lambda item: item["index"]):
             with open(job["result_path"], "r", encoding="utf-8") as file:
                 result_data = json.load(file)
@@ -357,9 +359,13 @@ class ParallelPreprocessCoordinator:
                 if cache_enabled:
                     hash_value = hash_map.get(original_name, "")
                     if hash_value:
-                        PreProcessCache.save_to_cache(original_name, copy_name, hash_value)
+                        cache_items.append((original_name, copy_name, hash_value))
                     else:
                         LOG.warning(f"⚠️ 缓存保存跳过: {original_name} 哈希值为空")
+
+        if cache_items:
+            LOG.info(f"💾 正在批量保存缓存 ({len(cache_items)} 个物体)...")
+            PreProcessCache.batch_save_to_cache(cache_items)
 
     @staticmethod
     def _write_text(file_path: str, content: str):

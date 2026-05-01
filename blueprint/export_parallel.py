@@ -324,9 +324,11 @@ class ParallelExportCoordinator:
             snapshot_path = os.path.join(session_dir, "snapshot.blend")
             bpy.ops.wm.save_as_mainfile(filepath=snapshot_path, copy=True, check_existing=False)
 
-            jobs = cls._build_jobs(session_dir, snapshot_path, tree.name, middle_rounds)
+            cache_dir = PreProcessCache.get_original_cache_dir()
+            jobs = cls._build_jobs(session_dir, snapshot_path, tree.name, middle_rounds, cache_dir)
             cls._run_jobs(jobs, blender_path, instance_count, timeout_seconds)
             results = cls._load_results(jobs)
+            cls._merge_job_caches(jobs, cache_dir)
         except Exception:
             if not keep_temp:
                 shutil.rmtree(session_dir, ignore_errors=True)
@@ -340,13 +342,12 @@ class ParallelExportCoordinator:
         return results
 
     @classmethod
-    def _build_jobs(cls, session_dir: str, snapshot_path: str, tree_name: str, middle_rounds: list[dict]) -> list[dict]:
-        cache_dir = PreProcessCache.get_original_cache_dir()
-        
+    def _build_jobs(cls, session_dir: str, snapshot_path: str, tree_name: str, middle_rounds: list[dict], cache_dir: str) -> list[dict]:
         jobs = []
         for index, round_plan in enumerate(middle_rounds, start=1):
             job_dir = os.path.join(session_dir, f"job_{index:03d}")
             os.makedirs(job_dir, exist_ok=True)
+            job_cache_dir = os.path.join(job_dir, "preprocess_cache")
 
             manifest_path = os.path.join(job_dir, "manifest.json")
             result_path = os.path.join(job_dir, "result.json")
@@ -359,7 +360,8 @@ class ParallelExportCoordinator:
                 "round_plan": round_plan,
                 "result_path": result_path,
                 "log_path": log_path,
-                "cache_dir": cache_dir,
+                "cache_read_dir": cache_dir,
+                "cache_write_dir": job_cache_dir,
             }
 
             with open(manifest_path, "w", encoding="utf-8") as file:
@@ -372,6 +374,7 @@ class ParallelExportCoordinator:
                 "log_path": log_path,
                 "snapshot_path": snapshot_path,
                 "round_plan": round_plan,
+                "cache_write_dir": job_cache_dir,
             })
 
         LOG.info(f"⚡ 并行导出任务数: {len(jobs)}")
@@ -379,6 +382,18 @@ class ParallelExportCoordinator:
             round_plan = job["round_plan"]
             LOG.info(f"   Job {job['index']:03d}: 第 {round_plan['round_index']} 轮 -> {round_plan['buffer_folder_name']}")
         return jobs
+
+    @classmethod
+    def _merge_job_caches(cls, jobs: list[dict], cache_dir: str):
+        if not cache_dir:
+            return
+
+        merged_count = 0
+        for job in jobs:
+            merged_count += PreProcessCache.merge_cache_dir(job.get("cache_write_dir", ""), cache_dir)
+
+        if merged_count > 0:
+            LOG.info(f"[ParallelExportCache] merged staged cache entries: {merged_count}")
 
     @classmethod
     def _run_jobs(cls, jobs: list[dict], blender_path: str, instance_count: int, timeout_seconds: int):
@@ -486,9 +501,11 @@ def _run_worker(manifest_path: str):
         LOG.start_collecting()
         GlobalConfig.read_from_main_json_ssmt4()
         
-        cache_dir = manifest.get("cache_dir", "")
-        if cache_dir:
-            PreProcessCache.set_override_cache_dir(cache_dir)
+        cache_read_dir = manifest.get("cache_read_dir", "")
+        cache_write_dir = manifest.get("cache_write_dir", "")
+        if cache_write_dir or cache_read_dir:
+            read_dirs = [cache_read_dir] if cache_read_dir else []
+            PreProcessCache.set_override_cache_dirs(cache_write_dir or cache_read_dir, read_dirs)
 
         tree = bpy.data.node_groups.get(manifest["tree_name"])
         if not tree:

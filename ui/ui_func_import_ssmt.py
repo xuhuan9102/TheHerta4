@@ -95,7 +95,7 @@ def ImprotFromWorkSpaceFull(self, context):
     # 自动生成蓝图节点逻辑
     # ==========================
     try:
-        tree_name = GlobalConfig.workspacename
+        tree_name = GlobalConfig.get_workspace_name()
 
         try:
             tree = bpy.data.node_groups.new(name=tree_name, type='SSMTBlueprintTreeType')
@@ -103,6 +103,10 @@ def ImprotFromWorkSpaceFull(self, context):
             print(f"Failed to create new node tree: {e}. Check if SSMTBlueprintTreeType is registered.")
             return
         tree.use_fake_user = True
+
+        global_properties = getattr(getattr(context, "scene", None), "global_properties", None)
+        if global_properties and getattr(global_properties, "selected_blueprint_name", "") != tree.name:
+            global_properties.selected_blueprint_name = tree.name
 
         drawib_tabname_dict = WorkSpaceHelper.get_drawib_tabname_dict()
 
@@ -244,7 +248,7 @@ class SSMT4ImportAllFromCurrentWorkSpaceBlueprint(bpy.types.Operator):
     def execute(self, context):
         # print("Current WorkSpace: " + GlobalConfig.workspacename)
         # print("Current Game: " + GlobalConfig.gamename)
-        if GlobalConfig.workspacename == "":
+        if GlobalConfig.get_workspace_name() == "":
             self.report({"ERROR"},"Please select your WorkSpace in SSMT before import.")
         elif not os.path.exists(GlobalConfig.path_workspace_folder()):
             self.report({"ERROR"},"WorkSpace Folder Didn't exists, Please create a WorkSpace in SSMT before import " + GlobalConfig.path_workspace_folder())

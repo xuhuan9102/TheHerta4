@@ -332,7 +332,7 @@ class DrawIBModelWWMI:
             ObjUtils.join_objects(bpy.context, component_merged_object)
             component_obj = component_merged_object[0]
 
-            if GlobalConfig.logic_name == LogicName.WWMI:
+            if GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
                 ObjUtils.select_obj(component_obj)
                 component_obj.rotation_euler[0] = 0
                 component_obj.rotation_euler[1] = 0

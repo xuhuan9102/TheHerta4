@@ -133,10 +133,53 @@ class GlobalConfig:
     @classmethod
     def path_current_game_total_workspace_folder(cls):
         return os.path.join(GlobalConfig.path_total_workspace_folder(),GlobalConfig.gamename + "\\") 
+
+    @classmethod
+    def _normalize_workspace_folder_path(cls, folder_path: str) -> str:
+        normalized = str(folder_path or "").strip()
+        if not normalized:
+            return ""
+
+        normalized = os.path.normpath(normalized)
+        if not normalized.endswith("\\"):
+            normalized = normalized + "\\"
+        return normalized
+
+    @classmethod
+    def get_workspace_name(cls):
+        try:
+            workspace_source_mode = GlobalProterties.workspace_source_mode()
+
+            if workspace_source_mode == "SPECIFIC":
+                specified_workspace_name = GlobalProterties.specific_workspace_name()
+                if specified_workspace_name:
+                    return specified_workspace_name
+
+            if workspace_source_mode == "CUSTOM":
+                custom_workspace_folder_path = cls._normalize_workspace_folder_path(
+                    GlobalProterties.custom_workspace_folder_path()
+                )
+                if custom_workspace_folder_path:
+                    return os.path.basename(custom_workspace_folder_path.rstrip("\\/"))
+        except Exception:
+            pass
+
+        return cls.workspacename
     
     @classmethod
     def path_workspace_folder(cls):
-        return os.path.join(GlobalConfig.path_current_game_total_workspace_folder(), GlobalConfig.workspacename + "\\")
+        try:
+            if GlobalProterties.workspace_source_mode() == "CUSTOM":
+                custom_workspace_folder_path = cls._normalize_workspace_folder_path(
+                    GlobalProterties.custom_workspace_folder_path()
+                )
+                if custom_workspace_folder_path:
+                    return custom_workspace_folder_path
+                return ""
+        except Exception:
+            pass
+
+        return os.path.join(GlobalConfig.path_current_game_total_workspace_folder(), cls.get_workspace_name() + "\\")
     
     @classmethod
     def path_generate_mod_folder(cls):
@@ -147,7 +190,7 @@ class GlobalConfig:
         else:
             # 确保用的时候直接拿到的就是已经存在的目录
             ssmt_generated_mod_folder_path = os.path.join(GlobalConfig.path_mods_folder(),"SSMTGeneratedMod\\")
-            generate_mod_folder_path = os.path.join(ssmt_generated_mod_folder_path, GlobalConfig.workspacename + "\\")
+            generate_mod_folder_path = os.path.join(ssmt_generated_mod_folder_path, cls.get_workspace_name() + "\\")
             if not os.path.exists(generate_mod_folder_path):
                 os.makedirs(generate_mod_folder_path)
             return generate_mod_folder_path

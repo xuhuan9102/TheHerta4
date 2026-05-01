@@ -11,6 +11,10 @@ try:
 except ImportError:
     pass
 try:
+    from .node_panel import SSMTNode_ModPanel
+except ImportError:
+    pass
+try:
     from .model import BluePrintModel
 except ImportError:
     pass
@@ -47,6 +51,7 @@ _MODULE_REGISTRY = [
     {"name": "node_base", "required": True},
     {"name": "node_obj", "required": True},
     {"name": "node_shapekey", "required": True},
+    {"name": "node_panel", "required": True},
     {"name": "model", "required": True},
     {"name": "export_helper", "required": True},
     {"name": "preprocess_cache", "required": True},

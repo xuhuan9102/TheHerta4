@@ -64,6 +64,7 @@ class ProcessingChain:
 
     object_name: str = ""
     original_object_name: str = ""
+    virtual_object_name: str = ""
     source_node: Optional[bpy.types.Node] = None
 
     node_path: List[bpy.types.Node] = field(default_factory=list)
@@ -275,6 +276,7 @@ class ProcessingChain:
         new_chain = ProcessingChain()
         new_chain.object_name = self.object_name
         new_chain.original_object_name = self.original_object_name
+        new_chain.virtual_object_name = self.virtual_object_name
         new_chain.source_node = self.source_node
         new_chain.node_path = list(self.node_path)
         new_chain.node_param_signatures = list(self.node_param_signatures)
@@ -958,10 +960,15 @@ class BluePrintModel:
                     continue
 
                 for record in chain.rename_history:
-                    rename_node_name = record.get('node_name', '') or '__unknown_rename_node__'
-                    rename_records_by_node.setdefault(rename_node_name, []).append(record)
+                    rename_node_key = (
+                        record.get('node_key', '')
+                        or record.get('node_name', '')
+                        or '__unknown_rename_node__'
+                    )
+                    rename_records_by_node.setdefault(rename_node_key, []).append(record)
 
-            for rename_node_name, rename_records in rename_records_by_node.items():
+            for rename_node_key, rename_records in rename_records_by_node.items():
+                rename_node_name = rename_records[0].get('node_name', '') or rename_node_key
                 indexcount_mapping, ibhash_mapping = self._build_cross_ib_rename_mappings_from_records(rename_records)
                 if not indexcount_mapping and not ibhash_mapping:
                     continue

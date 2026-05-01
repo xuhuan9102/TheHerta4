@@ -2,6 +2,43 @@ import bpy
 import os
 
 
+_blueprint_enum_items_cache = []
+
+
+def _get_blueprint_enum_items(self, context):
+    global _blueprint_enum_items_cache
+
+    try:
+        from ..blueprint.export_helper import BlueprintExportHelper
+        _blueprint_enum_items_cache = BlueprintExportHelper.get_blueprint_enum_items(context=context)
+    except Exception:
+        _blueprint_enum_items_cache = [
+            ("__NONE__", "当前没有蓝图", "当前没有可选蓝图，请先打开蓝图界面或执行一键导入"),
+        ]
+
+    return _blueprint_enum_items_cache
+
+
+def _get_workspace_enum_items(self, context):
+    try:
+        from .global_config import GlobalConfig
+
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_root = GlobalConfig.path_current_game_total_workspace_folder()
+        if not workspace_root or not os.path.isdir(workspace_root):
+            return [("", "当前没有工作空间", "当前游戏配置下未找到可用工作空间")]
+
+        workspace_names = sorted(
+            [entry.name for entry in os.scandir(workspace_root) if entry.is_dir()]
+        )
+        if not workspace_names:
+            return [("", "当前没有工作空间", "当前游戏配置下未找到可用工作空间")]
+
+        return [(name, name, "") for name in workspace_names]
+    except Exception:
+        return [("", "当前没有工作空间", "当前游戏配置下未找到可用工作空间")]
+
+
 def _default_parallel_instance_count() -> int:
     cpu_count = os.cpu_count() or 4
     return max(1, min(4, cpu_count))
@@ -13,6 +50,12 @@ def _update_parallel_preprocess_toggle(self, context):
 
 
 class GlobalProterties(bpy.types.PropertyGroup):
+    selected_blueprint_name: bpy.props.EnumProperty(
+        name="当前蓝图",
+        description="选择要打开或快捷生成 Mod 的蓝图",
+        items=_get_blueprint_enum_items,
+    ) # type: ignore
+
     open_mod_folder_after_generate_mod: bpy.props.BoolProperty(
         name="生成后打开Mod文件夹",
         description="勾选后，在生成Mod完成后自动打开Mod文件夹",
@@ -43,12 +86,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=False,
     ) # type: ignore
 
-    generate_branch_mod_gui: bpy.props.BoolProperty(
-        name="生成分支切换Mod面板(测试版)",
-        description="生成Mod时，生成一个基于当前集合架构的分支Mod面板，可在游戏中按住Ctrl + Alt呼出，仍在测试改进中",
-        default=False,
-    ) # type: ignore
-
     recalculate_tangent: bpy.props.BoolProperty(
         name="向量归一化法线存入TANGENT(全局)",
         description="使用向量相加归一化重计算所有模型的TANGENT值，勾选此项后无法精细控制具体某个模型是否计算，是偷懒选项,在不勾选时默认使用右键菜单中标记的选项。\n用途:\n1.一般用于修复GI角色,HI3 1.0角色,HSR角色轮廓线。\n2.用于修复模型由于TANGENT不正确导致的黑色色块儿问题，比如HSR的薄裙子可能会出现此问题。",
@@ -70,6 +107,30 @@ class GlobalProterties(bpy.types.PropertyGroup):
     generate_mod_folder_path: bpy.props.StringProperty(
         name="生成Mod文件夹路径",
         description="选择的生成Mod的文件夹路径",
+        default="",
+        subtype='DIR_PATH',
+    ) # type: ignore
+
+    workspace_source_mode: bpy.props.EnumProperty(
+        name="工作空间模式",
+        description="控制当前使用的工作空间来源",
+        items=[
+            ("SYNC", "同步SSMT选择", "使用 SSMT 配置文件中当前同步的工作空间"),
+            ("SPECIFIC", "使用指定工作空间", "从当前游戏配置下的工作空间列表中手动选择"),
+            ("CUSTOM", "使用自定义目录", "直接使用你指定的工作空间目录"),
+        ],
+        default="SYNC",
+    ) # type: ignore
+
+    specific_workspace_name: bpy.props.EnumProperty(
+        name="指定工作空间",
+        description="当前游戏配置下可选的工作空间列表",
+        items=_get_workspace_enum_items,
+    ) # type: ignore
+
+    custom_workspace_folder_path: bpy.props.StringProperty(
+        name="自定义工作空间目录",
+        description="手动指定工作空间目录路径",
         default="",
         subtype='DIR_PATH',
     ) # type: ignore
@@ -102,6 +163,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         name="导出时添加缺失顶点组",
         description="勾选此项后，生成Mod时会自动重新排列并填补数字顶点组间的间隙空缺",
         default=True,
+    ) # type: ignore
+
+    use_normal_map: bpy.props.BoolProperty(
+        name="自动上贴图时使用法线贴图",
+        description="启用后在导入模型时自动附加法线贴图节点，在材质预览模式下得到略微更好的视觉效果",
+        default=False,
     ) # type: ignore
 
     enable_non_mirror_workflow: bpy.props.BoolProperty(
@@ -263,7 +330,19 @@ class GlobalProterties(bpy.types.PropertyGroup):
 
     @classmethod
     def generate_branch_mod_gui(cls):
-        return cls._instance().generate_branch_mod_gui
+        try:
+            from ..blueprint.export_helper import BlueprintExportHelper
+            return BlueprintExportHelper.has_mod_panel_node()
+        except Exception:
+            return False
+
+    @classmethod
+    def generate_branch_mod_gui_flow_effect(cls):
+        try:
+            from ..blueprint.export_helper import BlueprintExportHelper
+            return BlueprintExportHelper.is_mod_panel_flow_effect_enabled()
+        except Exception:
+            return False
 
     @classmethod
     def recalculate_tangent(cls):
@@ -280,6 +359,18 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def generate_mod_folder_path(cls):
         return cls._instance().generate_mod_folder_path
+
+    @classmethod
+    def workspace_source_mode(cls):
+        return cls._instance().workspace_source_mode
+
+    @classmethod
+    def specific_workspace_name(cls):
+        return cls._instance().specific_workspace_name
+
+    @classmethod
+    def custom_workspace_folder_path(cls):
+        return cls._instance().custom_workspace_folder_path
 
     @classmethod
     def import_merged_vgmap(cls):
@@ -300,6 +391,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def export_add_missing_vertex_groups(cls):
         return cls._instance().export_add_missing_vertex_groups
+
+    @classmethod
+    def use_normal_map(cls):
+        return cls._instance().use_normal_map
 
     @classmethod
     def enable_non_mirror_workflow(cls):
@@ -336,6 +431,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def prefix_quick_apply_to_object_name(cls):
         return cls._instance().prefix_quick_apply_to_object_name
+
+    @classmethod
+    def selected_blueprint_name(cls):
+        return cls._instance().selected_blueprint_name
 
     @classmethod
     def get_deduplicate_element_set(cls) -> set:

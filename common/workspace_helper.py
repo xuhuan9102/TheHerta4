@@ -44,7 +44,7 @@ class WorkSpaceHelper:
     @staticmethod
     def create_and_get_workspace_collection() -> bpy.types.Collection:
         # 这里先创建以当前工作空间为名称的集合，并且链接到scene，确保它存在
-        workspace_collection = CollectionUtils.create_new_collection(collection_name=GlobalConfig.workspacename,color_tag=CollectionColor.Red)
+        workspace_collection = CollectionUtils.create_new_collection(collection_name=GlobalConfig.get_workspace_name(),color_tag=CollectionColor.Red)
         bpy.context.scene.collection.children.link(workspace_collection)
         return workspace_collection
 
