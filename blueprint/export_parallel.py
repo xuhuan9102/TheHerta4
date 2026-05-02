@@ -48,6 +48,8 @@ class ExportRoundExecutor:
         BluePrintModel.clear_object_name_mapping()
         BlueprintExportHelper.set_runtime_blueprint_tree(tree)
         BlueprintExportHelper.calculate_max_export_count(tree)
+        nested_trees = cls.collect_nested_trees(tree)
+        PreProcessHelper.recover_blueprint_node_references(tree, nested_trees)
 
         try:
             cls._prepare_round_state(tree, round_plan)
@@ -64,7 +66,6 @@ class ExportRoundExecutor:
                 original_to_copy_map = PreProcessHelper.execute_preprocess(object_names)
 
             if original_to_copy_map:
-                nested_trees = cls.collect_nested_trees(tree)
                 PreProcessHelper.update_blueprint_node_references(tree, nested_trees)
             TimerUtils.end_stage("前处理")
 

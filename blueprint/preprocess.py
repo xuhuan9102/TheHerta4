@@ -1,6 +1,6 @@
 import bpy
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from ..utils.log_utils import LOG
 from ..utils.shapekey_utils import ShapeKeyUtils
@@ -14,7 +14,7 @@ from ..common.object_prefix_helper import ObjectPrefixHelper
 class PreProcessHelper:
     original_to_copy_map: Dict[str, str] = {}
     created_copies: List[str] = []
-    modified_nodes: List[tuple] = []
+    modified_nodes: List[dict] = []
 
     @classmethod
     def reset_runtime_state(cls):
@@ -27,6 +27,126 @@ class PreProcessHelper:
         cls.original_to_copy_map[original_name] = copy_name
         if copy_name not in cls.created_copies:
             cls.created_copies.append(copy_name)
+
+    @staticmethod
+    def _looks_like_runtime_object_name(object_name: str) -> bool:
+        if not object_name:
+            return False
+
+        return (
+            object_name.endswith('_temp')
+            or object_name.endswith('_copy')
+            or object_name.startswith('TEMP_SUBMESH_MERGED_')
+            or re.search(r'_chain\d+$', object_name) is not None
+            or re.search(r'_dup\d+$', object_name) is not None
+        )
+
+    @classmethod
+    def _iter_runtime_name_candidates(cls, object_name: str):
+        if not object_name:
+            return
+
+        queue = [object_name]
+        seen = set()
+        strip_patterns = (
+            re.compile(r'_temp$'),
+            re.compile(r'_copy$'),
+            re.compile(r'_chain\d+$'),
+            re.compile(r'_dup\d+$'),
+        )
+
+        while queue:
+            current_name = queue.pop(0)
+            if not current_name or current_name in seen:
+                continue
+
+            seen.add(current_name)
+            yield current_name
+
+            for pattern in strip_patterns:
+                stripped_name = pattern.sub('', current_name)
+                if stripped_name and stripped_name != current_name and stripped_name not in seen:
+                    queue.append(stripped_name)
+
+    @staticmethod
+    def _resolve_object_id(object_name: str, fallback_object_id: str = "") -> str:
+        if object_name:
+            obj = bpy.data.objects.get(object_name)
+            if obj:
+                return str(obj.as_pointer())
+        return fallback_object_id or ""
+
+    @classmethod
+    def _resolve_runtime_reference_target(cls, current_name: str, fallback_name: str = "") -> Optional[str]:
+        for candidate_name in cls._iter_runtime_name_candidates(current_name):
+            if candidate_name != current_name and bpy.data.objects.get(candidate_name):
+                return candidate_name
+
+        for candidate_name in cls._iter_runtime_name_candidates(fallback_name):
+            if bpy.data.objects.get(candidate_name):
+                return candidate_name
+
+        return None
+
+    @classmethod
+    def recover_blueprint_node_references(cls, tree, nested_trees: List = None):
+        trees_to_update = [tree]
+        if nested_trees:
+            trees_to_update.extend(nested_trees)
+
+        recovered_count = 0
+
+        for current_tree in trees_to_update:
+            for node in current_tree.nodes:
+                if node.mute:
+                    continue
+
+                if node.bl_idname == 'SSMTNode_Object_Info':
+                    current_name = getattr(node, 'object_name', '')
+                    fallback_name = getattr(node, 'original_object_name', '')
+                    current_obj = bpy.data.objects.get(current_name) if current_name else None
+
+                    should_recover = current_obj is None or (
+                        fallback_name and cls._looks_like_runtime_object_name(current_name)
+                    )
+                    if not should_recover:
+                        continue
+
+                    target_name = cls._resolve_runtime_reference_target(current_name, fallback_name)
+                    if not target_name or target_name == current_name:
+                        continue
+
+                    node.object_name = target_name
+                    node.object_id = cls._resolve_object_id(target_name, getattr(node, 'object_id', ''))
+                    recovered_count += 1
+
+                elif node.bl_idname == 'SSMTNode_MultiFile_Export':
+                    node_changed = False
+                    for item in getattr(node, 'object_list', []):
+                        current_name = getattr(item, 'object_name', '')
+                        fallback_name = getattr(item, 'original_object_name', '')
+                        current_obj = bpy.data.objects.get(current_name) if current_name else None
+
+                        should_recover = current_obj is None or (
+                            fallback_name and cls._looks_like_runtime_object_name(current_name)
+                        )
+                        if not should_recover:
+                            continue
+
+                        target_name = cls._resolve_runtime_reference_target(current_name, fallback_name)
+                        if not target_name or target_name == current_name:
+                            continue
+
+                        item.object_name = target_name
+                        item.object_id = cls._resolve_object_id(target_name, getattr(item, 'object_id', ''))
+                        recovered_count += 1
+                        node_changed = True
+
+                    if node_changed:
+                        node.update_node_width([item.object_name for item in getattr(node, 'object_list', [])])
+
+        if recovered_count > 0:
+            LOG.info(f"🔧 自动恢复失效节点引用: {recovered_count} 个")
 
     @classmethod
     def collect_target_object_names(cls, object_names: List[str]) -> List[str]:
@@ -499,8 +619,17 @@ class PreProcessHelper:
                         continue
                     if original_name in cls.original_to_copy_map:
                         copy_name = cls.original_to_copy_map[original_name]
-                        cls.modified_nodes.append((current_tree.name, node.name, getattr(node, 'object_name', ''), 'object_info'))
+                        cls.modified_nodes.append({
+                            "tree_name": current_tree.name,
+                            "node_name": node.name,
+                            "node_type": "object_info",
+                            "item_index": None,
+                            "original_name": getattr(node, 'object_name', ''),
+                            "original_object_id": getattr(node, 'object_id', ''),
+                            "original_original_name": getattr(node, 'original_object_name', ''),
+                        })
                         node.object_name = copy_name
+                        node.object_id = cls._resolve_object_id(copy_name, getattr(node, 'object_id', ''))
                         updated_count += 1
                         
                         if original_name not in multi_ref_objects:
@@ -509,7 +638,7 @@ class PreProcessHelper:
                 
                 elif node.bl_idname == 'SSMTNode_MultiFile_Export' and not node.mute:
                     object_list = getattr(node, 'object_list', [])
-                    for item in object_list:
+                    for item_index, item in enumerate(object_list):
                         original_name = getattr(item, 'object_name', '')
                         if not original_name:
                             continue
@@ -517,8 +646,17 @@ class PreProcessHelper:
                             continue
                         if original_name in cls.original_to_copy_map:
                             copy_name = cls.original_to_copy_map[original_name]
-                            cls.modified_nodes.append((current_tree.name, node.name, original_name, 'multi_file_export'))
+                            cls.modified_nodes.append({
+                                "tree_name": current_tree.name,
+                                "node_name": node.name,
+                                "node_type": "multi_file_export",
+                                "item_index": item_index,
+                                "original_name": original_name,
+                                "original_object_id": getattr(item, 'object_id', ''),
+                                "original_original_name": getattr(item, 'original_object_name', ''),
+                            })
                             item.object_name = copy_name
+                            item.object_id = cls._resolve_object_id(copy_name, getattr(item, 'object_id', ''))
                             multi_file_updated_count += 1
                             
                             if original_name not in multi_ref_objects:
@@ -540,7 +678,17 @@ class PreProcessHelper:
             return
         
         restored_count = 0
-        for tree_name, node_name, original_name, node_type in cls.modified_nodes:
+        multi_file_nodes_to_refresh = set()
+
+        for entry in cls.modified_nodes:
+            tree_name = entry.get("tree_name", "")
+            node_name = entry.get("node_name", "")
+            node_type = entry.get("node_type", "")
+            item_index = entry.get("item_index")
+            original_name = entry.get("original_name", "")
+            original_object_id = entry.get("original_object_id", "")
+            original_original_name = entry.get("original_original_name", "")
+
             tree = bpy.data.node_groups.get(tree_name)
             if not tree:
                 continue
@@ -550,20 +698,44 @@ class PreProcessHelper:
                 continue
             
             if node_type == 'object_info':
-                current_name = getattr(node, 'object_name', '')
-                if current_name.endswith('_copy'):
+                changed = (
+                    getattr(node, 'object_name', '') != original_name
+                    or getattr(node, 'object_id', '') != cls._resolve_object_id(original_name, original_object_id)
+                    or getattr(node, 'original_object_name', '') != original_original_name
+                )
+                if changed:
                     node.object_name = original_name
+                    node.object_id = cls._resolve_object_id(original_name, original_object_id)
+                    node.original_object_name = original_original_name
                     restored_count += 1
             
             elif node_type == 'multi_file_export':
                 object_list = getattr(node, 'object_list', [])
-                for item in object_list:
-                    current_name = getattr(item, 'object_name', '')
-                    if current_name == f"{original_name}_copy":
-                        item.object_name = original_name
-                        restored_count += 1
+                if item_index is None or item_index < 0 or item_index >= len(object_list):
+                    continue
+
+                item = object_list[item_index]
+                changed = (
+                    getattr(item, 'object_name', '') != original_name
+                    or getattr(item, 'object_id', '') != cls._resolve_object_id(original_name, original_object_id)
+                    or getattr(item, 'original_object_name', '') != original_original_name
+                )
+                if changed:
+                    item.object_name = original_name
+                    item.object_id = cls._resolve_object_id(original_name, original_object_id)
+                    item.original_object_name = original_original_name
+                    restored_count += 1
+                    multi_file_nodes_to_refresh.add((tree_name, node_name))
         
         cls.modified_nodes.clear()
+
+        for tree_name, node_name in multi_file_nodes_to_refresh:
+            tree = bpy.data.node_groups.get(tree_name)
+            if not tree:
+                continue
+            node = tree.nodes.get(node_name)
+            if node:
+                node.update_node_width([item.object_name for item in getattr(node, 'object_list', [])])
         
         if restored_count > 0:
             LOG.info(f"   ✅ 已恢复 {restored_count} 个节点引用")
@@ -576,13 +748,23 @@ class PreProcessHelper:
         copies_to_remove = []
         for obj in bpy.data.objects:
             obj_name = obj.name
-            if obj_name.endswith('_copy'):
+            if obj_name.endswith('_copy_temp') or obj_name.startswith('TEMP_SUBMESH_MERGED_'):
+                copies_to_remove.append(obj)
+            elif obj_name.endswith('_copy'):
                 copies_to_remove.append(obj)
             elif '_chain' in obj_name:
-                if re.search(r'_chain\d+$', obj_name) or re.search(r'_chain\d+_copy$', obj_name):
+                if (
+                    re.search(r'_chain\d+$', obj_name)
+                    or re.search(r'_chain\d+_copy$', obj_name)
+                    or re.search(r'_chain\d+_copy_temp$', obj_name)
+                ):
                     copies_to_remove.append(obj)
             elif '_dup' in obj_name:
-                if re.search(r'_dup\d+$', obj_name) or re.search(r'_dup\d+_copy$', obj_name):
+                if (
+                    re.search(r'_dup\d+$', obj_name)
+                    or re.search(r'_dup\d+_copy$', obj_name)
+                    or re.search(r'_dup\d+_copy_temp$', obj_name)
+                ):
                     copies_to_remove.append(obj)
         
         if not copies_to_remove:
