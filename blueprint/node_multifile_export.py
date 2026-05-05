@@ -1,8 +1,7 @@
 import bpy
 import traceback
-from bpy.types import Node, NodeSocket
-from bpy.props import StringProperty, CollectionProperty, BoolProperty, IntProperty
 
+from .direct_export import sync_multifile_direct_mode
 from .node_base import SSMTNodeBase
 
 
@@ -338,12 +337,21 @@ class SSMTNode_MultiFile_Export(SSMTNodeBase):
         description="将关键帧插值设为线性，防止拆分时出现过冲",
         default=True
     ) # type: ignore
+    # 直出开关和同蓝图中的其他多文件节点同步，避免同一轮导出出现混合状态。
+    direct_export_mode: bpy.props.BoolProperty(
+        name="直出模式",
+        description="启用后该节点参与直出导出，并与其他多文件导出节点同步",
+        default=False,
+        update=sync_multifile_direct_mode,
+    ) # type: ignore
     
     def init(self, context):
         self.outputs.new('SSMTSocketObject', "Output")
         self.width = 350
     
     def draw_buttons(self, context, layout):
+        layout.prop(self, "direct_export_mode")
+
         box = layout.box()
         box.label(text="物体列表", icon='GROUP_VCOL')
         

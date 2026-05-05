@@ -4,3 +4,5 @@ herta-blender_updater/
 theherta4_updater/
 test/
 references/
+# Codex 基准测试输出目录。
+.codex_benchmarks/

@@ -1,16 +1,19 @@
 import bpy
 import json
 import os
+import pickle
 import shutil
 import subprocess
 import sys
 import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from time import perf_counter
 
 from ..common.global_properties import GlobalProterties
 from ..utils.log_utils import LOG
 from ..utils.shapekey_utils import ShapeKeyUtils
+from .export_helper import BlueprintExportHelper
 from .preprocess import PreProcessHelper
 from .preprocess_cache import PreProcessCache
 
@@ -20,13 +23,34 @@ class ParallelPreprocessError(RuntimeError):
 
 
 class ParallelPreprocessCoordinator:
-    SESSION_VERSION = 1
+    SESSION_VERSION = 2
 
     @classmethod
     def execute_preprocess(cls, object_names: list[str]) -> dict[str, str]:
+        return cls._execute_preprocess_impl(object_names, preserve_shape_keys=False)
+
+    @classmethod
+    def execute_preprocess_preserve_shape_keys(cls, object_names: list[str]) -> dict[str, str]:
+        return cls._execute_preprocess_impl(object_names, preserve_shape_keys=True)
+
+    @classmethod
+    def execute_preprocess_capture_shape_keys(cls, object_names: list[str]) -> dict[str, str]:
+        return cls._execute_preprocess_impl(
+            object_names,
+            preserve_shape_keys=False,
+            capture_shape_keys=True,
+        )
+
+    @classmethod
+    def _execute_preprocess_impl(
+        cls,
+        object_names: list[str],
+        preserve_shape_keys: bool,
+        capture_shape_keys: bool = False,
+    ) -> dict[str, str]:
         PreProcessHelper.reset_runtime_state()
 
-        unique_objects = PreProcessHelper.collect_target_object_names(object_names)
+        unique_objects = PreProcessHelper.collect_target_object_names_strict(object_names)
         if not unique_objects:
             LOG.info("🔧 前处理完成: 0 个物体")
             return {}
@@ -35,24 +59,48 @@ class ParallelPreprocessCoordinator:
         if cleaned_count > 0:
             LOG.info(f"🔧 已清理 {cleaned_count} 个损坏的形态键")
 
+        # 直出 ShapeKey 采样现在也跟随前处理缓存生命周期，不再单独禁用缓存。
         cache_enabled = GlobalProterties.enable_preprocess_cache()
-        hash_map, cached_objects, uncached_objects = cls._classify_objects(unique_objects, cache_enabled)
+        classify_start = perf_counter()
+        hash_map, cached_objects, uncached_objects = cls._classify_objects(
+            unique_objects,
+            cache_enabled,
+            preserve_shape_keys=preserve_shape_keys,
+            capture_shape_keys=capture_shape_keys,
+        )
+        LOG.info(f"[CodexTiming] PreprocessParallel-Classify {perf_counter() - classify_start:.3f}s")
 
-        failed_cached_objects = cls._load_cached_objects(cached_objects)
+        load_cache_start = perf_counter()
+        failed_cached_objects = cls._load_cached_objects(
+            cached_objects,
+            capture_shape_keys=capture_shape_keys,
+        )
+        LOG.info(f"[CodexTiming] PreprocessParallel-LoadCache {perf_counter() - load_cache_start:.3f}s")
         uncached_objects.extend(failed_cached_objects)
 
         if not uncached_objects:
             LOG.info(f"🔧 前处理完成: {len(unique_objects)} 个物体")
             return dict(PreProcessHelper.original_to_copy_map)
 
-        config = cls._build_runtime_config(uncached_objects)
+        config = cls._build_runtime_config(
+            uncached_objects,
+            preserve_shape_keys=preserve_shape_keys,
+            capture_shape_keys=capture_shape_keys,
+        )
         session_dir = cls._prepare_session_directory()
 
         try:
             snapshot_path = cls._create_snapshot(session_dir)
-            jobs = cls._build_jobs(session_dir, snapshot_path, uncached_objects, config)
+            jobs = cls._build_jobs(
+                session_dir,
+                snapshot_path,
+                uncached_objects,
+                config,
+                preserve_shape_keys=preserve_shape_keys,
+                capture_shape_keys=capture_shape_keys,
+            )
             cls._run_jobs(jobs, config)
-            cls._integrate_results(jobs, hash_map, cache_enabled)
+            cls._integrate_results(jobs, hash_map, cache_enabled, capture_shape_keys=capture_shape_keys)
         except Exception:
             if not config["keep_temp"]:
                 shutil.rmtree(session_dir, ignore_errors=True)
@@ -106,7 +154,13 @@ class ParallelPreprocessCoordinator:
         return True, "配置有效"
 
     @classmethod
-    def _classify_objects(cls, object_names: list[str], cache_enabled: bool) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    def _classify_objects(
+        cls,
+        object_names: list[str],
+        cache_enabled: bool,
+        preserve_shape_keys: bool,
+        capture_shape_keys: bool = False,
+    ) -> tuple[dict[str, str], dict[str, str], list[str]]:
         hash_map: dict[str, str] = {}
         cached_objects: dict[str, str] = {}
         uncached_objects: list[str] = []
@@ -117,9 +171,26 @@ class ParallelPreprocessCoordinator:
             LOG.info("🔐 已关闭前处理缓存，所有物体进入并行前处理")
 
         for obj_name in object_names:
-            hash_value = PreProcessCache.compute_object_hash(obj_name) if cache_enabled else ""
+            if cache_enabled:
+                if capture_shape_keys:
+                    hash_value = PreProcessHelper._build_direct_shapekey_cache_hash(obj_name)
+                elif preserve_shape_keys:
+                    hash_value = PreProcessHelper._build_preserve_shapekey_cache_hash(obj_name)
+                else:
+                    hash_value = PreProcessCache.compute_object_hash(obj_name)
+            else:
+                hash_value = ""
             hash_map[obj_name] = hash_value
-            if cache_enabled and hash_value and PreProcessCache.has_cache(hash_value):
+            if not cache_enabled or not hash_value:
+                uncached_objects.append(obj_name)
+                continue
+
+            has_cache = (
+                PreProcessHelper._has_direct_shapekey_cache_entry(hash_value)
+                if capture_shape_keys
+                else PreProcessCache.has_cache(hash_value)
+            )
+            if has_cache:
                 cached_objects[obj_name] = hash_value
             else:
                 uncached_objects.append(obj_name)
@@ -132,20 +203,47 @@ class ParallelPreprocessCoordinator:
         return hash_map, cached_objects, uncached_objects
 
     @classmethod
-    def _load_cached_objects(cls, cached_objects: dict[str, str]) -> list[str]:
+    def _load_cached_objects(
+        cls,
+        cached_objects: dict[str, str],
+        capture_shape_keys: bool = False,
+    ) -> list[str]:
         failed_objects = []
-        for obj_name, hash_value in cached_objects.items():
+        bundle_loaded_objects = set()
+        pending_cached_objects = dict(cached_objects)
+        if PreProcessCache.ENABLE_CACHE_BUNDLES and not capture_shape_keys:
+            bundle_loaded_objects, pending_cached_objects = PreProcessCache.load_batch_from_cache_bundle(cached_objects)
+        for obj_name in cached_objects.keys():
+            if obj_name in bundle_loaded_objects:
+                PreProcessHelper.register_copy_result(obj_name, f"{obj_name}_copy")
+
+        loaded_from_single_cache = False
+        for obj_name, hash_value in pending_cached_objects.items():
             copy_name = f"{obj_name}_copy"
             success = PreProcessCache.load_from_cache(obj_name, hash_value)
             if success:
+                if capture_shape_keys and not PreProcessHelper._load_direct_shapekey_cache_records(hash_value):
+                    PreProcessCache.remove_runtime_copy(copy_name)
+                    LOG.warning(f"   ⚠️ 采样记录缓存加载失败 {obj_name}, 将重新进入并行前处理")
+                    failed_objects.append(obj_name)
+                    continue
                 PreProcessHelper.register_copy_result(obj_name, copy_name)
+                loaded_from_single_cache = True
             else:
                 LOG.warning(f"   ⚠️ 缓存加载失败 {obj_name}, 将重新进入并行前处理")
                 failed_objects.append(obj_name)
+
+        if PreProcessCache.ENABLE_CACHE_BUNDLES and loaded_from_single_cache and not failed_objects:
+            PreProcessCache.save_cache_bundle(cached_objects)
         return failed_objects
 
     @classmethod
-    def _build_runtime_config(cls, uncached_objects: list[str]) -> dict:
+    def _build_runtime_config(
+        cls,
+        uncached_objects: list[str],
+        preserve_shape_keys: bool,
+        capture_shape_keys: bool = False,
+    ) -> dict:
         issues = cls.validate_runtime_requirements()
         if issues:
             raise ParallelPreprocessError("；".join(issues))
@@ -165,6 +263,8 @@ class ParallelPreprocessCoordinator:
             "instance_count": instance_count,
             "timeout_seconds": timeout_seconds,
             "keep_temp": GlobalProterties.parallel_preprocess_keep_temp_files(),
+            "preserve_shape_keys": preserve_shape_keys,
+            "capture_shape_keys": capture_shape_keys,
         }
 
     @classmethod
@@ -181,7 +281,15 @@ class ParallelPreprocessCoordinator:
         return snapshot_path
 
     @classmethod
-    def _build_jobs(cls, session_dir: str, snapshot_path: str, object_names: list[str], config: dict) -> list[dict]:
+    def _build_jobs(
+        cls,
+        session_dir: str,
+        snapshot_path: str,
+        object_names: list[str],
+        config: dict,
+        preserve_shape_keys: bool,
+        capture_shape_keys: bool = False,
+    ) -> list[dict]:
         groups = cls._partition_objects(object_names, config["instance_count"])
         jobs = []
 
@@ -193,16 +301,20 @@ class ParallelPreprocessCoordinator:
             result_path = os.path.join(job_dir, "result.json")
             result_blend_path = os.path.join(job_dir, "result.blend")
             log_path = os.path.join(job_dir, "worker.log")
+            shapekey_records_path = os.path.join(job_dir, "direct_shapekey_records.pkl")
 
             manifest = {
                 "version": cls.SESSION_VERSION,
                 "mode": "preprocess-only",
+                "preserve_shape_keys": preserve_shape_keys,
+                "capture_shape_keys": capture_shape_keys,
                 "snapshot_path": snapshot_path,
                 "job_index": index,
                 "object_names": group,
                 "result_path": result_path,
                 "result_blend_path": result_blend_path,
                 "log_path": log_path,
+                "shapekey_records_path": shapekey_records_path,
             }
 
             with open(manifest_path, "w", encoding="utf-8") as file:
@@ -219,6 +331,7 @@ class ParallelPreprocessCoordinator:
                 "result_path": result_path,
                 "result_blend_path": result_blend_path,
                 "log_path": log_path,
+                "shapekey_records_path": shapekey_records_path,
             })
 
         LOG.info(f"📦 并行任务分组: {len(jobs)} 组")
@@ -324,10 +437,17 @@ class ParallelPreprocessCoordinator:
             raise ParallelPreprocessError(f"Job {job['index']:03d} 执行失败: {result_data.get('error', '未知错误')}")
 
     @classmethod
-    def _integrate_results(cls, jobs: list[dict], hash_map: dict[str, str], cache_enabled: bool):
+    def _integrate_results(
+        cls,
+        jobs: list[dict],
+        hash_map: dict[str, str],
+        cache_enabled: bool,
+        capture_shape_keys: bool = False,
+    ):
         LOG.info("📥 正在整合子进程结果...")
 
         cache_items = []
+        direct_record_cache_items: list[tuple[str, str]] = []
 
         for job in sorted(jobs, key=lambda item: item["index"]):
             with open(job["result_path"], "r", encoding="utf-8") as file:
@@ -360,12 +480,30 @@ class ParallelPreprocessCoordinator:
                     hash_value = hash_map.get(original_name, "")
                     if hash_value:
                         cache_items.append((original_name, copy_name, hash_value))
+                        if capture_shape_keys:
+                            direct_record_cache_items.append((original_name, hash_value))
                     else:
                         LOG.warning(f"⚠️ 缓存保存跳过: {original_name} 哈希值为空")
+
+            if capture_shape_keys:
+                # 直出采样记录按子进程回传后立即合并，保证主线程看到的是完整 ShapeKey 采样结果。
+                records_path = result_data.get("shapekey_records_path") or job.get("shapekey_records_path")
+                if records_path and os.path.exists(records_path):
+                    with open(records_path, "rb") as file:
+                        BlueprintExportHelper.merge_direct_shapekey_position_records(pickle.load(file))
 
         if cache_items:
             LOG.info(f"💾 正在批量保存缓存 ({len(cache_items)} 个物体)...")
             PreProcessCache.batch_save_to_cache(cache_items)
+
+        if capture_shape_keys and direct_record_cache_items:
+            saved_count = 0
+            for original_name, hash_value in direct_record_cache_items:
+                if PreProcessHelper._save_direct_shapekey_cache_records(original_name, hash_value):
+                    saved_count += 1
+                else:
+                    LOG.warning(f"⚠️ 采样记录缓存保存失败: {original_name}")
+            LOG.info(f"💾 直出形态键采样记录已写入缓存: {saved_count}/{len(direct_record_cache_items)}")
 
     @staticmethod
     def _write_text(file_path: str, content: str):
@@ -401,6 +539,9 @@ def _run_worker(manifest_path: str):
         "original_to_copy_map": {},
         "error": "",
     }
+    shapekey_records_path = manifest.get("shapekey_records_path", "")
+    if shapekey_records_path:
+        result["shapekey_records_path"] = shapekey_records_path
 
     try:
         LOG.start_collecting()
@@ -414,7 +555,21 @@ def _run_worker(manifest_path: str):
             LOG.info(f"🔧 已清理 {cleaned_count} 个损坏的形态键")
 
         PreProcessHelper.reset_runtime_state()
-        PreProcessHelper.execute_objects_without_cache(object_names)
+        if manifest.get("capture_shape_keys", False):
+            BlueprintExportHelper.clear_direct_shapekey_position_records()
+            BlueprintExportHelper.set_capture_direct_shapekey_positions(True)
+            try:
+                PreProcessHelper.execute_objects_without_cache(object_names)
+            finally:
+                BlueprintExportHelper.set_capture_direct_shapekey_positions(False)
+
+            if shapekey_records_path:
+                with open(shapekey_records_path, "wb") as file:
+                    pickle.dump(BlueprintExportHelper.get_direct_shapekey_position_records(), file)
+        elif manifest.get("preserve_shape_keys", False):
+            PreProcessHelper.execute_objects_without_cache_preserve_shape_keys(object_names)
+        else:
+            PreProcessHelper.execute_objects_without_cache(object_names)
 
         copy_map = dict(PreProcessHelper.original_to_copy_map)
         copy_names = set(copy_map.values())

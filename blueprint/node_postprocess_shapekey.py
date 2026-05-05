@@ -4,7 +4,6 @@ import glob
 import re
 import shutil
 import struct
-import datetime
 from collections import OrderedDict, Counter, defaultdict
 
 try:
@@ -13,6 +12,7 @@ try:
 except ImportError:
     NUMPY_AVAILABLE = False
 
+from .direct_export import sync_shapekey_direct_mode
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 
 _name_mapping_cache = {}
@@ -57,6 +57,13 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         description="将各槽位生成的紧凑缓冲区与索引缓冲区合并为单文件，减少着色器 T 资源位占用。当前主要在紧凑模式下生效。",
         default=False
     )
+    # 直出开关和同蓝图中的其他 ShapeKey 后处理节点同步，避免槽位资源生成策略不一致。
+    direct_export_mode: bpy.props.BoolProperty(
+        name="直出模式",
+        description="启用后该节点参与直出导出，并与同类节点同步",
+        default=False,
+        update=sync_shapekey_direct_mode,
+    )
 
     def apply_name_mapping(self, mapping):
         global _name_mapping_cache
@@ -83,6 +90,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         layout.prop(self, "store_deltas")
         layout.prop(self, "use_optimized_lookup")
         layout.prop(self, "merge_slot_files")
+        layout.prop(self, "direct_export_mode")
 
         if not NUMPY_AVAILABLE:
             layout.label(text="警告: 未安装numpy库，优化功能不可用", icon='ERROR')
@@ -822,6 +830,8 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                     if current_section not in sections:
                         sections[current_section] = []
                     continue
+                if not stripped_line:
+                    continue
                 if current_section:
                     sections[current_section].append(line)
         except Exception as e:
@@ -1227,6 +1237,9 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                 match = resource_pattern.match(section_name)
                 if match:
                     full_name, hash_val, number = match.groups()
+                    # 这里只登记基础 Position Resource，带编号的派生资源会在后续生成逻辑里单独处理。
+                    if number:
+                        continue
                     hash_val_normalized = hash_val.replace('_', '-')
                     hash_prefix = self._extract_hash_prefix(hash_val_normalized)
                     if hash_prefix and hash_prefix not in hash_to_base_resources:

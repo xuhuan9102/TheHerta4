@@ -31,6 +31,34 @@ class TimerUtils:
     methodname_runstart_dict = {}
 
     _session: Optional[ExportTimerSession] = None
+    _stage_display_name_map = {
+        "Default Session": "默认会话",
+        "Direct-CollectNodes": "直出-收集节点",
+        "Direct-SetupState": "直出-初始化状态",
+        "Direct-CollectObjects": "直出-收集物体",
+        "Direct-Preprocess": "直出-执行前处理",
+        "Direct-BlueprintModel": "直出-解析蓝图模型",
+        "Direct-BuildExporter": "直出-构建导出器",
+        "Direct-BaseExport": "直出-基础导出",
+        "Direct-MultiFileGenerate": "直出-生成多文件资源",
+        "Preprocess-CreateCopies": "前处理-创建副本",
+        "Preprocess-CacheHash": "前处理-计算缓存哈希",
+        "Preprocess-LoadCache": "前处理-加载缓存",
+        "Preprocess-ClearShapeKeys": "前处理-清空形态键",
+        "Preprocess-ApplyConstraints": "前处理-应用约束",
+        "Preprocess-ApplyModifiers": "前处理-应用修改器",
+        "Preprocess-Triangulate": "前处理-三角化",
+        "Preprocess-ApplyTransforms": "前处理-应用变换",
+        "Preprocess-RestoreShapeKeys": "前处理-恢复形态键",
+        "Preprocess-RenameUV": "前处理-重命名UV",
+        "Preprocess-NonMirrorRestore": "前处理-恢复非镜像",
+        "Preprocess-CaptureDirectShapeKeys": "前处理-采样直出形态键",
+        "Preprocess-ApplyShapeKeys": "前处理-应用形态键",
+    }
+
+    @classmethod
+    def _display_stage_name(cls, stage_name: str) -> str:
+        return cls._stage_display_name_map.get(stage_name, stage_name)
 
     @classmethod
     def Start(cls, func_name: str):
@@ -50,7 +78,8 @@ class TimerUtils:
             time_diff = cls.run_end - cls.run_start
             print(f"last function time elapsed: {time_diff} ")
         else:
-            time_diff = cls.run_end - cls.methodname_runstart_dict.get(func_name, 0)
+            started_at = cls.methodname_runstart_dict.get(func_name, cls.run_start)
+            time_diff = cls.run_end - started_at
             print("[" + func_name + f"]已完成,总耗时: {time_diff} ")
         cls.run_start = cls.run_end
 
@@ -60,7 +89,7 @@ class TimerUtils:
             session_name=session_name,
             start_time=datetime.now()
         )
-        LOG.info(f"⏱️ 计时会话开始: {session_name}")
+        LOG.info(f"计时会话开始: {session_name}")
 
     @classmethod
     def start_stage(cls, stage_name: str):
@@ -140,11 +169,12 @@ class TimerUtils:
 
         LOG.info("")
         LOG.info("=" * 60)
-        LOG.info("📊 导出耗时统计报告")
+        LOG.info("导出耗时统计报告")
         LOG.info("=" * 60)
         LOG.info("")
 
-        max_name_len = max(len(name) for name in stages.keys()) if stages else 10
+        display_names = [cls._display_stage_name(name) for name in stages.keys()]
+        max_name_len = max(len(name) for name in display_names) if display_names else 10
         max_name_len = max(max_name_len, 10)
 
         header_format = f"  {{:<{max_name_len + 2}}} {{:>10}}  {{:>8}}"
@@ -156,7 +186,7 @@ class TimerUtils:
         for stage_name in cls._session.stage_order:
             duration = stages.get(stage_name, 0)
             percentage = (duration / total * 100) if total > 0 else 0
-            LOG.info(row_format.format(stage_name, duration, percentage))
+            LOG.info(row_format.format(cls._display_stage_name(stage_name), duration, percentage))
 
         LOG.info("  " + "-" * (max_name_len + 22))
         LOG.info(f"  {'总计':<{max_name_len + 2}} {total:>10.3f}s  {'100.0':>7}%")
@@ -192,13 +222,13 @@ class TimerUtils:
 
         lines = []
         lines.append("=" * 50)
-        lines.append("📊 导出耗时统计")
+        lines.append("导出耗时统计")
         lines.append("=" * 50)
 
         for stage_name in cls._session.stage_order:
             duration = stages.get(stage_name, 0)
             percentage = (duration / total * 100) if total > 0 else 0
-            lines.append(f"  {stage_name}: {duration:.3f}s ({percentage:.1f}%)")
+            lines.append(f"  {cls._display_stage_name(stage_name)}: {duration:.3f}s ({percentage:.1f}%)")
 
         lines.append("-" * 50)
         lines.append(f"  总耗时: {total:.3f}s")

@@ -36,6 +36,7 @@ class UnityBufferBuildResult:
     ib: list = field(default_factory=list)
     category_buffer_dict: dict = field(default_factory=dict, repr=False)
     index_loop_id_dict: Optional[dict] = field(default=None, repr=False)
+    unique_first_loop_indices: Optional[numpy.ndarray] = field(default=None, repr=False)
     shape_key_buffer_dict: dict = field(default_factory=dict, repr=False)
 
 
@@ -74,7 +75,8 @@ class ExportUtils:
     ) -> ObjElementContext:
         resolved_obj = obj or ObjUtils.get_obj_by_name(name=obj_name)
 
-        ShapeKeyUtils.reset_shapekey_values(resolved_obj)
+        if not BlueprintExportHelper.should_preserve_current_shapekey_mix_for_export():
+            ShapeKeyUtils.reset_shapekey_values(resolved_obj)
 
         mesh = ObjUtils.get_mesh_evaluate_from_obj(obj=resolved_obj)
         if len(mesh.polygons) > 0:
@@ -115,6 +117,153 @@ class ExportUtils:
         )
 
     @staticmethod
+    def _get_key_block_coords(key_block) -> Optional[numpy.ndarray]:
+        if key_block is None:
+            return None
+
+        coords = numpy.empty((len(key_block.data), 3), dtype=numpy.float32)
+        key_block.data.foreach_get("co", coords.ravel())
+        return coords
+
+    @staticmethod
+    def _get_basis_key_block(obj: bpy.types.Object):
+        key_blocks = getattr(getattr(getattr(obj, "data", None), "shape_keys", None), "key_blocks", None)
+        if not key_blocks:
+            return None
+        return key_blocks[0]
+
+    @staticmethod
+    def _get_position_element(d3d11_game_type: D3D11GameType):
+        position_element = d3d11_game_type.ElementNameD3D11ElementDict.get("POSITION")
+        if position_element is not None:
+            return position_element
+
+        for d3d11_element in d3d11_game_type.D3D11ElementList:
+            if d3d11_element.Category == "Position" and d3d11_element.ElementName == "POSITION":
+                return d3d11_element
+        return None
+
+    @staticmethod
+    def _loop_vertex_indices(mesh: bpy.types.Mesh, loop_indices: Optional[numpy.ndarray] = None) -> numpy.ndarray:
+        all_loop_vertex_indices = numpy.empty(len(mesh.loops), dtype=int)
+        mesh.loops.foreach_get("vertex_index", all_loop_vertex_indices)
+        if loop_indices is None:
+            return all_loop_vertex_indices
+        return all_loop_vertex_indices[loop_indices]
+
+    @staticmethod
+    def _shape_key_position_data(
+        obj: bpy.types.Object,
+        mesh: bpy.types.Mesh,
+        d3d11_game_type: D3D11GameType,
+        key_block=None,
+        loop_indices: Optional[numpy.ndarray] = None,
+    ) -> Optional[numpy.ndarray]:
+        position_element = ExportUtils._get_position_element(d3d11_game_type)
+        if position_element is None:
+            return None
+
+        key_block = key_block or ExportUtils._get_basis_key_block(obj)
+        coords = ExportUtils._get_key_block_coords(key_block)
+        if coords is None:
+            return None
+
+        loop_vertex_indices = ExportUtils._loop_vertex_indices(mesh, loop_indices)
+        if loop_vertex_indices.size and int(loop_vertex_indices.max()) >= len(coords):
+            raise ValueError(
+                f"ShapeKey Position vertex index out of range: max={int(loop_vertex_indices.max())}, "
+                f"coords={len(coords)}, obj={getattr(obj, 'name', '')}"
+            )
+
+        return ObjBufferHelper._parse_position_from_vertex_coords(
+            coords,
+            loop_vertex_indices,
+            position_element,
+        )
+
+    @staticmethod
+    def _override_position_with_shape_key(
+        element_vertex_ndarray: numpy.ndarray,
+        obj: bpy.types.Object,
+        mesh: bpy.types.Mesh,
+        d3d11_game_type: D3D11GameType,
+        key_block=None,
+        loop_indices: Optional[numpy.ndarray] = None,
+    ) -> bool:
+        if element_vertex_ndarray is None or "POSITION" not in element_vertex_ndarray.dtype.names:
+            return False
+
+        position_data = ExportUtils._shape_key_position_data(
+            obj=obj,
+            mesh=mesh,
+            d3d11_game_type=d3d11_game_type,
+            key_block=key_block,
+            loop_indices=loop_indices,
+        )
+        if position_data is None:
+            return False
+
+        element_vertex_ndarray["POSITION"] = position_data
+        return True
+
+    @staticmethod
+    def _create_baked_shape_key_sample_mesh(obj: bpy.types.Object, shapekey_name: str):
+        # 这里单独烘焙一个只保留目标 ShapeKey 的临时网格，避免直接改动导出对象本身的状态。
+        sample_obj = obj.copy()
+        sample_obj.name = f"{obj.name}_shapekey_sample"
+        if obj.data:
+            sample_obj.data = obj.data.copy()
+        bpy.context.scene.collection.objects.link(sample_obj)
+
+        original_active = bpy.context.view_layer.objects.active
+        try:
+            key_blocks = getattr(getattr(sample_obj.data, "shape_keys", None), "key_blocks", None)
+            if not key_blocks:
+                return sample_obj, None
+
+            sample_key_block = key_blocks.get(shapekey_name)
+            if sample_key_block is None:
+                return sample_obj, None
+
+            for idx, key_block in enumerate(key_blocks):
+                if idx == 0:
+                    continue
+                key_block.value = 0.0
+            sample_key_block.value = 1.0
+            bpy.context.view_layer.update()
+
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = sample_obj
+            sample_obj.select_set(True)
+            bpy.ops.object.shape_key_remove(all=True, apply_mix=True)
+            bpy.context.view_layer.update()
+
+            return sample_obj, sample_obj.data
+        except Exception:
+            sample_mesh = sample_obj.data
+            if bpy.data.objects.get(sample_obj.name) is not None:
+                bpy.data.objects.remove(sample_obj, do_unlink=True)
+            if sample_mesh and sample_mesh.users == 0:
+                bpy.data.meshes.remove(sample_mesh)
+            raise
+        finally:
+            try:
+                sample_obj.select_set(False)
+            except Exception:
+                pass
+            if original_active is not None:
+                bpy.context.view_layer.objects.active = original_active
+
+    @staticmethod
+    def _cleanup_shape_key_sample_object(sample_obj: Optional[bpy.types.Object]):
+        if sample_obj is None:
+            return
+        sample_mesh = sample_obj.data
+        bpy.data.objects.remove(sample_obj, do_unlink=True)
+        if sample_mesh and sample_mesh.users == 0:
+            bpy.data.meshes.remove(sample_mesh)
+
+    @staticmethod
     def build_unity_obj_buffer_result(
         obj: bpy.types.Object,
         d3d11_game_type: D3D11GameType,
@@ -135,10 +284,18 @@ class ExportUtils:
             original_elementname_data_dict=element_context.original_elementname_data_dict,
             final_elementname_data_dict=element_context.final_elementname_data_dict,
         )
+        # 直出基态如果要求保留当前 ShapeKey 混合值，就在真正打包前直接覆盖 POSITION 数据。
+        if BlueprintExportHelper.should_preserve_current_shapekey_mix_for_export():
+            ExportUtils._override_position_with_shape_key(
+                element_vertex_ndarray=element_vertex_ndarray,
+                obj=obj,
+                mesh=element_context.mesh,
+                d3d11_game_type=d3d11_game_type,
+            )
         TimerUtils.end_stage("Element数据打包")
 
         TimerUtils.start_stage("索引去重与Buffer构建")
-        ib, category_buffer_dict, index_loop_id_dict = ExportUtils.build_unity_index_buffers(
+        ib, category_buffer_dict, index_loop_id_dict, unique_first_loop_indices = ExportUtils.build_unity_index_buffers(
             obj=obj,
             mesh=element_context.mesh,
             element_vertex_ndarray=element_vertex_ndarray,
@@ -148,12 +305,14 @@ class ExportUtils:
         TimerUtils.end_stage("索引去重与Buffer构建")
 
         TimerUtils.start_stage("ShapeKey计算")
-        shape_key_buffer_dict = ExportUtils.build_unity_shape_key_buffer_dict(
-            obj=obj,
-            d3d11_game_type=d3d11_game_type,
-            dtype=element_context.total_structured_dtype,
-            index_loop_id_dict=index_loop_id_dict,
-        )
+        shape_key_buffer_dict = {}
+        if not BlueprintExportHelper.should_suppress_shapekey_resource_export():
+            shape_key_buffer_dict = ExportUtils.build_unity_shape_key_buffer_dict(
+                obj=obj,
+                d3d11_game_type=d3d11_game_type,
+                dtype=element_context.total_structured_dtype,
+                index_loop_id_dict=index_loop_id_dict,
+            )
         TimerUtils.end_stage("ShapeKey计算")
 
         return UnityBufferBuildResult(
@@ -163,6 +322,7 @@ class ExportUtils:
             ib=ib,
             category_buffer_dict=category_buffer_dict,
             index_loop_id_dict=index_loop_id_dict,
+            unique_first_loop_indices=unique_first_loop_indices,
             shape_key_buffer_dict=shape_key_buffer_dict,
         )
 
@@ -235,7 +395,7 @@ class ExportUtils:
             if flat_arr.size % 3 == 0:
                 ib = flat_arr.reshape(-1, 3)[:, ::-1].flatten().tolist()
 
-        return ib, category_buffer_dict, index_loop_id_dict
+        return ib, category_buffer_dict, index_loop_id_dict, unique_first_loop_indices
 
     @staticmethod
     def build_unity_shape_key_buffer_dict(
@@ -247,13 +407,19 @@ class ExportUtils:
         shape_key_buffer_dict = {}
 
         shapekeyname_mkey_dict = BlueprintExportHelper.get_current_shapekeyname_mkey_dict()
-        if len(shapekeyname_mkey_dict.keys()) == 0:
+        shapekey_names = list(dict.fromkeys(
+            list(shapekeyname_mkey_dict.keys())
+            + BlueprintExportHelper.get_runtime_shapekey_buffer_names(getattr(obj, "name", ""))
+        ))
+        if not shapekey_names:
             return shape_key_buffer_dict
 
         if not obj.data.shape_keys or not obj.data.shape_keys.key_blocks:
             return shape_key_buffer_dict
 
-        shapekey_names = list(shapekeyname_mkey_dict.keys())
+        # Match exact shape key names; Blender labels can be numeric, default names,
+        # Chinese/Japanese text, or any other user-defined string.
+        # 这里必须按精确名称匹配，默认名、数字名或中文名都不能被二次规范化。
         shape_keys = [
             sk for sk in obj.data.shape_keys.key_blocks if sk.name in shapekey_names
         ]
@@ -274,24 +440,32 @@ class ExportUtils:
 
             for shapekey in shape_keys:
                 shapekey_name = shapekey.name
-                ShapeKeyUtils.reset_shapekey_values(
-                    obj,
-                    configured_shapekey_names=shapekey_names,
-                    current_shapekey_name=shapekey_name,
-                )
-                shapekey.value = 1.0
+                sample_obj = None
+                try:
+                    sample_obj, mesh_eval = ExportUtils._create_baked_shape_key_sample_mesh(
+                        obj=obj,
+                        shapekey_name=shapekey_name,
+                    )
+                    if mesh_eval is None:
+                        continue
 
-                mesh_eval = ObjUtils.get_mesh_evaluate_from_obj(obj=obj)
-                uv_map_name = "TEXCOORD.xy" if "TEXCOORD.xy" in mesh_eval.uv_layers else None
-                mesh_eval.calc_tangents(uvmap=uv_map_name)
+                    if len(mesh_eval.polygons) > 0:
+                        uv_map_name = "TEXCOORD.xy" if "TEXCOORD.xy" in mesh_eval.uv_layers else None
+                        try:
+                            mesh_eval.calc_tangents(uvmap=uv_map_name)
+                        except RuntimeError:
+                            ObjUtils.mesh_triangulate(mesh_eval)
+                            mesh_eval.calc_tangents(uvmap=uv_map_name)
 
-                shape_key_buffer_dict[shapekey_name] = ExportUtils.build_shape_key_buffer_result(
-                    name=shapekey_name,
-                    base_element_vertex_ndarray=base_shape_vertex_ndarray,
-                    mesh=mesh_eval,
-                    indices_map=indices_map,
-                    d3d11_game_type=d3d11_game_type,
-                )
+                    shape_key_buffer_dict[shapekey_name] = ExportUtils.build_shape_key_buffer_result(
+                        name=shapekey_name,
+                        base_element_vertex_ndarray=base_shape_vertex_ndarray,
+                        mesh=mesh_eval,
+                        indices_map=indices_map,
+                        d3d11_game_type=d3d11_game_type,
+                    )
+                finally:
+                    ExportUtils._cleanup_shape_key_sample_object(sample_obj)
         finally:
             ShapeKeyUtils.reset_shapekey_values(obj)
             TimerUtils.End(f"Processing {len(shape_keys)} ShapeKeys for {obj.name}")
@@ -305,6 +479,7 @@ class ExportUtils:
         indices_map: numpy.ndarray,
         d3d11_game_type: D3D11GameType,
         mesh: Optional[bpy.types.Mesh] = None,
+        position_coords: Optional[numpy.ndarray] = None,
     ) -> ShapeKeyBufferBuildResult:
         element_vertex_ndarray = base_element_vertex_ndarray.copy()
 
@@ -331,12 +506,19 @@ class ExportUtils:
                     mesh.loops.foreach_get("vertex_index", all_loop_vertex_indices)
                     loop_vertex_indices = all_loop_vertex_indices[loop_indices]
 
-                data = ObjBufferHelper._parse_position(
-                    mesh_vertices=mesh.vertices,
-                    mesh_vertices_length=len(mesh.vertices),
-                    loop_vertex_indices=loop_vertex_indices,
-                    d3d11_element=d3d11_element,
-                )
+                if position_coords is not None:
+                    data = ObjBufferHelper._parse_position_from_vertex_coords(
+                        position_coords,
+                        loop_vertex_indices,
+                        d3d11_element,
+                    )
+                else:
+                    data = ObjBufferHelper._parse_position(
+                        mesh_vertices=mesh.vertices,
+                        mesh_vertices_length=len(mesh.vertices),
+                        loop_vertex_indices=loop_vertex_indices,
+                        d3d11_element=d3d11_element,
+                    )
 
             elif elem_name == "NORMAL":
                 all_normals = ObjBufferHelper._parse_normal(
@@ -407,6 +589,13 @@ class ExportUtils:
                 original_elementname_data_dict=element_context.original_elementname_data_dict,
                 final_elementname_data_dict=element_context.final_elementname_data_dict,
             )
+        if BlueprintExportHelper.should_preserve_current_shapekey_mix_for_export():
+            ExportUtils._override_position_with_shape_key(
+                element_vertex_ndarray=element_vertex_ndarray,
+                obj=element_context.obj,
+                mesh=element_context.mesh,
+                d3d11_game_type=element_context.d3d11_game_type,
+            )
 
         deduplicate_element_set = GlobalProterties.get_deduplicate_element_set()
 
@@ -417,10 +606,13 @@ class ExportUtils:
             d3d11_game_type=element_context.d3d11_game_type,
             deduplicate_element_set=deduplicate_element_set,
         )
-        shapekey_offsets, shapekey_vertex_ids, shapekey_vertex_offsets, export_shapekey = ExportUtils.build_wwmi_shapekey_payload(
-            obj=element_context.obj,
-            index_vertex_id_dict=index_vertex_id_dict,
-        )
+        if BlueprintExportHelper.should_suppress_shapekey_resource_export():
+            shapekey_offsets, shapekey_vertex_ids, shapekey_vertex_offsets, export_shapekey = [], [], [], False
+        else:
+            shapekey_offsets, shapekey_vertex_ids, shapekey_vertex_offsets, export_shapekey = ExportUtils.build_wwmi_shapekey_payload(
+                obj=element_context.obj,
+                index_vertex_id_dict=index_vertex_id_dict,
+            )
 
         return WWMIBufferBuildResult(
             obj=element_context.obj,

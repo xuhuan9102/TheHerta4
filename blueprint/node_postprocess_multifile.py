@@ -50,7 +50,6 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
         min=0,
         max=100
     )
-
     def _hash_to_resource_prefix(self, h):
         return h.replace('-', '_')
 
@@ -206,6 +205,7 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
 
     def _create_packed_Meshess(self, base_Meshes, target_Meshes, use_delta=True):
         try:
+            # 这里只压缩 Position 差异，保证多文件切换时只写入真正变化的顶点数据。
             min_len = min(len(base_Meshes), len(target_Meshes))
             if len(base_Meshes) != len(target_Meshes):
                 print(f"警告: 基准缓冲区({len(base_Meshes)})和目标缓冲区({len(target_Meshes)})大小不一致，将使用较小的长度({min_len})进行计算")

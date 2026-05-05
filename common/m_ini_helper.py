@@ -5,8 +5,6 @@ from .m_ini_builder import *
 from .m_key import M_Key
 from .draw_call_model import DrawCallModel
 from .drawib_model import DrawIBModel
-from ..utils.json_utils import JsonUtils
-from ..utils.format_utils import Fatal
 from .global_config import GlobalConfig
 from .global_properties import GlobalProterties
 from .logic_name import LogicName
@@ -14,7 +12,6 @@ from .logic_name import LogicName
 from .global_key_count_helper import GlobalKeyCountHelper
 from .workspace_helper import WorkSpaceHelper
 from ..blueprint.export_helper import BlueprintExportHelper
-from .texture_metadata_helper import TextureMetadataResolver, TextureMarkUpInfo
 
 class M_IniHelper:
     """INI 辅助工具类
@@ -390,8 +387,8 @@ class M_IniHelper:
                     else:
                         print("M_IniHelper: Hash 贴图目标已存在，跳过复制: " + target_texture_file_path)
 
-            # 现在除了WWMI外都不使用全局Hash贴图风格，而是上面的标记的Hash风格贴图
-            if GlobalConfig.logic_name != LogicName.WWMI:
+            # NTEMI 复用 WWMI 导出链路，这里同样需要保留全局 Hash 贴图风格。
+            if GlobalConfig.logic_name not in (LogicName.WWMI, LogicName.NTEMI):
                 continue
 
 
@@ -450,6 +447,9 @@ class M_IniHelper:
     
     @classmethod
     def add_shapekey_ini_sections(cls, ini_builder:M_IniBuilder,drawib_drawibmodel_dict:dict[str,DrawIBModel]):
+        if BlueprintExportHelper.should_suppress_shapekey_resource_export():
+            return
+
         shapekeyname_mkey_dict = BlueprintExportHelper.get_current_shapekeyname_mkey_dict()
         if len(shapekeyname_mkey_dict.keys()) == 0:
             return

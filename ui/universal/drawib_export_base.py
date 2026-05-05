@@ -1,3 +1,4 @@
+from ...blueprint.export_helper import BlueprintExportHelper
 from ...blueprint.model import BluePrintModel
 from ...common.drawib_model import DrawIBModel
 from ...common.buffer_export_helper import BufferExportHelper
@@ -35,11 +36,13 @@ class DrawIBExportBase:
                 with open(category_buf_filepath, 'wb') as file_obj:
                     category_buf.tofile(file_obj)
 
-            for shapekey_name, shapekey_buf in drawib_model.shapekey_name_bytelist_dict.items():
-                shapekey_buf_filename = draw_ib + "-Position." + shapekey_name + ".buf"
-                shapekey_buf_filepath = os.path.join(output_folder, shapekey_buf_filename)
-                with open(shapekey_buf_filepath, 'wb') as file_obj:
-                    shapekey_buf.tofile(file_obj)
+            # 直出基础轮次会主动抑制 ShapeKey 资源，避免和后面的直出生成结果重复。
+            if not BlueprintExportHelper.should_suppress_shapekey_resource_export():
+                for shapekey_name, shapekey_buf in drawib_model.shapekey_name_bytelist_dict.items():
+                    shapekey_buf_filename = draw_ib + "-Position." + shapekey_name + ".buf"
+                    shapekey_buf_filepath = os.path.join(output_folder, shapekey_buf_filename)
+                    with open(shapekey_buf_filepath, 'wb') as file_obj:
+                        shapekey_buf.tofile(file_obj)
 
     def export_buffers_only(self):
         """只导出 Buffer 文件，不生成 INI 配置"""

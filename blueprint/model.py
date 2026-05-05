@@ -591,8 +591,12 @@ class BluePrintModel:
         self.nested_blueprint_trees.append(nested_tree)
         LOG.info(f"   🔗 解析嵌套蓝图: '{blueprint_name}' (节点数: {len(nested_tree.nodes)})")
 
+        # 嵌套蓝图也只遍历真正连到输出端的节点，避免把断开的试验链路带进导出结果。
+        nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, _NODE_TYPE_RESULT_OUTPUT)
         for inner_node in nested_tree.nodes:
             if inner_node.bl_idname == _NODE_TYPE_BLUEPRINT_NEST and not inner_node.mute:
+                if nested_output and not BlueprintExportHelper._is_node_connected_to_output(nested_tree, inner_node):
+                    continue
                 inner_bp_name = getattr(inner_node, 'blueprint_name', '')
                 LOG.debug(f"   🔗 嵌套蓝图 '{blueprint_name}' 中发现子嵌套节点: '{inner_node.name}' → '{inner_bp_name}'")
                 self._resolve_nested_blueprint_collect(inner_node, visited_copy)

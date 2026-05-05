@@ -1,9 +1,8 @@
 import bpy
-import itertools
 import numpy
 import math
 
-from mathutils import Vector,Matrix
+from mathutils import Vector
 
 from .format_utils import Fatal
 
@@ -31,7 +30,7 @@ class VertexGroupUtils:
     @classmethod
     def remove_all_vertex_groups(cls,obj):
         '''
-        移除给定obj的未使用的顶点组
+        移除给定 obj 的所有顶点组
         '''
         if obj.type == "MESH":
             for x in obj.vertex_groups:
@@ -196,7 +195,7 @@ class VertexGroupUtils:
             for vg in all_source_vgs:
                 try:
                     obj.vertex_groups.remove(vg)
-                except:
+                except Exception:
                     pass # Already removed?
             
             bpy.context.view_layer.objects.active = obj
@@ -312,7 +311,7 @@ class VertexGroupUtils:
             try:
                 bpy.ops.mesh.separate(type="SELECTED")
                 real_keys.append(gr)
-            except:
+            except Exception:
                 pass
         for i in range(1, len(real_keys) + 1):
             bpy.data.objects['{}.{:03d}'.format(origin_name, i)].name = '{}.{}'.format(
@@ -449,7 +448,9 @@ class VertexGroupUtils:
 
         # XXX 必须对当前obj对象执行权重规格化，否则模型细分后会导致模型坑坑洼洼
         
-        blendweights = blendweights / numpy.sum(blendweights, axis=1)[:, None]
+        row_sums = numpy.sum(blendweights, axis=1, keepdims=True)
+        numpy.putmask(row_sums, row_sums == 0, 1.0)
+        blendweights = blendweights / row_sums
 
         blendweights_dict = {}
         blendindices_dict = {}
@@ -460,9 +461,6 @@ class VertexGroupUtils:
     
     @classmethod
     def get_blendweights_blendindices_v3(cls,mesh, normalize_weights: bool = False):
-        print("get_blendweights_blendindices_v3")
-        print(normalize_weights)
-
         mesh_loops = mesh.loops
         mesh_loops_length = len(mesh_loops)
         mesh_vertices = mesh.vertices

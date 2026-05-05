@@ -50,11 +50,12 @@ class ExportSRMI:
                 with open(category_buf_filepath, 'wb') as f:
                     category_buf.tofile(f)
 
-            for shapekey_name, shapekey_buf in drawib_model.shapekey_name_bytelist_dict.items():
-                shapekey_buf_filename = draw_ib + "-Position." + shapekey_name + ".buf"
-                shapekey_buf_filepath = os.path.join(buf_output_folder, shapekey_buf_filename)
-                with open(shapekey_buf_filepath, 'wb') as f:
-                    shapekey_buf.tofile(f)
+            if not BlueprintExportHelper.should_suppress_shapekey_resource_export():
+                for shapekey_name, shapekey_buf in drawib_model.shapekey_name_bytelist_dict.items():
+                    shapekey_buf_filename = draw_ib + "-Position." + shapekey_name + ".buf"
+                    shapekey_buf_filepath = os.path.join(buf_output_folder, shapekey_buf_filename)
+                    with open(shapekey_buf_filepath, 'wb') as f:
+                        shapekey_buf.tofile(f)
 
     def copy_texture_files(self):
         if GlobalProterties.forbid_auto_texture_ini():

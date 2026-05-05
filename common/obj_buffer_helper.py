@@ -1,6 +1,5 @@
 import collections
 import copy
-import math
 from .d3d11_gametype import D3D11GameType
 from .draw_call_model import DrawCallModel
 
@@ -13,8 +12,6 @@ from ..utils.ssmt_error_utils import SSMTErrorUtils, Fatal
 from .logic_name import LogicName
 from .global_config import GlobalConfig
 from .global_properties import GlobalProterties
-from ..utils.obj_utils import ObjUtils
-from ..utils.log_utils import LOG
 
 
 import bpy
@@ -95,8 +92,15 @@ class ObjBufferHelper:
         # not apply mirroring or dtype conversion at extraction stage.
         # mesh_vertices.foreach_get('undeformed_co', vertex_coords)
         mesh_vertices.foreach_get('co', vertex_coords)
-        positions = vertex_coords.reshape(-1, 3)[loop_vertex_indices]
+        return ObjBufferHelper._parse_position_from_vertex_coords(
+            vertex_coords.reshape(-1, 3),
+            loop_vertex_indices,
+            d3d11_element,
+        )
 
+    @staticmethod
+    def _parse_position_from_vertex_coords(vertex_coords, loop_vertex_indices, d3d11_element):
+        positions = numpy.asarray(vertex_coords, dtype=numpy.float32).reshape(-1, 3)[loop_vertex_indices]
         if d3d11_element.Format == 'R32G32B32A32_FLOAT':
             # If format expects 4 components, add a zero alpha column (float32)
             new_array = numpy.zeros((positions.shape[0], 4), dtype=numpy.float32)
@@ -185,7 +189,6 @@ class ObjBufferHelper:
             return FormatUtils.convert_4x_float32_to_r8g8b8a8_unorm(result)
 
         elif d3d11_element.Format == "R32_UINT" and GlobalConfig.logic_name == LogicName.EFMI:
-            print("终末地法线编码 - 使用 TBNCodec")
             raw_normals = normals.reshape(-1, 3)
             tangents = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
             mesh_loops.foreach_get("tangent", tangents)
@@ -327,9 +330,6 @@ class ObjBufferHelper:
             elif d3d11_element.Format == 'R8G8B8A8_UNORM':
                 result = FormatUtils.convert_4x_float32_to_r8g8b8a8_unorm(result)
 
-            print(d3d11_element.Format)
-            print(d3d11_element_name)
-    
             return result
         return None
 
@@ -570,7 +570,6 @@ class ObjBufferHelper:
                 # can diagnose than to silently write zeros for an expected
                 # element (which would corrupt downstream buffers).
                 SSMTErrorUtils.raise_fatal(f"Missing element data for '{d3d11_element_name}' when packing vertex ndarray")
-            print("尝试赋值 Element: " + d3d11_element_name)
             element_vertex_ndarray[d3d11_element_name] = data
         
         return element_vertex_ndarray

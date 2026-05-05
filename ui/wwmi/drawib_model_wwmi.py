@@ -31,6 +31,7 @@ from ...common.buffer_export_helper import BufferExportHelper
 from ...common.obj_buffer_helper import ObjBufferHelper
 from ...common.workspace_helper import WorkSpaceHelper
 from ...common.d3d11_gametype import D3D11GameType
+from ...blueprint.export_helper import BlueprintExportHelper
 from ...blueprint.model import BluePrintModel
 from ...common.draw_call_model import DrawCallModel
 from ...common.submesh_metadata import SubmeshMetadata, SubmeshMetadataResolver
@@ -198,7 +199,11 @@ class DrawIBModelWWMI:
         BufferExportHelper.write_buf_ib_r32_uint(self.obj_buffer_model_wwmi.ib, self.draw_ib + "-Component1.buf")
         BufferExportHelper.write_category_buffer_files(self.obj_buffer_model_wwmi.category_buffer_dict, self.draw_ib)
 
-        if self.obj_buffer_model_wwmi.export_shapekey:
+        # 直出基础轮次会跳过 ShapeKey 资源写盘，交给后面的直出生成器统一落盘。
+        if (
+            self.obj_buffer_model_wwmi.export_shapekey
+            and not BlueprintExportHelper.should_suppress_shapekey_resource_export()
+        ):
             BufferExportHelper.write_buf_shapekey_offsets(self.obj_buffer_model_wwmi.shapekey_offsets, self.draw_ib + "-ShapeKeyOffset.buf")
             BufferExportHelper.write_buf_shapekey_vertex_ids(self.obj_buffer_model_wwmi.shapekey_vertex_ids, self.draw_ib + "-ShapeKeyVertexId.buf")
             BufferExportHelper.write_buf_shapekey_vertex_offsets(self.obj_buffer_model_wwmi.shapekey_vertex_offsets, self.draw_ib + "-ShapeKeyVertexOffset.buf")
@@ -227,6 +232,9 @@ class DrawIBModelWWMI:
             return True
 
         if self.blueprint_model.multi_file_export_nodes:
+            return True
+
+        if BlueprintExportHelper.should_preserve_current_shapekey_mix_for_export():
             return True
 
         return not source_obj.name.endswith('_copy')
@@ -338,7 +346,8 @@ class DrawIBModelWWMI:
                 component_obj.rotation_euler[1] = 0
                 component_obj.rotation_euler[2] = math.radians(180)
                 component_obj.scale = (100, 100, 100)
-                bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+                # WWMI/NTEMI 的组件缩放会影响 ShapeKey 顶点位置，这里必须走保 ShapeKey 的变换应用。
+                ShapeKeyUtils.transform_apply_preserve_shape_keys(component_obj, location=False, rotation=True, scale=True)
 
             if GlobalProterties.export_add_missing_vertex_groups():
                 ObjUtils.select_obj(component_obj)

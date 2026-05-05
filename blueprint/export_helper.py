@@ -1,8 +1,8 @@
 import bpy
-from bpy.types import NodeTree, Node, NodeSocket
 
 from ..common.global_config import GlobalConfig
 from ..common.m_key import M_Key
+from ..common.object_prefix_helper import ObjectPrefixHelper
 
 
 def _get_node_unique_key(node) -> str:
@@ -17,10 +17,17 @@ class BlueprintExportHelper:
     max_export_count = 1
 
     runtime_blueprint_tree_name = ""
-
     multi_file_export_nodes = []
 
     current_buffer_folder_name = "Meshes"
+
+    # 这些运行时字段由标准导出、并行导出和直出共同读写，用来传递形态键上下文。
+    runtime_shapekey_buffer_names = []
+    runtime_shapekey_buffer_name_map = {}
+    preserve_current_shapekey_mix_for_export = False
+    suppress_shapekey_resource_export = False
+    capture_direct_shapekey_positions = False
+    direct_shapekey_position_records = {}
 
     MAX_EXPORT_COUNT_LIMIT = 1000
 
@@ -73,6 +80,120 @@ class BlueprintExportHelper:
             return all_blueprints[0].name
 
         return ""
+
+    @staticmethod
+    def set_runtime_shapekey_buffer_names(shapekey_names):
+        BlueprintExportHelper.runtime_shapekey_buffer_names = list(dict.fromkeys(
+            name for name in (shapekey_names or []) if name
+        ))
+
+    @staticmethod
+    def set_runtime_shapekey_buffer_name_map(shapekey_name_map):
+        normalized_map = {}
+        for key, shapekey_names in (shapekey_name_map or {}).items():
+            if not key:
+                continue
+            normalized_names = list(dict.fromkeys(
+                name for name in (shapekey_names or []) if name
+            ))
+            if normalized_names:
+                normalized_map[key] = normalized_names
+        BlueprintExportHelper.runtime_shapekey_buffer_name_map = normalized_map
+
+    @staticmethod
+    def get_runtime_shapekey_buffer_names(buffer_key=None):
+        names = list(BlueprintExportHelper.runtime_shapekey_buffer_names)
+        if buffer_key:
+            key = str(buffer_key)
+            if key.startswith("TEMP_SUBMESH_MERGED_"):
+                key = key[len("TEMP_SUBMESH_MERGED_"):]
+
+            key_prefix = key.split("-", 1)[0] if "-" in key else key
+            for candidate_key in (buffer_key, key, key_prefix):
+                names.extend(BlueprintExportHelper.runtime_shapekey_buffer_name_map.get(candidate_key, []))
+
+        return list(dict.fromkeys(name for name in names if name))
+
+    @staticmethod
+    def clear_runtime_shapekey_buffer_names():
+        BlueprintExportHelper.runtime_shapekey_buffer_names = []
+        BlueprintExportHelper.runtime_shapekey_buffer_name_map = {}
+
+    @staticmethod
+    def set_preserve_current_shapekey_mix_for_export(enabled: bool):
+        BlueprintExportHelper.preserve_current_shapekey_mix_for_export = bool(enabled)
+
+    @staticmethod
+    def should_preserve_current_shapekey_mix_for_export() -> bool:
+        return bool(BlueprintExportHelper.preserve_current_shapekey_mix_for_export)
+
+    @staticmethod
+    def set_suppress_shapekey_resource_export(enabled: bool):
+        BlueprintExportHelper.suppress_shapekey_resource_export = bool(enabled)
+
+    @staticmethod
+    def should_suppress_shapekey_resource_export() -> bool:
+        return bool(BlueprintExportHelper.suppress_shapekey_resource_export)
+
+    @staticmethod
+    def set_capture_direct_shapekey_positions(enabled: bool):
+        BlueprintExportHelper.capture_direct_shapekey_positions = bool(enabled)
+
+    @staticmethod
+    def should_capture_direct_shapekey_positions() -> bool:
+        return bool(BlueprintExportHelper.capture_direct_shapekey_positions)
+
+    @staticmethod
+    def clear_direct_shapekey_position_records():
+        BlueprintExportHelper.direct_shapekey_position_records = {}
+
+    @staticmethod
+    def register_direct_shapekey_position_record(object_aliases, shapekey_name, coords, loop_vertex_indices):
+        if not shapekey_name or coords is None or loop_vertex_indices is None:
+            return
+
+        for alias in object_aliases or []:
+            if not alias:
+                continue
+            record = BlueprintExportHelper.direct_shapekey_position_records.setdefault(
+                alias,
+                {
+                    "loop_vertex_indices": loop_vertex_indices,
+                    "shape_keys": {},
+                },
+            )
+            record["loop_vertex_indices"] = loop_vertex_indices
+            record.setdefault("shape_keys", {})[shapekey_name] = coords
+
+    @staticmethod
+    def update_direct_shapekey_record_loop_indices(object_aliases, loop_vertex_indices):
+        if loop_vertex_indices is None:
+            return
+
+        for alias in object_aliases or []:
+            record = BlueprintExportHelper.direct_shapekey_position_records.get(alias)
+            if record:
+                record["loop_vertex_indices"] = loop_vertex_indices
+
+    @staticmethod
+    def merge_direct_shapekey_position_records(records):
+        for alias, record in (records or {}).items():
+            if not alias or not record:
+                continue
+            target = BlueprintExportHelper.direct_shapekey_position_records.setdefault(
+                alias,
+                {
+                    "loop_vertex_indices": record.get("loop_vertex_indices"),
+                    "shape_keys": {},
+                },
+            )
+            if record.get("loop_vertex_indices") is not None:
+                target["loop_vertex_indices"] = record.get("loop_vertex_indices")
+            target.setdefault("shape_keys", {}).update(record.get("shape_keys", {}) or {})
+
+    @staticmethod
+    def get_direct_shapekey_position_records():
+        return BlueprintExportHelper.direct_shapekey_position_records
 
     @staticmethod
     def get_blueprint_enum_items(context=None):
@@ -158,6 +279,66 @@ class BlueprintExportHelper:
             context=context,
         )
         return BlueprintExportHelper.get_blueprint_tree_by_name(preferred_name)
+
+    @staticmethod
+    def collect_connected_object_names(tree) -> list[str]:
+        if not tree:
+            return []
+
+        # 这里只收集真正连到输出的物体，避免断开的节点或历史副本混入前处理。
+        object_names = []
+        seen_names = set()
+        visited_trees = set()
+
+        def append_name(candidate_name: str):
+            if not candidate_name or candidate_name in seen_names:
+                return
+            seen_names.add(candidate_name)
+            object_names.append(candidate_name)
+
+        def collect_from_tree(current_tree):
+            if not BlueprintExportHelper._is_valid_blueprint_tree(current_tree):
+                return
+            if current_tree.name in visited_trees:
+                return
+            visited_trees.add(current_tree.name)
+
+            output_node = BlueprintExportHelper.get_node_from_bl_idname(
+                current_tree,
+                'SSMTNode_Result_Output',
+            )
+
+            for node in current_tree.nodes:
+                if getattr(node, "mute", False):
+                    continue
+
+                if (
+                    output_node
+                    and not BlueprintExportHelper._is_node_connected_to_output(current_tree, node)
+                ):
+                    continue
+
+                if node.bl_idname == 'SSMTNode_Object_Info':
+                    obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
+                    if not obj_name:
+                        obj_name = getattr(node, 'object_name', '')
+                    append_name(obj_name)
+                    continue
+
+                if node.bl_idname == 'SSMTNode_MultiFile_Export':
+                    for item in getattr(node, 'object_list', []):
+                        append_name(getattr(item, 'object_name', ''))
+                    continue
+
+                if node.bl_idname == 'SSMTNode_Blueprint_Nest':
+                    nested_tree_name = getattr(node, 'blueprint_name', '')
+                    if not nested_tree_name or nested_tree_name == 'NONE':
+                        continue
+                    nested_tree = bpy.data.node_groups.get(nested_tree_name)
+                    collect_from_tree(nested_tree)
+
+        collect_from_tree(tree)
+        return object_names
 
     @staticmethod
     def get_active_mod_panel_nodes(context=None, tree=None):
@@ -313,6 +494,30 @@ class BlueprintExportHelper:
 
 
         collect_shapekey_nodes(tree)
+
+        connected_object_names = BlueprintExportHelper.collect_shapekey_objects(tree)
+        for obj_name in connected_object_names:
+            obj = bpy.data.objects.get(obj_name)
+            if not obj or not obj.data:
+                continue
+            if not hasattr(obj.data, "shape_keys") or not obj.data.shape_keys:
+                continue
+
+            for key_block in obj.data.shape_keys.key_blocks:
+                if key_block == obj.data.shape_keys.key_blocks[0]:
+                    continue
+                if key_block.name in shapekey_name_mkey_dict:
+                    continue
+
+                m_key = M_Key()
+                m_key.key_name = "$shapekey" + str(key_index)
+                m_key.initialize_value = 0
+                m_key.initialize_vk_str = ""
+                m_key.comment = key_block.name
+
+                shapekey_name_mkey_dict[key_block.name] = m_key
+                key_index += 1
+
         return shapekey_name_mkey_dict
 
     @staticmethod
@@ -710,6 +915,10 @@ class BlueprintExportHelper:
 
     @staticmethod
     def collect_shapekey_objects(tree) -> list:
+        BlueprintExportHelper.shapekey_objects = BlueprintExportHelper.collect_connected_object_names(tree)
+        print(f"[ShapeKeyExport] collected {len(BlueprintExportHelper.shapekey_objects)} connected objects")
+        return BlueprintExportHelper.shapekey_objects
+
         BlueprintExportHelper.shapekey_objects = []
         if not tree:
             return []
@@ -786,20 +995,24 @@ class BlueprintExportHelper:
 
     @staticmethod
     def set_all_shapekey_values(value: int, slot_index: int = None):
-        print(f"[ShapeKeyExport] set_all_shapekey_values 调用: value={value}, slot_index={slot_index}")
-        print(f"[ShapeKeyExport] shapekey_objects 列表: {BlueprintExportHelper.shapekey_objects}")
+        total_objects = len(BlueprintExportHelper.shapekey_objects)
+        objects_with_keys = 0
+        missing_objects = 0
+        objects_without_keys = 0
+        changed_keys = 0
+        failed_keys = 0
         
         for obj_name in BlueprintExportHelper.shapekey_objects:
             obj = bpy.data.objects.get(obj_name)
             if not obj or not obj.data:
-                print(f"[ShapeKeyExport]   物体不存在或无数据: {obj_name}")
+                missing_objects += 1
                 continue
             if not hasattr(obj.data, 'shape_keys') or not obj.data.shape_keys:
-                print(f"[ShapeKeyExport]   物体无形态键: {obj_name}")
+                objects_without_keys += 1
                 continue
             
             key_blocks = obj.data.shape_keys.key_blocks
-            print(f"[ShapeKeyExport]   物体 {obj_name} 有 {len(key_blocks)} 个形态键")
+            objects_with_keys += 1
             
             for i, kb in enumerate(key_blocks):
                 if i == 0:
@@ -809,24 +1022,34 @@ class BlueprintExportHelper:
                     if i == slot_index:
                         try:
                             kb.value = 1.0
-                            print(f"[ShapeKeyExport]     设置 {kb.name} = 1.0")
+                            changed_keys += 1
                         except Exception as e:
-                            print(f"[ShapeKeyExport]     设置失败 {kb.name}: {e}")
+                            failed_keys += 1
                     else:
                         try:
                             kb.value = 0.0
+                            changed_keys += 1
                         except Exception:
-                            pass
+                            failed_keys += 1
                 else:
                     try:
                         kb.value = float(value)
+                        changed_keys += 1
                     except Exception:
-                        pass
+                        failed_keys += 1
         
         if slot_index is not None:
-            print(f"[ShapeKeyExport] 设置槽位 {slot_index} 形态键=1，其他=0")
+            print(
+                f"[ShapeKeyExport] 设置槽位 {slot_index} 形态键=1，其他=0 "
+                f"(物体 {objects_with_keys}/{total_objects}, 键 {changed_keys}, "
+                f"缺失 {missing_objects}, 无形态键 {objects_without_keys}, 失败 {failed_keys})"
+            )
         else:
-            print(f"[ShapeKeyExport] 设置所有形态键值={value}")
+            print(
+                f"[ShapeKeyExport] 设置所有形态键值={value} "
+                f"(物体 {objects_with_keys}/{total_objects}, 键 {changed_keys}, "
+                f"缺失 {missing_objects}, 无形态键 {objects_without_keys}, 失败 {failed_keys})"
+            )
 
     @staticmethod
     def generate_shapekey_classification_report(blueprint_model=None):
@@ -838,14 +1061,216 @@ class BlueprintExportHelper:
                 return name
             patterns = [
                 r'_copy$',
+                r'_chain\d+$',
+                r'_dup\d+$',
                 r'_chain\d+_copy$',
                 r'_dup\d+_copy$',
+                r'_chain\d+_dup\d+$',
                 r'_chain\d+_dup\d+_copy$',
             ]
             result = name
             for pattern in patterns:
                 result = re.sub(pattern, '', result)
             return result
+
+        def iter_name_variants(name):
+            if not name:
+                return
+
+            seen = set()
+            candidate_names = [name, extract_original_name(name)]
+            if name.endswith("_copy"):
+                candidate_names.append(name[:-5])
+
+            for candidate_name in candidate_names:
+                if candidate_name and candidate_name not in seen:
+                    seen.add(candidate_name)
+                    yield candidate_name
+
+        def canonical_name(name):
+            if not name:
+                return ""
+            return extract_original_name(name)
+
+        def iter_chain_aliases(chain):
+            raw_names = [
+                getattr(chain, "object_name", "") or "",
+                getattr(chain, "original_object_name", "") or "",
+                getattr(chain, "virtual_object_name", "") or "",
+                getattr(chain, "export_object_name_override", "") or "",
+            ]
+
+            get_export_object_name = getattr(chain, "get_export_object_name", None)
+            if callable(get_export_object_name):
+                try:
+                    raw_names.append(get_export_object_name() or "")
+                except Exception:
+                    pass
+
+            for rename_record in getattr(chain, "rename_history", []) or []:
+                raw_names.append(rename_record.get("old_name", "") or "")
+                raw_names.append(rename_record.get("new_name", "") or "")
+
+            seen = set()
+            for raw_name in raw_names:
+                for candidate_name in iter_name_variants(raw_name):
+                    if candidate_name and candidate_name not in seen:
+                        seen.add(candidate_name)
+                        yield candidate_name
+
+        def get_visible_shapekey_info(obj_name):
+            obj = bpy.data.objects.get(obj_name)
+            if not obj or not obj.data or obj.hide_get():
+                return None
+            if not hasattr(obj.data, 'shape_keys') or not obj.data.shape_keys:
+                return None
+
+            key_blocks = obj.data.shape_keys.key_blocks
+            shapekey_info = []
+            for i, kb in enumerate(key_blocks):
+                if i == 0:
+                    continue
+                shapekey_info.append((i, kb.name))
+            return shapekey_info or None
+
+        def resolve_chain_output_names(chain):
+            output_names = []
+            seen = set()
+
+            preferred_name = ""
+            get_export_object_name = getattr(chain, "get_export_object_name", None)
+            if callable(get_export_object_name):
+                try:
+                    preferred_name = get_export_object_name() or ""
+                except Exception:
+                    preferred_name = ""
+
+            for candidate_name in (
+                preferred_name,
+                getattr(chain, "virtual_object_name", "") or "",
+                getattr(chain, "export_object_name_override", "") or "",
+                getattr(chain, "object_name", "") or "",
+            ):
+                candidate_name = canonical_name(candidate_name)
+                if not candidate_name or candidate_name in seen:
+                    continue
+                seen.add(candidate_name)
+                output_names.append(candidate_name)
+
+            if not output_names:
+                for candidate_name in iter_chain_aliases(chain):
+                    candidate_name = canonical_name(candidate_name)
+                    if candidate_name and candidate_name not in seen:
+                        output_names.append(candidate_name)
+                        break
+
+            return output_names
+
+        def resolve_chain_shapekey_source(chain):
+            source_candidates = []
+
+            get_export_object_name = getattr(chain, "get_export_object_name", None)
+            if callable(get_export_object_name):
+                try:
+                    source_candidates.append(get_export_object_name() or "")
+                except Exception:
+                    pass
+
+            source_candidates.extend([
+                getattr(chain, "object_name", "") or "",
+                getattr(chain, "virtual_object_name", "") or "",
+                getattr(chain, "original_object_name", "") or "",
+                getattr(chain, "export_object_name_override", "") or "",
+            ])
+
+            for rename_record in reversed(getattr(chain, "rename_history", []) or []):
+                source_candidates.append(rename_record.get("new_name", "") or "")
+                source_candidates.append(rename_record.get("old_name", "") or "")
+
+            seen = set()
+            for candidate_name in source_candidates:
+                for variant_name in iter_name_variants(candidate_name):
+                    variant_name = canonical_name(variant_name)
+                    if not variant_name or variant_name in seen:
+                        continue
+                    seen.add(variant_name)
+                    shapekey_info = get_visible_shapekey_info(variant_name)
+                    if shapekey_info:
+                        return variant_name, shapekey_info
+
+            return "", None
+
+        if blueprint_model:
+            classification_data = defaultdict(lambda: defaultdict(list))
+            output_groups = defaultdict(set)
+            output_group_shapekeys = {}
+
+            valid_chains = [
+                chain
+                for chain in blueprint_model.processing_chains
+                if chain.is_valid and chain.reached_output
+            ]
+
+            print(f"[ShapeKeyExport] 开始生成分类报告，处理链数: {len(blueprint_model.processing_chains)}")
+            print(f"[ShapeKeyExport] 有效输出链路数: {len(valid_chains)}")
+
+            for chain in valid_chains:
+                output_names = resolve_chain_output_names(chain)
+                if not output_names:
+                    continue
+
+                source_name, shapekey_info = resolve_chain_shapekey_source(chain)
+                if not shapekey_info:
+                    continue
+
+                output_group_shapekeys[source_name] = shapekey_info
+                output_groups[source_name].update(output_names)
+
+                for slot_index, shape_key_name in shapekey_info:
+                    for output_name in output_names:
+                        classification_data[slot_index][shape_key_name].append(output_name)
+
+            if not classification_data:
+                print("[ShapeKeyExport] 未找到任何形态键，跳过分类报告生成")
+                return False
+
+            import time
+            output_lines = ["# 自动化形态键导出 - 分类报告", time.ctime(), "=" * 40, ""]
+
+            if output_groups:
+                output_lines.append("# 原始物体与衍生物体映射:")
+                for source_name in sorted(output_groups.keys()):
+                    derived_sorted = sorted(output_groups.get(source_name, set()))
+                    if derived_sorted:
+                        output_lines.append(f"#   {source_name} -> {', '.join(derived_sorted)}")
+                output_lines.append("")
+
+            sorted_slots = sorted(classification_data.keys())
+            for slot in sorted_slots:
+                output_lines.append(f"槽位 {slot}:")
+                sk_data = classification_data[slot]
+                sorted_sk_names = sorted(sk_data.keys())
+
+                for sk_name in sorted_sk_names:
+                    output_lines.append(f"  - 名称: {sk_name}")
+                    object_list = sk_data[sk_name]
+                    for obj_name in sorted(set(object_list)):
+                        output_lines.append(f"    - 物体: {obj_name}")
+                output_lines.append("")
+
+            final_text = "\n".join(output_lines)
+            text_block_name = "Shape_Key_Classification"
+            if text_block_name in bpy.data.texts:
+                txt = bpy.data.texts[text_block_name]
+                txt.clear()
+            else:
+                txt = bpy.data.texts.new(name=text_block_name)
+            txt.write(final_text)
+
+            print(f"[ShapeKeyExport] 形态键分类报告已生成: '{text_block_name}'")
+            print(f"[ShapeKeyExport]   - 原始物体数: {len(output_group_shapekeys)}")
+            print(f"[ShapeKeyExport]   - 衍生物体映射数: {len(output_groups)}")
+            return True
         
         classification_data = defaultdict(lambda: defaultdict(list))
         original_to_derived = defaultdict(set)
@@ -858,14 +1283,55 @@ class BlueprintExportHelper:
                 if not chain.is_valid or not chain.reached_output:
                     continue
                 
+                chain_aliases = list(iter_chain_aliases(chain))
+                if not chain_aliases:
+                    continue
+
                 current_obj_name = chain.object_name
                 original_obj_name = chain.original_object_name or chain.object_name
-                true_original_name = extract_original_name(original_obj_name)
-                
-                original_to_derived[true_original_name].add(current_obj_name)
-                original_to_derived[true_original_name].add(original_obj_name)
-                if current_obj_name != original_obj_name:
-                    original_to_derived[true_original_name].add(current_obj_name)
+                true_original_name = ""
+
+                source_candidates = [
+                    original_obj_name,
+                    current_obj_name,
+                    getattr(chain, "virtual_object_name", "") or "",
+                    getattr(chain, "export_object_name_override", "") or "",
+                ]
+                for rename_record in getattr(chain, "rename_history", []) or []:
+                    source_candidates.append(rename_record.get("old_name", "") or "")
+                    source_candidates.append(rename_record.get("new_name", "") or "")
+
+                get_export_object_name = getattr(chain, "get_export_object_name", None)
+                if callable(get_export_object_name):
+                    try:
+                        source_candidates.append(get_export_object_name() or "")
+                    except Exception:
+                        pass
+
+                for candidate_name in source_candidates:
+                    for variant_name in iter_name_variants(candidate_name):
+                        if get_visible_shapekey_info(variant_name):
+                            true_original_name = variant_name
+                            break
+                    if true_original_name:
+                        break
+
+                if not true_original_name:
+                    true_original_name = extract_original_name(original_obj_name) or original_obj_name or current_obj_name
+                true_original_name = canonical_name(true_original_name)
+
+                derived_names = []
+                for candidate_name in (
+                    current_obj_name,
+                    original_obj_name,
+                    getattr(chain, "virtual_object_name", "") or "",
+                    getattr(chain, "export_object_name_override", "") or "",
+                ):
+                    canonical_candidate = canonical_name(candidate_name)
+                    if canonical_candidate and canonical_candidate not in derived_names:
+                        derived_names.append(canonical_candidate)
+
+                original_to_derived[true_original_name].update(derived_names)
             
             print(f"[ShapeKeyExport] 收集到 {len(original_to_derived)} 个原始物体组")
             for orig_name, derived_set in original_to_derived.items():
@@ -883,37 +1349,20 @@ class BlueprintExportHelper:
                         shapekey_status = "无形态键"
                 print(f"[ShapeKeyExport] 检查原始物体 '{original_obj_name}': {obj_status}, {hide_status}, {shapekey_status}")
                 
-                if obj and obj.data and not obj.hide_get():
-                    if hasattr(obj.data, 'shape_keys') and obj.data.shape_keys:
-                        key_blocks = obj.data.shape_keys.key_blocks
-                        shapekey_info = []
-                        for i, kb in enumerate(key_blocks):
-                            if i == 0:
-                                continue
-                            shapekey_info.append((i, kb.name))
-                        
-                        if shapekey_info:
-                            original_to_shapekeys[original_obj_name] = shapekey_info
-                            print(f"[ShapeKeyExport]   从原始物体获取形态键: {shapekey_info}")
-                            continue
+                shapekey_info = get_visible_shapekey_info(original_obj_name)
+                if shapekey_info:
+                    original_to_shapekeys[original_obj_name] = shapekey_info
+                    print(f"[ShapeKeyExport]   从原始物体获取形态键: {shapekey_info}")
+                    continue
                 
                 for derived_name in original_to_derived[original_obj_name]:
                     if derived_name == original_obj_name:
                         continue
-                    derived_obj = bpy.data.objects.get(derived_name)
-                    if derived_obj and derived_obj.data and not derived_obj.hide_get():
-                        if hasattr(derived_obj.data, 'shape_keys') and derived_obj.data.shape_keys:
-                            key_blocks = derived_obj.data.shape_keys.key_blocks
-                            shapekey_info = []
-                            for i, kb in enumerate(key_blocks):
-                                if i == 0:
-                                    continue
-                                shapekey_info.append((i, kb.name))
-                            
-                            if shapekey_info:
-                                original_to_shapekeys[original_obj_name] = shapekey_info
-                                print(f"[ShapeKeyExport] 从衍生物体 '{derived_name}' 获取形态键信息")
-                                break
+                    shapekey_info = get_visible_shapekey_info(derived_name)
+                    if shapekey_info:
+                        original_to_shapekeys[original_obj_name] = shapekey_info
+                        print(f"[ShapeKeyExport] 从衍生物体 '{derived_name}' 获取形态键信息")
+                        break
             
             for original_obj_name, shapekey_info in original_to_shapekeys.items():
                 derived_objects = original_to_derived.get(original_obj_name, set())

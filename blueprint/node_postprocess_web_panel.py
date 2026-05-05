@@ -130,12 +130,22 @@ class SSMTNode_PostProcess_WebPanel(SSMTNode_PostProcess_Base):
         addon_root = Path(__file__).resolve().parent.parent
         toolset_dir = addon_root / 'Toolset'
 
-        exact_path = toolset_dir / 'UI 构造器 v60.4.html'
-        if exact_path.is_file():
-            return str(exact_path)
+        # 先尝试稳定文件名，再回退到“同前缀里最新的 HTML”，减少版本号变更带来的路径失效。
+        stable_name = 'UI 构造器.html'
+        stable_path = toolset_dir / stable_name
+        if stable_path.is_file():
+            return str(stable_path)
 
-        candidates = sorted(toolset_dir.glob('UI 构造器*.html'))
+        # Ignore trailing version text in the builder filename and pick the newest match.
+        candidates = [path for path in toolset_dir.glob('UI 构造器*.html') if path.is_file()]
         if candidates:
+            candidates.sort(
+                key=lambda path: (
+                    path.name != stable_name,
+                    -path.stat().st_mtime,
+                    path.name,
+                )
+            )
             return str(candidates[0])
 
         return ""

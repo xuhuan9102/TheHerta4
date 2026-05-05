@@ -1,26 +1,26 @@
-'''
-How to log colored text on terminal:
-
-BLACK = '\033[30m'
-RED = '\033[31m'
-GREEN = '\033[32m'
-YELLOW = '\033[33m'
-BLUE = '\033[34m'
-MAGENTA = '\033[35m'
-CYAN = '\033[36m'
-WHITE = '\033[37m'
-RESET = '\033[0m'
-
-BOLD = '\033[1m'
-UNDERLINE = '\033[4m'
-BACKGROUND_YELLOW = '\033[43m'
-
-print(BACKGROUND_YELLOW + BLACK + BOLD + "Warning: This is a warningg message" + RESET)
-'''
 from .format_utils import Fatal
-from datetime import datetime
 import sys
 import io
+import unicodedata
+
+
+def _reconfigure_stdio_utf8():
+    # Blender 外部进程和 Windows 终端编码经常不一致，这里统一切到 UTF-8 以免日志提示乱码。
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_reconfigure_stdio_utf8()
+
 
 class LOG:
     _original_stdout = None
@@ -29,6 +29,7 @@ class LOG:
 
     @classmethod
     def start_collecting(cls):
+        _reconfigure_stdio_utf8()
         cls._log_capture = io.StringIO()
         cls._original_stdout = sys.stdout
         sys.stdout = _TeeOutput(cls._original_stdout, cls._log_capture)
@@ -53,12 +54,31 @@ class LOG:
             cls._log_capture = io.StringIO()
 
     @classmethod
+    def _normalize_log_text(cls, text) -> str:
+        if text is None:
+            return ""
+
+        normalized_chars = []
+        for ch in str(text):
+            if ch in ("\ufe0f", "\ufe0e", "\u200d"):
+                continue
+
+            # Windows + Blender 的控制台链路对 emoji 等符号兼容性很差，
+            # 这里统一剥离掉，优先保证中文提示稳定可读。
+            if unicodedata.category(ch) == "So":
+                continue
+
+            normalized_chars.append(ch)
+
+        return "".join(normalized_chars)
+
+    @classmethod
     def info(cls,input):
         if type(input) == list:
             for something in input:
-                print(something)
+                print(cls._normalize_log_text(something))
         else:
-            print(input)
+            print(cls._normalize_log_text(input))
 
     @classmethod
     def error(cls,input:str):
@@ -66,12 +86,12 @@ class LOG:
 
     @classmethod
     def warning(cls,input:str):
-        print("\033[33m" + "Warning: " + input + "\033[0m")
+        print("\033[33m" + "Warning: " + cls._normalize_log_text(input) + "\033[0m")
         cls.newline()
 
     @classmethod
     def debug(cls, input: str):
-        print("\033[36m" + "Debug: " + input + "\033[0m")
+        print("\033[36m" + "Debug: " + cls._normalize_log_text(input) + "\033[0m")
 
     @classmethod
     def newline(cls):
@@ -109,8 +129,9 @@ class _TeeOutput:
         self.outputs = outputs
 
     def write(self, text):
+        normalized_text = LOG._normalize_log_text(text)
         for output in self.outputs:
-            output.write(text)
+            output.write(normalized_text)
 
     def flush(self):
         for output in self.outputs:

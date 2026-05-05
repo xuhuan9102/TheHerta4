@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..common.global_config import GlobalConfig
 from ..common.global_properties import GlobalProterties
 from ..common.logic_name import LogicName
-from ..common.object_prefix_helper import ObjectPrefixHelper
 from ..utils.log_utils import LOG
 from ..utils.timer_utils import TimerUtils
 from .model import BluePrintModel
@@ -138,7 +137,7 @@ class ExportRoundExecutor:
             ExportSRMI(blueprint_model=blueprint_model).export()
         elif GlobalConfig.logic_name == LogicName.ZZMI:
             ExportZZMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.WWMI:
+        elif GlobalConfig.logic_name in (LogicName.WWMI, LogicName.NTEMI):
             ExportWWMI(blueprint_model=blueprint_model).export()
         elif GlobalConfig.logic_name == LogicName.SnowBreak:
             ExportSnowBreak(blueprint_model=blueprint_model).export()
@@ -163,7 +162,7 @@ class ExportRoundExecutor:
             ExportSRMI(blueprint_model=blueprint_model).export_buffers_only()
         elif GlobalConfig.logic_name == LogicName.ZZMI:
             ExportZZMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.WWMI:
+        elif GlobalConfig.logic_name in (LogicName.WWMI, LogicName.NTEMI):
             ExportWWMI(blueprint_model=blueprint_model).export_buffers_only()
         elif GlobalConfig.logic_name == LogicName.SnowBreak:
             ExportSnowBreak(blueprint_model=blueprint_model).export_buffers_only()
@@ -176,59 +175,9 @@ class ExportRoundExecutor:
 
     @staticmethod
     def collect_object_names_from_tree(tree) -> list:
-        object_names = []
-
-        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, 'SSMTNode_Result_Output')
-
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
-                    continue
-                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
-                if obj_name:
-                    object_names.append(obj_name)
-
-        nested_count = 0
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
-                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
-                    continue
-                nested_names = ExportRoundExecutor.collect_nested_object_names(node)
-                object_names.extend(nested_names)
-                nested_count += len(nested_names)
-
-        main_count = len(object_names) - nested_count
-        LOG.info(f"📋 物体收集: {tree.name}(主蓝图) {main_count} 个, 嵌套蓝图 {nested_count} 个, 共 {len(object_names)} 个")
-        return object_names
-
-    @staticmethod
-    def collect_nested_object_names(nest_node, visited=None) -> list:
-        if visited is None:
-            visited = set()
-
-        blueprint_name = getattr(nest_node, 'blueprint_name', '')
-        if not blueprint_name or blueprint_name == 'NONE':
-            return []
-
-        nested_tree = bpy.data.node_groups.get(blueprint_name)
-        if not nested_tree or nested_tree.name in visited:
-            return []
-
-        visited.add(nested_tree.name)
-
-        nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, 'SSMTNode_Result_Output')
-
-        object_names = []
-        for node in nested_tree.nodes:
-            if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                if nested_output and not BlueprintExportHelper._is_node_connected_to_output(nested_tree, node):
-                    continue
-                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
-                if obj_name:
-                    object_names.append(obj_name)
-            elif node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
-                object_names.extend(ExportRoundExecutor.collect_nested_object_names(node, visited))
-
+        # 并行轮次和主线程轮次必须看到完全一致的连通物体集合。
+        object_names = BlueprintExportHelper.collect_connected_object_names(tree)
+        LOG.info(f"Collected preprocess objects from {tree.name}: {len(object_names)}")
         return object_names
 
     @staticmethod

@@ -3,6 +3,7 @@ import os
 import json
 import hashlib
 import struct
+import pickle
 import numpy
 import tempfile
 import shutil
@@ -15,7 +16,11 @@ from ..common.object_prefix_helper import ObjectPrefixHelper
 class PreProcessCache:
     CACHE_DIR_NAME = ".ssmt_preprocess_cache"
     CACHE_INDEX_FILENAME = "cache_index.json"
-    CACHE_VERSION = 2
+    CACHE_BUNDLE_DIR_NAME = "bundles"
+    CACHE_VERSION = 3
+    # 继续把前处理缓存限定在“单物体副本”粒度，避免批量 bundle 把未连到输出的旧对象也一并加载回来。
+    ENABLE_CACHE_BUNDLES = False
+    PIPELINE_HASH_VERSION = 1
     COPY_HASH_PROP = "_ssmt_preprocess_hash"
     COPY_SOURCE_PROP = "_ssmt_preprocess_source"
     COPY_REQUESTED_PROP = "_ssmt_preprocess_requested"
@@ -108,6 +113,36 @@ class PreProcessCache:
         return cls.get_cache_index_path_for_dir(cls.get_cache_dir())
 
     @classmethod
+    def get_cache_bundle_dir(cls) -> str:
+        cache_dir = cls.get_cache_dir()
+        if not cache_dir:
+            return ""
+
+        bundle_dir = os.path.join(cache_dir, cls.CACHE_BUNDLE_DIR_NAME)
+        if not os.path.exists(bundle_dir):
+            os.makedirs(bundle_dir)
+        return bundle_dir
+
+    @classmethod
+    def get_cache_bundle_path(cls, cached_objects: dict[str, str]) -> str:
+        if not cached_objects:
+            return ""
+
+        bundle_dir = cls.get_cache_bundle_dir()
+        if not bundle_dir:
+            return ""
+
+        hasher = hashlib.sha256()
+        hasher.update(f"bundle-v{cls.CACHE_VERSION}".encode("utf-8"))
+        for obj_name, hash_value in sorted(cached_objects.items()):
+            hasher.update(obj_name.encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update((hash_value or "").encode("utf-8"))
+            hasher.update(b"\0")
+
+        return os.path.join(bundle_dir, hasher.hexdigest() + ".blend")
+
+    @classmethod
     def load_cache_index(cls, force_reload: bool = False, cache_dir: str = "") -> dict:
         if not cache_dir:
             cache_dir = cls.get_cache_dir()
@@ -127,6 +162,14 @@ class PreProcessCache:
             
             with open(index_path, 'r', encoding='utf-8') as f:
                 index = json.load(f)
+
+            if int(index.get("version", 0) or 0) != cls.CACHE_VERSION:
+                LOG.info(
+                    f"ℹ️ 忽略旧版前处理缓存索引: {index_path} "
+                    f"(found={index.get('version')}, expected={cls.CACHE_VERSION})"
+                )
+                cls.invalidate_index_cache(cache_dir)
+                return {"version": cls.CACHE_VERSION, "entries": {}}
             
             cls._index_cache_by_path[index_path] = index
             cls._index_cache_mtime_by_path[index_path] = current_mtime
@@ -266,9 +309,11 @@ class PreProcessCache:
 
         hasher = hashlib.sha256()
 
+        hasher.update(f"pipeline-v{cls.PIPELINE_HASH_VERSION}".encode('utf-8'))
         hasher.update(source_obj_name.encode('utf-8'))
         hasher.update(obj.type.encode('utf-8'))
         hasher.update(struct.pack('<?', GlobalProterties.enable_non_mirror_workflow()))
+        hasher.update(struct.pack('<?', GlobalProterties.apply_all_modifiers()))
 
         loc = numpy.array(obj.location, dtype=numpy.float32)
         rot = numpy.array(obj.rotation_euler, dtype=numpy.float32)
@@ -311,12 +356,10 @@ class PreProcessCache:
         if obj.type == 'MESH' and obj.data and obj.data.shape_keys:
             key_blocks = obj.data.shape_keys.key_blocks
             hasher.update(struct.pack('<I', len(key_blocks)))
-            print(f"[HashDebug] 物体 {obj_name} (源物体 {source_obj_name}) 形态键哈希计算:")
             for kb in key_blocks:
                 hasher.update(kb.name.encode('utf-8'))
                 hasher.update(struct.pack('<d', kb.value))
                 hasher.update(struct.pack('<?', kb.mute))
-                print(f"[HashDebug]   {kb.name}: value={kb.value}, mute={kb.mute}")
                 if kb.data:
                     n_sk_verts = len(kb.data)
                     if n_sk_verts > 0:
@@ -397,6 +440,82 @@ class PreProcessCache:
                 return cache_dir, entry
 
         return "", {}
+
+    @classmethod
+    def get_sidecar_path_for_dir(cls, cache_dir: str, hash_value: str, suffix: str) -> str:
+        if not cache_dir or not hash_value or not suffix:
+            return ""
+        return os.path.join(cache_dir, f"{hash_value}.{suffix}")
+
+    @classmethod
+    def has_sidecar(cls, hash_value: str, suffix: str) -> bool:
+        if not hash_value or not suffix:
+            return False
+
+        cache_dir, _entry = cls.resolve_cache_entry(hash_value)
+        if cache_dir:
+            sidecar_path = cls.get_sidecar_path_for_dir(cache_dir, hash_value, suffix)
+            if sidecar_path and os.path.exists(sidecar_path):
+                return True
+
+        for search_dir in cls.get_cache_search_dirs():
+            sidecar_path = cls.get_sidecar_path_for_dir(search_dir, hash_value, suffix)
+            if sidecar_path and os.path.exists(sidecar_path):
+                return True
+
+        return False
+
+    @classmethod
+    def save_pickle_sidecar(cls, hash_value: str, suffix: str, payload) -> bool:
+        cache_dir = cls.get_cache_dir()
+        if not cache_dir or not hash_value or not suffix:
+            return False
+
+        sidecar_path = cls.get_sidecar_path_for_dir(cache_dir, hash_value, suffix)
+        if not sidecar_path:
+            return False
+
+        temp_path = sidecar_path + ".tmp"
+        try:
+            with open(temp_path, "wb") as file_obj:
+                pickle.dump(payload, file_obj, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(temp_path, sidecar_path)
+            return True
+        except Exception as exc:
+            LOG.warning(f"侧车缓存保存失败 {hash_value}.{suffix}: {exc}")
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+            return False
+
+    @classmethod
+    def load_pickle_sidecar(cls, hash_value: str, suffix: str):
+        if not hash_value or not suffix:
+            return None
+
+        cache_dir, _entry = cls.resolve_cache_entry(hash_value)
+        candidate_dirs = []
+        if cache_dir:
+            candidate_dirs.append(cache_dir)
+        for search_dir in cls.get_cache_search_dirs():
+            if search_dir and search_dir not in candidate_dirs:
+                candidate_dirs.append(search_dir)
+
+        for candidate_dir in candidate_dirs:
+            sidecar_path = cls.get_sidecar_path_for_dir(candidate_dir, hash_value, suffix)
+            if not sidecar_path or not os.path.exists(sidecar_path):
+                continue
+
+            try:
+                with open(sidecar_path, "rb") as file_obj:
+                    return pickle.load(file_obj)
+            except Exception as exc:
+                LOG.warning(f"侧车缓存加载失败 {hash_value}.{suffix}: {exc}")
+                return None
+
+        return None
 
     @classmethod
     def save_to_cache(cls, obj_name: str, copy_name: str, hash_value: str):
@@ -733,6 +852,149 @@ class PreProcessCache:
                 except Exception:
                     pass
 
+            return False
+
+    @classmethod
+    def load_batch_from_cache_bundle(cls, cached_objects: dict[str, str]) -> tuple[set[str], dict[str, str]]:
+        loaded_objects: set[str] = set()
+        if not cls.ENABLE_CACHE_BUNDLES or not cached_objects:
+            return loaded_objects, dict(cached_objects)
+
+        bundle_path = cls.get_cache_bundle_path(cached_objects)
+        if not bundle_path or not os.path.exists(bundle_path):
+            return loaded_objects, dict(cached_objects)
+
+        requested_info: dict[str, tuple[str, str, str]] = {}
+        for obj_name, hash_value in cached_objects.items():
+            copy_name = f"{obj_name}_copy"
+            _, source_obj_name = cls.resolve_source_object(obj_name)
+
+            existing_copy = bpy.data.objects.get(copy_name)
+            if existing_copy:
+                if cls.runtime_copy_matches(existing_copy, obj_name, source_obj_name, hash_value):
+                    loaded_objects.add(obj_name)
+                    continue
+                cls.remove_runtime_copy(copy_name)
+
+            requested_info[copy_name] = (obj_name, source_obj_name, hash_value)
+
+        if not requested_info:
+            return loaded_objects, {}
+
+        try:
+            with bpy.data.libraries.load(bundle_path) as (data_from, data_to):
+                available_names = set(data_from.objects)
+                wanted_names = [
+                    copy_name
+                    for copy_name in requested_info.keys()
+                    if copy_name in available_names
+                ]
+                missing_names = set(requested_info.keys()) - set(wanted_names)
+                if missing_names:
+                    LOG.warning(f"⚠️ 缓存 bundle 缺少 {len(missing_names)} 个物体，将回退到单对象缓存")
+                    try:
+                        os.remove(bundle_path)
+                    except Exception:
+                        pass
+                    return loaded_objects, {
+                        obj_name: hash_value
+                        for obj_name, hash_value in cached_objects.items()
+                        if obj_name not in loaded_objects
+                    }
+                data_to.objects = wanted_names
+
+            for loaded_obj in data_to.objects:
+                if loaded_obj is None:
+                    continue
+
+                requested_name = loaded_obj.get(cls.COPY_REQUESTED_PROP, "")
+                if not requested_name:
+                    loaded_name = loaded_obj.name
+                    requested_name = loaded_name[:-5] if loaded_name.endswith("_copy") else loaded_name
+
+                if requested_name not in cached_objects:
+                    bpy.data.objects.remove(loaded_obj, do_unlink=True)
+                    continue
+
+                hash_value = cached_objects[requested_name]
+                copy_name = f"{requested_name}_copy"
+                _, source_obj_name = cls.resolve_source_object(requested_name)
+
+                loaded_obj.name = copy_name
+                if loaded_obj.data:
+                    loaded_obj.data.name = f"{copy_name}_mesh"
+
+                bpy.context.scene.collection.objects.link(loaded_obj)
+                cls.tag_runtime_copy(loaded_obj, requested_name, source_obj_name, hash_value)
+                loaded_obj.location = (0, 0, 0)
+                loaded_obj.rotation_euler = (0, 0, 0)
+                loaded_obj.scale = (1, 1, 1)
+                loaded_objects.add(requested_name)
+
+            if loaded_objects:
+                LOG.info(f"   📦 缓存 bundle 已加载: {len(loaded_objects)} 个物体")
+
+        except Exception as e:
+            LOG.warning(f"⚠️ 缓存 bundle 加载失败，将回退到单对象缓存: {e}")
+            for obj_name in cached_objects.keys():
+                copy_name = f"{obj_name}_copy"
+                existing_copy = bpy.data.objects.get(copy_name)
+                if existing_copy and not cls.runtime_copy_matches(
+                    existing_copy,
+                    obj_name,
+                    cls.resolve_source_object(obj_name)[1],
+                    cached_objects[obj_name],
+                ):
+                    cls.remove_runtime_copy(copy_name)
+            return set(), dict(cached_objects)
+
+        pending_objects = {
+            obj_name: hash_value
+            for obj_name, hash_value in cached_objects.items()
+            if obj_name not in loaded_objects
+        }
+        return loaded_objects, pending_objects
+
+    @classmethod
+    def save_cache_bundle(cls, cached_objects: dict[str, str]) -> bool:
+        if not cls.ENABLE_CACHE_BUNDLES or not cached_objects:
+            return False
+
+        bundle_path = cls.get_cache_bundle_path(cached_objects)
+        if not bundle_path:
+            return False
+        if os.path.exists(bundle_path):
+            return True
+
+        datablocks = set()
+        for obj_name, hash_value in cached_objects.items():
+            copy_name = f"{obj_name}_copy"
+            copy_obj = bpy.data.objects.get(copy_name)
+            _, source_obj_name = cls.resolve_source_object(obj_name)
+            if not cls.runtime_copy_matches(copy_obj, obj_name, source_obj_name, hash_value):
+                return False
+            datablocks.add(copy_obj)
+            if copy_obj.data:
+                datablocks.add(copy_obj.data)
+
+        if not datablocks:
+            return False
+
+        temp_path = bundle_path + ".writing.blend"
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            bpy.data.libraries.write(temp_path, datablocks, compress=False, fake_user=True)
+            os.replace(temp_path, bundle_path)
+            LOG.info(f"   📦 缓存 bundle 已保存: {len(cached_objects)} 个物体 -> {os.path.basename(bundle_path)}")
+            return True
+        except Exception as e:
+            LOG.warning(f"⚠️ 缓存 bundle 保存失败: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
             return False
 
     @classmethod

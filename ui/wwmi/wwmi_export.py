@@ -2,7 +2,6 @@ import os
 
 from ...common.global_properties import GlobalProterties
 from ...common.global_config import GlobalConfig
-from ...common.logic_name import LogicName
 from .drawib_model_wwmi import DrawIBModelWWMI
 from ...blueprint.model import BluePrintModel
 from ...blueprint.export_helper import BlueprintExportHelper
@@ -378,6 +377,10 @@ class ExportWWMI:
         ini_builder.append_section(texture_override_component)
 
     def add_texture_override_shapekeys(self, ini_builder: M_IniBuilder, draw_ib_model: DrawIBModelWWMI):
+        # 直出基础轮次不写这部分，避免和后续直出生成的 ShapeKey 资源段重复。
+        if BlueprintExportHelper.should_suppress_shapekey_resource_export():
+            return
+
         texture_override_shapekeys_section = M_IniSection(M_SectionType.TextureOverrideShapeKeys)
 
         shapekey_offsets_hash = draw_ib_model.extracted_object.shapekeys.offsets_hash
@@ -453,6 +456,10 @@ class ExportWWMI:
         ini_builder.append_section(texture_override_shapekeys_section)
 
     def add_resource_shapekeys(self, ini_builder: M_IniBuilder, draw_ib_model: DrawIBModelWWMI):
+        # ShapeKey 资源段和二进制缓冲都由同一个抑制开关控制，防止基础轮次输出半套资源。
+        if BlueprintExportHelper.should_suppress_shapekey_resource_export():
+            return
+
         resource_shapekeys_section = M_IniSection(M_SectionType.ResourceShapeKeysOverride)
         resource_shapekeys_section.append("; Resources: Shape Keys Override -------------------------")
         resource_shapekeys_section.append("[ResourceShapeKeyCBRW]")
@@ -536,26 +543,27 @@ class ExportWWMI:
             resource_buffer_section.append("filename = " + buffer_folder_name + "/" + draw_ib_model.draw_ib + "-BlendRemapReverse.buf")
             resource_buffer_section.new_line()
 
-        resource_buffer_section.append("[ResourceShapeKeyOffsetBuffer]")
-        resource_buffer_section.append("type = Buffer")
-        resource_buffer_section.append("format = DXGI_FORMAT_R32G32B32A32_UINT")
-        resource_buffer_section.append("stride = 16")
-        resource_buffer_section.append("filename = " + buffer_folder_name + "/" + draw_ib_model.draw_ib + "-ShapeKeyOffset.buf")
-        resource_buffer_section.new_line()
+        if not BlueprintExportHelper.should_suppress_shapekey_resource_export():
+            resource_buffer_section.append("[ResourceShapeKeyOffsetBuffer]")
+            resource_buffer_section.append("type = Buffer")
+            resource_buffer_section.append("format = DXGI_FORMAT_R32G32B32A32_UINT")
+            resource_buffer_section.append("stride = 16")
+            resource_buffer_section.append("filename = " + buffer_folder_name + "/" + draw_ib_model.draw_ib + "-ShapeKeyOffset.buf")
+            resource_buffer_section.new_line()
 
-        resource_buffer_section.append("[ResourceShapeKeyVertexIdBuffer]")
-        resource_buffer_section.append("type = Buffer")
-        resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")
-        resource_buffer_section.append("stride = 4")
-        resource_buffer_section.append("filename = " + buffer_folder_name + "/" + draw_ib_model.draw_ib + "-ShapeKeyVertexId.buf")
-        resource_buffer_section.new_line()
+            resource_buffer_section.append("[ResourceShapeKeyVertexIdBuffer]")
+            resource_buffer_section.append("type = Buffer")
+            resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")
+            resource_buffer_section.append("stride = 4")
+            resource_buffer_section.append("filename = " + buffer_folder_name + "/" + draw_ib_model.draw_ib + "-ShapeKeyVertexId.buf")
+            resource_buffer_section.new_line()
 
-        resource_buffer_section.append("[ResourceShapeKeyVertexOffsetBuffer]")
-        resource_buffer_section.append("type = Buffer")
-        resource_buffer_section.append("format = DXGI_FORMAT_R16_FLOAT")
-        resource_buffer_section.append("stride = 2")
-        resource_buffer_section.append("filename = " + buffer_folder_name + "/" + draw_ib_model.draw_ib + "-ShapeKeyVertexOffset.buf")
-        resource_buffer_section.new_line()
+            resource_buffer_section.append("[ResourceShapeKeyVertexOffsetBuffer]")
+            resource_buffer_section.append("type = Buffer")
+            resource_buffer_section.append("format = DXGI_FORMAT_R16_FLOAT")
+            resource_buffer_section.append("stride = 2")
+            resource_buffer_section.append("filename = " + buffer_folder_name + "/" + draw_ib_model.draw_ib + "-ShapeKeyVertexOffset.buf")
+            resource_buffer_section.new_line()
 
         ini_builder.append_section(resource_buffer_section)
 

@@ -6,18 +6,17 @@ from .draw_call_model import DrawCallModel
 from ..utils.export_utils import ExportUtils
 from ..utils.obj_utils import ObjUtils
 from ..utils.collection_utils import CollectionUtils
-from ..utils.json_utils import JsonUtils
 from ..utils.timer_utils import TimerUtils
+from ..utils.shapekey_utils import ShapeKeyUtils
 from .logic_name import LogicName
 from .global_config import GlobalConfig
 from .d3d11_gametype import D3D11GameType
-from .obj_buffer_helper import ObjBufferHelper
 from .submesh_metadata import SubmeshMetadataResolver
+from ..blueprint.export_helper import BlueprintExportHelper
 
 
 import bpy
 import math
-import os
 import array
 import hashlib
 import re
@@ -50,6 +49,8 @@ class SubMeshModel:
     category_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
     index_vertex_id_dict:dict = field(init=False,repr=False,default_factory=dict) 
     shape_key_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
+    unique_first_loop_indices:numpy.ndarray = field(init=False,repr=False,default=None)
+    object_export_context_map:dict = field(init=False,repr=False,default_factory=dict)
 
     def __post_init__(self):
 
@@ -78,11 +79,13 @@ class SubMeshModel:
         original_names = []
         for draw_call_model in self.drawcall_model_list:
             source_name = draw_call_model.source_obj_name
-            if source_name:
-                if source_name.endswith('_copy'):
-                    source_name = source_name[:-5]
-                source_name = re.sub(r'_chain\d+$', '', source_name)
-            original_names.append(source_name if source_name else draw_call_model.get_blender_obj_name())
+            normalized_source_name = self._normalize_source_name(source_name)
+            if normalized_source_name:
+                original_names.append(normalized_source_name)
+                continue
+
+            fallback_name = draw_call_model.get_blender_obj_name()
+            original_names.append(self._normalize_source_name(fallback_name) or fallback_name)
 
         # 调试输出：打印所有对象的哈希值和原始名称
         print(f"[SubMeshModel] 数据哈希预计算完成: {len(self.drawcall_model_list)} 个对象")
@@ -110,6 +113,8 @@ class SubMeshModel:
         index_offset = 0
         submesh_temp_obj_list = []
         data_hash_cache = {}
+        cache_key_to_geometry_record = {}
+        cache_key_to_candidate_names = {}
 
         reuse_count = 0
         direct_source_reuse_count = 0
@@ -119,6 +124,11 @@ class SubMeshModel:
         join_duration = 0.0
         normalize_duration = 0.0
         rotate_duration = 0.0
+        loop_offset = 0
+        preserve_distinct_export_contexts = self._should_preserve_distinct_export_contexts()
+
+        if preserve_distinct_export_contexts:
+            print(f"[SubMeshModel] 直出 ShapeKey 场景: 保留独立导出上下文，禁用几何复用 {self.unique_str}")
 
         temp_collection = CollectionUtils.create_new_collection("TEMP_SUBMESH_COLLECTION_" + self.unique_str)
         bpy.context.scene.collection.children.link(temp_collection)
@@ -142,13 +152,16 @@ class SubMeshModel:
                 obj_hash = f"FALLBACK_{blender_obj_name}"
             original_name = original_names[i]
             cache_key = (obj_hash, original_name)
-            cached_result = data_hash_cache.get(cache_key)
+            cached_result = None if preserve_distinct_export_contexts else data_hash_cache.get(cache_key)
 
             if cached_result is not None:
                 cached_offset, cached_vertex_count, cached_index_count = cached_result
                 draw_call_model.vertex_count = cached_vertex_count
                 draw_call_model.index_count = cached_index_count
                 draw_call_model.index_offset = cached_offset
+                cache_key_to_candidate_names.setdefault(cache_key, set()).update(
+                    self._build_drawcall_candidate_names(draw_call_model)
+                )
                 reuse_count += 1
                 print(f"  ♻️复用: '{blender_obj_name}' (原始: {original_name}) → offset={cached_offset}, vertices={cached_vertex_count}, indices={cached_index_count}")
                 continue
@@ -184,12 +197,24 @@ class SubMeshModel:
             draw_call_model.vertex_count = len(temp_obj.data.vertices)
             draw_call_model.index_count = len(temp_obj.data.polygons) * 3
             draw_call_model.index_offset = index_offset
+            loop_count = len(temp_obj.data.loops)
 
             data_hash_cache[cache_key] = (index_offset, draw_call_model.vertex_count, draw_call_model.index_count)
+            cache_key_to_candidate_names.setdefault(cache_key, set()).update(
+                self._build_drawcall_candidate_names(draw_call_model)
+            )
+            cache_key_to_geometry_record[cache_key] = {
+                "loop_start": loop_offset,
+                "loop_count": loop_count,
+                "label": self.unique_str,
+                "d3d11_game_type": self.d3d11_game_type,
+                "preferred_source_name": self._resolve_preferred_source_name(source_obj, draw_call_model),
+            }
 
             index_offset += draw_call_model.index_count
             self.vertex_count += draw_call_model.vertex_count
             self.index_count += draw_call_model.index_count
+            loop_offset += loop_count
 
             submesh_temp_obj_list.append(temp_obj)
 
@@ -210,6 +235,8 @@ class SubMeshModel:
                 except ReferenceError:
                     continue
             if valid_temp_obj_list:
+                if BlueprintExportHelper.should_preserve_current_shapekey_mix_for_export():
+                    self._ensure_target_shape_key_union(valid_temp_obj_list[0], valid_temp_obj_list[1:])
                 ObjUtils.join_objects_fast(valid_temp_obj_list[0], valid_temp_obj_list[1:])
             submesh_temp_obj_list = valid_temp_obj_list
         join_duration += perf_counter() - join_start
@@ -236,9 +263,6 @@ class SubMeshModel:
 
         TimerUtils.end_stage("对象处理与合并")
 
-        # 检查并校验是否有缺少的元素
-        ObjBufferHelper.check_and_verify_attributes(obj=submesh_merged_obj, d3d11_game_type=self.d3d11_game_type)
-
         obj_buffer_result = ExportUtils.build_unity_obj_buffer_result(
             obj=submesh_merged_obj,
             d3d11_game_type=self.d3d11_game_type,
@@ -246,7 +270,12 @@ class SubMeshModel:
         self.ib = obj_buffer_result.ib
         self.category_buffer_dict = obj_buffer_result.category_buffer_dict
         self.index_vertex_id_dict = obj_buffer_result.index_loop_id_dict
+        self.unique_first_loop_indices = obj_buffer_result.unique_first_loop_indices
         self.shape_key_buffer_dict = obj_buffer_result.shape_key_buffer_dict
+        self.object_export_context_map = self._build_object_export_context_map(
+            cache_key_to_geometry_record=cache_key_to_geometry_record,
+            cache_key_to_candidate_names=cache_key_to_candidate_names,
+        )
 
         # 计算完成后，删除临时对象
         if not merged_obj_uses_preprocessed_copy:
@@ -268,6 +297,138 @@ class SubMeshModel:
 
         self._deduplicate_draw_calls()
 
+    def _ensure_target_shape_key_union(self, target_obj: bpy.types.Object, source_objs: list[bpy.types.Object]):
+        objects = [
+            obj for obj in [target_obj] + list(source_objs or [])
+            if obj is not None and getattr(obj, "data", None)
+        ]
+        if not objects:
+            return
+
+        ordered_shape_key_names = []
+        seen_names = set()
+        for obj in objects:
+            key_blocks = getattr(getattr(getattr(obj, "data", None), "shape_keys", None), "key_blocks", None)
+            if not key_blocks:
+                continue
+            for key_index, key_block in enumerate(key_blocks):
+                if key_index == 0:
+                    continue
+                key_name = getattr(key_block, "name", "")
+                if key_name and key_name not in seen_names:
+                    seen_names.add(key_name)
+                    ordered_shape_key_names.append(key_name)
+
+        if not ordered_shape_key_names:
+            return
+
+        total_added_count = 0
+        for obj in objects:
+            target_shape_keys = getattr(obj.data, "shape_keys", None)
+            target_key_blocks = getattr(target_shape_keys, "key_blocks", None)
+            if not target_key_blocks:
+                obj.shape_key_add(name="Basis", from_mix=False)
+                target_key_blocks = obj.data.shape_keys.key_blocks
+
+            target_names = {key_block.name for key_block in target_key_blocks}
+            added_count = 0
+            for key_name in ordered_shape_key_names:
+                if key_name in target_names:
+                    continue
+                obj.shape_key_add(name=key_name, from_mix=False)
+                target_names.add(key_name)
+                added_count += 1
+
+            total_added_count += added_count
+
+        if total_added_count:
+            print(f"[SubMeshModel] ShapeKey 合并前补齐: {self.unique_str} 新增 {total_added_count} 个空形态键槽")
+
+    def _build_drawcall_candidate_names(self, draw_call_model: DrawCallModel) -> set[str]:
+        candidate_names = {
+            getattr(draw_call_model, "obj_name", "") or "",
+            getattr(draw_call_model, "source_obj_name", "") or "",
+            draw_call_model.get_blender_obj_name() or "",
+        }
+
+        normalized_names = set()
+        for name in candidate_names:
+            if not name:
+                continue
+            normalized_names.add(name)
+            normalized_name = self._normalize_source_name(name)
+            if normalized_name:
+                normalized_names.add(normalized_name)
+            if name.endswith("_copy"):
+                normalized_names.add(name[:-5])
+
+        return {name for name in normalized_names if name}
+
+    def _normalize_source_name(self, name: str) -> str:
+        if not name:
+            return name
+
+        result = name
+        for pattern in (
+            r"_chain\d+_dup\d+_copy$",
+            r"_chain\d+_copy$",
+            r"_dup\d+_copy$",
+            r"_copy$",
+            r"_chain\d+_dup\d+$",
+            r"_chain\d+$",
+            r"_dup\d+$",
+        ):
+            result = re.sub(pattern, "", result)
+        return result
+
+    def _resolve_preferred_source_name(self, source_obj: bpy.types.Object, draw_call_model: DrawCallModel) -> str:
+        for candidate_name in (
+            getattr(source_obj, "name", "") if source_obj is not None else "",
+            getattr(draw_call_model, "source_obj_name", "") or "",
+            draw_call_model.get_blender_obj_name() or "",
+            getattr(draw_call_model, "obj_name", "") or "",
+        ):
+            normalized_name = self._normalize_source_name(candidate_name)
+            if normalized_name:
+                return normalized_name
+        return ""
+
+    def _build_object_export_context_map(self, cache_key_to_geometry_record: dict, cache_key_to_candidate_names: dict) -> dict:
+        if self.unique_first_loop_indices is None:
+            return {}
+
+        unique_first_loop_indices = numpy.asarray(self.unique_first_loop_indices, dtype=numpy.int32)
+        object_export_context_map = {}
+
+        for cache_key, geometry_record in cache_key_to_geometry_record.items():
+            loop_start = int(geometry_record.get("loop_start", 0))
+            loop_count = int(geometry_record.get("loop_count", 0))
+            if loop_count <= 0:
+                continue
+
+            loop_end = loop_start + loop_count
+            export_mask = (unique_first_loop_indices >= loop_start) & (unique_first_loop_indices < loop_end)
+            export_indices = numpy.flatnonzero(export_mask).astype(numpy.int32)
+            if export_indices.size == 0:
+                continue
+
+            local_loop_indices = (unique_first_loop_indices[export_mask] - loop_start).astype(numpy.int32)
+            context = {
+                "cache_key": cache_key,
+                "export_indices": export_indices,
+                "local_loop_indices": local_loop_indices,
+                "vertex_count": int(export_indices.size),
+                "label": geometry_record.get("label", self.unique_str),
+                "d3d11_game_type": geometry_record.get("d3d11_game_type", self.d3d11_game_type),
+                "preferred_source_name": geometry_record.get("preferred_source_name", ""),
+            }
+
+            for candidate_name in cache_key_to_candidate_names.get(cache_key, set()):
+                if candidate_name:
+                    object_export_context_map[candidate_name] = context
+
+        return object_export_context_map
+
     def _should_duplicate_source_for_merge(self, source_obj: bpy.types.Object) -> bool:
         if source_obj is None:
             return True
@@ -278,11 +439,20 @@ class SubMeshModel:
         if self.has_multi_file_export_nodes:
             return True
 
+        if BlueprintExportHelper.should_preserve_current_shapekey_mix_for_export():
+            return True
+
         if not source_obj.name.endswith('_copy'):
             return True
 
         unique_str_count = self.source_obj_unique_str_count.get(source_obj.name, 0)
         return unique_str_count > 1
+
+    def _should_preserve_distinct_export_contexts(self) -> bool:
+        # Keep the base exporter on the legacy geometry-reuse path.
+        # Direct shape key export now supplements missing per-object data later,
+        # and forcing distinct export contexts here inflates the base buffers.
+        return False
 
     def _deduplicate_draw_calls(self):
         if len(self.drawcall_model_list) <= 1:
@@ -464,10 +634,12 @@ class SubMeshModel:
             temp_obj.rotation_euler[0] = math.radians(-90)
             temp_obj.rotation_euler[1] = 0
             temp_obj.rotation_euler[2] = 0
-            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+            ShapeKeyUtils.transform_apply_preserve_shape_keys(temp_obj, location=False, rotation=True, scale=True)
         elif GlobalConfig.logic_name == LogicName.EFMI:
-            ObjUtils.select_obj(temp_obj)
             temp_obj.rotation_euler[0] = 0
             temp_obj.rotation_euler[1] = 0
             temp_obj.rotation_euler[2] = 0
-            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+            if all(abs(axis - 1.0) <= 1e-7 for axis in temp_obj.scale):
+                return
+            ObjUtils.select_obj(temp_obj)
+            ShapeKeyUtils.transform_apply_preserve_shape_keys(temp_obj, location=False, rotation=True, scale=True)

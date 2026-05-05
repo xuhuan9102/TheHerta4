@@ -1,5 +1,4 @@
 from ...blueprint.model import BluePrintModel
-from ...common.draw_call_model import DrawCallModel
 from ...common.submesh_model import SubMeshModel
 from ...common.drawib_model import DrawIBModel
 from dataclasses import dataclass,field
@@ -29,7 +28,11 @@ class ExportEFMI:
 
     def __post_init__(self):
         self.submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(self.blueprint_model)
-        self.drawib_model_list = ExportHelper.parse_drawib_model_list_from_blueprint_model(self.blueprint_model, combine_ib=False)
+        # EFMI 直接复用已经解析好的 SubMeshModel，避免同一轮导出把几何解析做两遍。
+        self.drawib_model_list = ExportHelper.parse_drawib_model_list_from_submesh_model_list(
+            submesh_model_list=self.submesh_model_list,
+            combine_ib=False,
+        )
         print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
         self.cross_ib_info_dict = self.blueprint_model.cross_ib_info_dict

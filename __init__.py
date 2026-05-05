@@ -39,7 +39,7 @@ class HERTT_OT_SwitchToMainPanel(bpy.types.Operator):
     """切换回主面板"""
     bl_idname = "model.switch_to_main_panel"
     bl_label = "切换回主面板"
-    
+
     def execute(self, context):
         context.scene.herta_show_toolkit = False
         return {'FINISHED'}

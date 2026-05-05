@@ -52,9 +52,13 @@ class TBNCodec:
             shape (N, 2) 的 float32 编码向量
         """
         # Keep behavior aligned with EFMI-Tools reference implementation.
-        n = normals / numpy.linalg.norm(normals, axis=1, keepdims=True)
+        norm = numpy.linalg.norm(normals, axis=1, keepdims=True)
+        norm = numpy.where(norm < 1e-8, 1.0, norm)
+        n = normals / norm
 
-        inv_l1 = 1.0 / numpy.sum(numpy.abs(n), axis=1, keepdims=True)
+        l1 = numpy.sum(numpy.abs(n), axis=1, keepdims=True)
+        inv_l1 = numpy.zeros_like(l1)
+        numpy.divide(1.0, l1, out=inv_l1, where=l1 >= 1e-8)
         n *= inv_l1
 
         mask = n[:, 2] < 0
@@ -187,7 +191,8 @@ class TBNCodec:
         sin_theta = numpy.clip(sin_theta, -1.0, 1.0)
 
         denom = numpy.abs(cos_theta) + numpy.abs(sin_theta)
-        u_t = numpy.where(denom > 1e-8, cos_theta / denom, 0.0)
+        safe_denom = numpy.where(denom > 1e-8, denom, 1.0)
+        u_t = numpy.where(denom > 1e-8, cos_theta / safe_denom, 0.0)
         t = 1 - (1 - u_t) / 2.0
 
         s = numpy.where(sin_theta == 0.0, 1.0, numpy.sign(sin_theta))

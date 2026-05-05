@@ -9,12 +9,15 @@ from .node_postprocess_base import SSMTNode_PostProcess_Base
 
 _name_mapping_cache = {}
 _reverse_name_mapping_cache = {}
+# 资源缓存按“材质内容签名”去重，避免同一套贴图被重复复制/重复生成 Resource。
+_material_resource_cache = {}
 
 
 def clear_name_mapping_cache():
-    global _name_mapping_cache, _reverse_name_mapping_cache
+    global _name_mapping_cache, _reverse_name_mapping_cache, _material_resource_cache
     _name_mapping_cache.clear()
     _reverse_name_mapping_cache.clear()
+    _material_resource_cache.clear()
 
 
 class MaterialPrefixItem(bpy.types.PropertyGroup):
@@ -526,16 +529,100 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
         return mapping
 
     def find_matching_materials(self, obj, texture_type):
-        matching_materials = []
         texture_type_lower = texture_type.lower()
-        for material_slot in obj.material_slots:
-            material = material_slot.material
-            if not material: continue
-            material_first_word = material.name.split('_')[0].lower()
-            if material_first_word == texture_type_lower:
-                matching_materials.append(material)
-        
-        return matching_materials
+
+        try:
+            from .preprocess_cache import PreProcessCache
+            from ..common.object_prefix_helper import ObjectPrefixHelper
+        except Exception:
+            PreProcessCache = None
+            ObjectPrefixHelper = None
+
+        candidate_objects = []
+        candidate_names = []
+
+        def append_candidate_name(name):
+            name = str(name or "").strip()
+            if not name or name in candidate_names:
+                return
+            candidate_names.append(name)
+
+        source_obj = None
+        if obj and PreProcessCache is not None:
+            try:
+                source_obj, _ = PreProcessCache.resolve_source_object(getattr(obj, "name", ""))
+            except Exception:
+                source_obj = None
+
+        if obj:
+            if PreProcessCache is not None:
+                append_candidate_name(obj.get(PreProcessCache.COPY_SOURCE_PROP, ""))
+
+            original_object_name = getattr(obj, "original_object_name", "")
+            append_candidate_name(original_object_name)
+
+            if ObjectPrefixHelper is not None:
+                append_candidate_name(ObjectPrefixHelper.resolve_source_object_name(obj.name))
+
+            for stripped_name in self._strip_all_suffixes(obj.name):
+                append_candidate_name(stripped_name)
+
+            append_candidate_name(obj.name)
+
+        for name in candidate_names:
+            candidate_obj = bpy.data.objects.get(name)
+            if candidate_obj and candidate_obj not in candidate_objects:
+                candidate_objects.append(candidate_obj)
+
+        if source_obj and source_obj in candidate_objects:
+            candidate_objects.remove(source_obj)
+            candidate_objects.insert(0, source_obj)
+        elif source_obj:
+            candidate_objects.insert(0, source_obj)
+
+        if obj and obj in candidate_objects:
+            candidate_objects.remove(obj)
+            candidate_objects.append(obj)
+        elif obj:
+            candidate_objects.append(obj)
+
+        matching_materials = OrderedDict()
+        for candidate_obj in candidate_objects:
+            for material_slot in candidate_obj.material_slots:
+                material = material_slot.material
+                if not material:
+                    continue
+                if not material.name.lower().startswith(texture_type_lower):
+                    continue
+                material_first_word = material.name.split('_')[0].lower()
+                if material_first_word == texture_type_lower:
+                    signature = self._build_material_signature(material)
+                    if signature not in matching_materials:
+                        matching_materials[signature] = material
+
+            if matching_materials:
+                break
+
+        return list(matching_materials.values())
+
+    @staticmethod
+    def _build_material_signature(material):
+        if not material:
+            return ("",)
+
+        material_name = str(getattr(material, "name", "") or "")
+        type_prefix = material_name.split('_')[0].lower()
+        texture_images = []
+        if getattr(material, "use_nodes", False) and getattr(material, "node_tree", None):
+            for node in material.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    image = node.image
+                    image_path = bpy.path.abspath(getattr(image, "filepath", "") or "")
+                    texture_images.append(image_path or image.name)
+
+        if texture_images:
+            return (type_prefix, *sorted(set(texture_images)))
+        return (type_prefix, material_name)
 
     def get_texture_from_material(self, material):
         if not material or not material.use_nodes:
@@ -561,7 +648,7 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                 return node.image
         return None
 
-    def copy_texture_file(self, texture_image, target_folder, material):
+    def copy_texture_file(self, texture_image, target_folder, material, forced_filename=None):
         if not texture_image or not texture_image.filepath:
             return None
         try:
@@ -569,8 +656,11 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
             if not os.path.exists(source_path): return None
             os.makedirs(target_folder, exist_ok=True)
 
-            _, file_extension = os.path.splitext(os.path.basename(source_path))
-            new_filename = f"{material.name}{file_extension}"
+            if forced_filename:
+                new_filename = forced_filename
+            else:
+                _, file_extension = os.path.splitext(os.path.basename(source_path))
+                new_filename = f"{material.name}{file_extension}"
 
             target_path = os.path.join(target_folder, new_filename)
             if os.path.exists(target_path) and not self.material_to_resource_override:
@@ -591,6 +681,8 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                     if stripped_line.startswith('[') and stripped_line.endswith(']'):
                         current_section = stripped_line
                         sections[current_section] = []
+                    elif not stripped_line:
+                        continue
                     elif current_section is not None:
                         sections[current_section].append(line.rstrip())
         except FileNotFoundError:
@@ -670,23 +762,121 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
         return generated_lines, next_swap_key_num
 
     def create_resource_entry(self, material, param_name, texture_folder, all_sections):
+        global _material_resource_cache
+
         texture_image = self.get_texture_from_material(material)
         if not texture_image: return None
-        copied_filename = self.copy_texture_file(texture_image, texture_folder, material)
+
+        # 同内容材质复用同一个 Resource 名称，避免材质后处理把同图资源反复写出。
+        material_signature = self._build_material_signature(material)
+        cached_entry = _material_resource_cache.get(material_signature)
+
+        if cached_entry:
+            resource_name = cached_entry.get("resource_name", f"Resource_{material.name}")
+            copied_filename = self.copy_texture_file(
+                texture_image,
+                texture_folder,
+                material,
+                forced_filename=cached_entry.get("filename"),
+            )
+        else:
+            copied_filename = self.copy_texture_file(texture_image, texture_folder, material)
+            resource_name = f"Resource_{material.name}"
+            if copied_filename:
+                _material_resource_cache[material_signature] = {
+                    "resource_name": resource_name,
+                    "filename": copied_filename,
+                }
+
         if not copied_filename: return None
-        new_resource_name = f"Resource_{material.name}"
-        resource_section_name = f"[{new_resource_name}]"
-        if resource_section_name not in all_sections or self.material_to_resource_override:
-            all_sections[resource_section_name] = [f"filename = Texture/{copied_filename}".replace("\\", "/")]
-        return "{} = {}".format(param_name, new_resource_name) if not param_name.lower().startswith("resource\\") else "{} = ref {}".format(param_name, new_resource_name)
+        resource_section_name = f"[{resource_name}]"
+        desired_line = f"filename = Texture/{copied_filename}".replace("\\", "/")
+        existing_lines = all_sections.get(resource_section_name, [])
+        existing_normalized = {
+            line.strip().replace("\\", "/")
+            for line in existing_lines
+        }
+        if self.material_to_resource_override or desired_line not in existing_normalized:
+            all_sections[resource_section_name] = [desired_line]
+        return "{} = {}".format(param_name, resource_name) if not param_name.lower().startswith("resource\\") else "{} = ref {}".format(param_name, resource_name)
+
+    @staticmethod
+    def _is_generated_material_line(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+
+        generated_prefixes = (
+            "Resource\\RabbitFX\\",
+            "Resource\\RabbitFx\\",
+            "Resource\\ZZMI\\",
+            "ps-t",
+            "$\\RabbitFX\\brightness",
+        )
+        generated_exact = {
+            "run = CommandList\\RabbitFX\\SetTextures",
+            "run = CommandList\\RabbitFx\\SetTextures",
+            "run = CommandList\\ZZMI\\SetTextures",
+            "run = CommandList\\RabbitFX\\Run",
+        }
+        return (
+            stripped in generated_exact
+            or stripped.startswith(generated_prefixes)
+            or "材质切换" in stripped
+        )
+
+    def _is_material_switch_if_line(self, line: str) -> bool:
+        base_var = str(getattr(self, "material_switch_var", "") or "").strip()
+        if not base_var:
+            return False
+
+        match = re.match(r"^if\s+(\$\w+?)(\d+)\s*==", line.strip())
+        base_match = re.match(r"^(\$\w+?)(\d+)$", base_var)
+        if match and base_match:
+            var_prefix, var_index = match.groups()
+            base_prefix, base_index = base_match.groups()
+            return var_prefix == base_prefix and int(var_index) >= int(base_index)
+
+        return line.strip().startswith(f"if {base_var} ")
+
+    def _strip_generated_material_lines(self, lines):
+        cleaned_lines = []
+        inside_mesh_block = False
+        skipping_material_switch_block = False
+
+        for line in lines:
+            if self.extract_mesh_name(line):
+                inside_mesh_block = True
+                skipping_material_switch_block = False
+                cleaned_lines.append(line)
+                continue
+
+            stripped = line.strip()
+            if inside_mesh_block and self._is_material_switch_if_line(stripped):
+                skipping_material_switch_block = True
+                continue
+
+            if skipping_material_switch_block:
+                if stripped == "endif":
+                    skipping_material_switch_block = False
+                continue
+
+            if inside_mesh_block and self._is_generated_material_line(stripped):
+                continue
+
+            cleaned_lines.append(line)
+
+        return cleaned_lines
 
     def process_texture_override_section(self, section_name, all_sections,
                                           material_group_to_swapkey, swap_key_prefix, next_swap_key_num,
                                           used_swap_keys, transparency_sections_to_add):
         from ..utils.log_utils import LOG as _LOG
         lines = all_sections[section_name]
+        lines[:] = self._strip_generated_material_lines(lines)
         ini_mapping = self.build_mapping_for_section(lines)
-        texture_folder = os.path.join(os.path.dirname(all_sections.get('_config_path', '')), "Texture")
+        config_path = os.path.normpath(all_sections.get('_config_path', ''))
+        texture_folder = os.path.join(config_path, "Texture")
         object_to_diffuse_swapkey = {}
 
         mesh_lines_info_phase1 = [(i, self.extract_mesh_name(line)) for i, line in enumerate(lines) if self.extract_mesh_name(line)]
@@ -834,6 +1024,8 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                 if stripped.startswith('[') and stripped.endswith(']'):
                     current_section = stripped
                     sections[current_section] = []
+                elif not stripped:
+                    continue
                 elif current_section:
                     sections[current_section].append(line)
 

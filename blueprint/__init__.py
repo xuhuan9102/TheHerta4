@@ -83,6 +83,8 @@ _MODULE_REGISTRY = [
     {"name": "node_postprocess_web_panel", "required": False},
     {"name": "node_postprocess_resource_merge", "required": False},
     {"name": "node_postprocess_buffer_cleanup", "required": False},
+    # 直出模块保持为可选注册，避免旧环境缺少新节点时阻塞整个蓝图系统加载。
+    {"name": "direct_export", "required": False},
     {"name": "node_postprocess_multifile", "required": False},
 ]
 

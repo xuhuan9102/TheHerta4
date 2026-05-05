@@ -1,11 +1,7 @@
-
 from dataclasses import field, dataclass
-import os
 
 from .d3d11_gametype import D3D11GameType
-from .global_config import GlobalConfig
 
-from ..utils.json_utils import JsonUtils
 from .texture_metadata_helper import TextureMetadataResolver
 from .submesh_metadata import SubmeshMetadataResolver
 
@@ -52,6 +48,7 @@ class DrawIBModel:
     index_vertex_id_dict:dict = field(init=False,repr=False,default_factory=dict)
     obj_name_draw_offset:dict = field(init=False,repr=False,default_factory=dict)
     shapekey_name_bytelist_dict:dict = field(init=False,repr=False,default_factory=dict)
+    object_export_context_map:dict = field(init=False,repr=False,default_factory=dict)
 
 
     def __post_init__(self):
@@ -66,6 +63,7 @@ class DrawIBModel:
         self.vertex_count = vertex_count
         self.category_buffer_dict = category_buffer_dict
         self.index_vertex_id_dict = index_vertex_id_dict
+        self.object_export_context_map = self._assemble_object_export_context_map(submesh_vertex_base_dict)
         self.shapekey_name_bytelist_dict = self._assemble_shape_key_buffers()
 
         if self.combine_ib:
@@ -149,6 +147,23 @@ class DrawIBModel:
             if category_chunks
         }
         return total_category_buffer_dict, submesh_vertex_base_dict, total_index_vertex_id_dict, vertex_offset
+
+    def _assemble_object_export_context_map(self, submesh_vertex_base_dict: dict) -> dict:
+        object_export_context_map = {}
+
+        for submesh_model in self.submesh_model_list:
+            vertex_base = int(submesh_vertex_base_dict.get(submesh_model.unique_str, 0))
+            for candidate_name, local_context in getattr(submesh_model, "object_export_context_map", {}).items():
+                local_export_indices = numpy.asarray(local_context.get("export_indices", []), dtype=numpy.int32)
+                if local_export_indices.size == 0:
+                    continue
+
+                global_context = dict(local_context)
+                global_context["export_indices"] = (local_export_indices + vertex_base).astype(numpy.int32)
+                global_context["vertex_base"] = vertex_base
+                object_export_context_map[candidate_name] = global_context
+
+        return object_export_context_map
 
     def _assemble_combined_ib_and_draw_offset(self, submesh_vertex_base_dict: dict) -> tuple[list, dict]:
         total_ib = []
@@ -376,5 +391,3 @@ class DrawIBModel:
         for part_name, submesh_model in self.part_name_submesh_dict.items():
             result["Component " + part_name] = self.submesh_ib_dict.get(submesh_model.unique_str, [])
         return result
-
-        

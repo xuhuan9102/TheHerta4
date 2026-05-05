@@ -3,157 +3,115 @@ import bpy
 import time
 import numpy
 import re
-from mathutils import Vector
+from mathutils import Matrix
 
 from .timer_utils import TimerUtils
-from typing import List, Tuple, Dict, Optional
 
 class ShapeKeyUtils:
     # Github: https://github.com/przemir/ApplyModifierForObjectWithShapeKeys
 
+    @staticmethod
+    def _get_shape_key_coordinate_snapshot(obj):
+        shape_keys = getattr(getattr(obj, "data", None), "shape_keys", None)
+        key_blocks = getattr(shape_keys, "key_blocks", None)
+        if not key_blocks:
+            return {}
+
+        snapshot = {}
+        for key_block in key_blocks:
+            coords = numpy.empty((len(key_block.data), 3), dtype=numpy.float32)
+            key_block.data.foreach_get("co", coords.ravel())
+            snapshot[key_block.name] = coords
+        return snapshot
+
+    @staticmethod
+    def _build_applied_transform_matrix(obj, location=True, rotation=True, scale=True):
+        if rotation and scale:
+            matrix = obj.matrix_basis.copy()
+            if not location:
+                matrix.translation = (0.0, 0.0, 0.0)
+            return matrix
+
+        loc, rot, scl = obj.matrix_basis.decompose()
+        loc_matrix = Matrix.Translation(loc if location else (0.0, 0.0, 0.0))
+        rot_matrix = rot.to_matrix().to_4x4() if rotation else Matrix.Identity(4)
+        scale_matrix = Matrix.Diagonal((
+            float(scl.x) if scale else 1.0,
+            float(scl.y) if scale else 1.0,
+            float(scl.z) if scale else 1.0,
+            1.0,
+        ))
+        return loc_matrix @ rot_matrix @ scale_matrix
+
+    @staticmethod
+    def _restore_transformed_shape_key_coordinates(obj, snapshot, matrix):
+        if not snapshot:
+            return
+
+        shape_keys = getattr(getattr(obj, "data", None), "shape_keys", None)
+        key_blocks = getattr(shape_keys, "key_blocks", None)
+        if not key_blocks:
+            return
+
+        matrix_np = numpy.array(matrix, dtype=numpy.float64)
+        linear = matrix_np[:3, :3]
+        translation = matrix_np[:3, 3]
+
+        for key_block in key_blocks:
+            coords = snapshot.get(key_block.name)
+            if coords is None or len(coords) != len(key_block.data):
+                continue
+            transformed = coords.astype(numpy.float64) @ linear.T + translation
+            key_block.data.foreach_set("co", transformed.astype(numpy.float32).ravel())
+
+        obj.data.update()
+
+    @classmethod
+    def transform_apply_preserve_shape_keys(cls, obj, location=True, rotation=True, scale=True):
+        snapshot = cls._get_shape_key_coordinate_snapshot(obj)
+        matrix = cls._build_applied_transform_matrix(
+            obj,
+            location=location,
+            rotation=rotation,
+            scale=scale,
+        )
+        original_active = bpy.context.view_layer.objects.active
+        original_selection = list(bpy.context.selected_objects)
+
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = obj
+            obj.select_set(True)
+            bpy.ops.object.transform_apply(
+                location=location,
+                rotation=rotation,
+                scale=scale,
+            )
+            cls._restore_transformed_shape_key_coordinates(obj, snapshot, matrix)
+        finally:
+            bpy.ops.object.select_all(action='DESELECT')
+            for selected_obj in original_selection:
+                if selected_obj.name in bpy.data.objects:
+                    selected_obj.select_set(True)
+            if original_active and original_active.name in bpy.data.objects:
+                bpy.context.view_layer.objects.active = original_active
+
     @classmethod
     def apply_modifiers_for_object_with_shape_keys_optimized(cls, context, selected_modifiers, disable_armatures=False):
         """
-        优化版：使用 numpy 直接处理形态键数据
-        避免对每个形态键重复复制物体和应用修改器
-        
-        注意：此优化版仅适用于不改变顶点位置的修改器
-        如果修改器会改变顶点位置（如 Armature, Curve, Lattice 等），
-        则回退到原始算法
-        
-        算法：
-        1. 检查修改器类型，决定是否使用优化路径
-        2. 使用 numpy 提取所有形态键的顶点坐标
-        3. 删除所有形态键
-        4. 应用修改器到基础形状
-        5. 使用 numpy 直接重新创建形态键
+        当前保留一个兼容入口，实际统一回退到经典算法。
+        之前的 numpy 快路径会在部分修改器栈下产生错误结果，因此先禁用，
+        避免直出和普通导出出现静默数据偏差。
         """
         if len(selected_modifiers) == 0:
             return (True, None)
-        
-        obj = context.object
-        
-        modifiers_that_transform_vertices = {'ARMATURE', 'CURVE', 'LATTICE', 'SHRINKWRAP', 'SIMPLE_DEFORM', 'BEND', 'HOOK'}
-        has_transform_modifiers = False
-        for modifier in obj.modifiers:
-            if modifier.name in selected_modifiers and modifier.type in modifiers_that_transform_vertices and modifier.show_viewport:
-                has_transform_modifiers = True
-                break
-        
-        if has_transform_modifiers:
-            print(f"[ShapeKeyOptimized] 检测到会变换顶点的修改器，回退到原始算法")
-            return cls.apply_modifiers_for_object_with_shape_keys(context, selected_modifiers, disable_armatures)
-        
-        start_time = time.time()
-        
-        contains_mirror_with_merge = False
-        for modifier in obj.modifiers:
-            if modifier.name in selected_modifiers:
-                if modifier.type == 'MIRROR' and modifier.use_mirror_merge == True:
-                    contains_mirror_with_merge = True
-        
-        disabled_armature_modifiers = []
-        if disable_armatures:
-            for modifier in obj.modifiers:
-                if modifier.name not in selected_modifiers and modifier.type == 'ARMATURE' and modifier.show_viewport == True:
-                    disabled_armature_modifiers.append(modifier)
-                    modifier.show_viewport = False
-        
-        if not obj.data.shape_keys:
-            for modifier_name in selected_modifiers:
-                mod = obj.modifiers.get(modifier_name)
-                if mod and mod.show_viewport:
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-            return (True, None)
-        
-        shapes_count = len(obj.data.shape_keys.key_blocks)
-        
-        if shapes_count == 0:
-            for modifier_name in selected_modifiers:
-                mod = obj.modifiers.get(modifier_name)
-                if mod and mod.show_viewport:
-                    bpy.ops.object.modifier_apply(modifier=modifier_name)
-            return (True, None)
-        
-        print(f"[ShapeKeyOptimized] 开始处理 {shapes_count} 个形态键")
-        
-        properties_list = []
-        properties = ["interpolation", "mute", "name", "relative_key", "slider_max", "slider_min", "value", "vertex_group"]
-        
-        for i in range(shapes_count):
-            key_b = obj.data.shape_keys.key_blocks[i]
-            props = {p: None for p in properties}
-            props["name"] = key_b.name
-            props["mute"] = key_b.mute
-            props["interpolation"] = key_b.interpolation
-            props["relative_key"] = key_b.relative_key.name
-            props["slider_max"] = key_b.slider_max
-            props["slider_min"] = key_b.slider_min
-            props["value"] = key_b.value
-            props["vertex_group"] = key_b.vertex_group
-            properties_list.append(props)
-        
-        original_vert_count = len(obj.data.vertices)
-        
-        shape_key_coords = []
-        for i in range(shapes_count):
-            key_b = obj.data.shape_keys.key_blocks[i]
-            coords = numpy.empty((original_vert_count, 3), dtype=numpy.float32)
-            key_b.data.foreach_get('co', coords.ravel())
-            shape_key_coords.append(coords)
-        
-        print(f"[ShapeKeyOptimized] 已提取 {shapes_count} 个形态键坐标数据")
-        
-        bpy.ops.object.shape_key_remove(all=True)
-        
-        for modifier_name in selected_modifiers:
-            bpy.ops.object.modifier_apply(modifier=modifier_name)
-        
-        new_vert_count = len(obj.data.vertices)
-        
-        if original_vert_count != new_vert_count:
-            error_hint = ""
-            if contains_mirror_with_merge:
-                error_hint = "\n提示: 镜像修改器启用了 'Merge' 选项可能导致问题。"
-            error_info = (f"顶点数量变化: {original_vert_count} -> {new_vert_count}！\n"
-                         f"形态键要求修改器应用后顶点数量不变。{error_hint}")
-            
-            for modifier in disabled_armature_modifiers:
-                modifier.show_viewport = True
-            return (False, error_info)
-        
-        bpy.ops.object.shape_key_add(from_mix=False)
-        
-        for i in range(1, shapes_count):
-            key_b = obj.shape_key_add(name=properties_list[i]["name"], from_mix=False)
-            key_b.data.foreach_set('co', shape_key_coords[i].ravel())
-        
-        print(f"[ShapeKeyOptimized] 已重新创建 {shapes_count - 1} 个形态键")
-        
-        for i in range(shapes_count):
-            key_b = obj.data.shape_keys.key_blocks[i]
-            key_b.name = properties_list[i]["name"]
-            key_b.interpolation = properties_list[i]["interpolation"]
-            key_b.mute = properties_list[i]["mute"]
-            key_b.slider_max = properties_list[i]["slider_max"]
-            key_b.slider_min = properties_list[i]["slider_min"]
-            key_b.value = properties_list[i]["value"]
-            key_b.vertex_group = properties_list[i]["vertex_group"]
-            
-            rel_key = properties_list[i]["relative_key"]
-            for j in range(shapes_count):
-                key_brel = obj.data.shape_keys.key_blocks[j]
-                if rel_key == key_brel.name:
-                    key_b.relative_key = key_brel
-                    break
-        
-        for modifier in disabled_armature_modifiers:
-            modifier.show_viewport = True
-        
-        elapsed = time.time() - start_time
-        print(f"[ShapeKeyOptimized] 完成，耗时: {elapsed:.2f}秒")
-        
-        return (True, None)
+
+        print("[ShapeKeyOptimized] Fast path disabled for correctness, falling back to classic apply path")
+        return cls.apply_modifiers_for_object_with_shape_keys(
+            context,
+            selected_modifiers,
+            disable_armatures,
+        )
 
     @classmethod
     def apply_modifiers_for_object_with_shape_keys(cls,context, selectedModifiers, disable_armatures):
@@ -208,7 +166,7 @@ class ShapeKeyUtils:
         # - Delete copyObject.
         
         if len(selectedModifiers) == 0:
-            return
+            return (True, None)
 
         list_properties = []
         properties = ["interpolation", "mute", "name", "relative_key", "slider_max", "slider_min", "value", "vertex_group"]
@@ -317,6 +275,19 @@ class ShapeKeyUtils:
                 errorInfo = ("Shape keys ended up with different number of vertices!\n"
                             "All shape keys needs to have the same number of vertices after modifier is applied.\n"
                             "Otherwise joining such shape keys will fail!%s" % errorInfoHint)
+                if disable_armatures:
+                    for modifier in disabled_armature_modifiers:
+                        modifier.show_viewport = True
+                for cleanup_obj in (tmpObject, copyObject):
+                    try:
+                        cleanup_mesh = cleanup_obj.data
+                        bpy.data.objects.remove(cleanup_obj, do_unlink=True)
+                        if cleanup_mesh and cleanup_mesh.users == 0:
+                            bpy.data.meshes.remove(cleanup_mesh)
+                    except Exception:
+                        pass
+                context.view_layer.objects.active = originalObject
+                originalObject.select_set(True)
                 return (False, errorInfo)
         
             # Join with originalObject
@@ -414,7 +385,7 @@ class ShapeKeyUtils:
         if mesh_shapekeys is None:
             print(f"obj: {obj.name} 不含有形态键，跳过处理")
             TimerUtils.End("shapekey_cache")
-            return None, None, None
+            return {}
 
         # 构建顶点索引到全局index_id的反向映射
         vertex_to_indices = {}

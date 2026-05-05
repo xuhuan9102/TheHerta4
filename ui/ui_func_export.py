@@ -7,26 +7,13 @@ from ..utils.command_utils import CommandUtils
 from ..utils.log_utils import LOG
 
 from ..common.global_config import GlobalConfig
-from ..common.logic_name import LogicName
-
-from .universal.efmi import ExportEFMI
-from .universal.gimi import ExportGIMI
-from .universal.himi import ExportHIMI
-from .universal.identityv import ExportIdentityV
-from .universal.snowbreak import ExportSnowBreak
-from .universal.srmi import ExportSRMI
-from .universal.unity import ExportUnity
-from .wwmi.wwmi_export import ExportWWMI
-from .universal.yysls import ExportYYSLS
-from .universal.zzmi import ExportZZMI
 
 from ..blueprint.model import BluePrintModel
+from ..blueprint.direct_export import execute_direct_export, has_direct_export_mode
 from ..blueprint.export_helper import BlueprintExportHelper
 from ..blueprint.preprocess import PreProcessHelper
-from ..blueprint.preprocess_parallel import ParallelPreprocessCoordinator
 from ..blueprint.export_parallel import ExportRoundExecutor, ParallelExportCoordinator, ParallelExportError
 from ..common.global_properties import GlobalProterties
-from ..common.object_prefix_helper import ObjectPrefixHelper
 
 
 def _raise_for_unknown_logic_name() -> None:
@@ -124,6 +111,51 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         LOG.info("=" * 60)
         LOG.info("🚀 开始生成Mod")
         LOG.info("=" * 60)
+
+        # 直出模式复用原有按钮入口，避免用户在标准导出和直出之间来回切换。
+        if has_direct_export_mode(tree):
+            LOG.info("⚡ 检测到直出模式，切换到直出导出流程")
+
+            export_success = False
+            error_message = None
+
+            try:
+                execute_direct_export(context=context, tree=tree)
+                export_success = True
+            except Exception as e:
+                error_message = f"直出失败: {str(e)}"
+                print(f"❌ 直出过程中发生错误: {e}")
+                import traceback
+                traceback.print_exc()
+                PreProcessHelper.cleanup_copies(silent=True)
+
+            LOG.info("")
+            LOG.info("📍 清理阶段")
+            LOG.info("-" * 40)
+            PreProcessHelper.cleanup_copies()
+
+            LOG.info("")
+            LOG.info("=" * 60)
+            if export_success:
+                LOG.info("✅ 直出完成!")
+                LOG.info("=" * 60)
+                self.report({'INFO'}, TR.translate("Generate Mod Success!"))
+                CommandUtils.OpenGeneratedModFolder()
+            else:
+                LOG.info(f"❌ Mod生成失败: {error_message}")
+                LOG.info("=" * 60)
+                self.report({'ERROR'}, error_message)
+
+            TimerUtils.print_summary()
+
+            LOG.stop_collecting()
+            log_name = LOG.save_to_text_editor()
+            if log_name:
+                print(f"📄 导出日志已保存至文本编辑器: {log_name}")
+
+            if export_success:
+                return {'FINISHED'}
+            return {'CANCELLED'}
 
         has_shapekey_export = BlueprintExportHelper.has_shapekey_postprocess_node(tree)
         max_shapekey_slot = 0
@@ -382,178 +414,6 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
             raise ParallelExportError(
                 f"第 {round_index} 轮导出的 Buffer 文件夹 {buffer_folder_name} 大小 ({current_size} 字节) 与首轮 ({reference_size} 字节) 不一致"
             )
-
-    def _do_single_export(self, context, tree, buffer_folder_name, export_round, generate_ini=True):
-        LOG.info(f"   正在解析蓝图...")
-
-        TimerUtils.start_stage(f"蓝图解析_{export_round}")
-        try:
-            blueprint_model = BluePrintModel(tree=tree, context=context)
-        except ValueError as error:
-            LOG.error(f"   蓝图解析失败: {error}")
-            return None
-        TimerUtils.end_stage(f"蓝图解析_{export_round}")
-
-        TimerUtils.start_stage(f"引用验证_{export_round}")
-        self._validate_copy_references(blueprint_model)
-        TimerUtils.end_stage(f"引用验证_{export_round}")
-
-        LOG.info(f"📋 待导出物体: {len(blueprint_model.ordered_draw_obj_data_model_list)} 个")
-
-        if generate_ini:
-            TimerUtils.start_stage(f"数据导出_{export_round}")
-            self._export_with_ini(blueprint_model)
-            TimerUtils.end_stage(f"数据导出_{export_round}")
-        else:
-            TimerUtils.start_stage(f"缓冲文件生成_{export_round}")
-            self._export_buffers_only(blueprint_model)
-            TimerUtils.end_stage(f"缓冲文件生成_{export_round}")
-
-        return blueprint_model
-
-    def _export_with_ini(self, blueprint_model):
-        if GlobalConfig.logic_name == LogicName.EFMI:
-            ExportEFMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.GIMI:
-            ExportGIMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.HIMI:
-            ExportHIMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.IdentityV:
-            ExportIdentityV(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.SRMI:
-            ExportSRMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.ZZMI:
-            ExportZZMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
-            ExportWWMI(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.SnowBreak:
-            ExportSnowBreak(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name == LogicName.YYSLS:
-            ExportYYSLS(blueprint_model=blueprint_model).export()
-        elif GlobalConfig.logic_name in (LogicName.Naraka, LogicName.NarakaM, LogicName.GF2, LogicName.AILIMIT):
-            ExportUnity(blueprint_model=blueprint_model).export()
-        else:
-            _raise_for_unknown_logic_name()
-
-    def _export_buffers_only(self, blueprint_model):
-        if GlobalConfig.logic_name == LogicName.EFMI:
-            ExportEFMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.GIMI:
-            ExportGIMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.HIMI:
-            ExportHIMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.IdentityV:
-            ExportIdentityV(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.SRMI:
-            ExportSRMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.ZZMI:
-            ExportZZMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.WWMI or GlobalConfig.logic_name == LogicName.NTEMI:
-            ExportWWMI(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.SnowBreak:
-            ExportSnowBreak(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name == LogicName.YYSLS:
-            ExportYYSLS(blueprint_model=blueprint_model).export_buffers_only()
-        elif GlobalConfig.logic_name in (LogicName.Naraka, LogicName.NarakaM, LogicName.GF2, LogicName.AILIMIT):
-            ExportUnity(blueprint_model=blueprint_model).export_buffers_only()
-        else:
-            _raise_for_unknown_logic_name()
-
-    def _get_folder_size(self, folder_path: str) -> int:
-        total_size = 0
-        try:
-            for dirpath, dirnames, filenames in os.walk(folder_path):
-                for filename in filenames:
-                    filepath = os.path.join(dirpath, filename)
-                    if os.path.isfile(filepath):
-                        total_size += os.path.getsize(filepath)
-        except Exception as e:
-            LOG.warning(f"计算文件夹大小失败: {e}")
-        return total_size
-
-    def _collect_object_names_from_tree(self, tree) -> list:
-        object_names = []
-
-        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, 'SSMTNode_Result_Output')
-
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
-                    continue
-                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
-                if obj_name:
-                    object_names.append(obj_name)
-
-        nested_count = 0
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
-                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
-                    continue
-                nested_names = self._collect_nested_object_names(node)
-                object_names.extend(nested_names)
-                nested_count += len(nested_names)
-
-        main_count = len(object_names) - nested_count
-        LOG.info(f"📋 物体收集: {tree.name}(主蓝图) {main_count} 个, 嵌套蓝图 {nested_count} 个, 共 {len(object_names)} 个")
-        return object_names
-
-    def _collect_nested_object_names(self, nest_node) -> list:
-        blueprint_name = getattr(nest_node, 'blueprint_name', '')
-        if not blueprint_name or blueprint_name == 'NONE':
-            return []
-
-        nested_tree = bpy.data.node_groups.get(blueprint_name)
-        if not nested_tree:
-            return []
-
-        nested_output = BlueprintExportHelper.get_node_from_bl_idname(nested_tree, 'SSMTNode_Result_Output')
-
-        object_names = []
-        for node in nested_tree.nodes:
-            if node.bl_idname == 'SSMTNode_Object_Info' and not node.mute:
-                if nested_output and not BlueprintExportHelper._is_node_connected_to_output(nested_tree, node):
-                    continue
-                obj_name = ObjectPrefixHelper.build_virtual_object_name_for_node(node, strict=True)
-                if obj_name:
-                    object_names.append(obj_name)
-
-        return object_names
-
-    def _collect_nested_trees(self, tree) -> list:
-        nested_trees = []
-        output_node = BlueprintExportHelper.get_node_from_bl_idname(tree, 'SSMTNode_Result_Output')
-        for node in tree.nodes:
-            if node.bl_idname == 'SSMTNode_Blueprint_Nest' and not node.mute:
-                if output_node and not BlueprintExportHelper._is_node_connected_to_output(tree, node):
-                    continue
-                blueprint_name = getattr(node, 'blueprint_name', '')
-                if blueprint_name and blueprint_name != 'NONE':
-                    nested_tree = bpy.data.node_groups.get(blueprint_name)
-                    if nested_tree:
-                        nested_trees.append(nested_tree)
-        return nested_trees
-
-    def _validate_copy_references(self, blueprint_model: BluePrintModel):
-        if not PreProcessHelper.has_copies():
-            return
-
-        LOG.info(f"📋 验证物体引用是否为副本...")
-
-        invalid_objects = []
-        for chain in blueprint_model.processing_chains:
-            if chain.is_valid:
-                obj_name = chain.object_name
-                if not PreProcessHelper.validate_copy_suffix(obj_name):
-                    invalid_objects.append(obj_name)
-
-        if invalid_objects:
-            LOG.error(f"   ❌ 前处理错误：以下物体引用未更新为副本:")
-            for obj_name in invalid_objects:
-                LOG.error(f"      - {obj_name}")
-            raise ValueError(f"前处理错误：物体引用未正确更新为副本，请检查前处理流程")
-
-        LOG.info(f"   ✅ 所有物体引用已正确更新为副本")
-
 
 class SSMTQuickExportSelected(bpy.types.Operator):
     bl_idname = "ssmt.quick_export_selected"

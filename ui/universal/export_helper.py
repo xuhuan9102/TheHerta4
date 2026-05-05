@@ -5,9 +5,6 @@ from ...common.submesh_model import SubMeshModel
 from ...common.drawib_model import DrawIBModel
 from ...blueprint.node_datatype import reset_datatype_override_log
 
-
-import os
-
 class ExportHelper:
     pass
 
@@ -71,11 +68,22 @@ class ExportHelper:
         '''
         reset_datatype_override_log()
 
+        submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(blueprint_model)
+        return ExportHelper.parse_drawib_model_list_from_submesh_model_list(
+            submesh_model_list=submesh_model_list,
+            combine_ib=combine_ib,
+        )
+
+    @staticmethod
+    def parse_drawib_model_list_from_submesh_model_list(
+        submesh_model_list:list[SubMeshModel],
+        combine_ib:bool,
+    ) -> list[DrawIBModel]:
         drawib_model_list:list[DrawIBModel] = []
 
         # 先把Submesh Model按照DrawIB分在一起
         draw_ib_submesh_model_list_dict:dict[str,list[SubMeshModel]] = {}
-        for submesh_model in ExportHelper.parse_submesh_model_list_from_blueprint_model(blueprint_model):
+        for submesh_model in submesh_model_list:
             draw_ib = submesh_model.match_draw_ib
             tmp_submesh_model_list = draw_ib_submesh_model_list_dict.get(draw_ib,[])
             tmp_submesh_model_list.append(submesh_model)
