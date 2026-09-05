@@ -68,7 +68,7 @@ def is_postprocess_node_on_export_chain(tree, target_node):
         node for node in (getattr(tree, "nodes", None) or [])
         if getattr(node, "bl_idname", "") in {
             "SSMTNode_Result_Output",
-            "SSMTNode_Result_Output_NTMIModImp",
+            "SSMTNode_Result_Output_NTMIModImp", "SSMTNode_VeloExportBridge",
         }
     ]
     if not result_nodes:

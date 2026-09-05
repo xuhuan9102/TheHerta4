@@ -152,6 +152,7 @@ class GlobalProterties(bpy.types.PropertyGroup):
             ("SYNC", "同步SSMT选择", "使用 SSMT 配置文件中当前同步的工作空间"),
             ("SPECIFIC", "使用指定工作空间", "从当前游戏配置下的工作空间列表中手动选择"),
             ("CUSTOM", "使用自定义目录", "直接使用你指定的工作空间目录"),
+            ("VELO", "velo工作空间", "使用 Velo Tools 当前组件集合"),
         ],
         default="SYNC",
     ) # type: ignore

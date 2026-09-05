@@ -109,6 +109,7 @@ MODIMP_MIRROR_FLIP_PROP = "modimp_mirror_flip"
 COMPATIBLE_POSTPROCESS_NODE_TYPES = {
     "SSMTNode_PostProcess_AnimDriver",
     "SSMTNode_PostProcess_BufferCleanup",
+    "SSMTNode_PostProcess_CommentCleanup",
     "SSMTNode_PostProcess_Material",
     "SSMTNode_PostProcess_CustomMaterialAssign",
     "SSMTNode_PostProcess_MultiFile",

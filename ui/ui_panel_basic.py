@@ -497,6 +497,9 @@ class PanelBasicInformation(bpy.types.Panel):
         )
 
         if global_properties.expand_import_quick_tools:
+            velo_row = layout.row()
+            velo_row.enabled = global_properties.workspace_source_mode == 'VELO'
+            velo_row.operator('ssmt.import_current_velo_workspace', text='导入当前velo工作空间', icon='IMPORT')
             import_box = layout.box()
             import_box.operator("import_mesh.migoto_raw_buffers_mmt", text="导入FMT格式模型", icon='IMPORT')
             import_box.operator(SSMT4ImportRaw.bl_idname, text="导入SSMT格式模型", icon='IMPORT')

@@ -28,6 +28,46 @@ _pick_context = {
     "item_index": -1,
 }
 
+_switch_sync_guard = False
+
+
+def _sync_switch_variable_fields(group, context):
+    """同一切换变量的启用状态与备注保持完全一致（限定在所属蓝图内）。"""
+    global _switch_sync_guard
+    if _switch_sync_guard:
+        return
+    variable = str(getattr(group, "switch_variable", "") or "").strip()
+    if not variable:
+        return
+    # 只同步触发变量所属的蓝图树，避免不同蓝图同名变量互相干扰。
+    try:
+        owner_tree = group.id_data.id_data
+    except Exception:
+        owner_tree = None
+    _switch_sync_guard = True
+    try:
+        enabled = bool(getattr(group, "enabled", True))
+        comment = str(getattr(group, "comment", "") or "")
+        trees = [owner_tree] if owner_tree is not None else list(bpy.data.node_groups)
+        for tree in trees:
+            for node in getattr(tree, "nodes", []) or []:
+                if getattr(node, "bl_idname", "") != NODE_IDNAME:
+                    continue
+                collections = [getattr(node, "global_switch_groups", [])]
+                collections.extend(
+                    getattr(item, "switch_groups", [])
+                    for item in getattr(node, "target_items", [])
+                )
+                for collection in collections:
+                    for candidate in collection:
+                        if str(getattr(candidate, "switch_variable", "") or "").strip() == variable:
+                            if candidate is group:
+                                continue
+                            candidate.enabled = enabled
+                            candidate.comment = comment
+    finally:
+        _switch_sync_guard = False
+
 
 def _mesh_object_poll(self, obj):
     return bool(getattr(obj, "type", "") == "MESH")
@@ -47,11 +87,6 @@ class SSMT_CustomMaterialAssignSwitchGroup(bpy.types.PropertyGroup):
         description="生成到 INI 的控制变量，默认沿用材质转资源的 $swapkey 命名",
         default="",
     )
-    comment: bpy.props.StringProperty(
-        name="备注",
-        description="写入 KeySwap 段的备注注释",
-        default="",
-    )
     key: bpy.props.StringProperty(
         name="切换按键",
         description="控制该部件多套贴图切换的按键",
@@ -67,10 +102,22 @@ class SSMT_CustomMaterialAssignSwitchGroup(bpy.types.PropertyGroup):
         name="启用切换",
         description="关闭后只使用第一套贴图，不写入按键切换",
         default=True,
+        update=_sync_switch_variable_fields,
+    )
+    comment: bpy.props.StringProperty(
+        name="备注",
+        description="同一切换变量下的部件共享此备注，并写入 KeySwap 段",
+        default="",
+        update=_sync_switch_variable_fields,
     )
     bindings: bpy.props.StringProperty(
         name="材质绑定",
         description="内部使用：JSON 形式记录参与同一切换的各前缀材质组",
+        default="",
+        options={"HIDDEN"},
+    )
+    merge_group_id: bpy.props.StringProperty(
+        name="合并组标识",
         default="",
         options={"HIDDEN"},
     )
@@ -100,6 +147,64 @@ def _find_node(context, node_name):
     if node and node.bl_idname == NODE_IDNAME:
         return node
     return None
+
+
+def _find_material_assign_node_from_blueprint(context):
+    trees = []
+    window = getattr(context, "window", None)
+    screens = [getattr(window, "screen", None)] if window else []
+    for candidate_window in getattr(getattr(context, "window_manager", None), "windows", []) or []:
+        screen = getattr(candidate_window, "screen", None)
+        if screen and screen not in screens:
+            screens.append(screen)
+    for screen in screens:
+        for area in getattr(screen, "areas", []) or []:
+            if area.type != "NODE_EDITOR":
+                continue
+            for space in getattr(area, "spaces", []) or []:
+                tree = getattr(space, "edit_tree", None) or getattr(space, "node_tree", None)
+                if getattr(tree, "bl_idname", "") == "SSMTBlueprintTreeType" and tree not in trees:
+                    trees.append(tree)
+    for tree in bpy.data.node_groups:
+        if getattr(tree, "bl_idname", "") == "SSMTBlueprintTreeType" and tree not in trees:
+            trees.append(tree)
+    for tree in trees:
+        for node in getattr(tree, "nodes", []) or []:
+            if getattr(node, "bl_idname", "") == NODE_IDNAME:
+                return node
+    return None
+
+
+class SSMT_OT_CustomMaterialAssignAddSelected(bpy.types.Operator):
+    bl_idname = "ssmt.custom_material_assign_add_selected"
+    bl_label = "将选中物体加入材质转资源"
+    bl_description = "将当前选中的所有网格物体加入材质转资源 Pro 节点"
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    def execute(self, context):
+        node = _find_material_assign_node_from_blueprint(context)
+        if node is None:
+            self.report({"WARNING"}, "没有找到材质转资源节点")
+            return {"CANCELLED"}
+        if bool(getattr(node, "use_global_assign", False)):
+            self.report({"WARNING"}, "全局指定模式下不支持添加")
+            return {"CANCELLED"}
+        selected = [obj for obj in (getattr(context, "selected_objects", None) or []) if getattr(obj, "type", "") == "MESH"]
+        existing = {item.target_object for item in node.target_items if item.target_object}
+        added = 0
+        for obj in selected:
+            if obj in existing:
+                continue
+            item = next((candidate for candidate in node.target_items if getattr(candidate, "target_object", None) is None), None)
+            if item is None:
+                item = node.target_items.add()
+            item.target_object = obj
+            existing.add(obj)
+            added += 1
+        if added:
+            node.active_target_index = len(node.target_items) - 1
+        self.report({"INFO"}, f"已加入 {added} 个部件" if added else "选中物体已在材质转资源中")
+        return {"FINISHED"}
 
 
 def _find_custom_node(node):
@@ -312,6 +417,29 @@ class SSMT_OT_CustomMaterialAssignRemoveTarget(bpy.types.Operator):
         index = self.item_index
         if not 0 <= index < len(node.target_items):
             return {"CANCELLED"}
+        # 共享组合并组内第一次点击叉号只解除合并，保留为独立部件窗口。
+        item = node.target_items[index]
+        if item.switch_groups:
+            for group in list(item.switch_groups):
+                variable = str(getattr(group, "switch_variable", "") or "").strip()
+                merge_id = str(getattr(group, "merge_group_id", "") or "").strip()
+                if not merge_id:
+                    continue
+                peers = []
+                for other in node.target_items:
+                    if other is item:
+                        continue
+                    peers.extend(
+                        candidate for candidate in other.switch_groups
+                        if str(getattr(candidate, "switch_variable", "") or "").strip() == variable
+                        and str(getattr(candidate, "merge_group_id", "") or "").strip() == merge_id
+                    )
+                if peers:
+                    group.enabled = peers[0].enabled
+                    group.comment = peers[0].comment
+                    group.key = peers[0].key
+                    group.merge_group_id = ""
+                    return {"FINISHED"}
         node.target_items.remove(index)
         node.active_target_index = min(
             max(0, self.item_index - 1),
@@ -514,7 +642,7 @@ def _connected_blueprint_object_names(tree):
     """仿照物体切换面板：只返回链接到 Mod 输出节点的 Object Info / MultiFile。"""
     OUTPUT_IDS = {
         "SSMTNode_Result_Output",
-        "SSMTNode_Result_Output_NTMIModImp",
+        "SSMTNode_Result_Output_NTMIModImp", "SSMTNode_VeloExportBridge",
     }
     SOURCE_IDS = {
         "SSMTNode_Object_Info",
@@ -611,6 +739,19 @@ class SSMT_OT_CustomMaterialScanSwitches(bpy.types.Operator):
 
     node_name: bpy.props.StringProperty()
 
+    @staticmethod
+    def _group_shape(group):
+        try:
+            bindings = json.loads(str(getattr(group, "bindings", "") or "[]"))
+        except Exception:
+            bindings = []
+        lengths = tuple(sorted(len(item) for item in bindings if isinstance(item, (list, tuple))))
+        return (int(getattr(group, "state_count", 0) or 0), lengths)
+
+    @staticmethod
+    def _material_group_shape(groups):
+        return (max(len(names) for names in groups.values()), tuple(sorted(len(names) for names in groups.values())))
+
     def execute(self, context):
         node = _find_node(context, self.node_name)
         if not node:
@@ -658,6 +799,35 @@ class SSMT_OT_CustomMaterialScanSwitches(bpy.types.Operator):
                 for item in node.target_items
             ]
 
+        # 先保存旧组的纯数据，随后清空并按当前材质重建，避免集合引用失效。
+        old_by_object = {}
+        old_by_variable = {}
+        if global_mode:
+            for (object_name, variable), group in old_global.items():
+                old_by_object[object_name] = {
+                    "variable": variable, "shape": self._group_shape(group),
+                    "comment": str(group.comment), "key": str(group.key), "enabled": bool(group.enabled),
+                }
+                old_by_variable.setdefault(variable, old_by_object[object_name])
+        else:
+            for item in node.target_items:
+                for old_group in item.switch_groups:
+                    if old_group.switch_variable:
+                        snapshot = {
+                            "variable": str(old_group.switch_variable), "shape": self._group_shape(old_group),
+                            "comment": str(old_group.comment), "key": str(old_group.key), "enabled": bool(old_group.enabled),
+                        }
+                        old_by_object[item.target_object.name if item.target_object else ""] = snapshot
+                        old_by_variable.setdefault(snapshot["variable"], snapshot)
+            # 重新扫描后按当前材质套件重建，避免已不符合条件的部件残留在旧合并组。
+            for item in node.target_items:
+                item.switch_groups.clear()
+
+        variable_shapes = {variable: data["shape"] for variable, data in old_by_variable.items()}
+        shape_variables = {}
+        for variable, shape in variable_shapes.items():
+            shape_variables.setdefault(shape, variable)
+
         for obj in scan_objects:
             if obj is None or getattr(obj, "type", "") != "MESH":
                 continue
@@ -665,11 +835,18 @@ class SSMT_OT_CustomMaterialScanSwitches(bpy.types.Operator):
             if not groups:
                 continue
 
+            shape = self._material_group_shape(groups)
+            old_data = old_by_object.get(obj.name)
+            if old_data is not None and old_data["shape"] == shape:
+                variable = old_data["variable"]
+            elif old_data is None and shape in shape_variables:
+                variable = shape_variables[shape]
+            else:
+                variable = f"{prefix}{next_number}"
+                next_number += 1
+                shape_variables.setdefault(shape, variable)
+
             if global_mode:
-                existing = {}
-                for (object_key, variable_key), old_group in old_global.items():
-                    if object_key == obj.name and variable_key not in existing:
-                        existing[variable_key] = old_group
                 container = node.global_switch_groups
             else:
                 item = next(
@@ -678,30 +855,23 @@ class SSMT_OT_CustomMaterialScanSwitches(bpy.types.Operator):
                 )
                 if item is None:
                     continue
-                existing = {
-                    group.switch_variable: group
-                    for group in item.switch_groups
-                    if group.switch_variable
-                }
-                item.switch_groups.clear()
                 container = item.switch_groups
 
             total_parts += 1
-            variable = f"{prefix}{next_number}"
-            next_number += 1
             group = container.add()
             group.object_name = obj.name
             group.switch_variable = variable
+            group.merge_group_id = variable
             group.state_count = max(len(names) for names in groups.values())
             group.bindings = json.dumps(
                 [sorted(names) for names in groups.values()],
                 ensure_ascii=False,
             )
-            old_group = existing.get(variable)
-            if old_group is not None:
-                group.comment = old_group.comment
-                group.key = old_group.key
-                group.enabled = old_group.enabled
+            metadata = old_data or old_by_variable.get(variable)
+            if metadata is not None:
+                group.comment = metadata["comment"]
+                group.key = metadata["key"]
+                group.enabled = metadata["enabled"]
             else:
                 group.comment = ""
                 group.key = "N"
@@ -794,6 +964,17 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 names.add(obj.name)
         return names
 
+    def _is_primary_switch_group(self, group, collection):
+        variable = str(getattr(group, "switch_variable", "") or "").strip()
+        if not variable:
+            return True
+        for candidate in collection:
+            if candidate == group:
+                return True
+            if str(getattr(candidate, "switch_variable", "") or "").strip() == variable:
+                return False
+        return True
+
     def _is_custom_target(self, obj):
         return obj is not None and obj.name in self._target_object_set()
 
@@ -826,10 +1007,77 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
     def find_matching_materials(self, obj, texture_type):
         """TTL/FX 等按 mesh 扫描的入口也只允许指定的部件。"""
         if bool(getattr(self, "use_global_assign", False)):
-            return super().find_matching_materials(obj, texture_type)
+            materials = super().find_matching_materials(obj, texture_type)
+            return self._limit_disabled_switch_materials(materials)
         if obj is None or not self._is_custom_target(obj):
             return []
-        return super().find_matching_materials(obj, texture_type)
+        materials = super().find_matching_materials(obj, texture_type)
+        return self._limit_disabled_switch_materials(materials)
+
+    def _disabled_switch_variables(self):
+        """返回被关闭的切换变量；同变量任一组关闭即整体关闭。"""
+        disabled = set()
+        for spec in self._iter_switch_group_defs():
+            if not spec["enabled"]:
+                disabled.add(spec["variable"])
+        return disabled
+
+    def _limit_disabled_switch_materials(self, materials):
+        """禁用切换时只保留材质槽顺序中的第一套材质。
+
+        生成阶段某些纹理类型可能只返回完整切换绑定的一个子集（例如
+        DiffuseMap 的三套材质中当前段只命中前两套）。旧逻辑要求名称集合
+        与绑定集合完全相等，导致备用材质绕过过滤并被写入 INI。只要当前
+        命中的多个材质全部属于同一个已禁用绑定，就应视为该切换组并禁用。
+        """
+        if not materials or len(materials) < 2:
+            return materials
+        names = tuple(sorted(str(getattr(material, "name", "") or "") for material in materials))
+        name_set = set(names)
+        disabled = self._disabled_switch_variables()
+        if not disabled:
+            return materials
+        for spec in self._iter_switch_group_defs():
+            if spec["variable"] in disabled and any(
+                len(name_set) >= 2
+                and name_set.issubset(set(str(name) for name in binding))
+                for binding in spec["bindings"]
+            ):
+                return materials[:1]
+        return materials
+
+    def generate_material_lines(self, matching_materials, param_name, texture_type, obj,
+                                texture_folder, all_sections,
+                                object_to_diffuse_swapkey, material_group_to_swapkey,
+                                swap_key_prefix, next_swap_key_num, used_swap_keys,
+                                resource_name_provider=None):
+        """最终生成入口的防线：禁用切换组时绝不生成备用资源/INI 条件块。"""
+        matching_materials = self._limit_disabled_switch_materials(matching_materials)
+        return super().generate_material_lines(
+            matching_materials, param_name, texture_type, obj,
+            texture_folder, all_sections, object_to_diffuse_swapkey,
+            material_group_to_swapkey, swap_key_prefix, next_swap_key_num,
+            used_swap_keys, resource_name_provider=resource_name_provider,
+        )
+
+    def _find_workspace_slot_materials(self, obj, slot_info):
+        materials = super()._find_workspace_slot_materials(obj, slot_info)
+        return self._limit_disabled_switch_materials(materials)
+
+    def _collect_ps_texture_slot_materials(self, obj):
+        slots = super()._collect_ps_texture_slot_materials(obj)
+        disabled = self._disabled_switch_variables()
+        if not disabled:
+            return slots
+        for slot_info in slots.values():
+            materials = list(slot_info.get("materials", {}).values())
+            limited = self._limit_disabled_switch_materials(materials)
+            if len(limited) < len(materials):
+                slot_info["materials"] = OrderedDict(
+                    (self._build_material_signature(material), material)
+                    for material in limited
+                )
+        return slots
 
     def _iter_switch_group_defs(self):
         global_mode = bool(getattr(self, "use_global_assign", False))
@@ -1403,55 +1651,75 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         )
         add.node_name = self.name
 
+        grouped = OrderedDict()
         for index, item in enumerate(self.target_items):
-            box = rows.box()
-            row = box.row(align=True)
-            row.prop(item, "target_object", text=f"部件 {index + 1}")
-            pick = row.operator(
-                "ssmt.custom_material_assign_pick_target",
-                text="",
-                icon="EYEDROPPER",
-            )
+            for group in item.switch_groups:
+                variable = str(getattr(group, "merge_group_id", "") or "").strip() or f"__single_{index}"
+                if variable:
+                    grouped.setdefault(variable, []).append((index, item, group))
+        merged_groups = {variable: entries for variable, entries in grouped.items() if len(entries) > 1}
+        primary_indices = {entries[0][0] for entries in merged_groups.values()}
+        merged_member_indices = {entry[0] for entries in merged_groups.values() for entry in entries}
+
+        def draw_target_row(parent, index, item, label):
+            row = parent.row(align=True)
+            row.prop(item, "target_object", text=label)
+            pick = row.operator("ssmt.custom_material_assign_pick_target", text="", icon="EYEDROPPER")
             pick.node_name = self.name
             pick.item_index = index
             remove_row = row.row(align=True)
             remove_row.enabled = len(self.target_items) > 1
-            remove = remove_row.operator(
-                "ssmt.custom_material_assign_remove_target", text="", icon="X"
-            )
+            remove = remove_row.operator("ssmt.custom_material_assign_remove_target", text="", icon="X")
             remove.node_name = self.name
             remove.item_index = index
-
             target = item.target_object
             if target is None:
-                box.label(
-                    text="未指定（可拖入大纲物体，或使用吸管）",
-                    icon="INFO",
-                )
+                parent.label(text="未指定（可拖入大纲物体，或使用吸管）", icon="INFO")
             elif target.type != "MESH":
-                box.label(text="仅支持网格物体", icon="ERROR")
+                parent.label(text="仅支持网格物体", icon="ERROR")
             else:
-                box.label(text=f"物体: {target.name}", icon="MESH_DATA")
-                for group_index, group in enumerate(item.switch_groups):
-                    group_box = box.box()
-                    group_header = group_box.row(align=True)
-                    group_header.prop(
-                        group,
-                        "enabled",
-                        text="",
-                        icon="CHECKBOX_HLT" if group.enabled else "CHECKBOX_DEHLT",
-                    )
-                    group_header.label(
-                        text=f"贴图切换 {group_index + 1}（{group.state_count} 档）",
-                        icon="KEYFRAME_HLT",
-                    )
-                    group_box.prop(
-                        group,
-                        "switch_variable",
-                        text="材质切换变量",
-                    )
-                    group_box.prop(group, "comment", text="备注")
-                    group_box.prop(group, "key", text="切换按键")
+                parent.label(text=f"物体: {target.name}", icon="MESH_DATA")
+
+        def draw_switch_controls(parent, group, group_index=1):
+            header = parent.row(align=True)
+            header.prop(
+                group,
+                "enabled",
+                text="",
+                icon="CHECKBOX_HLT" if group.enabled else "CHECKBOX_DEHLT",
+            )
+            header.label(text=f"贴图切换 {group_index}（{group.state_count} 档）", icon="KEYFRAME_HLT")
+            parent.prop(group, "switch_variable", text="材质切换变量")
+            parent.prop(group, "comment", text="备注")
+            parent.prop(group, "key", text="切换按键")
+
+        for index, item in enumerate(self.target_items):
+            if index not in primary_indices:
+                continue
+            # 共享组主窗口：多个部件框在同一窗口内，控件只保留一套。
+            matching = [entries for entries in merged_groups.values() if entries[0][0] == index]
+            if matching:
+                for entries in matching:
+                    box = rows.box()
+                    first_group = entries[0][2]
+                    box.label(text=f"部件指定组（{first_group.state_count} 档）", icon="LINKED")
+                    for member_index, member_item, _group in entries:
+                        draw_target_row(box, member_index, member_item, f"部件 {member_index + 1}")
+                    draw_switch_controls(box, first_group)
+                continue
+            box = rows.box()
+            draw_target_row(box, index, item, f"部件 {index + 1}")
+            for group_index, group in enumerate(item.switch_groups, 1):
+                draw_switch_controls(box, group, group_index)
+
+        # 未指定或未形成共享组的条目仍保持原有独立窗口。
+        for index, item in enumerate(self.target_items):
+            if index in merged_member_indices:
+                continue
+            box = rows.box()
+            draw_target_row(box, index, item, f"部件 {index + 1}")
+            for group_index, group in enumerate(item.switch_groups, 1):
+                draw_switch_controls(box, group, group_index)
 
     def _draw_global_switch_panel(self, context, layout):
         """全局模式：显示全局贴图切换框。"""
@@ -1467,23 +1735,28 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 icon="INFO",
             )
 
+        grouped = OrderedDict()
         for group in self.global_switch_groups:
+            variable = str(getattr(group, "merge_group_id", "") or "").strip() or f"__single_{getattr(group, 'object_name', '')}"
+            if variable:
+                grouped.setdefault(variable, []).append(group)
+        for variable, entries in grouped.items():
             group_box = box.box()
-            object_name = str(getattr(group, "object_name", "") or "")
-            group_header = group_box.row(align=True)
-            group_header.prop(
-                group,
-                "enabled",
-                text="",
-                icon="CHECKBOX_HLT" if group.enabled else "CHECKBOX_DEHLT",
-            )
-            group_header.label(
-                text=f"{object_name or '(未命名部件)'}（{group.state_count} 档）",
-                icon="OBJECT_DATA",
-            )
-            group_box.prop(group, "switch_variable", text="材质切换变量")
-            group_box.prop(group, "comment", text="备注")
-            group_box.prop(group, "key", text="切换按键")
+            first_group = entries[0]
+            if len(entries) > 1:
+                group_box.label(text=f"共享切换组（{first_group.state_count} 档）", icon="LINKED")
+            else:
+                group_box.label(text=f"贴图切换（{first_group.state_count} 档）", icon="KEYFRAME_HLT")
+            parts_box = group_box.column(align=True)
+            for group in entries:
+                row = parts_box.row(align=True)
+                row.label(text=str(getattr(group, "object_name", "") or "(未命名部件)"), icon="OBJECT_DATA")
+            header = group_box.row(align=True)
+            header.prop(first_group, "enabled", text="", icon="CHECKBOX_HLT" if first_group.enabled else "CHECKBOX_DEHLT")
+            header.label(text=f"贴图切换 1（{first_group.state_count} 档）", icon="KEYFRAME_HLT")
+            group_box.prop(first_group, "switch_variable", text="材质切换变量")
+            group_box.prop(first_group, "comment", text="备注")
+            group_box.prop(first_group, "key", text="切换按键")
 
     def draw_buttons(self, context, layout):
         layout.prop(self, "use_global_assign", text="使用全局指定")
@@ -1550,6 +1823,73 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         return super().execute_postprocess(mod_export_path, exporter=exporter)
 
 
+LEGACY_MATERIAL_NODE_ID = 'SSMTNode_PostProcess_Material'
+
+
+def _migrate_legacy_material_nodes():
+    """把旧版「材质转资源」节点原位迁移为「材质转资源pro」（幂等）。
+
+    旧类仅保留为注册壳（见 node_postprocess_material），目的是让旧蓝图文件
+    能够正常加载、避免未知节点类型被 Blender 静默丢弃；迁移在此之后执行：
+    复制全部共享属性、切换为全局指定模式（等价原版全场景行为），并重连
+    同名 socket 的连线。迁移完成的壳节点随即删除。
+    """
+    migrated = 0
+    for tree in bpy.data.node_groups:
+        if getattr(tree, 'bl_idname', '') != 'SSMTBlueprintTreeType':
+            continue
+        for node in list(tree.nodes):
+            if getattr(node, 'bl_idname', '') != LEGACY_MATERIAL_NODE_ID:
+                continue
+            try:
+                _migrate_legacy_material_node(tree, node)
+                migrated += 1
+            except Exception as exc:
+                print(f"[TheHerta4] 材质转资源节点迁移失败 {node.name}: {exc}")
+    if migrated:
+        print(f"[TheHerta4] 材质转资源节点迁移完成：{migrated} 个节点已转换为「材质转资源pro」。")
+    return migrated
+
+
+def _migrate_legacy_material_node(tree, node):
+    new_node = tree.nodes.new(NODE_IDNAME)
+    new_node.location = node.location
+    if node.label:
+        new_node.label = node.label
+    # 原版按场景全部物体处理，等价于 pro 的「使用全局指定」模式。
+    new_node.use_global_assign = True
+    # 复制共享属性（属性均声明在未注册的 SSMTNode_PostProcess_MaterialBase）。
+    for attr in ('material_to_resource_override', 'debug_disable_fx_ttl',
+                 'material_switch_var', 'temp_prefix_input',
+                 'show_detect_panel', 'detect_all_ok'):
+        try:
+            setattr(new_node, attr, getattr(node, attr))
+        except Exception:
+            pass
+    for item in node.material_detect_prefixes:
+        target = new_node.material_detect_prefixes.add()
+        target.prefix = item.prefix
+    for item in node.detected_materials:
+        target = new_node.detected_materials.add()
+        target.object_name = item.object_name
+        target.missing_prefix = item.missing_prefix
+    # 重连输入/输出 socket（两者的 socket 布局一致：PostProcess Input/Output）。
+    for index, output in enumerate(node.outputs):
+        for link in list(output.links):
+            tree.links.new(new_node.outputs[index], link.to_socket)
+    for index, socket_input in enumerate(node.inputs):
+        for link in list(socket_input.links):
+            tree.links.new(link.from_socket, new_node.inputs[index])
+    tree.nodes.remove(node)
+
+
+def _migrate_legacy_material_nodes_handler():
+    try:
+        _migrate_legacy_material_nodes()
+    except Exception as exc:
+        print(f"[TheHerta4] 材质转资源节点迁移失败: {exc}")
+
+
 classes = (
     SSMT_CustomMaterialAssignSwitchGroup,
     SSMT_CustomMaterialAssignTargetItem,
@@ -1559,6 +1899,7 @@ classes = (
     SSMT_OT_CustomMaterialDetect,
     SSMT_OT_CustomMaterialDetectClear,
     SSMT_OT_CustomMaterialAssignAddTarget,
+    SSMT_OT_CustomMaterialAssignAddSelected,
     SSMT_OT_CustomMaterialAssignRemoveTarget,
     SSMT_OT_CustomMaterialAssignPickTarget,
     SSMT_OT_CustomMaterialAssignPickTargetModal,
@@ -1572,9 +1913,15 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.VIEW3D_HT_header.append(_draw_picking_header)
+    if _migrate_legacy_material_nodes_handler not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_migrate_legacy_material_nodes_handler)
+    # 立即迁移一次：覆盖「addon 启用时文件已打开」的场景。
+    _migrate_legacy_material_nodes_handler()
 
 
 def unregister():
     bpy.types.VIEW3D_HT_header.remove(_draw_picking_header)
+    if _migrate_legacy_material_nodes_handler in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_migrate_legacy_material_nodes_handler)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

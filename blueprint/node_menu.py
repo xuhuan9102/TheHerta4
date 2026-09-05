@@ -1313,6 +1313,8 @@ class SSMT_MT_ObjectContextMenuSub(bpy.types.Menu):
         layout.operator("ssmt.create_group_from_selection", text="将所选物体新建到组节点", icon='GROUP')
         layout.operator("ssmt.create_internal_switch", text="创建内部切换", icon='ARROW_LEFTRIGHT')
         layout.separator()
+        layout.operator("ssmt.custom_material_assign_add_selected", text="将选中物体加入材质转资源", icon='MATERIAL')
+        layout.separator()
         layout.operator("ssmt.quick_add_rename_rule", text="快速添加重命名规则", icon='FONT_DATA')
         layout.operator("ssmt.quick_add_vertex_group_match", text="快速添加顶点组匹配", icon='GROUP_VERTEX')
 
@@ -1324,6 +1326,7 @@ class SSMT_MT_NodeMenu_ModOutput(bpy.types.Menu):
         layout = self.layout
         _add_node_entry(layout, "Mod输出", 'EXPORT', "SSMTNode_Result_Output")
         _add_node_entry(layout, "NTMI ModImp输出", 'EXPORT', "SSMTNode_Result_Output_NTMIModImp")
+        _add_node_entry(layout, "Velo Mod", 'EXPORT', "SSMTNode_VeloExportBridge")
 
 
 class SSMT_MT_NodeMenu_ObjectBase(bpy.types.Menu):
@@ -1405,10 +1408,11 @@ class SSMT_MT_NodeMenu_PostProcess_Material(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        _add_node_entry(layout, "材质转资源", 'MATERIAL', "SSMTNode_PostProcess_Material")
+        # 原版「材质转资源」已弃用：功能被「材质转资源pro」完全覆盖，旧蓝图会自动迁移。
         _add_node_entry(layout, "材质转资源pro", 'OBJECT_DATA', "SSMTNode_PostProcess_CustomMaterialAssign")
         _add_node_entry(layout, "贴图资源去重", 'PACKAGE', "SSMTNode_PostProcess_ResourceMerge")
         _add_node_entry(layout, "缓冲区清理", 'TRASH', "SSMTNode_PostProcess_BufferCleanup")
+        _add_node_entry(layout, "配置文件清理", 'TEXT', "SSMTNode_PostProcess_CommentCleanup")
 
 
 class SSMT_MT_NodeMenu_PostProcess_Panel(bpy.types.Menu):

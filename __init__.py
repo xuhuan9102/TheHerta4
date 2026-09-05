@@ -196,6 +196,12 @@ def register():
     bpy.utils.register_class(HertaUpdatePreference)
 
     blueprint.register()
+    # Velo 桥接支持两种安装布局：作为 TheHerta4 包内子包，或独立复制到 addons 目录。
+    try:
+        import TheHerta4_Velo_Bridge
+    except ImportError:
+        from . import TheHerta4_Velo_Bridge
+    TheHerta4_Velo_Bridge.register()
     _schedule_blueprint_node_color_refresh()
     ui_prefix_quick_ops.register()
     ui_panel_basic.register()
@@ -232,6 +238,11 @@ def unregister():
     ui_panel_sword.unregister()
     ui_panel_basic.unregister()
     ui_prefix_quick_ops.unregister()
+    try:
+        import TheHerta4_Velo_Bridge
+    except ImportError:
+        from . import TheHerta4_Velo_Bridge
+    TheHerta4_Velo_Bridge.unregister()
     blueprint.unregister()
 
     bpy.utils.unregister_class(HertaUpdatePreference)

@@ -18,7 +18,7 @@ class SwapKeyINIGenerator:
         def is_connected_to_output(current_tree, node):
             output_node = None
             for candidate in current_tree.nodes:
-                if candidate.bl_idname == "SSMTNode_Result_Output":
+                if candidate.bl_idname in {"SSMTNode_Result_Output", "SSMTNode_Result_Output_NTMIModImp", "SSMTNode_VeloExportBridge"}:
                     output_node = candidate
                     break
             if not output_node:
