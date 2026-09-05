@@ -2696,10 +2696,6 @@ class ExportEFMI:
             drawib_model.draw_ib: drawib_model
             for drawib_model in self.drawib_model_list
         }
-        draw_ib_active_index_dict = {
-            drawib_model.draw_ib: index
-            for index, drawib_model in enumerate(self.drawib_model_list)
-        }
 
         if self.has_cross_ib:
             self._add_cross_ib_present_section(ini_builder)
@@ -2724,7 +2720,6 @@ class ExportEFMI:
 
         for submesh_model in self.submesh_model_list:
             drawib_model = drawib_drawibmodel_dict.get(submesh_model.match_draw_ib)
-            active_index = draw_ib_active_index_dict.get(submesh_model.match_draw_ib, 0)
 
             current_ib_key = self._get_submesh_ib_key(submesh_model)
 
@@ -2784,7 +2779,7 @@ class ExportEFMI:
                     "run = CommandList_Component_DrawInstances"
                 )
                 if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
-                    texture_override_ib_section.append("$active" + str(active_index) + " = 1")
+                    texture_override_ib_section.append("$active0 = 1")
                     if GlobalProterties.generate_branch_mod_gui():
                         texture_override_ib_section.append("$ActiveCharacter = 1")
                 texture_override_ib_section.new_line()
@@ -2972,7 +2967,7 @@ class ExportEFMI:
                 )
 
             if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
-                texture_override_ib_section.append("$active" + str(active_index) + " = 1")
+                texture_override_ib_section.append("$active0 = 1")
                 if GlobalProterties.generate_branch_mod_gui():
                     texture_override_ib_section.append("$ActiveCharacter = 1")
 

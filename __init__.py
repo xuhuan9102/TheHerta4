@@ -8,7 +8,6 @@ from .utils import texture_auto_reload
 
 
 from .ui import ui_panel_basic
-from .ui import ui_panel_sword
 from .ui import ui_func_import
 from .ui import ui_func_import_ssmt
 from .ui import ui_prefix_quick_ops
@@ -205,7 +204,6 @@ def register():
     _schedule_blueprint_node_color_refresh()
     ui_prefix_quick_ops.register()
     ui_panel_basic.register()
-    ui_panel_sword.register()
     ui_func_import_ssmt.register()
     ui_func_import.register()
     ui_func_export.register()
@@ -235,7 +233,6 @@ def unregister():
     ui_func_export.unregister()
     ui_func_import.unregister()
     ui_func_import_ssmt.unregister()
-    ui_panel_sword.unregister()
     ui_panel_basic.unregister()
     ui_prefix_quick_ops.unregister()
     try:
