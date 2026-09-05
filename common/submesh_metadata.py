@@ -239,3 +239,107 @@ class SubmeshMetadataResolver:
             SubmeshMetadata 对象
         """
         return SubmeshMetadata(unique_str=unique_str)
+
+
+# ---------------------------------------------------------------------------
+# 工作空间格式解析辅助（供形态键配置 / UV 偏移生成等按 IB 动态取格式）
+#
+# 形态键配置生成与 UV 偏移生成原本都要求用户手动提供顶点属性 / UV 属性
+# 定义（字节布局），一旦多个 IB 的真实布局不一致（如 9 个 16 字节 + 1 个
+# 40 字节的 -Position.buf），手填的单一格式就会把其余 IB 写坏。
+# 这里统一从工作空间 SubmeshJson（CategoryBufferList 的 D3D11ElementList）
+# 解析每个 IB 的真实格式 —— 与导出管线完全同源（含数据类型覆盖节点），
+# 失败时静默返回 None，由调用方回退到旧的节点/默认推断。
+# ---------------------------------------------------------------------------
+
+_workspace_game_type_cache: dict = {}
+_workspace_game_type_prefix_cache: dict = {}
+
+
+def clear_workspace_game_type_cache() -> None:
+    """工作空间切换 / 重新导入后调用，避免旧缓存继续生效。"""
+    _workspace_game_type_cache.clear()
+    _workspace_game_type_prefix_cache.clear()
+
+
+def resolve_workspace_game_type(unique_str: str):
+    """按 unique_str（可含 LOD 前缀）解析工作空间游戏类型；失败返回 None。
+
+    与导出管线同源（SubmeshMetadataResolver），会并入数据类型覆盖节点的影响。
+    """
+    key = str(unique_str or "").strip()
+    if not key:
+        return None
+    cached = _workspace_game_type_cache.get(key, _UNRESOLVED)
+    if cached is not _UNRESOLVED:
+        return cached
+    game_type = None
+    try:
+        game_type = SubmeshMetadataResolver.resolve(key).d3d11_game_type
+    except Exception:
+        game_type = None
+    _workspace_game_type_cache[key] = game_type
+    return game_type
+
+
+def resolve_workspace_game_type_by_prefix(draw_ib_prefix: str):
+    """按 8 位 IB 前缀解析工作空间游戏类型（自动覆盖 LOD 分区与分区工作空间）。
+
+    同一前缀存在多个子网格时取第一个可解析的；同一 DrawIB 的各子网格布局一致
+    （DrawIBModel 的合并前提），因此首个可解析结果即可代表该 IB。
+    """
+    prefix = str(draw_ib_prefix or "").strip()
+    if not prefix:
+        return None
+    cache_key = "prefix:" + prefix.casefold()
+    cached = _workspace_game_type_prefix_cache.get(cache_key, _UNRESOLVED)
+    if cached is not _UNRESOLVED:
+        return cached
+    game_type = None
+    prefix_lower = prefix.casefold()
+    try:
+        for record in WorkSpaceHelper.get_submesh_folder_records():
+            bare_name = str(record.get("bare_name", "") or "").strip()
+            if not bare_name:
+                continue
+            bare_lower = bare_name.casefold()
+            if bare_lower != prefix_lower and not bare_lower.startswith(prefix_lower + "-"):
+                continue
+            lod_name = str(record.get("lod_name", "") or "").strip()
+            identity = bare_name if not lod_name else f"{lod_name}.{bare_name}"
+            candidate = resolve_workspace_game_type(identity)
+            if candidate is not None:
+                game_type = candidate
+                break
+    except Exception:
+        game_type = None
+    _workspace_game_type_prefix_cache[cache_key] = game_type
+    return game_type
+
+
+def resolve_workspace_category_stride(unique_str: str, category: str) -> int:
+    """按 unique_str 解析工作空间指定类别（Position/Texcoord/...）的字节步长。"""
+    game_type = resolve_workspace_game_type(unique_str)
+    if game_type is None:
+        return 0
+    return int((getattr(game_type, "CategoryStrideDict", {}) or {}).get(category, 0) or 0)
+
+
+def resolve_workspace_category_elements(unique_str: str, category: str) -> list:
+    """按 unique_str 解析工作空间指定类别的元素列表（顺序即流内顺序）。"""
+    game_type = resolve_workspace_game_type(unique_str)
+    if game_type is None:
+        return []
+    category_upper = str(category or "").upper()
+    return [
+        element
+        for element in getattr(game_type, "D3D11ElementList", []) or []
+        if str(getattr(element, "Category", "") or "").upper() == category_upper
+    ]
+
+
+class _Unresolved:
+    __slots__ = ()
+
+
+_UNRESOLVED = _Unresolved()
