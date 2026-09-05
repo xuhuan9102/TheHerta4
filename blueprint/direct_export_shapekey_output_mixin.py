@@ -63,6 +63,7 @@ class DirectShapeKeyOutputMixin:
                 base_bytes,
                 target_bytes,
                 struct_definition,
+                preferred_stride=runtime_info["position_stride"],
             )
             base_data = np.frombuffer(base_bytes, dtype=np.float32).reshape((num_vertices, num_floats_per_vertex))
             target_data = np.frombuffer(target_bytes, dtype=np.float32).reshape((num_vertices, num_floats_per_vertex))
@@ -127,6 +128,7 @@ class DirectShapeKeyOutputMixin:
                     base_bytes,
                     target_bytes,
                     struct_definition,
+                    preferred_stride=runtime_info["position_stride"],
                 )
                 base_data = np.frombuffer(base_bytes, dtype=np.float32).reshape((num_vertices, num_floats_per_vertex))
                 merged_index_map = np.full((num_vertices, num_slots), -1, dtype=np.int32)

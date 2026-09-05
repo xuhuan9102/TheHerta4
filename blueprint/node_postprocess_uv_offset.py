@@ -5,7 +5,6 @@ import re
 import shutil
 import struct
 from collections import OrderedDict, defaultdict
-from bpy.types import NodeSocket
 
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 from .variable_registry import (
@@ -16,30 +15,6 @@ from .variable_registry import (
 from ..common.mod_path_compat import ensure_resource_alias_section
 from ..common.object_prefix_helper import ObjectPrefixHelper
 
-
-UV_ATTRIBUTE_TYPES = (
-    ('float', 'float', 'float (R32, 4字节)'),
-    ('float2', 'float2', 'float2 (R32G32, 8字节)'),
-    ('float3', 'float3', 'float3 (R32G32B32, 12字节)'),
-    ('float4', 'float4', 'float4 (R32G32B32A32, 16字节)'),
-    ('half', 'half', 'half (R16, 2字节)'),
-    ('half2', 'half2', 'half2 (R16G16, 4字节)'),
-    ('half3', 'half3', 'half3 (R16G16B16, 6字节)'),
-    ('half4', 'half4', 'half4 (R16G16B16A16, 8字节)'),
-    ('rgba8', 'rgba8', 'RGBA8 (R8G8B8A8_UNORM, 4字节)'),
-)
-
-
-class SSMTSocketUVAttrs(NodeSocket):
-    """UV 属性定义节点的专用输出口，直接连接 UV 偏移节点的动态输入口。"""
-    bl_idname = 'SSMTSocketUVAttrs'
-    bl_label = 'UV属性'
-
-    def draw_color(self, context, node):
-        return (0.2, 0.8, 0.6, 1.0)
-
-    def draw(self, context, layout, node, text):
-        layout.label(text=text)
 
 UV_TYPE_SIZES = {
     'float': 4, 'float2': 8, 'float3': 12, 'float4': 16,
@@ -56,168 +31,62 @@ COMMON_ZZMI_UV_LAYOUT = (
     ('half2', 'uv2', True),
 )
 
+# 工作空间 DXGI Format -> 插件 UV 属性类型（仅用于映射；未知格式保留原样但计入字节数）
+WORKSPACE_UV_FORMAT_TO_TYPE = {
+    'R32_FLOAT': 'float',
+    'R32G32_FLOAT': 'float2',
+    'R32G32B32_FLOAT': 'float3',
+    'R32G32B32A32_FLOAT': 'float4',
+    'R16_FLOAT': 'half',
+    'R16G16_FLOAT': 'half2',
+    'R16G16B16A16_FLOAT': 'half4',
+    'R8G8B8A8_UNORM': 'rgba8',
+    'R8G8B8A8_SNORM': 'rgba8',
+    'R8G8B8A8_UINT': 'rgba8',
+}
 
-def parse_uv_attributes(attributes):
-    """按顺序计算 UV 属性字节偏移，返回规范化列表。"""
-    result = []
-    offset = 0
-    for item in attributes or []:
-        attr_type = str(getattr(item, "attr_type", "") or "").strip()
-        attr_name = str(getattr(item, "attr_name", "") or "").strip()
-        size = UV_TYPE_SIZES.get(attr_type, 0)
-        if size <= 0 or not attr_name:
+
+def _resolve_workspace_game_type_by_prefix(prefix):
+    """延迟导入工作空间格式解析（避免测试桩包触发模块链导入）。"""
+    from ..common.submesh_metadata import resolve_workspace_game_type_by_prefix as _impl
+    return _impl(prefix)
+
+
+def workspace_uv_attributes_from_game_type(game_type):
+    """从工作空间游戏类型构造 UV 属性布局（Texcoord 类别元素，顺序即流内顺序）。
+
+    - COLOR 等非 TEXCOORD 语义元素计字节但不参与偏移（apply_offset=False）；
+    - 未知 Format 的元素保留原始格式名并计入字节数（着色器侧跳过偏移，
+      但总字节必须与实际 Texcoord stride 一致，避免误跳过）。
+    """
+    attributes = []
+    stream_offset = 0
+    for element in getattr(game_type, "D3D11ElementList", []) or []:
+        if str(getattr(element, "Category", "") or "").upper() != "TEXCOORD":
             continue
-        apply_offset = bool(getattr(item, "apply_offset", True))
-        result.append({
-            'name': attr_name,
+        semantic = str(getattr(element, "SemanticName", "") or "").strip()
+        semantic_index = int(getattr(element, "SemanticIndex", 0) or 0)
+        byte_width = int(getattr(element, "ByteWidth", 0) or 0)
+        if byte_width <= 0:
+            continue
+        element_format = str(getattr(element, "Format", "") or "").upper()
+        attr_type = WORKSPACE_UV_FORMAT_TO_TYPE.get(element_format, element_format.lower() if element_format else "unknown")
+        is_color = semantic.upper().startswith("COLOR")
+        attributes.append({
+            'name': semantic.lower() + str(semantic_index),
             'type': attr_type,
-            'size': size,
-            'offset': offset,
-            'apply_offset': apply_offset,
+            'size': byte_width,
+            'offset': stream_offset,
+            'apply_offset': not is_color,
         })
-        offset += size
-    return result
+        stream_offset += byte_width
+    if stream_offset <= 0:
+        return None
+    return attributes
 
 
 def uv_attributes_total_bytes(attributes):
     return sum(attr['size'] for attr in attributes or [])
-
-
-class UVAttributeItem(bpy.types.PropertyGroup):
-    attr_type: bpy.props.EnumProperty(
-        name="数据类型",
-        description="UV属性的数据类型",
-        items=UV_ATTRIBUTE_TYPES,
-        default='float2'
-    )
-    attr_name: bpy.props.StringProperty(name="属性名称", description="UV属性的名称", default="uv", maxlen=256)
-    apply_offset: bpy.props.BoolProperty(
-        name="参与偏移",
-        description="该属性是否参与UV偏移（如 COLOR 通道请关闭）",
-        default=True,
-    )
-
-
-class SSMTNode_PostProcess_UVAttrs(SSMTNode_PostProcess_Base):
-    bl_idname = 'SSMTNode_PostProcess_UVAttrs'
-    bl_label = 'UV属性定义'
-    bl_description = '为UV偏移配置提供UV属性定义'
-
-    uv_attributes: bpy.props.CollectionProperty(type=UVAttributeItem)  # type: ignore
-    active_uv_attribute: bpy.props.IntProperty(default=0)  # type: ignore
-
-    def init(self, context):
-        # 不再接入后处理链路：只暴露 UV 属性输出，直接连接 UV 偏移节点的动态输入口
-        self.outputs.new('SSMTSocketUVAttrs', "UV属性")
-        self.width = 300
-
-    def draw_buttons(self, context, layout):
-        box = layout.box()
-        box.label(text="UV属性定义", icon='PROPERTIES')
-        box.template_list("SSMT_UL_UV_ATTRIBUTES", "", self, "uv_attributes", self, "active_uv_attribute", rows=3)
-
-        row = box.row()
-        row.operator("ssmt_postprocess.add_uv_attribute", icon='ADD', text="")
-        row.operator("ssmt_postprocess.remove_uv_attribute", icon='REMOVE', text="")
-        row = box.row()
-        row.operator("ssmt_postprocess.load_common_zzmi_uv_attributes", text="载入ZZMI常用布局", icon='FILE_REFRESH')
-
-        if self.uv_attributes and 0 <= self.active_uv_attribute < len(self.uv_attributes):
-            active_item = self.uv_attributes[self.active_uv_attribute]
-            row = box.row()
-            row.prop(active_item, "attr_type")
-            row = box.row()
-            row.prop(active_item, "attr_name")
-            row = box.row()
-            row.prop(active_item, "apply_offset")
-
-    def get_uv_attributes(self):
-        return parse_uv_attributes(self.uv_attributes)
-
-    def load_common_zzmi_uv_attributes(self):
-        while len(self.uv_attributes) > 0:
-            self.uv_attributes.remove(len(self.uv_attributes) - 1)
-        for attr_type, attr_name, apply_offset in COMMON_ZZMI_UV_LAYOUT:
-            item = self.uv_attributes.add()
-            item.attr_type = attr_type
-            item.attr_name = attr_name
-            item.apply_offset = apply_offset
-        self.active_uv_attribute = 0
-        return len(self.uv_attributes)
-
-    def execute_postprocess(self, mod_export_path):
-        print(f"UV属性定义节点已配置，Mod导出路径: {mod_export_path}")
-
-
-class SSMT_UL_UV_ATTRIBUTES(bpy.types.UIList):
-    bl_idname = 'SSMT_UL_UV_ATTRIBUTES'
-
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        del context, data, icon, active_data, active_propname, index
-        if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            row = layout.row(align=True)
-            mark = "✓" if getattr(item, "apply_offset", True) else "✗"
-            row.label(text=f"{item.attr_type} {item.attr_name} [{mark}]")
-        elif self.layout_type in {'GRID'}:
-            layout.alignment = 'CENTER'
-            mark = "✓" if getattr(item, "apply_offset", True) else "✗"
-            layout.label(text=f"{item.attr_type} {item.attr_name} [{mark}]")
-
-
-class SSMT_OT_PostProcess_AddUVAttribute(bpy.types.Operator):
-    bl_idname = "ssmt_postprocess.add_uv_attribute"
-    bl_label = "添加UV属性"
-    bl_description = "添加新的UV属性项"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        node = context.active_node
-        if not node or node.bl_idname != 'SSMTNode_PostProcess_UVAttrs':
-            self.report({'ERROR'}, "请先选择UV属性定义节点")
-            return {'CANCELLED'}
-
-        new_item = node.uv_attributes.add()
-        new_item.attr_name = f"uv{len(node.uv_attributes) - 1}"
-        new_item.attr_type = 'float2'
-        new_item.apply_offset = True
-        node.active_uv_attribute = len(node.uv_attributes) - 1
-        return {'FINISHED'}
-
-
-class SSMT_OT_PostProcess_RemoveUVAttribute(bpy.types.Operator):
-    bl_idname = "ssmt_postprocess.remove_uv_attribute"
-    bl_label = "删除UV属性"
-    bl_description = "删除选中的UV属性项"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        node = context.active_node
-        if not node or node.bl_idname != 'SSMTNode_PostProcess_UVAttrs':
-            self.report({'ERROR'}, "请先选择UV属性定义节点")
-            return {'CANCELLED'}
-
-        if 0 <= node.active_uv_attribute < len(node.uv_attributes):
-            node.uv_attributes.remove(node.active_uv_attribute)
-            if node.active_uv_attribute >= len(node.uv_attributes) and node.active_uv_attribute > 0:
-                node.active_uv_attribute -= 1
-        return {'FINISHED'}
-
-
-class SSMT_OT_PostProcess_LoadCommonZZMIUVAttributes(bpy.types.Operator):
-    bl_idname = "ssmt_postprocess.load_common_zzmi_uv_attributes"
-    bl_label = "载入ZZMI常用布局"
-    bl_description = "载入ZZMI常见Texcoord布局：COLOR + half2 uv0 + float2 uv1 + half2 uv2"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        node = context.active_node
-        if not node or node.bl_idname != 'SSMTNode_PostProcess_UVAttrs':
-            self.report({'ERROR'}, "请先选择UV属性定义节点")
-            return {'CANCELLED'}
-
-        count = node.load_common_zzmi_uv_attributes()
-        self.report({'INFO'}, f"已载入ZZMI常用UV布局（{count} 项）")
-        return {'FINISHED'}
 
 
 class UVOffsetVariableItem(bpy.types.PropertyGroup):
@@ -341,7 +210,9 @@ class SSMTNode_PostProcess_UVOffset(SSMTNode_PostProcess_Base):
     def get_uv_offset_export_variable_names(self):
         return (self.get_uv_offset_variable_name("X"), self.get_uv_offset_variable_name("Y"))
 
-    # ---------- 动态 IB 输入口 ----------
+    # ---------- UV 布局解析（工作空间驱动） ----------
+    # 「UV 属性定义」节点与动态输入口已下线：每个 IB 的 Texcoord 布局直接从
+    # 工作空间 SubmeshJson 读取（逐 IB 动态适配），不可解析时回退默认布局。
 
     def _collect_uv_prefixes(self):
         """从物体列表解析出独立的 8 位 IB 前缀（保序去重）。"""
@@ -363,55 +234,45 @@ class SSMTNode_PostProcess_UVOffset(SSMTNode_PostProcess_Base):
             prefixes.append(h_prefix)
         return prefixes
 
-    def _sync_uv_attr_sockets(self):
-        """根据物体列表解析出的独立 IB 前缀，动态维护 UV 属性输入口。"""
-        inputs = getattr(self, "inputs", None)
-        if inputs is None:
-            return
+    def _get_workspace_uv_attributes(self, prefix):
+        """按 IB 前缀从工作空间解析 Texcoord 布局（每个 IB 独立，动态处理）。
 
-        wanted_prefixes = self._collect_uv_prefixes()
-        wanted_names = {f"UV属性 {prefix}" for prefix in wanted_prefixes}
-        current_names = {}
-        for index in range(len(inputs) - 1, 0, -1):
-            socket = inputs[index]
-            name = str(getattr(socket, "name", "") or "")
-            if name.startswith("UV属性 "):
-                current_names[name] = socket
-
-        # 删除不再需要的动态输入口
-        for name in list(current_names.keys()):
-            if name not in wanted_names:
-                inputs.remove(current_names[name])
-
-        # 新增缺失的动态输入口
-        for prefix in wanted_prefixes:
-            socket_name = f"UV属性 {prefix}"
-            if socket_name not in current_names:
-                inputs.new('SSMTSocketUVAttrs', socket_name)
-
-    def _get_uv_attrs_socket_for_prefix(self, prefix):
+        工作空间 SubmeshJson 记录每个 IB 的真实 Texcoord 类别元素布局，
+        优先以它为准，替代用户手填的 UV 属性定义节点 —— 这样 20/24/48 字节
+        等异构布局都能自动生成，不再因「默认布局与 stride 不一致」被跳过。
+        """
         prefix = str(prefix or "").strip()
         if not prefix:
             return None
-        inputs = getattr(self, "inputs", None)
-        if inputs is None:
-            return None
-        socket_name = f"UV属性 {prefix}"
-        for socket in inputs:
-            if str(getattr(socket, "name", "") or "") == socket_name:
-                return socket
-        return None
+        cache = getattr(self, "_workspace_uv_attributes_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                self._workspace_uv_attributes_cache = cache
+            except Exception:
+                pass
+        if prefix in cache:
+            return cache[prefix]
+        attributes = None
+        try:
+            game_type = _resolve_workspace_game_type_by_prefix(prefix)
+            if game_type is not None:
+                attributes = workspace_uv_attributes_from_game_type(game_type)
+        except Exception:
+            attributes = None
+        cache[prefix] = attributes
+        return attributes
 
     def _get_uv_attributes_for_prefix(self, prefix):
-        """取指定 IB 前缀对应的 UV 属性布局；未连接属性定义节点时回退默认布局。"""
-        socket = self._get_uv_attrs_socket_for_prefix(prefix)
-        if socket is not None:
-            for link in getattr(socket, "links", []) or []:
-                source_node = getattr(link, "from_node", None)
-                if source_node is not None and getattr(source_node, "bl_idname", "") == 'SSMTNode_PostProcess_UVAttrs':
-                    attributes = source_node.get_uv_attributes()
-                    if attributes:
-                        return attributes
+        """取指定 IB 前缀对应的 UV 属性布局。
+
+        优先级：工作空间真实布局（逐 IB 动态适配）→ 默认布局（旧兜底）。
+        不再需要连接 UV 属性定义节点。
+        """
+        workspace_attributes = self._get_workspace_uv_attributes(prefix)
+        if workspace_attributes:
+            return workspace_attributes
+
         return self._default_uv_attributes()
 
     @staticmethod
@@ -1100,8 +961,6 @@ class SSMTNode_PostProcess_UVOffset(SSMTNode_PostProcess_Base):
             return False
 
     def draw_buttons(self, context, layout):
-        self._sync_uv_attr_sockets()
-
         layout.operator("ssmt.scan_uv_offset_variables", text="预分配UV偏移变量", icon='FILE_REFRESH').node_name = self.name
         if self.uv_offset_variable_items:
             box = layout.box()
@@ -1138,13 +997,18 @@ class SSMTNode_PostProcess_UVOffset(SSMTNode_PostProcess_Base):
         prefixes = self._collect_uv_prefixes()
         if prefixes:
             box = layout.box()
-            box.label(text="IB UV属性连接", icon='LINKED')
+            box.label(text="IB UV布局（工作空间自动解析）", icon='LINKED')
             for prefix in prefixes:
-                socket = self._get_uv_attrs_socket_for_prefix(prefix)
-                linked = bool(socket is not None and getattr(socket, "is_linked", False))
-                status = "已连接" if linked else "未连接（使用默认布局）"
-                row = box.row(align=True)
-                row.label(text=f"{prefix}: {status}", icon='CHECKBOX_HLT' if linked else 'CHECKBOX_DEHLT')
+                attributes = self._get_workspace_uv_attributes(prefix)
+                if attributes:
+                    row = box.row(align=True)
+                    row.label(
+                        text=f"{prefix}: 工作空间布局 {uv_attributes_total_bytes(attributes)}B（{len(attributes)} 条属性）",
+                        icon='CHECKBOX_HLT',
+                    )
+                else:
+                    row = box.row(align=True)
+                    row.label(text=f"{prefix}: 工作空间未解析，使用默认 20B 布局", icon='CHECKBOX_DEHLT')
 
     def _read_ini_to_ordered_dict(self, ini_file_path):
         sections = OrderedDict()
@@ -1212,9 +1076,6 @@ class SSMTNode_PostProcess_UVOffset(SSMTNode_PostProcess_Base):
             if not sections:
                 return
 
-            # 根据物体列表解析出的独立 IB 前缀，确保 UV 属性输入口已就绪
-            self._sync_uv_attr_sockets()
-
             self.ensure_uv_offset_variable_map(["X", "Y"])
             x_var, y_var = self.get_uv_offset_export_variable_names()
 
@@ -1274,8 +1135,16 @@ class SSMTNode_PostProcess_UVOffset(SSMTNode_PostProcess_Base):
                     continue
                 attributes_total = uv_attributes_total_bytes(attributes)
                 if attributes_total != stride:
-                    print(f"[UVOffset] 哈希 {h_prefix} 的 UV属性定义总字节 {attributes_total} 与 Texcoord stride {stride} 不一致，跳过")
+                    print(
+                        f"[UVOffset] 哈希 {h_prefix} 的 UV属性布局总字节 {attributes_total} 与 Texcoord stride {stride} 不一致，跳过。"
+                        f"（已优先尝试从工作空间解析该 IB 的 Texcoord 布局，若仍不一致请检查工作空间 SubmeshJson）"
+                    )
                     continue
+                if self._get_workspace_uv_attributes(h_prefix):
+                    print(
+                        f"[UVOffset] 哈希 {h_prefix} 已从工作空间解析 Texcoord 布局: "
+                        f"{attributes_total} 字节, {len(attributes)} 条属性（动态适配，无需手动指定 UV 属性定义）"
+                    )
 
                 shader_dest_path = os.path.join(dest_res_dir, f"uv_offset_{h_prefix}.hlsl")
                 shutil.copy2(shader_source_path, shader_dest_path)
@@ -1524,13 +1393,6 @@ class SSMT_OT_ScanUVOffsetVariables(bpy.types.Operator):
 
 
 classes = (
-    SSMTSocketUVAttrs,
-    UVAttributeItem,
-    SSMTNode_PostProcess_UVAttrs,
-    SSMT_UL_UV_ATTRIBUTES,
-    SSMT_OT_PostProcess_AddUVAttribute,
-    SSMT_OT_PostProcess_RemoveUVAttribute,
-    SSMT_OT_PostProcess_LoadCommonZZMIUVAttributes,
     UVOffsetVariableItem,
     SSMT_UL_UV_OFFSET_VARIABLE_MAPPINGS,
     UVOffsetObjectItem,

@@ -1396,9 +1396,7 @@ class SSMT_MT_NodeMenu_PostProcess_Dynamic(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        _add_node_entry(layout, "顶点属性定义", 'PROPERTIES', "SSMTNode_PostProcess_VertexAttrs")
         _add_node_entry(layout, "形态键配置", 'SHAPEKEY_DATA', "SSMTNode_PostProcess_ShapeKey")
-        _add_node_entry(layout, "UV属性定义", 'UV', "SSMTNode_PostProcess_UVAttrs")
         _add_node_entry(layout, "UV偏移", 'DRIVER', "SSMTNode_PostProcess_UVOffset")
         _add_node_entry(layout, "多文件配置", 'FILE_FOLDER', "SSMTNode_PostProcess_MultiFile")
 

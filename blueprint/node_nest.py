@@ -27,7 +27,6 @@ class SSMTNode_Blueprint_Nest(SSMTNodeBase):
         'SSMTNode_Blueprint_Nest': '嵌套蓝图',
         'SSMTNode_CrossIB': '跨IB',
         'SSMTNode_MultiFile_Export': '多文件导出',
-        'SSMTNode_PostProcess_VertexAttrs': '顶点属性',
         'SSMTNode_PostProcess_ShapeKey': '形态键配置',
         'SSMTNode_PostProcess_Material': '材质转资源',
         'SSMTNode_PostProcess_HealthDetection': '血量检测',

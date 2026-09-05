@@ -91,17 +91,28 @@ class SSMTNode_PostProcess_MultiFile(SSMTNode_PostProcess_Base):
             layout.label(text="警告: 未安装numpy库，功能不可用", icon='ERROR')
 
     def _get_vertex_attrs_node(self):
+        # 「顶点属性定义」节点已下线：此处仅兼容旧蓝图文件。残留节点可能已是
+        # 未定义类型，必须探测方法存在再使用。
+        def _as_vertex_attrs(candidate):
+            if (
+                candidate is not None
+                and getattr(candidate, "bl_idname", "") == 'SSMTNode_PostProcess_VertexAttrs'
+                and callable(getattr(candidate, "get_vertex_struct_definition", None))
+            ):
+                return candidate
+            return None
+
         if not self.inputs[0].is_linked:
             return None
 
         source_node = self.inputs[0].links[0].from_node
-        if source_node.bl_idname == 'SSMTNode_PostProcess_VertexAttrs':
-            return source_node
+        matched = _as_vertex_attrs(source_node)
+        if matched is not None:
+            return matched
 
         if source_node.inputs[0].is_linked:
             prev_node = source_node.inputs[0].links[0].from_node
-            if prev_node.bl_idname == 'SSMTNode_PostProcess_VertexAttrs':
-                return prev_node
+            return _as_vertex_attrs(prev_node)
 
         return None
 

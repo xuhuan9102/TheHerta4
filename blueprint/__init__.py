@@ -75,7 +75,6 @@ _MODULE_REGISTRY = [
     {"name": "node_shader_replace", "required": False},
     {"name": "node_multifile_export", "required": False},
     {"name": "node_postprocess_base", "required": False},
-    {"name": "node_postprocess_vertex_attrs", "required": False},
     {"name": "node_postprocess_shapekey", "required": False},
     {"name": "node_postprocess_uv_offset", "required": False},
     {"name": "node_postprocess_material", "required": False},

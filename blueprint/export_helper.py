@@ -1164,6 +1164,16 @@ class BlueprintExportHelper:
 
     @staticmethod
     def clear_postprocess_caches():
+        # 工作空间格式缓存（common.submesh_metadata 模块级，含 None 负缓存）：
+        # 每次导出前清理，避免同会话内「重新导入工作空间 / 编辑数据类型覆盖节点」
+        # 后旧的 Position/Texcoord 布局继续生效。无蓝图树时也必须执行，故置于
+        # 下方 tree 提前返回之前。
+        try:
+            from ..common.submesh_metadata import clear_workspace_game_type_cache
+            clear_workspace_game_type_cache()
+        except Exception:
+            pass
+
         tree = BlueprintExportHelper.get_current_blueprint_tree()
         if not tree:
             return

@@ -126,14 +126,15 @@ class NTMIShapeKeyNodeAdapter:
     def _should_merge_slot_files(self, use_packed=None):
         return self.original_node._should_merge_slot_files(use_packed)
 
-    def _get_vertex_struct_definition(self):
+    def _get_vertex_struct_definition(self, hash_val=None):
+        del hash_val
         return "struct VertexAttributes {\n    float3 position;\n};"
 
     def parse_vertex_struct(self, struct_definition):
         return self.original_node.parse_vertex_struct(struct_definition)
 
-    def _detect_vertex_format(self, base_bytes, shapekey_bytes, struct_definition=None):
-        return self.original_node._detect_vertex_format(base_bytes, shapekey_bytes, struct_definition)
+    def _detect_vertex_format(self, base_bytes, shapekey_bytes, struct_definition=None, **kwargs):
+        return self.original_node._detect_vertex_format(base_bytes, shapekey_bytes, struct_definition, **kwargs)
 
     def _get_shader_source_path(self):
         return self.original_node._get_shader_source_path()
@@ -221,8 +222,9 @@ class NTMIShapeKeyNodeAdapter:
         drag_click_stages=None,
         drag_stage_count=1,
         drag_dirs=None,
+        hash_val=None,
     ):
-        del unique_objects, use_packed, use_delta, use_optimized, merge_slot_files
+        del unique_objects, use_packed, use_delta, use_optimized, merge_slot_files, hash_val
         num_slots = max(hash_slot_data.keys()) if hash_slot_data else 0
         zone_ids = list(drag_zone_ids or []) if drag_drive_enabled else []
         click_stages = list(drag_click_stages or []) if drag_drive_enabled else []

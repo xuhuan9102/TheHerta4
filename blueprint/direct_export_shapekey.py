@@ -431,6 +431,7 @@ class DirectShapeKeyGenerator(
                     drag_click_stages=self.node._drag_drive_click_stages(hash_unique_names) if drag_drive_enabled else None,
                     drag_stage_count=self.node._drag_drive_stage_count(),
                     drag_dirs=self.node._drag_drive_dirs(hash_unique_names) if drag_drive_enabled else None,
+                    hash_val=logical_hash,
                 )
         LOG.info(f"直出形态键: shader/freq 写出完成 {perf_counter() - stage_start:.3f}s")
 

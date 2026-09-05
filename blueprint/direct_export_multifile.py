@@ -14,6 +14,7 @@ from ..common.mod_path_compat import find_base_position_resource_name
 from ..common.mod_path_compat import is_stale_texture_override_position_copy_desc_line
 from ..common.mod_path_compat import resolve_position_buffer_candidate
 from ..utils.export_utils import ExportUtils
+from ..utils.log_utils import LOG
 from .direct_export_runtime_utils import (
     apply_position_override_in_place,
     get_model_vertex_count as _get_model_vertex_count,
@@ -256,11 +257,18 @@ class DirectMultiFileGenerator:
         return lookup
 
     def _infer_position_stride(self, drawib_model, base_bytes: bytes) -> int:
+        # 工作空间游戏类型优先（含数据类型覆盖节点影响）；与缓冲大小不整除时
+        # 显式告警并继续回退，避免静默以错误步长写出。
         d3d11_game_type = getattr(drawib_model, "d3d11GameType", None) or getattr(drawib_model, "d3d11_game_type", None)
         if d3d11_game_type is not None:
             stride = int(d3d11_game_type.CategoryStrideDict.get("Position", 0))
-            if stride > 0:
+            if stride > 0 and len(base_bytes) % stride == 0:
                 return stride
+            if stride > 0:
+                LOG.warning(
+                    f"直出多文件: 工作空间 Position 步长 {stride} 与缓冲区大小 "
+                    f"{len(base_bytes)} 不整除，继续尝试其它推断 draw_ib={getattr(drawib_model, 'draw_ib', '')}"
+                )
 
         vertex_count = _get_model_vertex_count(drawib_model)
         if vertex_count > 0 and len(base_bytes) % vertex_count == 0:

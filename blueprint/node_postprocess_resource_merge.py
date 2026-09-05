@@ -13,10 +13,22 @@ class SSMTNode_PostProcess_ResourceMerge(SSMTNode_PostProcess_Base):
     bl_label = '资源合并'
     bl_description = '通过计算DDS贴图内容的MD5哈希值，自动合并内容相同的资源引用并删除重复的DDS贴图'
 
+    use_pixel_dedup: bpy.props.BoolProperty(
+        name="像素级去重",
+        description="开启后除MD5外还会解码DDS像素内容进行比对：像素完全相同的贴图（即使文件格式/编码不同）也判定为重复并合并删除。BC6H等暂不支持的格式自动跳过",
+        default=False,
+    )  # type: ignore
+
     def draw_buttons(self, context, layout):
         layout.label(text="计算DDS贴图文件MD5哈希值", icon='FILE_CACHE')
         layout.label(text="合并内容相同的DDS资源引用")
         layout.label(text="自动删除重复的DDS贴图文件")
+        layout.separator()
+        layout.prop(self, "use_pixel_dedup", icon='TEXTURE')
+        if getattr(self, "use_pixel_dedup", False):
+            layout.label(text="额外执行像素级去重：", icon='INFO')
+            layout.label(text="解码DDS像素内容，像素完全相同（如相同内容")
+            layout.label(text="不同格式/编码/压缩的贴图）也合并删除")
         layout.separator()
         layout.label(text="执行前会自动备份ini文件", icon='BACK')
 
@@ -171,6 +183,7 @@ class SSMTNode_PostProcess_ResourceMerge(SSMTNode_PostProcess_Base):
 
         file_hash_to_first_ref = {}
         files_to_delete: dict[str, str] = {}
+        pixel_primary_filename = {}
 
         for entry in resource_entries:
             section_name = entry["section"]
@@ -183,6 +196,8 @@ class SSMTNode_PostProcess_ResourceMerge(SSMTNode_PostProcess_Base):
             if file_path is None:
                 print(f"[ResourceMerge] 跳过 {section_name}: 路径越出Mod目录 {filename}")
                 continue
+            entry["file_path"] = file_path
+            entry["_norm_path"] = os.path.normcase(os.path.realpath(file_path))
             if not os.path.isfile(file_path):
                 print(f"[ResourceMerge] 跳过 {section_name}: 文件不存在 {file_path}")
                 continue
@@ -211,15 +226,21 @@ class SSMTNode_PostProcess_ResourceMerge(SSMTNode_PostProcess_Base):
                 }
             entry["file_hash"] = file_hash
 
+        if getattr(self, "use_pixel_dedup", False):
+            self._pixel_dedup_phase(
+                resource_entries,
+                files_to_delete,
+                pixel_primary_filename,
+            )
+
         print(f"[ResourceMerge] 扫描完成: {len(file_hash_to_first_ref)} 个唯一资源, {len(files_to_delete)} 个重复文件待删除")
 
         modified = False
         for entry in resource_entries:
-            file_hash = entry.get("file_hash")
-            if not file_hash or file_hash not in file_hash_to_first_ref:
-                continue
             original_filename = entry["filename"]
-            primary_filename = file_hash_to_first_ref[file_hash]["filename"]
+            primary_filename = self._resolve_primary_filename(
+                entry, file_hash_to_first_ref, pixel_primary_filename
+            )
             if original_filename == primary_filename:
                 continue
             match = entry["match"]
@@ -244,6 +265,95 @@ class SSMTNode_PostProcess_ResourceMerge(SSMTNode_PostProcess_Base):
                 print(f"[ResourceMerge] 已删除重复文件: {display_name}")
             except OSError as e:
                 print(f"[ResourceMerge] 删除文件失败 {file_path}: {e}")
+
+    @staticmethod
+    def _resolve_primary_filename(entry, file_hash_to_first_ref, pixel_primary_filename):
+        """返回条目应改写成的规范文件名：像素合并结果优先，其次 MD5 同内容组。"""
+        norm_path = entry.get("_norm_path")
+        if norm_path and norm_path in pixel_primary_filename:
+            return pixel_primary_filename[norm_path]
+        file_hash = entry.get("file_hash")
+        if file_hash and file_hash in file_hash_to_first_ref:
+            return file_hash_to_first_ref[file_hash]["filename"]
+        return entry["filename"]
+
+    def _pixel_dedup_phase(self, resource_entries, files_to_delete, pixel_primary_filename):
+        """像素级去重：解码 DDS 像素，像素完全相同的文件即使格式不同也合并。"""
+        try:
+            from ..common import dds_pixel
+            import numpy as np
+        except Exception as exc:
+            print(f"[ResourceMerge] 像素去重模块不可用（{exc}），本ini跳过像素合并")
+            return
+
+        # 候选：MD5 扫描成功、且未在 MD5 阶段被判定为重复的文件
+        unique_entries = {}
+        for entry in resource_entries:
+            file_hash = entry.get("file_hash")
+            norm_path = entry.get("_norm_path")
+            if not file_hash or not norm_path:
+                continue
+            file_path = entry["file_path"]
+            if file_path in files_to_delete:
+                continue
+            unique_entries.setdefault(norm_path, entry)
+
+        if len(unique_entries) < 2:
+            return
+
+        # 按像素尺寸分组（尺寸不同不可能像素相同）
+        groups = {}
+        for norm_path, entry in unique_entries.items():
+            try:
+                with open(norm_path, 'rb') as f:
+                    head = f.read(160)
+            except OSError as exc:
+                print(f"[ResourceMerge] 像素去重: 读取失败 {norm_path}: {exc}")
+                continue
+            dims = dds_pixel.dds_dimensions(head)
+            if dims is None:
+                print(f"[ResourceMerge] 像素去重: 跳过无法解析的 {os.path.basename(norm_path)}（{dds_pixel.last_error}）")
+                continue
+            groups.setdefault(dims, []).append((norm_path, entry))
+
+        matched = 0
+        skipped = 0
+        for dims, members in groups.items():
+            if len(members) < 2:
+                continue
+            representatives = []  # [(norm_path, pixels, entry)]
+            for norm_path, entry in members:
+                try:
+                    with open(norm_path, 'rb') as f:
+                        data = f.read()
+                except OSError as exc:
+                    print(f"[ResourceMerge] 像素去重: 读取失败 {norm_path}: {exc}")
+                    continue
+                pixels = dds_pixel.decode_dds_rgba8(data)
+                if pixels is None:
+                    skipped += 1
+                    print(f"[ResourceMerge] 像素去重: 跳过无法解码的 {os.path.basename(norm_path)}（{dds_pixel.last_error}）")
+                    continue
+                duplicate_of = None
+                for rep_path, rep_pixels, rep_entry in representatives:
+                    if np.array_equal(rep_pixels, pixels):
+                        duplicate_of = rep_entry
+                        break
+                if duplicate_of is not None:
+                    matched += 1
+                    pixel_primary_filename[norm_path] = duplicate_of["filename"]
+                    files_to_delete[entry["file_path"]] = entry["filename"]
+                    print(
+                        f"[ResourceMerge]   像素重复! {os.path.basename(norm_path)} "
+                        f"与 {os.path.basename(duplicate_of['file_path'])} 像素完全一致（格式不同），合并"
+                    )
+                else:
+                    representatives.append((norm_path, pixels, entry))
+
+        if matched or skipped:
+            print(
+                f"[ResourceMerge] 像素去重完成: 合并 {matched} 个, 无法解码跳过 {skipped} 个"
+            )
 
 
 classes = (

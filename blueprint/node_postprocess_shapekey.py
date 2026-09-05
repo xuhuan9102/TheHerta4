@@ -110,6 +110,29 @@ def clear_name_mapping_cache():
     print("[ShapeKey] 已清除名称映射缓存")
 
 
+def _resolve_workspace_category_stride(unique_str, category):
+    """延迟导入工作空间格式解析（避免测试桩包触发模块链导入）。"""
+    from ..common.submesh_metadata import resolve_workspace_category_stride as _impl
+    return _impl(unique_str, category)
+
+
+def _resolve_workspace_game_type_by_prefix(prefix):
+    from ..common.submesh_metadata import resolve_workspace_game_type_by_prefix as _impl
+    return _impl(prefix)
+
+
+def _resolve_workspace_category_elements(unique_str, category):
+    from ..common.submesh_metadata import resolve_workspace_category_elements as _impl
+    return _impl(unique_str, category)
+
+
+# HLSL uint 系占位类型（按字节宽度占位，不参与任何读写）
+_HLSL_PAD_TYPE_BY_SIZE = {4: "uint", 8: "uint2", 12: "uint3", 16: "uint4"}
+
+# 与着色器模板一致的默认顶点布局（40 字节：pos+normal+tangent）
+_DEFAULT_VERTEX_STRUCT_DEFINITION = "struct VertexAttributes {\n    float3 position;\n    float3 normal;\n    float4 tangent;\n};"
+
+
 class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
     INI_PREAMBLE_KEY = "__SSMT_INI_PREAMBLE__"
     bl_idname = 'SSMTNode_PostProcess_ShapeKey'
@@ -1229,20 +1252,80 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         return (total_bytes, total_floats, attributes)
 
 
-    def _detect_vertex_format(self, base_bytes, shapekey_bytes, struct_definition=None):
-        VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX = 40, 10
-        num_vertices = len(base_bytes) // VERTEX_STRIDE
+    def _get_workspace_position_stride(self, hash_val):
+        """按哈希/IB 从工作空间解析 Position 类别字节步长（每个 IB 独立，支持并存）。
 
+        工作空间 SubmeshJson 的 CategoryBufferList 记录了每个 IB 的真实布局
+        （如 9 个 IB 的 Position=16 字节、1 个 IB 的 Position=40 字节），
+        这里优先以它为准，替代用户手填的单一「顶点属性定义」。
+        """
+        cache_key = str(hash_val or "").strip()
+        if not cache_key:
+            return 0
+        cache = getattr(self, "_workspace_stride_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                self._workspace_stride_cache = cache
+            except Exception:
+                pass
+        if cache_key in cache:
+            return cache[cache_key]
+        stride = 0
+        try:
+            stride = _resolve_workspace_category_stride(cache_key, "Position")
+            if stride <= 0:
+                game_type = _resolve_workspace_game_type_by_prefix(self._extract_hash_prefix(cache_key))
+                if game_type is not None:
+                    stride = int((getattr(game_type, "CategoryStrideDict", {}) or {}).get("Position", 0) or 0)
+        except Exception:
+            stride = 0
+        cache[cache_key] = int(stride)
+        return cache[cache_key]
+
+    def _detect_vertex_format(self, base_bytes, shapekey_bytes, struct_definition=None, preferred_stride=None, hash_val=None):
+        # 1) 显式步长（直出路径 runtime_infos 的 position_stride 已按工作空间解析）
+        if preferred_stride and int(preferred_stride) > 0 and int(preferred_stride) % 4 == 0 and len(base_bytes) % int(preferred_stride) == 0:
+            VERTEX_STRIDE = int(preferred_stride)
+            NUM_FLOATS_PER_VERTEX = VERTEX_STRIDE // 4
+            num_vertices = len(base_bytes) // VERTEX_STRIDE
+            print(f"使用工作空间步长: {VERTEX_STRIDE}字节, 每顶点{NUM_FLOATS_PER_VERTEX}个float, 顶点数={num_vertices}")
+            return (VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, num_vertices)
+
+        # 2) 按 hash 从工作空间解析（每个 IB 独立的真实格式，支持 16/40 等异构并存；
+        #    不再被用户手填的顶点属性定义统一覆盖）
+        if hash_val:
+            workspace_stride = self._get_workspace_position_stride(hash_val)
+            if workspace_stride > 0 and workspace_stride % 4 == 0 and len(base_bytes) % workspace_stride == 0:
+                VERTEX_STRIDE = int(workspace_stride)
+                NUM_FLOATS_PER_VERTEX = VERTEX_STRIDE // 4
+                num_vertices = len(base_bytes) // VERTEX_STRIDE
+                print(f"从工作空间解析哈希 {hash_val} 的 Position 步长: {VERTEX_STRIDE}字节, 每顶点{NUM_FLOATS_PER_VERTEX}个float, 顶点数={num_vertices}")
+                return (VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, num_vertices)
+            if workspace_stride > 0:
+                print(f"警告: 哈希 {hash_val} 工作空间 Position 步长 {workspace_stride} 与缓冲区大小 {len(base_bytes)} 不整除，回退到结构体定义")
+
+        # 3) 结构体定义（顶点属性定义节点 / 默认 40B）作为回退
         if struct_definition and struct_definition.strip():
             parsed = self.parse_vertex_struct(struct_definition)
             if parsed:
                 VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, attributes = parsed
-                num_vertices = len(base_bytes) // VERTEX_STRIDE
-                print(f"使用结构体定义: 步长={VERTEX_STRIDE}字节, 每顶点{NUM_FLOATS_PER_VERTEX}个float, 顶点数={num_vertices}")
-                return (VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, num_vertices)
+                if len(base_bytes) % VERTEX_STRIDE == 0:
+                    num_vertices = len(base_bytes) // VERTEX_STRIDE
+                    print(f"使用结构体定义: 步长={VERTEX_STRIDE}字节, 每顶点{NUM_FLOATS_PER_VERTEX}个float, 顶点数={num_vertices}")
+                    return (VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, num_vertices)
+                print(f"警告: 结构体定义步长 {VERTEX_STRIDE}与缓冲区大小 {len(base_bytes)} 不整除，使用默认值")
             else:
                 print(f"警告: 结构体定义解析失败，使用默认值")
 
+        # 4) 默认 40 字节（与原逻辑一致），带整除性回退，避免静默错位
+        VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX = 40, 10
+        if len(base_bytes) % VERTEX_STRIDE != 0:
+            for candidate_stride in (16, 12, 8):
+                if len(base_bytes) % candidate_stride == 0:
+                    VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX = candidate_stride, candidate_stride // 4
+                    break
+        num_vertices = len(base_bytes) // VERTEX_STRIDE
         print(f"使用默认值: 步长={VERTEX_STRIDE}字节, 每顶点{NUM_FLOATS_PER_VERTEX}个float, 顶点数={num_vertices}")
         return (VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, num_vertices)
 
@@ -1332,7 +1415,12 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                     continue
 
                 struct_definition = self._get_vertex_struct_definition()
-                VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, num_vertices = self._detect_vertex_format(base_bytes, shapekey_bytes, struct_definition)
+                VERTEX_STRIDE, NUM_FLOATS_PER_VERTEX, num_vertices = self._detect_vertex_format(
+                    base_bytes,
+                    shapekey_bytes,
+                    struct_definition,
+                    hash_val=h,
+                )
                 print(f"    -> 检测到格式: 步长={VERTEX_STRIDE}字节, 每顶点{NUM_FLOATS_PER_VERTEX}个float, 顶点数={num_vertices}")
 
                 if h_prefix not in hash_to_stride:
@@ -1482,7 +1570,8 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                     vertex_stride, num_floats_per_vertex, num_vertices = self._detect_vertex_format(
                         base_bytes,
                         shapekey_bytes,
-                        struct_definition
+                        struct_definition,
+                        hash_val=h,
                     )
                     print(
                         f"      -> 检测到格式: 步长={vertex_stride}字节, "
@@ -1655,17 +1744,28 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         return None
 
     def _get_vertex_attrs_node(self):
+        # 「顶点属性定义」节点已下线：工作空间按 IB 动态提供格式。此处仅兼容旧
+        # 蓝图文件——残留节点可能已是未定义类型，必须探测方法存在再使用。
+        def _as_vertex_attrs(candidate):
+            if (
+                candidate is not None
+                and getattr(candidate, "bl_idname", "") == 'SSMTNode_PostProcess_VertexAttrs'
+                and callable(getattr(candidate, "get_vertex_struct_definition", None))
+            ):
+                return candidate
+            return None
+
         if not self.inputs[0].is_linked:
             return None
 
         source_node = self.inputs[0].links[0].from_node
-        if source_node.bl_idname == 'SSMTNode_PostProcess_VertexAttrs':
-            return source_node
+        matched = _as_vertex_attrs(source_node)
+        if matched is not None:
+            return matched
 
         if source_node.inputs[0].is_linked:
             prev_node = source_node.inputs[0].links[0].from_node
-            if prev_node.bl_idname == 'SSMTNode_PostProcess_VertexAttrs':
-                return prev_node
+            return _as_vertex_attrs(prev_node)
 
         return None
 
@@ -1702,19 +1802,134 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
             print(f"获取着色器模板路径时出错: {e}")
             return None
 
-    def _get_vertex_struct_definition(self):
+    def _get_workspace_vertex_struct_definition(self, hash_val):
+        """按工作空间游戏类型为指定哈希合成 VertexAttributes struct。
+
+        形态键着色器模板按固定字段名读写：position（float3 算术）、normal（float3
+        算术，仅非增量模板）、tangent（.xyz，仅非增量模板）。StructuredBuffer 的
+        行宽又必须与实际 -Position.buf 一致——同一工作空间内 16/40 字节 IB 并存，
+        因此 struct 必须逐 IB 从工作空间合成，而非用单一手填定义。
+
+        合成规则（保持模板字段算术可编译）：
+        - POSITION 12B -> float3 position；16B -> float3 position + float position_w
+        - NORMAL  12B -> float3 normal；16B -> float3 normal + float normal_w
+        - TANGENT 16B -> float4 tangent；12B -> float3 tangent
+        - 其它元素（如 4B 压缩法线）-> uint 系占位（delta 模板不触碰这些字段；
+          standard/packed 非增量模板需要 float3 normal / float4 tangent，布局
+          不满足时放弃合成并告警）
+
+        Returns:
+            合成出的 struct 文本；不可合成时返回 None。
+        """
+        workspace_stride = self._get_workspace_position_stride(hash_val)
+        if workspace_stride <= 0:
+            return None
+
+        elements = _resolve_workspace_category_elements(str(hash_val or "").strip(), "Position")
+        if not elements:
+            game_type = _resolve_workspace_game_type_by_prefix(self._extract_hash_prefix(hash_val))
+            if game_type is None:
+                return None
+            elements = [
+                element
+                for element in getattr(game_type, "D3D11ElementList", []) or []
+                if str(getattr(element, "Category", "") or "").upper() == "POSITION"
+            ]
+        if not elements:
+            return None
+
+        lines = []
+        total_bytes = 0
+        pad_index = 0
+        has_float3_normal = False
+        has_float4_tangent = False
+        for element in elements:
+            semantic = str(getattr(element, "SemanticName", "") or "").upper()
+            byte_width = int(getattr(element, "ByteWidth", 0) or 0)
+            if byte_width <= 0:
+                return None
+            if semantic == "POSITION" and byte_width == 12:
+                lines.append("    float3 position;")
+            elif semantic == "POSITION" and byte_width == 16:
+                lines.append("    float3 position;")
+                lines.append("    float position_w;")
+            elif semantic == "NORMAL" and byte_width == 12:
+                lines.append("    float3 normal;")
+                has_float3_normal = True
+            elif semantic == "NORMAL" and byte_width == 16:
+                lines.append("    float3 normal;")
+                lines.append("    float normal_w;")
+                has_float3_normal = True
+            elif semantic == "TANGENT" and byte_width == 16:
+                lines.append("    float4 tangent;")
+                has_float4_tangent = True
+            elif semantic == "TANGENT" and byte_width == 12:
+                lines.append("    float3 tangent;")
+            else:
+                field_type = _HLSL_PAD_TYPE_BY_SIZE.get(byte_width)
+                if field_type is None:
+                    return None
+                lines.append(f"    {field_type} _pad{pad_index};")
+                pad_index += 1
+            total_bytes += byte_width
+
+        if total_bytes != int(workspace_stride):
+            return None
+        if not any(line.strip() == "float3 position;" for line in lines):
+            return None
+
+        if not (has_float3_normal and has_float4_tangent):
+            print(
+                f"[ShapeKey] 哈希 {hash_val} 的工作空间布局（步长 {workspace_stride}）不含 "
+                f"float3 normal / float4 tangent，合成 struct 仅适用于增量(delta)模板；"
+                f"standard/packed 非增量模板仍需要完整 40B 布局。"
+            )
+
+        return "struct VertexAttributes {\n" + "\n".join(lines) + "\n};"
+
+    def _get_vertex_struct_definition(self, hash_val=None):
+        # 1) 工作空间合成（推荐）：与实际 -Position.buf 行宽逐 IB 一致
+        workspace_struct = None
+        workspace_stride = 0
+        if hash_val:
+            try:
+                workspace_struct = self._get_workspace_vertex_struct_definition(hash_val)
+                workspace_stride = self._get_workspace_position_stride(hash_val)
+            except Exception:
+                workspace_struct = None
+        if workspace_struct:
+            return workspace_struct
+
+        # 2) 旧蓝图兼容：历史上连接的顶点属性定义节点（节点已下线，仅兼容旧文件）
         vertex_attrs_node = self._get_vertex_attrs_node()
         if vertex_attrs_node:
-            return vertex_attrs_node.get_vertex_struct_definition()
+            struct_definition = vertex_attrs_node.get_vertex_struct_definition()
+            # 着色器 struct 的字节数必须与实际 -Position.buf 行宽一致；
+            # 当用户手填的顶点属性定义与工作空间真实步长不一致时（如定义 16 字节、
+            # 实际 40 字节），继续用它替换 struct 会让 shader 读位错乱（游戏内顶点
+            # 爆炸）。此时改用与模板一致的默认布局并显式告警。
+            if hash_val and workspace_stride > 0:
+                try:
+                    parsed = self.parse_vertex_struct(struct_definition)
+                    if parsed is not None and int(parsed[0]) != int(workspace_stride):
+                        print(
+                            f"[ShapeKey][警告] 顶点属性定义步长 {int(parsed[0])} 与工作空间实际步长 "
+                            f"{int(workspace_stride)} 不一致（哈希 {hash_val}），着色器将改用工作空间默认布局。"
+                            f"建议直接移除顶点属性定义节点，让格式完全跟随工作空间。"
+                        )
+                        return _DEFAULT_VERTEX_STRUCT_DEFINITION
+                except Exception:
+                    pass
+            return struct_definition
 
-        return "struct VertexAttributes {\n    float3 position;\n    float3 normal;\n    float4 tangent;\n};"
+        return _DEFAULT_VERTEX_STRUCT_DEFINITION
 
-    def _update_shader_file(self, shader_path, hash_slot_data, use_packed, use_delta, unique_names, unique_objects, use_optimized=False, merge_slot_files=False, drag_drive_enabled=False, drag_zone_ids=None, drag_click_stages=None, drag_stage_count=1, drag_dirs=None):
+    def _update_shader_file(self, shader_path, hash_slot_data, use_packed, use_delta, unique_names, unique_objects, use_optimized=False, merge_slot_files=False, drag_drive_enabled=False, drag_zone_ids=None, drag_click_stages=None, drag_stage_count=1, drag_dirs=None, hash_val=None):
         try:
             with open(shader_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            vertex_struct = self._get_vertex_struct_definition()
+            vertex_struct = self._get_vertex_struct_definition(hash_val=hash_val)
             if vertex_struct:
                 content = re.sub(r"struct VertexAttributes\s*\{[^}]*\};", vertex_struct, content, flags=re.DOTALL)
 
@@ -2326,6 +2541,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                         drag_click_stages=self._drag_drive_click_stages(hash_unique_names) if drag_drive_enabled else None,
                         drag_stage_count=self._drag_drive_stage_count(),
                         drag_dirs=self._drag_drive_dirs(hash_unique_names) if drag_drive_enabled else None,
+                        hash_val=hash_val,
                     ):
                         print(f"更新哈希 {hash_val} 的着色器文件失败")
 

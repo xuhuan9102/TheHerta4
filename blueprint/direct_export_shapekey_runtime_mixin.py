@@ -89,24 +89,45 @@ class DirectShapeKeyRuntimeMixin:
         return lookup
 
     def _infer_position_stride(self, drawib_model, base_bytes: bytes) -> int:
+        draw_ib = getattr(drawib_model, "draw_ib", "")
         configured_stride = self._get_configured_vertex_stride()
+
+        # 1) 工作空间游戏类型（DrawIB 模型自工作空间 SubmeshJson 解析，含数据类型
+        #    覆盖节点影响）：每个 IB 的真实 Position 步长优先，不再被用户手填的
+        #    顶点属性定义统一覆盖（否则 40 字节 IB 会被按 16 字节写出导致失效）。
+        d3d11_game_type = getattr(drawib_model, "d3d11GameType", None) or getattr(drawib_model, "d3d11_game_type", None)
+        workspace_stride = 0
+        if d3d11_game_type is not None:
+            workspace_stride = int(d3d11_game_type.CategoryStrideDict.get("Position", 0) or 0)
+
+        if workspace_stride > 0 and len(base_bytes) % workspace_stride == 0:
+            if configured_stride > 0 and configured_stride != workspace_stride:
+                LOG.warning(
+                    f"直出形态键: 顶点属性定义步长 {configured_stride} 与工作空间实际步长 "
+                    f"{workspace_stride} 不一致（draw_ib={draw_ib}），已按工作空间格式处理。"
+                    f"若出现错位请移除顶点属性定义节点。"
+                )
+            return workspace_stride
+        if workspace_stride > 0:
+            LOG.warning(
+                f"直出形态键: 工作空间 Position 步长 {workspace_stride} 与缓冲区大小 "
+                f"{len(base_bytes)} 不整除，继续尝试其它推断 draw_ib={draw_ib}"
+            )
+
+        # 2) 顶点属性定义节点（仅作回退）
         if configured_stride > 0 and len(base_bytes) % configured_stride == 0:
             return configured_stride
 
-        d3d11_game_type = getattr(drawib_model, "d3d11GameType", None) or getattr(drawib_model, "d3d11_game_type", None)
-        if d3d11_game_type is not None:
-            stride = int(d3d11_game_type.CategoryStrideDict.get("Position", 0))
-            if stride > 0:
-                return stride
-
+        # 3) 顶点数整除推断
         vertex_count = _get_model_vertex_count(drawib_model)
         if vertex_count > 0 and len(base_bytes) % vertex_count == 0:
             return int(len(base_bytes) / vertex_count)
 
+        # 4) 通用回退
         if len(base_bytes) % 12 == 0:
             return 12
 
-        raise ShapeKeyDirectExportError(f"无法推断 Position 步长: draw_ib={getattr(drawib_model, 'draw_ib', '')}")
+        raise ShapeKeyDirectExportError(f"无法推断 Position 步长: draw_ib={draw_ib}")
 
     def _calculate_object_ranges(self, runtime_infos, all_objects, sections=None):
         if sections:
