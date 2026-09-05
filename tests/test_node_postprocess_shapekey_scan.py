@@ -542,7 +542,7 @@ class NodePostprocessShapeKeyScanTests(unittest.TestCase):
         node = module.SSMTNode_PostProcess_ShapeKey()
         node.INTENSITY_START_INDEX = 100
         node.VERTEX_RANGE_START_INDEX = 200
-        node._get_vertex_struct_definition = lambda: (
+        node._get_vertex_struct_definition = lambda **_kwargs: (
             "struct VertexAttributes {\n"
             "    float3 position;\n"
             "    float3 normal;\n"
@@ -630,6 +630,84 @@ class NodePostprocessShapeKeyScanTests(unittest.TestCase):
 
     def test_shape_key_variable_mapping_ui_list_is_registered(self):
         self.assertIn(module.SSMT_UL_ShapeKeyVariableMappings, module.classes)
+
+    # ---------- 工作空间优先格式检测（形态键配置生成） ----------
+
+    def _patch_workspace_resolvers(self, stride_by_hash, prefix_game_type=None):
+        module._resolve_workspace_category_stride = lambda unique_str, category: int(
+            stride_by_hash.get(str(unique_str or "").strip(), 0) or 0
+        )
+        module._resolve_workspace_game_type_by_prefix = lambda prefix: prefix_game_type
+
+    def test_detect_vertex_format_uses_workspace_stride_per_hash_heterogeneous(self):
+        """9 个 16 字节 IB + 1 个 40 字节 IB 并存：每个 IB 取自己的工作空间步长。"""
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        base_40 = bytes(3 * 40)   # 3 顶点 × 40B
+        base_16 = bytes(3 * 16)   # 3 顶点 × 16B
+        self._patch_workspace_resolvers(
+            {"aaaa0000-1-0": 40, "bbbb1111-2-0": 16},
+        )
+
+        stride_40, floats_40, vertices_40 = node._detect_vertex_format(
+            base_40, base_40, struct_definition=None, hash_val="aaaa0000-1-0",
+        )
+        self.assertEqual((stride_40, floats_40, vertices_40), (40, 10, 3))
+
+        stride_16, floats_16, vertices_16 = node._detect_vertex_format(
+            base_16, base_16, struct_definition=None, hash_val="bbbb1111-2-0",
+        )
+        self.assertEqual((stride_16, floats_16, vertices_16), (16, 4, 3))
+
+    def test_detect_vertex_format_workspace_wins_over_conflicting_struct(self):
+        """用户手填 16 字节顶点属性定义时，40 字节 IB 不再被写成 16 字节（本次 bug 根因）。"""
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        base_40 = bytes(3 * 40)
+        self._patch_workspace_resolvers({"aaaa0000-1-0": 40})
+        struct_16 = "struct VertexAttributes {\n    float4 position;\n};"
+
+        stride, floats, vertices = node._detect_vertex_format(
+            base_40, base_40, struct_definition=struct_16, hash_val="aaaa0000-1-0",
+        )
+        self.assertEqual((stride, floats, vertices), (40, 10, 3))
+
+    def test_detect_vertex_format_falls_back_to_struct_when_workspace_absent(self):
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        base_48 = bytes(3 * 16)
+        self._patch_workspace_resolvers({})
+        struct_16 = "struct VertexAttributes {\n    float4 position;\n};"
+
+        stride, floats, vertices = node._detect_vertex_format(
+            base_48, base_48, struct_definition=struct_16, hash_val="aaaa0000-1-0",
+        )
+        self.assertEqual((stride, floats, vertices), (16, 4, 3))
+
+    def test_detect_vertex_format_legacy_default_with_divisibility_fallback(self):
+        """工作空间与结构体都不可用时：40B 默认优先，16B 缓冲走整除回退不再静默错位。"""
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        self._patch_workspace_resolvers({})
+        base_48 = bytes(3 * 16)
+
+        stride, floats, vertices = node._detect_vertex_format(
+            base_48, base_48, struct_definition=None, hash_val=None,
+        )
+        self.assertEqual((stride, floats, vertices), (16, 4, 3))
+
+    def test_workspace_stride_cache_is_per_hash(self):
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        self._patch_workspace_resolvers({"aaaa0000-1-0": 40, "bbbb1111-2-0": 16})
+        self.assertEqual(node._get_workspace_position_stride("aaaa0000-1-0"), 40)
+        self.assertEqual(node._get_workspace_position_stride("bbbb1111-2-0"), 16)
+        # 缓存命中，再次获取结果一致
+        self.assertEqual(node._get_workspace_position_stride("aaaa0000-1-0"), 40)
+
+    def test_workspace_stride_prefix_fallback_when_unique_str_unresolvable(self):
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        node._extract_hash_prefix = lambda value: str(value or "").split("-")[0]
+        module._resolve_workspace_category_stride = lambda unique_str, category: 0
+        module._resolve_workspace_game_type_by_prefix = lambda prefix: types.SimpleNamespace(
+            CategoryStrideDict={"Position": 40},
+        )
+        self.assertEqual(node._get_workspace_position_stride("cccc2222-3-0"), 40)
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,7 +42,7 @@ for pkg_name in (PKG, f"{PKG}.blueprint"):
     _pkg = _install_module(pkg_name)
     _pkg.__path__ = []
 
-_install_module("bpy", types=types.SimpleNamespace())
+_install_module("bpy", types=types.SimpleNamespace(), props=types.SimpleNamespace(BoolProperty=lambda **_k: False))
 
 
 class _StubBase:

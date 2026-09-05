@@ -21,7 +21,7 @@ for package_name in (PKG, f"{PKG}.blueprint"):
     package = _install_module(package_name)
     package.__path__ = []
 
-_install_module("bpy", types=types.SimpleNamespace())
+_install_module("bpy", types=types.SimpleNamespace(), props=types.SimpleNamespace(BoolProperty=lambda **_k: False))
 _install_module(
     f"{PKG}.blueprint.node_postprocess_base",
     SSMTNode_PostProcess_Base=type(

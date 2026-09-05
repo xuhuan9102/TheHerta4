@@ -144,47 +144,13 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 
-def _make_uv_attrs_node_with_layout(use_common_layout=True):
-    uv_attrs_node = module.SSMTNode_PostProcess_UVAttrs()
-    uv_attrs_node.uv_attributes = _FakeCollection()
-    if use_common_layout:
-        for attr_type, attr_name, apply_offset in module.COMMON_ZZMI_UV_LAYOUT:
-            item = uv_attrs_node.uv_attributes.add()
-            item.attr_type = attr_type
-            item.attr_name = attr_name
-            item.apply_offset = apply_offset
-    else:
-        item = uv_attrs_node.uv_attributes.add()
-        item.attr_type = 'float2'
-        item.attr_name = 'uv'
-        item.apply_offset = True
-    return uv_attrs_node
-
-
-def _make_uv_attrs_node_28b():
-    """ZZMI 常用 20B 布局 + half2 uv3/half2 uv4（共 28B）。"""
-    uv_attrs_node = module.SSMTNode_PostProcess_UVAttrs()
-    uv_attrs_node.uv_attributes = _FakeCollection()
-    for attr_type, attr_name, apply_offset in module.COMMON_ZZMI_UV_LAYOUT:
-        item = uv_attrs_node.uv_attributes.add()
-        item.attr_type = attr_type
-        item.attr_name = attr_name
-        item.apply_offset = apply_offset
-    for attr_name in ("uv3", "uv4"):
-        item = uv_attrs_node.uv_attributes.add()
-        item.attr_type = 'half2'
-        item.attr_name = attr_name
-        item.apply_offset = True
-    return uv_attrs_node
-
-
 class _FakeLink:
     def __init__(self, from_node):
         self.from_node = from_node
 
 
 class _FakeSocket:
-    def __init__(self, linked, from_node=None, name="", bl_idname="SSMTSocketUVAttrs"):
+    def __init__(self, linked, from_node=None, name="", bl_idname="SSMTSocket"):
         self.is_linked = linked
         self.links = [_FakeLink(from_node)] if from_node else []
         self.name = name
@@ -207,13 +173,12 @@ class UVOffsetNodeTests(unittest.TestCase):
         node = module.SSMTNode_PostProcess_UVOffset()
         node.uv_offset_variable_items = _FakeCollection()
         node.uv_objects = _FakeCollection()
-        # UVOffset 继承 Base，index 0 始终是后处理 Input 口，动态 UV 属性口从 index 1 开始
+        # UVOffset 继承 Base，index 0 始终是后处理 Input 口
         node.inputs = _FakeInputs([_FakeSocket(False, name="Input")])
         return node
 
     def test_common_zzmi_uv_layout_parses_to_20_bytes(self):
-        uv_attrs_node = _make_uv_attrs_node_with_layout(True)
-        attributes = uv_attrs_node.get_uv_attributes()
+        attributes = module.SSMTNode_PostProcess_UVOffset._default_uv_attributes()
         self.assertEqual(module.uv_attributes_total_bytes(attributes), 20)
         self.assertEqual(
             [(a['name'], a['type'], a['offset'], a['apply_offset']) for a in attributes],
@@ -225,24 +190,8 @@ class UVOffsetNodeTests(unittest.TestCase):
             ],
         )
 
-    def test_uv_attrs_node_custom_attributes(self):
-        uv_attrs_node = _make_uv_attrs_node_with_layout(False)
-        attributes = uv_attrs_node.get_uv_attributes()
-        self.assertEqual(module.uv_attributes_total_bytes(attributes), 8)
-        self.assertEqual(attributes[0]['name'], 'uv')
-        self.assertEqual(attributes[0]['type'], 'float2')
-
-    def test_uv_offset_node_reads_linked_uv_attrs_node(self):
-        uv_attrs_node = _make_uv_attrs_node_with_layout(True)
-        node = self._make_node()
-        node.inputs.append(_FakeSocket(True, uv_attrs_node, name="UV属性 a913e9a9"))
-        attributes = node._get_uv_attributes_for_prefix("a913e9a9")
-        self.assertIsNotNone(attributes)
-        self.assertEqual(len(attributes), 4)
-
     def test_generate_uv_apply_code_handles_half2_and_float2(self):
-        uv_attrs_node = _make_uv_attrs_node_with_layout(True)
-        attributes = uv_attrs_node.get_uv_attributes()
+        attributes = module.SSMTNode_PostProcess_UVOffset._default_uv_attributes()
         code, warning = module.SSMTNode_PostProcess_UVOffset._generate_uv_apply_code(attributes, 20)
         self.assertIsNotNone(code)
         self.assertIn("f16tof32", code)
@@ -255,11 +204,127 @@ class UVOffsetNodeTests(unittest.TestCase):
         self.assertNotIn("data[0]", code.split("// half2 uv0")[0])
 
     def test_generate_uv_apply_code_rejects_stride_mismatch(self):
-        uv_attrs_node = _make_uv_attrs_node_with_layout(True)
-        attributes = uv_attrs_node.get_uv_attributes()
+        attributes = module.SSMTNode_PostProcess_UVOffset._default_uv_attributes()
         code, warning = module.SSMTNode_PostProcess_UVOffset._generate_uv_apply_code(attributes, 8)
         self.assertIsNotNone(code)
         self.assertIn("越界", warning or "")
+
+    # ---------- 工作空间优先 UV 布局（UV 偏移生成） ----------
+
+    def _fake_workspace_element(self, semantic, index, category, fmt, byte_width):
+        return types.SimpleNamespace(
+            SemanticName=semantic,
+            SemanticIndex=index,
+            Category=category,
+            Format=fmt,
+            ByteWidth=byte_width,
+        )
+
+    def _fake_workspace_game_type(self, elements):
+        return types.SimpleNamespace(D3D11ElementList=elements)
+
+    def _patch_workspace_uv_resolver(self, game_type_by_prefix):
+        module._resolve_workspace_game_type_by_prefix = lambda prefix: game_type_by_prefix.get(prefix)
+
+    def test_workspace_uv_layout_resolves_20b_layout_color_excluded(self):
+        """蕾米埃尔 20B 布局：COLOR(rgba8) + half2 + float2 + half2，COLOR 不参与偏移。"""
+        game_type = self._fake_workspace_game_type([
+            self._fake_workspace_element("COLOR", 0, "Texcoord", "R8G8B8A8_UNORM", 4),
+            self._fake_workspace_element("TEXCOORD", 0, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 1, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 2, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("BLENDWEIGHTS", 0, "Blend", "R32G32B32A32_FLOAT", 16),
+        ])
+        self._patch_workspace_uv_resolver({"a913e9a9": game_type})
+
+        node = self._make_node()
+        attributes = node._get_uv_attributes_for_prefix("a913e9a9")
+
+        self.assertIsNotNone(attributes)
+        self.assertEqual(module.uv_attributes_total_bytes(attributes), 20)
+        self.assertEqual(
+            [(a['name'], a['type'], a['offset'], a['apply_offset']) for a in attributes],
+            [
+                ('color0', 'rgba8', 0, False),
+                ('texcoord0', 'half2', 4, True),
+                ('texcoord1', 'float2', 8, True),
+                ('texcoord2', 'half2', 16, True),
+            ],
+        )
+
+        code, warning = module.SSMTNode_PostProcess_UVOffset._generate_uv_apply_code(attributes, 20)
+        self.assertIsNotNone(code)
+        # texcoord0/1/2 均参与偏移，color0 不参与
+        self.assertIn("// half2 texcoord0 @ 4", code)
+        self.assertIn("// float2 texcoord1 @ 8", code)
+        self.assertIn("// half2 texcoord2 @ 16", code)
+        self.assertFalse(warning)
+
+    def test_workspace_uv_layout_resolves_24b_and_48b_heterogeneous(self):
+        """同一工作空间内 24B（多一条 texcoord3）与 48B（float color + 4×float2）并存。"""
+        game_type_24 = self._fake_workspace_game_type([
+            self._fake_workspace_element("COLOR", 0, "Texcoord", "R8G8B8A8_UNORM", 4),
+            self._fake_workspace_element("TEXCOORD", 0, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 1, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 2, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 3, "Texcoord", "R16G16_FLOAT", 4),
+        ])
+        game_type_48 = self._fake_workspace_game_type([
+            self._fake_workspace_element("COLOR", 0, "Texcoord", "R32G32B32A32_FLOAT", 16),
+            self._fake_workspace_element("TEXCOORD", 0, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 1, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 2, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 3, "Texcoord", "R32G32_FLOAT", 8),
+        ])
+        self._patch_workspace_uv_resolver({"a913e9a9": game_type_24, "7fbbcf0d": game_type_48})
+
+        node = self._make_node()
+        attributes_24 = node._get_uv_attributes_for_prefix("a913e9a9")
+        attributes_48 = node._get_uv_attributes_for_prefix("7fbbcf0d")
+
+        self.assertEqual(module.uv_attributes_total_bytes(attributes_24), 24)
+        self.assertEqual(module.uv_attributes_total_bytes(attributes_48), 48)
+
+        # 24B：四条 texcoord 均参与，color 跳过
+        self.assertEqual([a['apply_offset'] for a in attributes_24], [False, True, True, True, True])
+        # 48B：float4 color 计字节但不参与偏移
+        self.assertEqual(attributes_48[0]['name'], 'color0')
+        self.assertEqual(attributes_48[0]['type'], 'float4')
+        self.assertEqual(attributes_48[0]['size'], 16)
+        self.assertFalse(attributes_48[0]['apply_offset'])
+
+        code_48, warning_48 = module.SSMTNode_PostProcess_UVOffset._generate_uv_apply_code(attributes_48, 48)
+        self.assertIsNotNone(code_48)
+        self.assertIn("// float2 texcoord3 @ 40", code_48)
+
+    def test_workspace_uv_layout_fallback_to_default_when_all_absent(self):
+        """工作空间不可用时回退默认 20B 布局。"""
+        self._patch_workspace_uv_resolver({})
+
+        node = self._make_node()
+        attributes = node._get_uv_attributes_for_prefix("a913e9a9")
+
+        self.assertEqual(module.uv_attributes_total_bytes(attributes), 20)
+        self.assertEqual([a['name'] for a in attributes], ['color', 'uv0', 'uv1', 'uv2'])
+
+    def test_workspace_uv_layout_unknown_format_counts_bytes_but_skips_offset(self):
+        """未知 DXGI 格式的元素计入字节总数，但不产生偏移代码。"""
+        game_type = self._fake_workspace_game_type([
+            self._fake_workspace_element("TEXCOORD", 0, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 1, "Texcoord", "R10G10B10A2_UNORM", 4),
+        ])
+        self._patch_workspace_uv_resolver({"a913e9a9": game_type})
+
+        node = self._make_node()
+        attributes = node._get_uv_attributes_for_prefix("a913e9a9")
+
+        self.assertEqual(module.uv_attributes_total_bytes(attributes), 8)
+        self.assertEqual(attributes[1]['type'], 'r10g10b10a2_unorm')
+
+        code, warning = module.SSMTNode_PostProcess_UVOffset._generate_uv_apply_code(attributes, 8)
+        self.assertIsNotNone(code)
+        self.assertIn("// half2 texcoord0 @ 0", code)
+        self.assertIn("texcoord1", warning or "")
 
     def test_ensure_uv_offset_variable_map_creates_xy(self):
         node = self._make_node()
@@ -390,7 +455,6 @@ class UVOffsetNodeTests(unittest.TestCase):
         node = self._make_node()
         item = node.uv_objects.add()
         item.object_name = "LOD0.a913e9a9-56682-0.Mesh"
-        node.inputs.append(_FakeSocket(True, _make_uv_attrs_node_with_layout(True), name="UV属性 a913e9a9"))
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             ini_path = self._write_sample_mod(tmp_dir)
@@ -466,54 +530,29 @@ class UVOffsetNodeTests(unittest.TestCase):
             ],
         )
 
-    def test_get_uv_attributes_returns_default_layout_with_empty_uv_attrs_node(self):
-        # 接上 UV 属性定义节点但没有任何属性项时，也回退默认布局
-        empty_uv_attrs_node = module.SSMTNode_PostProcess_UVAttrs()
-        empty_uv_attrs_node.uv_attributes = _FakeCollection()
+    def test_execute_postprocess_two_ibs_with_own_workspace_layouts(self):
+        """两个不同 IB（20B / 28B）按各自工作空间布局分别生成着色器。"""
+        game_type_20 = self._fake_workspace_game_type([
+            self._fake_workspace_element("COLOR", 0, "Texcoord", "R8G8B8A8_UNORM", 4),
+            self._fake_workspace_element("TEXCOORD", 0, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 1, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 2, "Texcoord", "R16G16_FLOAT", 4),
+        ])
+        game_type_28 = self._fake_workspace_game_type([
+            self._fake_workspace_element("COLOR", 0, "Texcoord", "R8G8B8A8_UNORM", 4),
+            self._fake_workspace_element("TEXCOORD", 0, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 1, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 2, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 3, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 4, "Texcoord", "R16G16_FLOAT", 4),
+        ])
+        self._patch_workspace_uv_resolver({"9004a39a": game_type_20, "241deac5": game_type_28})
 
-        node = self._make_node()
-        node.inputs.append(_FakeSocket(True, empty_uv_attrs_node, name="UV属性 a913e9a9"))
-        attributes = node._get_uv_attributes_for_prefix("a913e9a9")
-        self.assertIsNotNone(attributes)
-        self.assertEqual(len(attributes), 4)
-        self.assertEqual(module.uv_attributes_total_bytes(attributes), 20)
-        self.assertEqual(attributes[0]['name'], 'color')
-        self.assertEqual(attributes[0]['apply_offset'], False)
-
-    def test_execute_postprocess_uses_default_layout_with_empty_uv_attrs_node(self):
-        empty_uv_attrs_node = module.SSMTNode_PostProcess_UVAttrs()
-        empty_uv_attrs_node.uv_attributes = _FakeCollection()
-
-        node = self._make_node()
-        item = node.uv_objects.add()
-        item.object_name = "LOD0.a913e9a9-56682-0.Mesh"
-        node.inputs.append(_FakeSocket(True, empty_uv_attrs_node, name="UV属性 a913e9a9"))
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            ini_path = self._write_sample_mod(tmp_dir)
-            node.execute_postprocess(tmp_dir)
-            with open(ini_path, "r", encoding="utf-8") as f:
-                ini_content = f.read()
-            self.assertIn("[CustomShader_a913e9a9_UVOffset]", ini_content)
-
-            shader_path = os.path.join(tmp_dir, "res", "uv_offset_a913e9a9.hlsl")
-            self.assertTrue(os.path.exists(shader_path))
-            with open(shader_path, "r", encoding="utf-8") as f:
-                shader_content = f.read()
-            self.assertIn("// half2 uv0 @ 4", shader_content)
-            self.assertIn("// float2 uv1 @ 8", shader_content)
-            self.assertIn("// half2 uv2 @ 16", shader_content)
-            self.assertNotIn("asfloat(uint2(data[0], data[1]))", shader_content)
-
-    def test_execute_postprocess_two_ibs_with_own_uv_attrs_nodes(self):
-        """两个不同 IB（20B / 28B）各自连接 UV 属性定义节点，分别生成着色器。"""
         node = self._make_node()
         item_a = node.uv_objects.add()
         item_a.object_name = "LOD0.9004a39a-20472-0.Mesh"
         item_b = node.uv_objects.add()
         item_b.object_name = "LOD0.241deac5-20472-0.Mesh"
-        node.inputs.append(_FakeSocket(True, _make_uv_attrs_node_with_layout(True), name="UV属性 9004a39a"))
-        node.inputs.append(_FakeSocket(True, _make_uv_attrs_node_28b(), name="UV属性 241deac5"))
 
         specs = [
             {"object_name": "LOD0.9004a39a-20472-0.Mesh", "h_prefix": "9004a39a", "stride": 20},
@@ -541,19 +580,25 @@ class UVOffsetNodeTests(unittest.TestCase):
                 shader_b = f.read()
             self.assertIn("UV_STREAM_UINTS_PER_VERTEX = 5", shader_a)
             self.assertIn("UV_STREAM_UINTS_PER_VERTEX = 7", shader_b)
-            # 28B 布局额外偏移 half2 uv3 / half2 uv4
-            self.assertIn("// half2 uv3 @ 20", shader_b)
-            self.assertIn("// half2 uv4 @ 24", shader_b)
-            self.assertNotIn("uv3", shader_a)
+            # 28B 布局额外偏移 half2 texcoord3 / half2 texcoord4
+            self.assertIn("// half2 texcoord3 @ 20", shader_b)
+            self.assertIn("// half2 texcoord4 @ 24", shader_b)
+            self.assertNotIn("texcoord3", shader_a)
 
-    def test_execute_postprocess_28b_prefix_without_uv_attrs_falls_back_and_skips(self):
-        """第二个 28B IB 未连接 UV 属性定义节点：回退默认 20B 布局后与 stride 不匹配，跳过。"""
+    def test_execute_postprocess_28b_prefix_unresolved_falls_back_and_skips(self):
+        """第二个 28B IB 工作空间不可解析：回退默认 20B 布局后与 stride 不匹配，跳过。"""
+        self._patch_workspace_uv_resolver({"9004a39a": self._fake_workspace_game_type([
+            self._fake_workspace_element("COLOR", 0, "Texcoord", "R8G8B8A8_UNORM", 4),
+            self._fake_workspace_element("TEXCOORD", 0, "Texcoord", "R16G16_FLOAT", 4),
+            self._fake_workspace_element("TEXCOORD", 1, "Texcoord", "R32G32_FLOAT", 8),
+            self._fake_workspace_element("TEXCOORD", 2, "Texcoord", "R16G16_FLOAT", 4),
+        ])})
+
         node = self._make_node()
         item_a = node.uv_objects.add()
         item_a.object_name = "LOD0.9004a39a-20472-0.Mesh"
         item_b = node.uv_objects.add()
         item_b.object_name = "LOD0.241deac5-20472-0.Mesh"
-        node.inputs.append(_FakeSocket(True, _make_uv_attrs_node_with_layout(True), name="UV属性 9004a39a"))
 
         specs = [
             {"object_name": "LOD0.9004a39a-20472-0.Mesh", "h_prefix": "9004a39a", "stride": 20},

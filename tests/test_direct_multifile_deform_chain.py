@@ -47,6 +47,10 @@ _install_module(
 )
 _install_module(f"{PKG}.utils.export_utils", ExportUtils=types.SimpleNamespace())
 _install_module(
+    f"{PKG}.utils.log_utils",
+    LOG=types.SimpleNamespace(info=lambda *_args, **_kwargs: None, warning=lambda *_args, **_kwargs: None),
+)
+_install_module(
     f"{PKG}.blueprint.direct_export_runtime_utils",
     apply_position_override_in_place=lambda *_args, **_kwargs: None,
     get_model_vertex_count=lambda *_args, **_kwargs: 0,
