@@ -76,7 +76,7 @@ bl_info = {
     "name": "TheHerta4",
     "description": "Blender Plugin of SSMT4",
     "blender": (4, 5, 0),
-    "version": (4, 4, 43),
+    "version": (4, 4, 44),
     "location": "View3D",
     "category": "Generic"
 }
