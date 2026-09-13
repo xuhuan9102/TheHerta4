@@ -2833,6 +2833,29 @@ class ExportEFMI:
                 # 嵌套 CommandList 内的 handling=skip 在部分 3Dmigoto 分支不一定生效，
                 # 粘合层里仍保留一份作为双保险。
                 texture_override_ib_section.append("handling = skip")
+                # [阴影 pass 单投射源]（2026-09-13 实机定位）
+                # 同一逻辑部件若同时存在 LOD0/LOD1 两个独立 component，游戏会在阴影 pass
+                # 里把该部件画多次（抓帧实证：身体 = LOD1 x2 级联 + LOD0 x1），而 EFMI 的
+                # 矩阵是「按 component 分帧独立导入」的 → 两套矩阵在运动时必然错开 →
+                # 同一张阴影图里出现两个姿态的身体 → 光照 pass 把错位的那份当成遮挡 =
+                # 身体上的自遮黑块（与地面影子同形；静止时两套重合故不可见）。
+                # 修法（实机验证有效）：只让 LOD1 那一份参与投影，LOD0 入口在阴影 pass
+                # 内不再回画。vs 过滤号 200 = ShaderOverridevs1000(f11c7e1d，阴影 pass 的
+                # 角色 VS)；颜色 pass 为 201/202/203，其余 pass 不受影响。
+                _bare_part = re.sub(r"^LOD\d+\.", "", str(submesh_model.unique_str))
+                _has_lod1_sibling = any(
+                    str(_p.get("unique_str", "")).startswith("LOD1.")
+                    and re.sub(r"^LOD\d+\.", "", str(_p.get("unique_str", ""))) == _bare_part
+                    for _p in self.merged_skeleton_components
+                )
+                _shadow_gate = (
+                    str(submesh_model.unique_str).startswith("LOD0.") and _has_lod1_sibling
+                )
+                if _shadow_gate:
+                    texture_override_ib_section.append(
+                        "; [shadow-gate] 同部件 LOD1 已在阴影 pass 投影，本入口不重复投射"
+                    )
+                    texture_override_ib_section.append("if vs != 200")
                 texture_override_ib_section.append(f"$\\EFMIv1\\component_id = {merged_component_id}")
                 # 不再写裸版 $lod_level：v10/v13 下每个 component 恒为单绘制入口
                 # （len(draws)==1，含 same-IB 折叠，draws 不追加第二入口），此写入
@@ -2862,6 +2885,8 @@ class ExportEFMI:
                 texture_override_ib_section.append(
                     "run = CommandList_Component_DrawInstances"
                 )
+                if _shadow_gate:
+                    texture_override_ib_section.append("endif")
                 if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
                     texture_override_ib_section.append("$active0 = 1")
                     if GlobalProterties.generate_branch_mod_gui():
