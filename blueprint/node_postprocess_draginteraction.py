@@ -5045,7 +5045,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             # 3DMigoto 解析期折叠（"Optimised out post"），decode 链从未执行。
             # decode CS 对空/无效 LayoutData 有完整保护（直接返回并清零），无条件运行安全。
             block.extend([
-                f"if {drag_mode_var} >= 1 && $ssmtdrag_viewport_probe_armed_{ns} == 1",
+                f"if {drag_mode_var} >= 1 && $ssmtdrag_viewport_probe_armed_{ns} == 1 && $ssmtdrag_drawn_{ns} == 1",
                 f"\trun = CustomShaderDragViewportLayoutDecode_{ns}",
                 "endif",
                 f"if {drag_mode_var} >= 1 && $ssmtdrag_viewport_probe_enabled_{ns} == 1 && time >= $ssmtdrag_viewport_probe_next_time_{ns}",
@@ -5097,11 +5097,14 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"if $ssmtdrag_mode_{ns} == 1 && ($ssmtdrag_lmb_down_{ns} == 1 || $ssmtdrag_x_down_{ns} == 1)",
                 f"\t$ssmtdrag_skheld_{ns} = 1",
                 "endif",
-                f"if $ssmtdrag_booted_{ns} == 1",
+                f"if $ssmtdrag_booted_{ns} == 1 && $ssmtdrag_drawn_{ns} == 1",
                 f"\tpre run = CommandListDragShapeKeyVarReadback_{ns}",
                 "endif",
-                # 变量→驱动缓冲同步：每帧运行、不受模式门控；排在回读之后让采用结果当帧生效
-                f"run = CustomShaderDragShapeKeyVarSync_{ns}",
+                # 变量→驱动缓冲同步：只在角色在屏（drawn，由网格覆写置位）时运行；
+                # 排在回读之后让采用结果当帧生效
+                f"if $ssmtdrag_drawn_{ns} == 1",
+                f"\trun = CustomShaderDragShapeKeyVarSync_{ns}",
+                "endif",
             ])
         ui_readback_sec = f"[CommandListDragUIReadback_{ns}]"
         if self._feature_panel() and ui_readback_sec not in sections:
@@ -5161,13 +5164,17 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # GPU 缓冲（下一帧检测消费）；随后 post 清零供下一帧分支重算。
         total_objs = sum(int(comp.get("object_count") or 0) for comp in components)
         if total_objs:
+            block.append(f"if $ssmtdrag_drawn_{ns} == 1")
             block.append(f"\tpre run = CommandListDragVisPublish_{ns}")
+            block.append("endif")
             # 同上：post 清零按全局 oid 并集发射，按组件 range 会产生重复且漏掉
             # 第二组件起的 oid（曾出现 0-14 重复、37-51 缺失）。
             for oid in self._global_object_oids(components):
                 block.append(f"post $ssmtdrag_objvis_{ns}_{oid} = 0")
         if self._feature_panel():
-            block.append(f"post run = CommandListDragUIReadback_{ns}")
+            block.append(f"if $ssmtdrag_drawn_{ns} == 1")
+            block.append(f"\tpost run = CommandListDragUIReadback_{ns}")
+            block.append("endif")
         block.extend([
             f"post $ssmtdrag_drawn_{ns} = 0",
         ])

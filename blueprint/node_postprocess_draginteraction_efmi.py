@@ -4047,10 +4047,12 @@ class DragInteractionEFMIExporter:
             # F4 变量联动：回读（boot 门控）→ 同步（每帧无条件，变量优先）；
             # 绑定项非空才发射（防悬空引用）
             lines.extend([
-                f"if $ssmtdrag_efmi_booted_{ns} == 1",
+                f"if $ssmtdrag_efmi_booted_{ns} == 1 && $ssmtdrag_efmi_drawn_{ns} == 1",
                 f"\tpre run = CommandListEFMIDragShapeKeyVarReadback_{ns}",
                 "endif",
-                f"run = CustomShaderEFMIDragShapeKeyVarSync_{ns}",
+                f"if $ssmtdrag_efmi_drawn_{ns} == 1",
+                f"\trun = CustomShaderEFMIDragShapeKeyVarSync_{ns}",
+                "endif",
             ])
         if self._feature_panel() or self.enable_hand_cursor:
             # F3 面板联动 / 手型光标：发布命中（每帧）→ 帧末 store 回读（一帧延迟
