@@ -29,6 +29,12 @@ from .vg_properties import vg_properties_list
 from .vg_backup import vg_backup_operators
 from .vg_create import vg_create_operators
 from .vg_weight_adjust import vg_weight_adjust_operators
+from .vg_partition_split import (
+    vg_partition_split_operators,
+    vg_partition_split_panels,
+    register_vg_partition_split_properties,
+    unregister_vg_partition_split_properties,
+)
 
 from .bmtp_properties import bmtp_properties_list, BMTP_Properties
 from .bmtp_bone_tools import bmtp_bone_tools_list
@@ -113,6 +119,10 @@ __all__ = [
     'vg_backup_operators',
     'vg_create_operators',
     'vg_weight_adjust_operators',
+    'vg_partition_split_operators',
+    'vg_partition_split_panels',
+    'register_vg_partition_split_properties',
+    'unregister_vg_partition_split_properties',
     'bmtp_properties_list',
     'bmtp_bone_tools_list',
     'bmtp_weight_tools_list',
@@ -191,6 +201,20 @@ def register():
             print(f"[TheHerta4]   已注册: {op_class.__name__}")
         except Exception as e:
             print(f"[TheHerta4]   注册失败: {op_class.__name__} - {e}")
+    
+    # 顶点组分区拆分（实验功能，来自独立插件 Vertex Group Partition Splitter v1.1.0）
+    try:
+        register_vg_partition_split_properties()
+        print("[TheHerta4]   已注册顶点组分区拆分属性（实验）")
+    except Exception as e:
+        print(f"[TheHerta4]   注册顶点组分区拆分属性失败: {e}")
+    
+    for op_class in vg_partition_split_operators:
+        try:
+            bpy.utils.register_class(op_class)
+            print(f"[TheHerta4]   已注册顶点组分区拆分: {op_class.__name__}")
+        except Exception as e:
+            print(f"[TheHerta4]   注册顶点组分区拆分失败: {op_class.__name__} - {e}")
     
     for op_class in bmtp_properties_list:
         try:
@@ -408,6 +432,13 @@ def register():
     
     bpy.utils.register_class(ToolkitPanel)
     bpy.utils.register_class(VGToolsPanel)
+    # 顶点组分区拆分面板（实验）：父面板 ToolkitPanel 必须先注册
+    for op_class in vg_partition_split_panels:
+        try:
+            bpy.utils.register_class(op_class)
+            print(f"[TheHerta4]   已注册顶点组分区拆分面板: {op_class.__name__}")
+        except Exception as e:
+            print(f"[TheHerta4]   注册顶点组分区拆分面板失败: {op_class.__name__} - {e}")
     bpy.utils.register_class(BMTP_MainPanel)
     bpy.utils.register_class(BMTP_BoneControlPanel)
     bpy.utils.register_class(BMTP_WeightControlPanel)
@@ -532,6 +563,11 @@ def unregister():
     bpy.utils.unregister_class(BMTP_WeightControlPanel)
     bpy.utils.unregister_class(BMTP_BoneControlPanel)
     bpy.utils.unregister_class(BMTP_MainPanel)
+    for op_class in reversed(vg_partition_split_panels):
+        try:
+            bpy.utils.unregister_class(op_class)
+        except Exception:
+            pass
     bpy.utils.unregister_class(VGToolsPanel)
     bpy.utils.unregister_class(ToolkitPanel)
     
@@ -727,6 +763,17 @@ def unregister():
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
+    
+    for op_class in reversed(vg_partition_split_operators):
+        try:
+            bpy.utils.unregister_class(op_class)
+        except Exception:
+            pass
+    
+    try:
+        unregister_vg_partition_split_properties()
+    except Exception as e:
+        print(f"[TheHerta4]   注销顶点组分区拆分属性失败: {e}")
     
     for op_class in reversed(vg_create_operators):
         try:
