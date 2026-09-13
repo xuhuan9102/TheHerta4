@@ -2842,20 +2842,37 @@ class ExportEFMI:
                 # 修法（实机验证有效）：只让 LOD1 那一份参与投影，LOD0 入口在阴影 pass
                 # 内不再回画。vs 过滤号 200 = ShaderOverridevs1000(f11c7e1d，阴影 pass 的
                 # 角色 VS)；颜色 pass 为 201/202/203，其余 pass 不受影响。
-                _bare_part = re.sub(r"^LOD\d+\.", "", str(submesh_model.unique_str))
-                _has_lod1_sibling = any(
-                    str(_p.get("unique_str", "")).startswith("LOD1.")
-                    and re.sub(r"^LOD\d+\.", "", str(_p.get("unique_str", ""))) == _bare_part
-                    for _p in self.merged_skeleton_components
+                # 判定抽到 ui/universal/efmi_shadow_gate.py（纯逻辑、可单测）。
+                # 配对键 = 各部件的**源物体名集合**（同一物体导出的各 LOD 共用同一键）：
+                # 实机身体的 LOD0/LOD1 是两个不同 IB，按名字配对永远配不上（曾因此失效）。
+                from .efmi_shadow_gate import (
+                    efmi_lod_index,
+                    efmi_shadow_gate_needed,
+                    efmi_shadow_gate_open_lines,
                 )
-                _shadow_gate = (
-                    str(submesh_model.unique_str).startswith("LOD0.") and _has_lod1_sibling
+                _shadow_keys = getattr(self, "_efmi_shadow_part_keys", None)
+                if _shadow_keys is None:
+                    _by_part, _keep_keys = {}, set()
+                    for _sm in self.submesh_model_list:
+                        _names = frozenset(
+                            str(getattr(_dc, "obj_name", "") or "")
+                            for _dc in (getattr(_sm, "drawcall_model_list", None) or [])
+                            if str(getattr(_dc, "obj_name", "") or "")
+                        )
+                        if not _names:
+                            continue
+                        _by_part[_sm.unique_str] = _names
+                        if efmi_lod_index(_sm.unique_str) == 1:
+                            _keep_keys.add(_names)
+                    _shadow_keys = (_by_part, frozenset(_keep_keys))
+                    self._efmi_shadow_part_keys = _shadow_keys
+                _shadow_gate = efmi_shadow_gate_needed(
+                    efmi_lod_index(submesh_model.unique_str),
+                    _shadow_keys[0].get(submesh_model.unique_str),
+                    _shadow_keys[1],
                 )
                 if _shadow_gate:
-                    texture_override_ib_section.append(
-                        "; [shadow-gate] 同部件 LOD1 已在阴影 pass 投影，本入口不重复投射"
-                    )
-                    texture_override_ib_section.append("if vs != 200")
+                    texture_override_ib_section.extend(efmi_shadow_gate_open_lines())
                 texture_override_ib_section.append(f"$\\EFMIv1\\component_id = {merged_component_id}")
                 # 不再写裸版 $lod_level：v10/v13 下每个 component 恒为单绘制入口
                 # （len(draws)==1，含 same-IB 折叠，draws 不追加第二入口），此写入
