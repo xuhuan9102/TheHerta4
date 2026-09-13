@@ -32,6 +32,11 @@ class _FakeIniSection:
     def append(self, line):
         self.SectionLineList.append(line)
 
+    def extend(self, lines):
+        # 与 common/m_ini_builder.M_IniSection 同 API（阴影门控发射侧用 extend）
+        for line in lines:
+            self.append(line)
+
     def new_line(self):
         self.SectionLineList.append("")
 
@@ -66,6 +71,8 @@ class _FakeSectionType:
     CommandList = "CommandList"
     MergedSkeleton = "MergedSkeleton"
     TextureOverrideVertexLimitRaise = "TextureOverrideVertexLimitRaise"
+    # EFMI 阴影 pass 单投射源门控依赖的段类型（阴影 PS 的 ShaderOverride 注册段）
+    ShaderOverride = "ShaderOverride"
 
 
 class _FakeExportUnity:
@@ -297,6 +304,11 @@ class ShaderReplaceExportPathTests(unittest.TestCase):
         self.zzmi_module = _load_module(
             f"{self.pkg}.ui.universal.zzmi",
             "ui/universal/zzmi.py",
+        )
+        # EFMI 阴影门控判定/行构造模块（efmi.py 的 generate_ini_file 按需导入）
+        self.shadow_gate_module = _load_module(
+            f"{self.pkg}.ui.universal.efmi_shadow_gate",
+            "ui/universal/efmi_shadow_gate.py",
         )
         self.efmi_module = _load_module(
             f"{self.pkg}.ui.universal.efmi",

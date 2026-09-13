@@ -16,6 +16,10 @@ class M_SectionType:
     TextureOverrideGeneral = "TextureOverrideGeneral" # 除VB IB VLR之外的通用类型
     TextureOverrideShapeKeys = "TextureOverrideShapeKeys" # Unreal形态键专用，目前只测试了WWMI
 
+    # 纯 ShaderOverride 注册段（注册 filter_index 供 ini 条件判 pass 用；
+    # EFMI 阴影 pass 单投射源门控靠它让 `if ps != <号>` 可判）
+    ShaderOverride = "ShaderOverride"
+
     IBSkip = "IBSkip"
 
     ResourceBuffer = "ResourceBuffer"
@@ -61,6 +65,13 @@ class M_IniSection:
 
     def append(self,line:str):
         self.SectionLineList.append(line)
+
+    def extend(self,lines) -> None:
+        '''
+        append multiple lines.
+        '''
+        for line in lines:
+            self.append(line)
 
     def new_line(self):
         '''
@@ -211,6 +222,8 @@ class M_IniBuilder:
         self.__append_section_line(M_SectionType.TextureOverrideShapeKeys)
 
         self.__append_section_line(M_SectionType.TextureOverrideGeneral)
+
+        self.__append_section_line(M_SectionType.ShaderOverride)
 
         self.__append_section_line(M_SectionType.CommandList)
 
