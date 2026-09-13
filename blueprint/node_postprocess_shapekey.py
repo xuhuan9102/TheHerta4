@@ -300,12 +300,35 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
 
     def ensure_shape_key_variable_map(self, shape_key_names):
         normalized_names = sorted({str(name or "").strip() for name in shape_key_names if str(name or "").strip()})
+        # 阶段一：先把所有缺失的项一次性补齐（每个新项只写 shape_key_name）。
+        # 绝不能“一边缓存 item 引用一边 add()”：节点上的 CollectionProperty 元素在底层
+        # 是连续存放的，add() 扩容会整块搬移元素内存（打开文件后首次 add 必然搬移），
+        # 此前取得的 item 引用随即失效；再拿失效引用写属性（尤其是需要新建 IDProperty
+        # 的 IDP_AddToGroup）就是访问已释放内存，会直接闪退。
+        known_names = {
+            str(getattr(item, "shape_key_name", "") or "").strip()
+            for item in self.shapekey_variable_items
+        }
+        known_names.discard("")
+
+        created_count = 0
+        newly_created_names = set()
+        for shape_key_name in normalized_names:
+            if shape_key_name in known_names:
+                continue
+            new_item = self.shapekey_variable_items.add()
+            new_item.shape_key_name = shape_key_name
+            known_names.add(shape_key_name)
+            newly_created_names.add(shape_key_name)
+            created_count += 1
+
+        # 阶段二：add() 全部结束后再建立缓存并写入，此后不再 add()/remove()，
+        # 缓存中的引用在整个写入过程中保持有效。
         existing_by_name = {
             item.shape_key_name: item
             for item in self.shapekey_variable_items
             if str(getattr(item, "shape_key_name", "") or "").strip()
         }
-        created_count = 0
         backfilled_count = 0
         refreshed_count = 0
 
@@ -313,12 +336,8 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         for shape_key_name in normalized_names:
             existing = existing_by_name.get(shape_key_name)
             if existing is None:
-                item = self.shapekey_variable_items.add()
-                item.shape_key_name = shape_key_name
-                item.assigned_variable_name = allocate_shape_key_variable_name(shape_key_name)
-                item.custom_variable_name = normalize_variable_name(item.assigned_variable_name)
-                created_count += 1
-                rebuilt_items.append(item)
+                # 阶段一已补齐，理论上不会走到这里
+                continue
             else:
                 old_assigned = normalize_variable_name(getattr(existing, "assigned_variable_name", "") or "")
                 old_custom = normalize_variable_name(getattr(existing, "custom_variable_name", "") or "")
@@ -336,7 +355,9 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                     )
                     if not old_custom:
                         existing.custom_variable_name = normalize_variable_name(existing.assigned_variable_name)
-                    backfilled_count += 1
+                    # 新建项已计入 created_count，不再计为回填
+                    if shape_key_name not in newly_created_names:
+                        backfilled_count += 1
                 else:
                     # 已存在预分配：用当前规则重算“理想名”，判断是否需要刷新。
                     # 会触发刷新的场景：

@@ -122,6 +122,64 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 
+class _RelocatingItem:
+    """模拟 Blender 的 PropertyGroup 元素：一旦集合搬移内存，旧引用即失效。"""
+
+    _DEFAULTS = {
+        "shape_key_name": "",
+        "assigned_variable_name": "",
+        "custom_variable_name": "",
+        "export_enabled": True,
+        "drag_zone_id": -1,
+        "drag_click_stage": 1,
+        "drag_dir_id": "-1",
+    }
+
+    def __init__(self, **kwargs):
+        object.__setattr__(self, "_freed", False)
+        data = dict(self._DEFAULTS)
+        data.update(kwargs)
+        object.__setattr__(self, "_data", data)
+
+    def _check_alive(self):
+        if object.__getattribute__(self, "_freed"):
+            raise RuntimeError("访问了已失效的形态键条目引用（use-after-free）")
+
+    def __getattr__(self, name):
+        self._check_alive()
+        return object.__getattribute__(self, "_data")[name]
+
+    def __setattr__(self, name, value):
+        self._check_alive()
+        object.__getattribute__(self, "_data")[name] = value
+
+
+class _RelocatingCollection(list):
+    """模拟 CollectionProperty 的内存搬移语义。
+
+    ``add()``/``remove()`` 会整块搬移元素内存，使此前取得的元素引用全部失效；
+    这里用「旧对象标记失效 + 替换为新对象」表达同一效果：沿用旧引用的实现会抛
+    ``RuntimeError``，而不是像 ``list`` 那样静默通过。
+    """
+
+    def _relocate(self):
+        for index, item in enumerate(self):
+            object.__setattr__(item, "_freed", True)
+            list.__setitem__(
+                self, index, _RelocatingItem(**object.__getattribute__(item, "_data"))
+            )
+
+    def add(self):
+        self._relocate()
+        item = _RelocatingItem()
+        list.append(self, item)
+        return item
+
+    def remove(self, index):
+        self._relocate()
+        del self[index]
+
+
 class NodePostprocessShapeKeyScanTests(unittest.TestCase):
     """测试形态键后处理扫描节点：收集和变量映射管理"""
 
@@ -357,6 +415,88 @@ class NodePostprocessShapeKeyScanTests(unittest.TestCase):
         self.assertFalse(preserved.export_enabled)
         added = next(item for item in node.shapekey_variable_items if item.shape_key_name == "D")
         self.assertTrue(added.export_enabled)
+
+    def test_ensure_shape_key_variable_map_survives_collection_growth(self):
+        """add() 搬移元素内存后，循环前建立的既有条目缓存不得再被使用。
+
+        真实崩溃路径：``shapekey_variable_items.add()`` 扩容会整块搬移元素内存，
+        循环前建立的 ``existing_by_name`` 缓存里的条目引用随即失效；若之后还要按名单
+        读取这些条目（例如新形态键按名称排序后排在既有条目之前），读写已释放内存
+        就会直接闪退。因此实现必须先把缺失条目全部补齐，再建立缓存并写入属性。
+        """
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        node.shapekey_variable_items = _RelocatingCollection([
+            _RelocatingItem(shape_key_name="A", assigned_variable_name="Freq_A", custom_variable_name="Freq_A"),
+            _RelocatingItem(shape_key_name="B", assigned_variable_name="Freq_B", custom_variable_name="Freq_B"),
+            _RelocatingItem(shape_key_name="C", assigned_variable_name="Freq_C", custom_variable_name="Freq_C"),
+        ])
+
+        # 名单内部会排序：新键名 "0D" 排在 A/B/C 之前，因此 add() 发生在读取既有条目
+        # 之前，实现若沿用 add() 之前建立的缓存引用，这里就会命中已释放内存。
+        created_count, backfilled_count = node.ensure_shape_key_variable_map(["0D", "A", "B", "C"])
+
+        self.assertEqual(created_count, 1)
+        # 新建项只算 created、不得再算成回填：否则扫描算子会误报「回填变量框 N 项」
+        self.assertEqual(backfilled_count, 0)
+        # 阶段二必须真的给新建项写上预分配名（统计对但名字没写 = 预分配静默失效）
+        created_item = next(
+            item for item in node.shapekey_variable_items if item.shape_key_name == "0D"
+        )
+        self.assertEqual(created_item.assigned_variable_name, "Freq_0D")
+        self.assertEqual(created_item.custom_variable_name, "Freq_0D")
+        # 名称集合未变化时不重建（保持既有顺序），仅补齐缺失条目
+        self.assertEqual(
+            [item.shape_key_name for item in node.shapekey_variable_items],
+            ["A", "B", "C", "0D"],
+        )
+
+    def test_ensure_shape_key_variable_map_rebuild_survives_collection_growth(self):
+        """集合增长且存在过期条目时会走重建路径，序列化用的 rebuilt_items 同样不能失效。"""
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        node.shapekey_variable_items = _RelocatingCollection([
+            _RelocatingItem(shape_key_name="A", assigned_variable_name="Freq_A", custom_variable_name="Freq_A"),
+            _RelocatingItem(shape_key_name="B", assigned_variable_name="Freq_B", custom_variable_name="Freq_B"),
+            _RelocatingItem(shape_key_name="C", assigned_variable_name="Freq_C", custom_variable_name="Freq_C"),
+            _RelocatingItem(shape_key_name="D", assigned_variable_name="Freq_D", custom_variable_name="Freq_D"),
+            _RelocatingItem(shape_key_name="E", assigned_variable_name="Freq_E", custom_variable_name="Freq_E"),
+        ])
+
+        # A/B/C 过期 + F 新增：既触发 add()，也触发按新名单重建
+        created_count, backfilled_count = node.ensure_shape_key_variable_map(["D", "E", "F"])
+
+        self.assertEqual(created_count, 1)
+        self.assertEqual(backfilled_count, 0)
+        self.assertEqual(
+            [item.shape_key_name for item in node.shapekey_variable_items],
+            ["D", "E", "F"],
+        )
+        # 重建走的是序列化字典：新建项的预分配名必须被带进新条目
+        rebuilt = {item.shape_key_name: item for item in node.shapekey_variable_items}
+        self.assertEqual(rebuilt["F"].assigned_variable_name, "Freq_F")
+        self.assertEqual(rebuilt["F"].custom_variable_name, "Freq_F")
+        self.assertEqual(rebuilt["D"].assigned_variable_name, "Freq_D")
+
+    def test_ensure_shape_key_variable_map_counts_created_and_backfilled_separately(self):
+        """同一名单里既有新建项、又有 assigned 为空的既有条目：两类统计必须分开计。"""
+        node = module.SSMTNode_PostProcess_ShapeKey()
+        node.shapekey_variable_items = _RelocatingCollection([
+            # 既有但从未预分配 → 走回填分支，计 backfilled
+            _RelocatingItem(shape_key_name="A"),
+            _RelocatingItem(shape_key_name="B", assigned_variable_name="Freq_B", custom_variable_name="Freq_B"),
+        ])
+
+        created_count, backfilled_count = node.ensure_shape_key_variable_map(["A", "B", "C"])
+
+        self.assertEqual((created_count, backfilled_count), (1, 1))
+        by_name = {item.shape_key_name: item for item in node.shapekey_variable_items}
+        # 既有空条目被回填，且 custom 与 assigned 一致
+        self.assertEqual(by_name["A"].assigned_variable_name, "Freq_A")
+        self.assertEqual(by_name["A"].custom_variable_name, "Freq_A")
+        # 新建项被预分配
+        self.assertEqual(by_name["C"].assigned_variable_name, "Freq_C")
+        self.assertEqual(by_name["C"].custom_variable_name, "Freq_C")
+        # 用户手改过的 custom 名不得被覆盖
+        self.assertEqual(by_name["B"].custom_variable_name, "Freq_B")
 
     def test_parse_classification_text_final_skips_unchecked_shape_keys(self):
         """测试解析分类文本时跳过未勾选导出的形态键及其物体行"""
