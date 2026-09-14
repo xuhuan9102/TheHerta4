@@ -15,8 +15,9 @@
   3. **pass ps 必须由抓帧推导**：无 RT（NumViews==0）且绘制了本模组部件的 ps 全都要
      注册（实机 08-31 抓帧实测有 3 个），只注册常量那一个会漏掉其余深度/阴影 pass；
      同一 ps 若也用于有 RT 的 pass 则剔除（不敢门控）；
-  4. 阶段标签 = 1718.2（生态「阴影阶段」既有编号，对齐 RabbitFX $RabbitFXShadow，
-     避免顶掉它的 ShaderRegex 标签）；门控行 = `if ps != 1718.2`；
+  4. 阶段标签 = **私有号段 99001**（实机事故回归守卫：v4.4.45 首版曾借用 RabbitFX 的
+     1718.2，结果它的可见 pass 标签把本门控关掉 → 可见外壳消失、只剩背面；门控行 =
+     `if ps != 99001`，且标签不得落在 1718.x 这类别家号段上）；
   5. ShaderOverride 注册段内容（hash / filter_index / allow_duplicate_hash）。
 """
 import importlib.util
@@ -423,16 +424,23 @@ class GateLineTests(unittest.TestCase):
         lines = GATE.efmi_shadow_gate_open_lines()
         self.assertEqual(len(lines), 2)
         self.assertIn("shadow-gate", lines[0])
-        self.assertEqual(lines[1], "if ps != 1718.2")
-        self.assertEqual(GATE.EFMI_SHADOW_PS_FILTER_INDEX, 1718.2)
+        self.assertEqual(lines[1], "if ps != 99001")
+        self.assertEqual(GATE.EFMI_SHADOW_PS_FILTER_INDEX, 99001)
         self.assertEqual(GATE.EFMI_SHADOW_KEEP_LOD, 1)
         self.assertEqual(GATE.EFMI_SHADOW_GATE_LOD, 0)
 
-    def test_stage_tag_text_and_ecosystem_alignment(self):
-        """标签值 = 生态「阴影阶段」既有编号（RabbitFX $RabbitFXShadow = 1718.2）。"""
-        self.assertEqual(GATE.efmi_shadow_filter_index_text(), "1718.2")
+    def test_stage_tag_is_private_number(self):
+        """回归守卫（2026-09-15 实机事故）：阶段标签必须是私有号段，**不得**借用别家 mod 的号。
+
+        v4.4.45 首版把标签写成 RabbitFX 的 1718.2 → RabbitFX 给它改写的**可见 G-buffer**
+        shader 打同一个号 → `if ps != 1718.2` 在可见 pass 里也不成立 → 门控关闭 →
+        `handling = skip` 之外那份 LOD0 外壳消失（实机：正面被剔、只剩背面）。
+        """
+        self.assertEqual(GATE.efmi_shadow_filter_index_text(), "99001")
         self.assertEqual(GATE.EFMI_SHADOW_FALLBACK_PS_HASHES,
                          (GATE.EFMI_SHADOW_PASS_PS_HASH,))
+        for foreign in (1718.1, 1718.2, 1718.3, 200, 201, 202, 203, 204, 99001.5):
+            self.assertNotEqual(GATE.EFMI_SHADOW_PS_FILTER_INDEX, foreign)
 
     def test_override_lines_single_hash(self):
         lines = GATE.efmi_shadow_override_lines(
@@ -441,7 +449,7 @@ class GateLineTests(unittest.TestCase):
         )
         self.assertEqual(lines[0], "[ShaderOverride_ShadowPS_ModTest]")
         self.assertEqual(lines[1], "hash = d7bb9dd57f5b70c6")
-        self.assertEqual(lines[2], "filter_index = 1718.2")
+        self.assertEqual(lines[2], "filter_index = 99001")
         self.assertEqual(lines[3], "allow_duplicate_hash = overrule")
 
     def test_override_lines_register_all_derived_hashes_with_one_tag(self):
@@ -453,7 +461,7 @@ class GateLineTests(unittest.TestCase):
         for index, ps_hash in enumerate(REAL_SHADOW_PS, start=1):
             self.assertIn("[ShaderOverride_ShadowPS_ModTest_%d]" % index, text)
             self.assertIn("hash = " + ps_hash, text)
-        self.assertEqual(text.count("filter_index = 1718.2"), len(REAL_SHADOW_PS))
+        self.assertEqual(text.count("filter_index = 99001"), len(REAL_SHADOW_PS))
         self.assertEqual(text.count("allow_duplicate_hash = overrule"), len(REAL_SHADOW_PS))
 
     def test_override_lines_default_to_fallback(self):
@@ -496,7 +504,7 @@ class InBuilderWiringTests(unittest.TestCase):
         self.assertIn("[ShaderOverride_ShadowPS_ModTest_1]", text)
         self.assertIn("[ShaderOverride_ShadowPS_ModTest_3]", text)
         self.assertIn("hash = " + REAL_SHADOW_PS[0], text)
-        self.assertIn("filter_index = 1718.2", text)
+        self.assertIn("filter_index = 99001", text)
         self.assertIn(";MARK:ShaderOverride", text)
 
 

@@ -39,13 +39,21 @@ LOD0 入口在这些 pass 内不再回画（handling = skip 仍在门控外，�
      必须在**着色器里**用 ``asint(...) == asint(-0.0)`` 判，不是普通 ini 条件。
      所以「无 RT」这个判据只在**导出期**可用——这正是本模块的推导入口。
 
-3. **阶段标签值必须与生态对齐（``EFMI_SHADOW_PS_FILTER_INDEX = 1718.2``）**。
-   d3dx 文档（d3dx.ini:855-856）：ShaderOverride 的 filter_index **优先级高于**
-   ShaderRegex。RabbitFX 用 ``[ShaderRegexShadow] filter_index = 1718.2``
-   （``$RabbitFXShadow``）标「阴影阶段」；若我们把同一个 shader 注册成别的标签值，
-   就会把它的标签顶掉、让它的 ``ps == $RabbitFXShadow`` 静默失效。
-   用同一个值注册时，即使顶掉也等价（实测它 Shadow 类 pattern 命中的 ps 目前不含
-   d7bb9dd57f5b70c6，但多 hash 注册后会碰到其中一些，故必须对齐）。
+3. **阶段标签值必须是私有号段（``EFMI_SHADOW_PS_FILTER_INDEX = 99001``），绝不能借用
+   别家 mod 的号**。这是一次实机事故换来的教训（2026-09-15，v4.4.45 首版曾写成 1718.2）：
+   - RabbitFX 会给它改写的 shader 打 ``filter_index = 1718.2``，而它改写的正是**角色可见
+     G-buffer 的 shader**。实测该角色有 **5 个可见 ps**（816908364e93e433 / 6ad403320174e5dc /
+     31e969822a004ce4 / f3926abc95fa801a / 00cf31fc5c40c10d）被它打了 1718.2。
+   - 于是 ``if ps != 1718.2`` 在**可见 pass** 里也不成立 → 门控关闭 → 该部件 LOD0 那份
+     不重画，而 ``handling = skip`` 又压掉了原版绘制 → **可见外壳整块消失，只剩内侧/背面**
+     （实机症状："正面被剔除，只剩背面"）。
+   - 换回私有 99001 后：RabbitFX 的 1718.x 标签碰不到本门控（只有我们自己的注册段会把
+     ``ps`` 置成 99001，而那正是深度/阴影 pass）→ 自遮黑块修复与 FX 共存。
+   - 当初"与生态对齐同值"的推理是**方向反了**：风险不是"我们的标签顶掉别家条件"，而是
+     **别家的标签会关掉我们的门控**。d3dx 的优先级规则（ShaderOverride 优先于 ShaderRegex）
+     只在两边都命中同一个 shader 时才是"同值等价"。
+   - 私有号段的唯一代价：若将来别家也用 99001，我们的 override 可能顶掉它的标签；因此
+     99001 是「本工具专用」的保留号，改动它前先全机 grep 一遍。
 
 **pass ps 全集是导出期从抓帧推导的，不是硬编常量（2026-09-13 实测缺口）**：
 深度/阴影类 pass 不止一个 ps。按「NumViews==0 且绘制了本模组部件」统计 08-31 抓帧：
@@ -72,9 +80,10 @@ import re
 EFMI_SHADOW_PASS_PS_HASH = "d7bb9dd57f5b70c6"
 EFMI_SHADOW_FALLBACK_PS_HASHES = (EFMI_SHADOW_PASS_PS_HASH,)
 
-# 阶段标签：生态里「阴影阶段」的既有编号（RabbitFX 的 $RabbitFXShadow）。
-# 见模块文档第 3 条——换值会顶掉别的 mod 的 ShaderRegex 标签。
-EFMI_SHADOW_PS_FILTER_INDEX = 1718.2
+# 阶段标签：**本工具专用的私有号段**（见模块文档第 3 条——实机事故：借用 RabbitFX 的
+# 1718.2 会让它的可见 pass 标签把本门控关掉，导致可见外壳消失）。
+# 改动前先全机 grep 一遍，确认没有别的 mod 用这个号。
+EFMI_SHADOW_PS_FILTER_INDEX = 99001
 
 # 参与投影的 LOD 与需要被门控的 LOD（实机验证的组合：留 LOD1，门控 LOD0）
 EFMI_SHADOW_KEEP_LOD = 1
@@ -202,7 +211,7 @@ def efmi_shadow_gate_needed(
 
 
 def efmi_shadow_filter_index_text():
-    """阶段标签的 ini 字面量（1718.2 保持小数；整数值去掉 .0）。"""
+    """阶段标签的 ini 字面量（整数直接输出；将来若改回小数，也能输出 1718.2 那样的形式）。"""
     value = EFMI_SHADOW_PS_FILTER_INDEX
     try:
         number = float(value)
@@ -346,8 +355,9 @@ def efmi_shadow_override_lines(section_name, ps_hashes=None):
 
     - 每个 hash 一个段（一段只能匹配一个 hash）；多个 hash 时段名加 ``_N`` 后缀。
     - ``allow_duplicate_hash = overrule``：同 hash 可能另有其它 ShaderOverride
-      （参考模组/框架/后处理导出），允许重复注册并由本段生效。标签值与生态一致
-      （1718.2），所以顶掉 RabbitFX 那类 ShaderRegex 标签也是等价的。
+      （参考模组/框架/后处理导出），允许重复注册并由本段生效。标签是本工具私有号段
+      （见模块文档第 3 条），不要改成别家 mod 用的号（如 1718.x）——那会让别家的阶段
+      标签把本门控在可见 pass 里关掉。
     """
     base_name = str(section_name or "").strip() or "ShaderOverride_ShadowPS"
     hashes = [
