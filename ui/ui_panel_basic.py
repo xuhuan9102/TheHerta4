@@ -367,7 +367,7 @@ class PanelBasicInformation(bpy.types.Panel):
             or BlueprintExportHelper.BLUEPRINT_NONE_IDENTIFIER
         )
 
-        layout.label(text="TheHerta4 v4.4.46", icon='INFO')
+        layout.label(text="TheHerta4 v4.4.47", icon='INFO')
         layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.ssmtlocation)
         layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)
         layout.label(text=TR.translate("当前游戏预设: ") + GlobalConfig.logic_name)
