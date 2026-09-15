@@ -1116,8 +1116,26 @@ class SubMeshModel:
                 if not deform_data:
                     continue
 
+                # ★ 2026-09-15（吸收自 TheHerta4Test_20260915）：用户合并/权重操作会在
+                #   .blend 里留下 NaN/inf/>1 的权重，下面 `1.0 / total_weight` 在 total
+                #   为 NaN 时会把整组权重都乘成 NaN（渲染侧这些顶点变成垃圾，逐帧闪烁
+                #   = 腿部抖动）。先就地清洗再归一。
+                for group_index in list(deform_data.keys()):
+                    w = deform_data[group_index]
+                    if not math.isfinite(w) or w < 0.0:
+                        deform_data[group_index] = 0.0
+                    elif w > 1.0:
+                        deform_data[group_index] = 1.0
+
                 total_weight = sum(deform_data.values())
-                if total_weight <= 0.0 or abs(total_weight - 1.0) <= 1e-7:
+                if total_weight <= 0.0:
+                    # 全 0：把第一个组的权重补成 1，避免顶点塌到原点
+                    first = next(iter(deform_data), None)
+                    if first is not None:
+                        deform_data[first] = 1.0
+                        changed_count += 1
+                    continue
+                if abs(total_weight - 1.0) <= 1e-7:
                     continue
 
                 inv_total = 1.0 / total_weight
