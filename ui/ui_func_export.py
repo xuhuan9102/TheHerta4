@@ -179,6 +179,21 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         BlueprintExportHelper.reset_direct_export_runtime_state(clear_postprocess_caches=True)
         TimerUtils.end_stage("蓝图验证")
 
+        # 合并骨架专用（吸收自 TheHerta4Test_20260915）：重新 dump / 少提取部件之后，
+        # 工作空间的全局骨骼编号会整体重排（common/zzmi_skeleton.py::build_vg_maps 按
+        # 部件排序 + 局部索引分配槽位），而工程里已经合并过的物体，顶点组名字还停留在
+        # **上一次导入**的编号。直接导出的话，旧编号在新工作空间里指向别的骨骼，游戏内
+        # 就是塌陷 / 侧躺 / 「面筋人」。
+        # 这里在写任何文件之前先把旧编号迁移到当前编号（判定与安全边界见
+        # common/vgroup_id_migration.py；只动判定为旧编号的物体）。
+        if GlobalConfig.logic_name in (LogicName.EFMI, LogicName.ZZMI):
+            if GlobalProterties.auto_migrate_stale_vgroup_ids():
+                from ..common import vgroup_id_migration
+
+                vgroup_id_migration.auto_migrate_scene(
+                    bpy.data.objects, GlobalConfig.path_workspace_folder()
+                )
+
         LOG.start_collecting()
         BluePrintModel.clear_object_name_mapping()
         GlobalKeyCountHelper.initialize()

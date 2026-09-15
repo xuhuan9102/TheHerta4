@@ -190,6 +190,71 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    auto_migrate_stale_vgroup_ids: bpy.props.BoolProperty(
+        name="导出前自动迁移旧骨骼编号",
+        description=(
+            "【只影响 ZZMI/EFMI 的合并骨架】重新 dump / 少提取部件之后，工作空间的"
+            "全局骨骼编号会整体重排，而工程里合并过的物体顶点组名字还停留在上一次导入的"
+            "编号 —— 直接导出的话，旧编号在新工作空间里指向别的骨骼（游戏内塌陷、错位、"
+            "侧躺、面筋人）。\n"
+            "勾选 = 导出前自动按『同一部件 + 同一局部索引 = 同一根骨骼』把旧编号换成新编号"
+            "（只动判定为旧编号的物体；当前编号的一个都不碰；没有对应关系的部件会点名跳过）。\n"
+            "不勾选 = 完全按工程里的现状导出，需要时用面板上的『迁移旧骨骼编号』按钮手动执行。"
+        ),
+        default=True,
+    ) # type: ignore
+
+    zzmi_removed_parts_keep_original: bpy.props.BoolProperty(
+        name="删掉的部件交回游戏画原版",
+        description=(
+            "【只影响绝区零(ZZMI)的合并骨架模式】把部件从蓝图里断链接/删节点以后，"
+            "这个开关决定插件怎么处理：\n"
+            "勾选 = 该部件完全不进 mod（不补占位、不抑制原版），游戏照常画原版 —— "
+            "适合『我不想要这个部件』；\n"
+            "不勾选 = 保持旧行为：如果它的骨骼还被别的部件引用，就补一个 3 顶点占位"
+            "把游戏原版顶掉（防止『join 到别的物体』时重复绘制）。\n"
+            "注意：如果你把部件 join 合并进了别的物体，请**取消勾选**，否则会出现重影。"
+        ),
+        default=True,
+    ) # type: ignore
+
+    zzmi_morph_parts_keep_geometry: bpy.props.BoolProperty(
+        name="表情部件（脸）整份交回游戏",
+        description=(
+            "【只影响绝区零(ZZMI)】绝区零的脸部表情不是播动画，而是游戏每帧用计算着色器\n"
+            "把表情算进顶点、再拷进变形阶段的顶点缓冲。插件如果照常规把那个顶点缓冲换成\n"
+            "mod 的静态顶点，表情就会整帧被丢掉（现象：脸正常但表情死住）。\n"
+            "勾选（默认）= 表情部件整份交回游戏：表情、贴图、UV 全用原版（一定正确）。\n"
+            "不勾选 = 老行为：连几何一起替换，表情会丢、贴图与 UV 也可能错乱。\n"
+            "注意：勾选时你对这个部件做的改动（几何/贴图）不会生效 —— 想改脸请先取消勾选，"
+            "但要接受表情丢失。"
+        ),
+        default=True,
+    ) # type: ignore
+
+    zzmi_morph_parts_list: bpy.props.StringProperty(
+        name="表情部件名单",
+        description=(
+            "手动指定哪些部件按『表情部件』处理：填 DrawIB（如 c28e6303）或物体名里的\n"
+            "一段文字（如 脸），用逗号分隔。留空 = 自动判断（按部件的计算着色器信息）。\n"
+            "自动判断不准时用这里兜底。"
+        ),
+        default="",
+    ) # type: ignore
+
+    zzmi_morph_parts_texture_only: bpy.props.BoolProperty(
+        name="表情部件只换贴图（不改几何）",
+        description=(
+            "勾上 = 表情部件走『贴图路径』：\n"
+            "  · 变形阶段（顶点/权重）完全不碰 → 游戏的表情链路完整，表情正常；\n"
+            "  · 渲染阶段照常挂上 mod 的贴图/材质与索引 → 你换的贴图生效。\n"
+            "前提：这个部件的**网格不能动**（顶点数/顺序/面数保持原样）—— 因为它用的\n"
+            "索引还是导出时那份，几何却来自游戏。\n"
+            "不勾（默认）= 表情部件整份交回游戏，贴图也不换（最安全）。"
+        ),
+        default=False,
+    ) # type: ignore
+
     efmi_lod_group_projection: bpy.props.BoolProperty(
         name="EFMI LOD 分组投影",
         description="EFMI 多 LOD 时，以 LOD0 的去重分组关系约束 LOD1：LOD0 已合并的对应组在 LOD1 也合并、未合并的组不互并；两侧仍使用互不重叠的独立槽位段。开启时还会过滤几何未匹配的 LOD1 物体并自动创建匹配链；关闭后双侧完全独立去重、不过滤、不建链",
@@ -387,6 +452,11 @@ class GlobalProterties(bpy.types.PropertyGroup):
         return bool(getattr(instance, name, default))
 
     @classmethod
+    def _str_attr(cls, name: str, default: str = "") -> str:
+        instance = cls._instance()
+        return str(getattr(instance, name, default) or default)
+
+    @classmethod
     def open_mod_folder_after_generate_mod(cls):
         return cls._instance().open_mod_folder_after_generate_mod
 
@@ -462,6 +532,39 @@ class GlobalProterties(bpy.types.PropertyGroup):
     def set_import_merged_vgmap(cls, value: bool):
         """显式切换合并 VGMap；预生成失败时用于保持导入与后续导出同一模式。"""
         setattr(cls._instance(), "import_merged_vgmap", bool(value))
+
+    @classmethod
+    def auto_migrate_stale_vgroup_ids(cls) -> bool:
+        """导出前是否自动迁移「上一次导入遗留的全局骨骼编号」。
+
+        见 `common/vgroup_id_migration.py`：重新 dump 之后编号整体重排，工程里合并过的
+        物体还带着旧编号，直接导出会在游戏里指向别的骨骼。默认 True。
+        """
+        return cls._bool_attr("auto_migrate_stale_vgroup_ids", True)
+
+    @classmethod
+    def zzmi_removed_parts_keep_original(cls) -> bool:
+        """删掉（蓝图里断链接/删节点）的部件：True = 交回游戏画原版。
+
+        见 `ui/universal/zzmi.py::_ensure_stub_objects_for_missing_parts`：
+        勾选时不再给整缺 DrawIB 补 3 顶点占位；默认 True（美术意图"我不要这个部件"）。
+        """
+        return cls._bool_attr("zzmi_removed_parts_keep_original", True)
+
+    @classmethod
+    def zzmi_morph_parts_keep_geometry(cls) -> bool:
+        """表情部件是否走『只换贴图不改几何』（保表情）。默认 True。"""
+        return cls._bool_attr("zzmi_morph_parts_keep_geometry", True)
+
+    @classmethod
+    def zzmi_morph_parts_list(cls) -> str:
+        """用户手填的『表情部件』名单（DrawIB 或名字片段，逗号分隔）。"""
+        return cls._str_attr("zzmi_morph_parts_list", "")
+
+    @classmethod
+    def zzmi_morph_parts_texture_only(cls) -> bool:
+        """表情部件是否走『只换贴图、几何交回游戏』（默认 False = 整份交回游戏）。"""
+        return cls._bool_attr("zzmi_morph_parts_texture_only", False)
 
     @classmethod
     def efmi_lod_group_projection(cls):
