@@ -1,3 +1,10 @@
+# ⚠️ 本工作流【不采用】：TheHerta4 的发布包一律**手动打包**（流程见 docs/release-packaging.md）。
+# 保留它只为给 tools/package_release.py 提供排除规则（脚本解析下面的 --exclude= 名单，
+# 规则只此一处，改这里即同时改打包脚本）。
+# 不采用的原因（2026-09-15 查证）：tag 触发的运行 #91(v4.4.45)/#92(v4.4.46)/#93(v4.4.47)
+# 全部 conclusion=failure，Annotations 原文：
+#   "The job was not started because your account is locked due to a billing issue."
+# （GitHub 账号计费锁定）⇒ tag 推送不会产出 Release，历史 Release 均为手工上传 zip。
 name: Release Package
 
 on:
