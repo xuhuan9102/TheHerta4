@@ -1275,24 +1275,158 @@ def _us_v2_is_straight(v, min_cos=0.5):
     return d1.normalized().dot(d2.normalized()) < -min_cos
 
 
+def _us_boundary_corner_verts(boundary_edges):
+    """边界上的**几何角点**：恰好两条边界边、且两条边明显不共线的顶点。
+
+    细分网格上，边界环里原网格顶点与新增中点交替出现，只有角点能保证是原网格的
+    格点。锚点若不是格点，整条晶格会整体偏移半格（保留格点全落在中点上）——
+    所以优先用角点当原点。
+    """
+    incident = {}
+    for edge in boundary_edges:
+        for vert in edge.verts:
+            incident.setdefault(vert, []).append(edge)
+    corners = []
+    for vert, edges in incident.items():
+        if len(edges) != 2:
+            continue
+        directions = []
+        for edge in edges:
+            other = edge.other_vert(vert)
+            if other is None:
+                directions = []
+                break
+            delta = other.co - vert.co
+            if delta.length <= 0.0:
+                directions = []
+                break
+            directions.append(delta.normalized())
+        if len(directions) != 2:
+            continue
+        # 共线（边界直线上的中点）= 夹角 ~180° ⇒ dot ~ -1 ⇒ 不是角点
+        if directions[0].dot(directions[1]) > -0.9:
+            corners.append(vert)
+    return corners
+
+
+def _us_canonical_origin(boundary_edges):
+    """顺序无关的格点原点：优先边界几何角点，其次边界顶点；都取坐标字典序最小者。
+
+    绝不能用 bmesh 元素顺序（枚举顺序随建模历史变化）——那正是原先"同一几何、
+    不同造法结果相反"的根源（5x5 细分出来的 9x9：内圈 9 个理想格点被删、36 个
+    非格点全留；直接建的同一几何：25 个理想格点全在）。
+    """
+    verts = {v for edge in boundary_edges for v in edge.verts}
+    if not verts:
+        return None
+    pool = _us_boundary_corner_verts(boundary_edges) or list(verts)
+    return min(
+        pool,
+        key=lambda v: (round(v.co.x, 6), round(v.co.y, 6), round(v.co.z, 6)),
+    )
+
+
+def _us_lattice_frame(bm, boundary_edges):
+    """从孤岛几何取晶格坐标系 ``(origin, axis_u, axis_v, step_len)``；退化返回 None。
+
+    - origin：``_us_canonical_origin``（坐标字典序，与元素顺序无关）
+    - step_len：全网格最短边长。细分网格上所有边等长，它就是"一条细分边"的长度；
+      非规则网格（最短边是碎三角）会由残差守卫拦下，回退链行走相位。
+    - axis_u / axis_v：原点处两条最"张得开"的边方向，axis_v 对 axis_u 正交化。
+      用局部坐标系而不是世界 XY —— 岛可以任意旋转/平移。
+    """
+    origin = _us_canonical_origin(boundary_edges)
+    if origin is None:
+        return None
+    lengths = []
+    for edge in bm.edges:
+        try:
+            length = (edge.verts[1].co - edge.verts[0].co).length
+        except Exception:
+            continue
+        if length > 0.0:
+            lengths.append(length)
+    if not lengths:
+        return None
+    step_len = min(lengths)
+
+    directions = []
+    for edge in getattr(origin, "link_edges", []) or []:
+        other = edge.other_vert(origin)
+        if other is None or other is origin:
+            continue
+        delta = other.co - origin.co
+        if delta.length <= 0.0:
+            continue
+        directions.append(delta.normalized())
+    if len(directions) < 2:
+        return None
+
+    axis_u = min(
+        directions,
+        key=lambda d: (round(d.x, 6), round(d.y, 6), round(d.z, 6)),
+    )
+    axis_v_raw = max(directions, key=lambda d: d.cross(axis_u).length)
+    if axis_v_raw.cross(axis_u).length < 0.2:
+        return None  # 原点处没有两条成角的边：不是四边形网格的角点
+    axis_v = (axis_v_raw - axis_u * axis_v_raw.dot(axis_u)).normalized()
+    if axis_v.length <= 0.0:
+        return None
+    return origin, axis_u, axis_v, step_len
+
+
+def _us_grid_coords_by_geometry(bm, boundary_edges, tolerance=0.2):
+    """几何相位：按孤岛局部坐标系量化出 (r, c)，与 bmesh 元素顺序无关。
+
+    残差守卫：任一顶点偏离量化格点超过 ``tolerance`` 个步长 ⇒ 这个岛不是（近似）
+    平面规则四边形网格 ⇒ 返回 None，让调用方回退到链行走相位（宁可少动）。
+    """
+    frame = _us_lattice_frame(bm, boundary_edges)
+    if frame is None:
+        return None
+    origin, axis_u, axis_v, step_len = frame
+    coords = {}
+    worst = 0.0
+    for vert in bm.verts:
+        rel = vert.co - origin.co
+        raw_r = rel.dot(axis_u) / step_len
+        raw_c = rel.dot(axis_v) / step_len
+        row = int(round(raw_r))
+        col = int(round(raw_c))
+        worst = max(worst, abs(raw_r - row), abs(raw_c - col))
+        coords[vert] = (0, row, col)
+    if worst > tolerance:
+        return None
+    return coords
+
+
 def _us_straight_unsubdivide(bm, boundary_edges, protected_verts, allowed_verts, iterations):
-    """定向直合反细分：相位从孤岛边界起算，只删除 (r,c) 不在保留格点上的顶点。
+    """定向直合反细分：只删除相位不在保留格点上的顶点。
+
+    相位来源（2026-09-15 起）：**几何量化优先、链行走兜底**。原实现只有链行走
+    （从每条边界边沿面条带向内走、各自 r=0 起算），起点/方向取决于 bmesh 枚举顺序
+    ⇒ 同一几何不同造法结果相反，实测细分出来的 9x9 会把内圈 9 个理想格点删掉、
+    36 个非格点全留下。几何相位用坐标字典序定原点 + 孤岛局部坐标系量化，与元素
+    顺序无关；非规则岛（残差超限）自动回退链行走。
 
     关键结构（防菱形的核心）：
     - dissolve_verts 只删顶点、合并面，**不会**在幸存顶点之间补新边；
       所以分两类动作循环到不动点：
       1) 度=4 的内部点：溶解 = 合并四周的面，方向保持、不产生新边；
       2) 度=2 且两邻居近似共线的点：溶解 = 把左右邻居用一条顺向直边接合；
-    - 边界顶点绝不删除；不跨不同边界链的势力范围（相位不穿插）；
-    - **不产生斜边/菱形**（实机实测 skew_edges=0），但**输出不是纯四边形**：
-      保留边界中点会让贴边一圈出现五边形，保护圈与粗格面心（偶,偶）残留还会带来
-      六/七/八边形，且对称输入的存活格点可能略偏（左下角多留几个点）；
+    - 边界顶点绝不删除；
+    - **不产生斜边/菱形**（实测 skew_edges=0），但**输出不是纯四边形**：
+      残留顶点被自己合并出来的 n 边形锁住（"度4且四周全四边 / 度2共线"两条安全
+      规则都够不着），所以最终密度仍高于理想值——纯四边形收尾需要换机制
+      （按保留格点重建面），不在本函数职责内；
     - ``step = 1 << iterations`` ⇒ 只对齐 factor 2（iterations=1）/ 4（iterations=2）
       的重采样：细分段的 ``us_cuts`` 是 1..10（factor 2..11），两者**不互逆**，
       cuts≥2 之后按 iterations 反细分回不到原网格（该不对称属已知限制）；
     - 返回 (删除顶点数, 编入坐标的顶点数)。
     """
-    coords = _us_assign_grid_coords(bm, boundary_edges, set(boundary_edges))
+    coords = _us_grid_coords_by_geometry(bm, boundary_edges)
+    if coords is None:
+        coords = _us_assign_grid_coords(bm, boundary_edges, set(boundary_edges))
     if not coords:
         return 0, 0
     step = 1 << max(1, int(iterations))
