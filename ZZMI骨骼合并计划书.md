@@ -1,5 +1,71 @@
 # ZZMI 骨骼合并（Merged Skeleton）计划书
 
+## v9.2（2026-09-13）：实测悬案定性 —— 导入段生效、导出段静默失效
+
+> ⚠️ **本轮合并（absorb/herta4test-20260915）注记**：本节连同 §修复 1/2/3 的代码
+> 来自 TheHerta4Test_20260915。其中 `common/zzmi_merged_contract.py`、
+> `common/ini_name_safety.py`、`Toolset/soft_body/*` 等**新增文件已吸收**；但
+> `ui/universal/zzmi.py`（+41KB）与 `blueprint/node_postprocess_draginteraction.py`
+> 属 lane B，是否完整落地以 `04-conflicts.md` 与 lane B 报告为准。本节文字保持
+> 交付方原文不改，作为「他的意图」的原始证据。
+
+**用户症状**：做了合并骨架以后 **mod 在游戏里整块不显示**；"我直接导出他就是错误的，
+例如插件根本就没有正常输出"。
+
+### 实测证据（全部来自用户本机，只读）
+
+| # | 检查对象 | 结果 |
+|---|---|---|
+| 1 | `C:\Users\Admin\Desktop\叶瞬光 20260913.blend`（副本，headless Blender 4.5.3 打开） | 集合里有 **`SkeletonGroup_0`(12 物体) / `_1` / `_2`(4) / `_3`** —— 合并**导入段生效过** |
+| 2 | 同上，逐网格顶点组 | 顶点组数 = 该网格实际用到的最大索引 + 1；**只用 1 根骨头的眉毛索引 49**、3 根骨头的后背铃铛最大索引 179、身体 397、肩膀红飘带 427 ⇒ Blender 里的顶点组**已经是全局骨骼编号**（不是部件局部 0..N-1） |
+| 3 | `Mods\SSMTGeneratedMod\叶瞬光（原）\叶瞬光（原）.ini`（用户 17:18 导出） | `ResourceZZMergedSkeleton` / `CustomShaderZZMIMergedSkeletonAttach` / `ResourceZZPalette` / `ResourceZZVgMap` / `seen_` / `occ_` **各 0 次** ⇒ 合并**导出段完全没生效** |
+| 4 | 同 ini 的 VB 段 | 每个部件都是 `handling = skip` + `draw = <顶点数>, 0`，正是 `add_unity_vs_texture_override_vb_sections` 的 **else（非合并）分支** |
+| 5 | 同 ini 的 Meshes\*-Blend.buf | 索引布局 `[4×f32 权重][4×u32 索引]`；每部件最大索引与 #2 的顶点组上限**逐一吻合**（1 骨骼部件 49、身体 397……）⇒ 导出的几何确实带着全局编号 |
+
+**结论**：导入段把顶点组写成了全局编号（并随 `.blend` 一起保存），导出段却没生成
+运行时合并骨架 ⇒ 游戏端每个部件只有自己的小 palette，全局编号一越界，蒙皮结果就是
+垃圾 ⇒ **模型整块不显示**。这不是"权重画错了"，是**两段契约断裂**。
+
+### 为什么以前没人发现
+
+`_collect_merged_skeleton_components()` 返回空列表时，导出器**静默**走普通导出
+（`if self.merged_skeleton_component_id_dict.get(draw_ib) is not None: … else: 普通两行`），
+只在控制台打几行 `[ZZMI骨骼合并] 警告 …`。用户界面上**没有任何提示**，产物看起来
+"导出成功"。
+
+### v9.2 的修复
+
+1. **导出前契约守卫（新增 `common/zzmi_merged_contract.py`）**：
+   `_export_impl()` 在**写任何文件之前**先收集组件 + 判定契约；`level == "error"` 时
+   `raise RuntimeError` ⇒ Blender 弹红框、导出中止，不再交付必然坏掉的 mod。
+   判定表：
+
+   | 情况 | 结论 |
+   |---|---|
+   | 工作空间有合并数据 + 0 组件 + 开关**关** | **错误**：全局编号几何 + 无运行时合并骨架 |
+   | 工作空间有合并数据 + 0 组件 + 开关开 | **错误**：并列出每个部件被拒绝的具体原因 |
+   | 有数据 + 有组件 + 部分部件被拒 | **警告**：点名哪些部件在游戏里不显示 |
+   | 无合并数据 + 0 组件 | 提示（**不是**错误）：正常普通导出 |
+
+2. **部件级拒绝原因留痕**：`_collect_merged_skeleton_components` 给每种 `continue` 记
+   `draw_ib → 原因`（元数据损坏 / VGCount 为 0 但有 VGMap / 缓存版本过期 / VGMap 未
+   完整覆盖 / 槽位越界），错误信息里直接点名到部件，用户能自查。
+
+3. **段名安全化（新增 `common/ini_name_safety.py`）**：物体名里的 `[` `]` 是 INI
+   **段名定界符**，拼进 `[TextureOverride_VB_<ib>_<别名>_<类别>]` 会让段名在第一个
+   `]` 处提前结束 —— `头饰[丝带]` 的 Position/Texcoord/Blend 三条段直接塌成同一个
+   名字（引擎报 `Duplicate section found` 并忽略后面的）。用户这次导出正好 **4 条**
+   这类警告（2 个部件 × 2 条）。修复：别名经 `sanitize_section_name_part` 把
+   `[`/`]`/`;`/控制字符换成 `_`，中文与 `.`/`-`/`_`/`+` 原样保留。
+
+### 验证
+
+* 新增单测：`tests/test_ini_name_safety.py`（7 例）、`tests/test_zzmi_merged_contract.py`（6 例）、
+  `tests/test_zzmi_merged_skeleton_ini.py` 追加 7 例（段名唯一性 / 契约守卫 / 正常合并放行）。
+  **契约用例对修复前必然失败**（守卫不存在 ⇒ `_enforce_merged_skeleton_contract` 直接 `AttributeError`）。
+* 全量套件 **137 通过 / 0 失败 / 0 跳过**；`qa.ps1` 生成物 lint / refs / IniParams 契约三项全过，
+  两条负对照仍全中。
+
 > 状态：**已实现（骨架分组 + 组内统一骨架直拷 attach + v9 出现次槽位/每槽守卫，用户游戏内实测通过），Blender headless 端到端 [PASS]** · 最后更新：2026-09（v9）
 > 2026-08-24 去重/分组确认（已实现）；**2026-08-25 用户拍板：放弃 CB1 校准**：
 > ① **单骨骼刚性部件（单权重物体）抓帧重合误并**——不同锚点骨（头顶/前额/后脑发饰/面部）在抓帧姿态下矩阵逐位相同被并成一根；修复：刚性部件命中对追加加权质心门控（<0.05 米才合并），仅拆不并、误拆零代价。

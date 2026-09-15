@@ -18,7 +18,9 @@
 安装的正式版共存，改成 ``TheHerta4Test``），pytest 会把 ``__init__.py`` 当成
 无名根包直接执行，撞在 ``from .common import global_properties`` 上抛
 ImportError，并连带让 40 多个用例报 "ERROR at setup"。推导之后测试套件与
-目录名解耦（worktree 目录名如 ``TheHerta4-absorb`` 同理受益）。
+目录名解耦（**前提：目录名是合法 Python 标识符**——含 ``-`` 的目录名连
+pytest 自己的 ``resolve_pkg_root_and_module_name`` 都解析不了，那种情况下本
+垫片也无能为力，需先把目录改名或另取一份）。
 """
 
 import sys
