@@ -51,10 +51,24 @@ class GateOpenLinesTests(unittest.TestCase):
         self.assertIn("if rt_width != 0", lines)
         self.assertEqual(lines[-1], "if " + GATE.EFMI_SHADOW_GATE_CONDITION)
 
-    def test_comment_documents_rt_width_semantics(self):
+    def test_no_developer_comment_is_emitted(self):
+        """生成物是 3DMigoto 读的配置表：不许往 ini 里写开发者注释。
+
+        机制说明（rt_width 语义、三次实机事故）留在模块文档串里，不进生成物。
+        """
         lines = GATE.efmi_shadow_gate_open_lines()
-        self.assertIn("shadow-gate", lines[0])
-        self.assertIn("rt_width", lines[0])
+        self.assertEqual(lines, ["if " + GATE.EFMI_SHADOW_GATE_CONDITION])
+        for line in lines:
+            self.assertFalse(line.lstrip().startswith(";"), line)
+            self.assertNotIn("[shadow-gate]", line)
+
+    def test_mechanism_is_documented_in_source(self):
+        """注释不进 ini，但知识不能丢：模块文档串必须仍讲清 rt_width 口径。"""
+        with open(MODULE_PATH, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        docstring = source.split('"""')[1]
+        self.assertIn("rt_width", docstring)
+        self.assertIn("NumViews:0", docstring)
 
     def test_no_hash_tagging_in_emitted_lines(self):
         """门控输出不得再出现 ps 标签 / 99001 / filter_index（三次实机事故守卫）。"""

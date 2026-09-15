@@ -45,8 +45,10 @@ def efmi_shadow_gate_open_lines():
     条件用 3DMigoto 内建的 ``rt_width``（见 EFMI_SHADOW_GATE_CONDITION）：
     无颜色 RT 的深度/阴影 pass 读为 0 → 门控关闭、入口不回画；可见 pass 恒有
     颜色 RT → 门控开启。不依赖任何着色器哈希，对所有角色/画质档一致。
+
+    本函数**只返回可执行行**，不往生成的 ini 里写开发者注释——机制说明留在本模块
+    文档串里（生成物是给 3DMigoto 读的配置表，不是给人读的开发笔记）。
     """
     return [
-        "; [shadow-gate] 无颜色 RT（rt_width==0）= 深度/阴影 pass，本入口不回画",
         "if " + EFMI_SHADOW_GATE_CONDITION,
     ]
