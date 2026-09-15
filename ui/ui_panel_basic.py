@@ -9,6 +9,7 @@ from ..common.global_properties import GlobalProterties
 from ..common.logic_name import LogicName
 from ..common.object_prefix_helper import ObjectPrefixHelper
 from ..common.workspace_helper import WorkSpaceHelper
+from ..common import vgroup_id_migration
 from ..blueprint.export_helper import BlueprintExportHelper
 
 from ..utils.translate_utils import TR
@@ -149,6 +150,101 @@ class SSMT_OT_ClearMergedSkeletonCache(bpy.types.Operator):
         else:
             message = f"扫描了 {scanned} 个 json，没有需要清理的 VGMap 缓存"
         print(f"[骨骼合并] {message}")
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
+class SSMT_OT_MigrateStaleVGroupIds(bpy.types.Operator):
+    """把上一次导入遗留的全局骨骼编号迁移到当前工作空间的编号。
+
+    场景（用户实测反复出现）：重新 dump / 少提取部件后，工作空间的部件集合变了，
+    每根骨骼的全局编号整体重排；但工程里合并过的物体，顶点组名字里还是**上一次**的
+    编号。继续用它导出，旧编号在新工作空间里指向别的骨骼（或超出槽位上限），
+    游戏内就是塌陷、错位、侧躺、面筋人。
+
+    本算子按「同一部件、同一局部索引 = 同一根骨骼」把旧编号一对一换成新编号
+    （`common/vgroup_id_migration.py` 有完整推导与安全边界），不动当前编号的物体，
+    迁移不了的部件（这次没提取的）会点名报出来而不是瞎猜。
+    """
+
+    bl_idname = "ssmt.migrate_stale_vgroup_ids"
+    bl_label = "迁移旧骨骼编号"
+    bl_description = (
+        "把工程里「上一次导入留下的全局骨骼编号」（顶点组名字）按同一部件的局部索引，"
+        "一对一迁移到当前工作空间的编号。用于重新 dump / 少提取部件之后，"
+        "编号重排导致合并结果错位的情况。可 Ctrl+Z 撤销"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return GlobalConfig.logic_name in (LogicName.EFMI, LogicName.ZZMI)
+
+    def _precheck(self):
+        if GlobalConfig.logic_name not in (LogicName.EFMI, LogicName.ZZMI):
+            return "仅 EFMI（终末地）/ ZZMI（绝区零）模式下可用"
+        # path_workspace_folder() 依赖 settings.json 的当前游戏/工作空间，而这份缓存
+        # 是懒加载的（面板 draw 会刷新，但算子可能在文件重载后才第一次被调用）。
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_root = GlobalConfig.path_workspace_folder()
+        if not workspace_root or not os.path.isdir(workspace_root):
+            return "当前工作空间目录无效"
+        return None
+
+    def invoke(self, context, event):
+        error = self._precheck()
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=460)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="将按「同一部件 + 同一局部索引」把旧骨骼编号换成当前编号：")
+        box = layout.box()
+        box.label(text="· 只动「上一次导入」留下的物体", icon='CHECKMARK')
+        box.label(text="· 当前编号的物体一个都不碰", icon='CHECKMARK')
+        box.label(text="· 先自动备份？不需要 —— 可用 Ctrl+Z 撤销", icon='INFO')
+        layout.label(text="执行后请保存工程再导出。", icon='ERROR')
+
+    def execute(self, context):
+        error = self._precheck()
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+
+        workspace_root = GlobalConfig.path_workspace_folder()
+        plan = vgroup_id_migration.plan_scene_migration(list(bpy.data.objects), workspace_root)
+        if plan["status"] != "ok":
+            print(f"[骨骼编号迁移] !!! {plan['message']}")
+            self.report({'ERROR'}, plan["message"])
+            return {'CANCELLED'}
+
+        print(
+            f"[骨骼编号迁移] 当前工作空间 {os.path.basename(workspace_root.rstrip(os.sep))}，"
+            f"上一次 {os.path.basename(plan['old_root'].rstrip(os.sep))}"
+            f"（共有 {plan['shared']} 个部件），{plan['message']}、无冲突"
+        )
+        migrated = vgroup_id_migration.apply_scene_migration(plan)
+        for name in migrated:
+            print(f"[骨骼编号迁移]   已迁移 {name}")
+        for name, unmapped in plan["blocked"]:
+            print(
+                f"[骨骼编号迁移] !!! 跳过 {name}：用到 {len(unmapped)} 个本次工作空间没有的"
+                f"旧编号 {unmapped[:12]}{' …' if len(unmapped) > 12 else ''}"
+                "（该部件这次没提取，没有对应关系，不能瞎猜）"
+            )
+        if plan["blocked"]:
+            print(
+                "[骨骼编号迁移] 这些部件无法迁移；如果它们也要参与导出，"
+                "请把对应部件一起 dump/导入后再合并。"
+            )
+
+        message = (
+            f"已迁移 {len(migrated)} 个物体（映射 {len(plan['remap'])} 条）；"
+            f"当前编号跳过 {len(plan['skipped'])} 个；无法迁移 {len(plan['blocked'])} 个（详见控制台）"
+        )
+        print(f"[骨骼编号迁移] {message}")
         self.report({'INFO'}, message)
         return {'FINISHED'}
 
@@ -569,6 +665,28 @@ class PanelBasicInformation(bpy.types.Panel):
         # 勾选 = 导入全局顶点组、导出走合并骨架；不勾选 = 完全维持原路线（见 ZZMI骨骼合并计划书.md §5.1）。
         if GlobalConfig.logic_name in (LogicName.WWMI, LogicName.ZZMI, LogicName.EFMI):
             layout.prop(global_properties, "import_merged_vgmap")
+            # 重新 dump / 少提取部件之后，工作空间的全局骨骼编号会整体重排，而工程里
+            # 合并过的物体还带着上一次导入的编号 —— 导出后在游戏里就是塌陷/错位。
+            # 这个按钮按「同一部件 + 同一局部索引 = 同一根骨骼」把旧编号一对一换掉。
+            if GlobalConfig.logic_name in (LogicName.EFMI, LogicName.ZZMI):
+                layout.prop(global_properties, "auto_migrate_stale_vgroup_ids")
+                layout.operator(
+                    SSMT_OT_MigrateStaleVGroupIds.bl_idname,
+                    icon='LOOP_BACK',
+                    text="迁移旧骨骼编号（重新 dump 后编号重排时用）",
+                )
+        # 绝区零专用：删掉（蓝图断链接/删节点）的部件怎么处理。
+        # 勾选 = 不插占位、交回游戏画原版（默认）；不勾 = 旧行为（骨骼被引用就补隐形占位）。
+        if GlobalConfig.logic_name == LogicName.ZZMI:
+            layout.prop(global_properties, "zzmi_removed_parts_keep_original")
+            # 表情部件（脸）走"只换贴图不改几何"，避免把游戏每帧算出来的表情顶掉。
+            layout.prop(global_properties, "zzmi_morph_parts_keep_geometry")
+            if GlobalProterties.zzmi_morph_parts_keep_geometry():
+                box = layout.box()
+                box.prop(global_properties, "zzmi_morph_parts_list")
+                box.label(text="留空 = 自动判断；填 DrawIB(如 c28e6303) 或 脸", icon='INFO')
+                # 三层需求里的第 1 层：只换贴图、几何与表情交回游戏。
+                box.prop(global_properties, "zzmi_morph_parts_texture_only")
         # EFMI 专用：多 LOD 使用 LOD0 分组投影，关闭则两侧独立去重。
         if GlobalConfig.logic_name == LogicName.EFMI:
             layout.prop(global_properties, "efmi_lod_group_projection")
@@ -591,6 +709,7 @@ def register():
     bpy.utils.register_class(SSMT_OT_ToggleIgnoreTextureAlpha)
     bpy.utils.register_class(SSMT_OT_ToggleStripTextureColorPrefix)
     bpy.utils.register_class(SSMT_OT_ClearMergedSkeletonCache)
+    bpy.utils.register_class(SSMT_OT_MigrateStaleVGroupIds)
     bpy.utils.register_class(SSMT_OT_CleanupUnusedIB)
     bpy.utils.register_class(SSMT_OT_ClearAllWorkspaceIB)
     bpy.utils.register_class(PanelBasicInformation)
@@ -601,6 +720,7 @@ def unregister():
     bpy.utils.unregister_class(SSMT_OT_ClearAllWorkspaceIB)
     bpy.utils.unregister_class(SSMT_OT_CleanupUnusedIB)
     bpy.utils.unregister_class(SSMT_OT_ClearMergedSkeletonCache)
+    bpy.utils.unregister_class(SSMT_OT_MigrateStaleVGroupIds)
     bpy.utils.unregister_class(SSMT_OT_ToggleStripTextureColorPrefix)
     bpy.utils.unregister_class(SSMT_OT_ToggleIgnoreTextureAlpha)
     bpy.utils.unregister_class(SSMT_OT_ToggleUseNormalMap)
