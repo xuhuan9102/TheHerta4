@@ -1250,7 +1250,7 @@ class ExportEFMI:
             section.append(f"{indent}run = CustomShader_RedirectCB1_{source_identifier}")
             section.append(f"{indent}vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
             section.append(f"{indent}vs-cb{cb_slot} = ResourceFakeCB1_{source_identifier}")
-            section.append(";所有需要跨 Ib 的物体引用")
+            # 所有需要跨 Ib 的物体引用（说明留源码，不写进配置表）
             self._append_drawindexed_instanced_with_shader_replace(section, objects, None)
             if condition:
                 section.append("endif")
@@ -1282,7 +1282,7 @@ class ExportEFMI:
             if not objects:
                 continue
 
-            lines.append(";跨 iB 区域")
+            # 跨 iB 区域（说明留源码，不写进配置表）
             self._append_source_cross_ib_replay(
                 section_adapter,
                 vb_condition,
@@ -1290,7 +1290,7 @@ class ExportEFMI:
                 source_identifier,
             )
 
-        lines.append(";不需要跨 Ib 的物体引用")
+        # 不需要跨 Ib 的物体引用（说明留源码，不写进配置表）
 
         if non_cross_ib_drawcalls:
             self._append_drawindexed_instanced_with_shader_replace(
@@ -1373,7 +1373,7 @@ class ExportEFMI:
             return
 
         present_section = M_IniSection(M_SectionType.CrossIBPresent)
-        present_section.append(";特殊追加固定区域")
+        # 特殊追加固定区域（说明留源码，不写进配置表）
 
         all_identifiers = self._get_all_cross_ib_identifiers()
         self._append_cross_ib_fake_resources(present_section, all_identifiers)
@@ -1459,7 +1459,7 @@ class ExportEFMI:
             return
 
         resource_id_section = M_IniSection(M_SectionType.ResourceID)
-        resource_id_section.append(";特殊追加身份证区域")
+        # 特殊追加身份证区域（说明留源码，不写进配置表）
 
         all_identifiers = set()
 
@@ -2579,7 +2579,7 @@ class ExportEFMI:
         section.append("Pool\\EFMIv1\\Input_MergedSkeleton_Instance_LodLevel = ref Pool_MergedSkeleton_Instance_LodLevel")
         section.append("Resource\\EFMIv1\\Output_MergedSkeleton = ref ResourceMergedSkeletonDataRW")
         section.append("run = CommandList\\EFMIv1\\MergedSkeleton_AttachComponent")
-        section.append("; BLENDINDICES layouts after merged-skeleton widening")
+        # BLENDINDICES layouts after merged-skeleton widening（说明留源码，不写进配置表）
         merged_unique_strs = {
             draw["unique_str"]
             for comp in components
@@ -3155,7 +3155,7 @@ class ExportEFMI:
                     if not objects:
                         continue
 
-                    texture_override_ib_section.append(";跨 iB 区域")
+                    # 跨 iB 区域（说明留源码，不写进配置表）
                     self._append_source_cross_ib_replay(
                         texture_override_ib_section,
                         vb_condition,
@@ -3163,7 +3163,7 @@ class ExportEFMI:
                         current_identifier,
                     )
 
-                texture_override_ib_section.append(";不需要跨 Ib 的物体引用")
+                # 不需要跨 Ib 的物体引用（说明留源码，不写进配置表）
 
                 if non_cross_ib_drawcalls:
                     self._append_drawindexed_instanced_with_shader_replace(
@@ -3361,13 +3361,13 @@ class ExportEFMI:
                 if not objects or not vb_condition_target:
                     continue
 
-                section.append(f";跨 IB 身份块,绘制 {source_identifier} 需要跨 Ib 的物体引用")
+                # 跨 IB 身份块：绘制本物体需要跨 Ib 的引用（说明留源码，不写进配置表）
                 section.append(vb_condition_target)
                 section.append(f"    cs-t2 = ResourceID_{source_identifier}")
                 section.append(f"    run = CustomShader_RedirectCB1_{source_identifier}")
                 section.append(f"    vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
                 section.append(f"    vs-cb2 = ResourceFakeCB1_{source_identifier}")
-                section.append("    ;跨 IB 块数据区域")
+                # 跨 IB 块数据区域（说明留源码，不写进配置表）
 
                 source_unique_str = source_submesh.unique_str
                 section.append(f"    vb0 = Resource_{source_unique_str.replace('-', '_')}_Position")
@@ -3377,7 +3377,7 @@ class ExportEFMI:
                 src_ib_resource_name = "Resource_" + source_unique_str.replace('-', '_') + "_Index"
                 section.append(f"    ib = {src_ib_resource_name}")
 
-                section.append(";所有需要跨 Ib 的物体引用")
+                # 所有需要跨 Ib 的物体引用（说明留源码，不写进配置表）
 
                 self._append_drawindexed_instanced_with_shader_replace(
                     section,

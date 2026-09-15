@@ -977,14 +977,12 @@ class ExportZZMI(ExportUnity):
         slot_first = slots[0]
 
         # 1) 出现次（顶层）
-        texture_override_vb_section.append("; 出现次（顶层）")
         texture_override_vb_section.append(f"{occ_var} = {occ_var} + 1")
         texture_override_vb_section.append(f"if {occ_var} >= {ZZMI_MERGED_SKELETON_OCC_WRAP}")
         texture_override_vb_section.append(f"    {occ_var} = {slot_first}")
         texture_override_vb_section.append("endif")
 
         # 2) 到达标记（顶层 sticky 累加；绝不在 if 体内赋值）
-        texture_override_vb_section.append("; 到达标记（顶层 sticky 累加）")
         for slot in slots:
             seen_var = self._merged_seen_var(component_id, slot)
             texture_override_vb_section.append(
@@ -1007,7 +1005,6 @@ class ExportZZMI(ExportUnity):
             int(host["component_id"]) == int(component_id) for host in absorbed_hosts
         )
         so_owner_target_ibs = self._merged_so_owner_target_ibs(draw_ib)
-        texture_override_vb_section.append("; 按槽捕获 palette 与 SO 引用")
         for index, slot in enumerate(slots):
             palette_line = (
                 f"{self._merged_palette_name(draw_ib, slot)} = copy vs-t0 unless_null"
@@ -1029,7 +1026,6 @@ class ExportZZMI(ExportUnity):
             texture_override_vb_section.append("endif")
 
         # 4) 顶层无条件 attach（每个 (部件, 槽) 一条 run；run 绝不进 if）
-        texture_override_vb_section.append("; 顶层无条件 attach（run 不进 if）")
         for slot in slots:
             for group_component_id in self._merged_group_component_ids(skeleton_group):
                 texture_override_vb_section.append(
@@ -1258,10 +1254,8 @@ class ExportZZMI(ExportUnity):
         """
         plan = self._redirect_target_map[target_ib]
         for slot in slots:
-            section.append(
-                "; 每槽守卫：本组全部部件在该槽都已当帧到达才重放"
-                "（if 内只有绑定与 draw）"
-            )
+            # 每槽守卫：本组全部部件在该槽都已当帧到达才重放；if 内只有绑定与 draw
+            # （说明留源码，不写进配置表）
             section.append(f"if {self._merged_group_slot_seen_condition(skeleton_group, slot)}")
             section.append(
                 f"    vs-t0 = {self._merged_skeleton_name(skeleton_group, slot)}"
@@ -1334,10 +1328,6 @@ class ExportZZMI(ExportUnity):
         `ResourceZZRedirectSO_s<k>`；本块的守卫条件保证该宿主**当帧**在该槽已
         到达（引用不会是上一轮的），因此任何布局兼容的挂点闭合守卫后都能写。
         """
-        section.append(
-            "; 合并宿主重放（直连路径）：本组全部部件在该槽都已当帧到达才写宿主 SO"
-            "（体内只有绑定与 draw；任何兼容挂点闭合守卫都能写，不依赖提交顺序）"
-        )
         section.append(f"if {self._merged_group_slot_seen_condition(skeleton_group, slot)}")
         section.append(f"    vs-t0 = {self._merged_skeleton_name(skeleton_group, slot)}")
         section.append(f"    so0 = ref {self._merged_redirect_so_name(slot)}")
@@ -1431,11 +1421,8 @@ class ExportZZMI(ExportUnity):
                 if self._merged_absorbed_replay_compatible(draw_ib, str(host["draw_ib"]))
             ]
             for slot in slots:
-                section.append(
-                    "; 直连路径自足挂点：按本轮出现次绑本槽骨架后直接绘制本部件几何"
-                    "（本段 attach 已用当帧 palette 写全自己的槽位；不等组内其它部件"
-                    "——组级门控只会在最后到达的部件那段成立，先到的部件整帧不画）"
-                )
+                # 直连路径自足挂点：按本轮出现次绑本槽骨架后直接绘制本部件几何
+                # （说明留源码，不写进配置表）
                 section.append(f"if {occ_var} == {slot}")
                 section.append(
                     f"    vs-t0 = {self._merged_skeleton_name(skeleton_group, slot)}"
@@ -1449,10 +1436,8 @@ class ExportZZMI(ExportUnity):
             return
 
         for slot in slots:
-            section.append(
-                "; 每槽守卫（直连路径/吸收挂点）：本组全部部件在该槽都已当帧到达才绘制"
-                "（if 内只有绑定与 draw）"
-            )
+            # 每槽守卫（直连路径/吸收挂点）：本组全部部件在该槽都已当帧到达才绘制
+            # （说明留源码，不写进配置表）
             section.append(f"if {self._merged_group_slot_seen_condition(skeleton_group, slot)}")
             section.append(
                 f"    vs-t0 = {self._merged_skeleton_name(skeleton_group, slot)}"
@@ -2417,7 +2402,6 @@ class ExportZZMI(ExportUnity):
         slots = self._merged_skeleton_slots()
 
         # [Constants] 只声明出现次与到达标记；每帧由 [Present] 清零。
-        constants_section.append("; [v9 出现次槽位 + 每槽守卫]")
         for component_id in range(len(self.merged_skeleton_components)):
             constants_section.append(f"global {self._merged_occ_var(component_id)} = 0")
             for slot in slots:
