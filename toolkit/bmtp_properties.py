@@ -188,7 +188,11 @@ class BMTP_Properties(bpy.types.PropertyGroup):
     )
     us_only_selected: bpy.props.BoolProperty(
         name="仅选中部分",
-        description="仅对进入编辑模式时选中的部分执行操作（两种模式均有效）",
+        description=(
+            "仅对**编辑模式内**选中的部分执行操作（两种模式均有效）。"
+            "注意：物体模式下的顶点选择标志会被 Blender 丢弃，请进入编辑模式后框选/点选再执行；"
+            "编辑模式内没有选中任何顶点时，细分会中止并提示"
+        ),
         default=False,
     )
     us_iterations: bpy.props.IntProperty(
