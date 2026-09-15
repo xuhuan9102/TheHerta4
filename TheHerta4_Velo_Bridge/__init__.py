@@ -2,6 +2,7 @@ bl_info = {'name': 'TheHerta4 Velo Bridge', 'version': (0, 3, 2), 'blender': (4,
 import bpy
 import importlib.util
 import re
+import sys
 import hashlib
 from contextlib import nullcontext
 from pathlib import Path
@@ -70,6 +71,48 @@ def _velo_text_formatter(game_value):
         raise ValueError('TheHerta4 Velo Bridge 不支持此游戏: ' + str(game_value))
     return importlib.import_module(module_name).TextFormatter()
 
+
+# ── 主包名解析（吸收自 TheHerta4Test_20260915 的 2026-09-13 修复）──────────
+#
+# 这里原先写死了两处 `from TheHerta4.blueprint... import ...`。
+# 主包目录名**是可以被改的** —— 交付方的测试构建就叫 `TheHerta4Test`
+# （需要能和用户已安装的正式版共存）。
+# 写死之后那两处会抛 ModuleNotFoundError，后果**两处还不一样**：
+#   * `_swap_bindings` 里被 `except Exception` 吞掉 ⇒ **静默降级**：
+#     变量名不再与主插件后处理节点共享同一身份，注释里那句
+#     "Share the exact variable identity" 的目标就落空了；
+#   * 导出路径里被包成 `raise ValueError('后处理节点执行失败: …')`
+#     ⇒ 用户看到的是一句和真正原因无关的报错，**导出直接取消**。
+#
+# 上游 `__init__.py` 的 `_import_velo_bridge()` 已经承认桥有两种安装布局，
+# 这里沿用同一个前提，但解析的是"**主包叫什么名字**"：
+
+def _host_package_name():
+    """本桥所属的**主插件**包名（不假设它叫 TheHerta4）。
+
+    布局 A：作为主包的子包
+        `__package__ == '<主包>.TheHerta4_Velo_Bridge'` ⇒ 父级就是主包名。
+    布局 B：被单独复制进 addons 目录
+        `__package__ == 'TheHerta4_Velo_Bridge'` ⇒ 推不出主包名，
+        改从**已经加载进 `sys.modules` 的模块**里找主包的内部模块。
+        （桥真正执行导入时，主包必然已经加载完毕。）
+    两者都不成立时退回规范名 `TheHerta4`。
+    """
+    package = globals().get('__package__') or ''
+    if '.' in package:
+        return package.rsplit('.', 1)[0]
+    for suffix in ('.blueprint.export_helper', '.blueprint.variable_registry'):
+        for name in list(sys.modules):
+            if name.endswith(suffix):
+                return name[: -len(suffix)]
+    return 'TheHerta4'
+
+
+def _host_import(relative):
+    """从主包导入一个模块。`relative` 以点开头，例如 `.blueprint.export_helper`。"""
+    return importlib.import_module(_host_package_name() + relative)
+
+
 def linked_objects(node):
     result, seen, visiting = [], set(), set()
     def walk(n):
@@ -115,7 +158,8 @@ def _swap_bindings(tree, output_name=''):
     result = {}
     used = set()
     try:
-        from TheHerta4.blueprint.variable_registry import get_node_variable_name
+        # 主包名不写死：见 _host_package_name() 的说明。
+        get_node_variable_name = _host_import('.blueprint.variable_registry').get_node_variable_name
     except Exception:
         get_node_variable_name = None
     for index, node in enumerate(_swap_nodes(tree, output_name)):
@@ -512,7 +556,8 @@ class ExportVeloWorkspace(bpy.types.Operator):
             )
             # Run TheHerta4's connected post-process chain against the final Velo INI.
             try:
-                from TheHerta4.blueprint.export_helper import BlueprintExportHelper
+                # 主包名不写死：见 _host_package_name() 的说明。
+                BlueprintExportHelper = _host_import('.blueprint.export_helper').BlueprintExportHelper
                 previous_runtime_tree = BlueprintExportHelper.runtime_blueprint_tree_name
                 previous_result_node_type = BlueprintExportHelper.runtime_result_output_node_type
                 previous_velo_game = BlueprintExportHelper.set_runtime_velo_bridge_game(desc.game_value)
