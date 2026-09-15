@@ -235,6 +235,27 @@ class EFMIMergedSkeletonSinglePoolTests(unittest.TestCase):
             if line.startswith("[") and line.rstrip().endswith("]"):
                 self.assertNotIn("_LOD", line, f"发现带 LOD 后缀的段头: {line}")
 
+    def test_merged_skeleton_rwbuffer_declares_bind_flags(self):
+        """[ResourceMergedSkeletonDataRW] 必须声明 bind_flags。
+
+        RWBuffer 缺 bind_flags 会导致资源创建失败（与 ResourceLLBakeRT 同类坑）；
+        缺失即 RW 绑定失效 → 合并骨架写不进去。
+        """
+        lines = self._merge_lines(_make_multi_lod_exporters())
+        block = lines.split("[ResourceMergedSkeletonDataRW]", 1)[1]
+        section_body = block.split("\n[", 1)[0]
+        self.assertIn("type = RWBuffer", section_body)
+        self.assertIn("bind_flags = shader_resource unordered_access", section_body)
+        # 顺序：type → format → bind_flags → array
+        self.assertLess(
+            section_body.index("format = R32G32B32A32_FLOAT"),
+            section_body.index("bind_flags = shader_resource unordered_access"),
+        )
+        self.assertLess(
+            section_body.index("bind_flags = shader_resource unordered_access"),
+            section_body.index("array = "),
+        )
+
     def test_multi_lod_global_bones_count_and_offsets(self):
         """bones_count = 全池 max(vg_offset+vg_count)；Initialize 写全局组件 id 及其槽位。"""
         lines = self._merge_lines(_make_multi_lod_exporters())

@@ -2561,6 +2561,7 @@ class ExportEFMI:
         section.append("[ResourceMergedSkeletonDataRW]")
         section.append("type = RWBuffer")
         section.append("format = R32G32B32A32_FLOAT")
+        section.append("bind_flags = shader_resource unordered_access")
         section.append(
             f"array = ($\\EFMIv1\\cfg_ms_implicit_bones_count + $\\EFMIv1\\cfg_ms_skeletons_count "
             f"* $bones_count * $max_instance_count) * $\\EFMIv1\\cfg_ms_bone_entry_size"
