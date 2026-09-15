@@ -1428,6 +1428,7 @@ class SSMT_MT_NodeMenu_PostProcess_AnimDriver(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
         _add_node_entry(layout, "拖拽交互", 'MOUSE_MOVE', "SSMTNode_PostProcess_DragInteraction")
+        _add_node_entry(layout, "软体物理", 'PHYSICS', "SSMTNode_PostProcess_SoftBody")
         _add_node_entry(layout, "动画驱动蓝图", 'ACTION', "SSMTNode_PostProcess_AnimDriver")
 
 
