@@ -71,7 +71,9 @@ _install_module(f"{PKG}.common.global_key_count_helper", GlobalKeyCountHelper=ty
 _install_module(f"{PKG}.common.global_properties", GlobalProterties=types.SimpleNamespace())
 _install_module(
     f"{PKG}.common.logic_name",
-    LogicName=types.SimpleNamespace(NTEMI="NTEMI"),
+    # 只放本文件用得到的成员；补充 EFMI/ZZMI（吸收自 TheHerta4Test_20260915）：
+    # 导出入口新增了「合并骨架导出前自动迁移旧骨骼编号」的分支，会读这两个名字。
+    LogicName=types.SimpleNamespace(NTEMI="NTEMI", EFMI="EFMI", ZZMI="ZZMI"),
 )
 _install_module(
     f"{PKG}.common.config_table_backup",
