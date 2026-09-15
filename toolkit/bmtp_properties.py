@@ -176,6 +176,55 @@ class BMTP_Properties(bpy.types.PropertyGroup):
         max=6,
     )
 
+    # ---------- 反细分＆细分（UV防错乱） ----------
+    us_operation: bpy.props.EnumProperty(
+        name="模式",
+        description="选择反细分（降低密度）还是细分（增加密度）",
+        items=[
+            ('UNSUBDIVIDE', "反细分", "合并细分过的网格，保护UV孤岛边界顶点，不改动原有缝合线"),
+            ('SUBDIVIDE', "细分", "增加网格密度，UV自动插值，缝合线保持"),
+        ],
+        default='UNSUBDIVIDE',
+    )
+    us_only_selected: bpy.props.BoolProperty(
+        name="仅选中部分",
+        description="仅对进入编辑模式时选中的部分执行操作（两种模式均有效）",
+        default=False,
+    )
+    us_iterations: bpy.props.IntProperty(
+        name="反细分迭代",
+        description="反细分迭代次数（仅反细分模式有效）",
+        default=2,
+        min=1,
+        max=10,
+    )
+    us_protection_rings: bpy.props.IntProperty(
+        name="边界保护圈",
+        description=(
+            "以UV孤岛边界顶点为起点，向孤岛内部额外多保护几圈顶点不参与合并。"
+            "0 = 只锁住边界那一圈顶点；1 = 再加一圈相邻顶点；圈数越大，接缝附近的原始密度保留得越多，"
+            "能合并的内部区域就越小（仅反细分模式有效）"
+        ),
+        default=0,
+        min=0,
+        max=5,
+    )
+    us_cuts: bpy.props.IntProperty(
+        name="细分段数",
+        description="每条边切分的段数（仅细分模式有效）。1 = 每条边切成2段",
+        default=1,
+        min=1,
+        max=10,
+    )
+    us_connect_boundary: bpy.props.BoolProperty(
+        name="连接边界顶点",
+        description=(
+            "消除细分后处理区与保留区交界处的T型顶点：把T点连到对面边上距离最近的顶点。"
+            "仅细分模式有效；反细分只做定向直合（按行/列对齐删除），从不主动连边"
+        ),
+        default=False,
+    )
+
     merge_split_items: bpy.props.CollectionProperty(type=BMTP_MergeSplitItem, name="合并拆分列表")
     merge_split_index: bpy.props.IntProperty(name="合并拆分索引", default=0, min=0)
     merge_split_target_name: bpy.props.StringProperty(
