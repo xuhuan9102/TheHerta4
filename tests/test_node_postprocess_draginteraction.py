@@ -4780,12 +4780,35 @@ class DragCollisionTests(unittest.TestCase):
         self.assertIn(f"cs-t77 = ResourceDragColliderCellsFine_{cn}_testns", text)
         self.assertIn(f"cs-t78 = ResourceDragColliderCellsCoarse_{cn}_testns", text)
         self.assertIn(f"cs-t79 = ResourceDragColliderVertexL0_{cn}_testns", text)
-        # x101: enabled=1 margin=0.002 mode=0(soft) safety=0.9
-        self.assertIn("x101 = 1 0.002 0 0.9", text)
-        self.assertIn("x102 = 0 0 0 0.1", text)
-        self.assertIn("x103 = 10 8 6 0.4", text)
-        # x104 携带 drag_mode 变量（模式三门控在 shader 内再确认）
-        self.assertIn("x104 = $ssmtdrag_drag_enabled_testns 3 2 2", text)
+        # 碰撞参数必须是**一个分量一行**。
+        #
+        # 2026-09-12 测试版修复：这里原先是
+        #     self.assertIn("x101 = 1 0.002 0 0.9", text)
+        # 也就是说**测试把错误写法锁死了**，于是它在生成器里活了很久。
+        # 「一行四个值」不是简写而是语法错误：`xNNN` 只取一个 float，右边整串被
+        # 当成一个表达式分词，tokenise() 遇到连续两个操作数直接抛
+        # `Unexpected identifier`，整行作废、x101~x104 全保持 0、
+        # 着色器的 `if (COLLISION_PARAMS.x > 0.5)` 永远为假 ——
+        # 碰撞解算一次都不执行，且不报错。证据链见 notes/50。
+        for expected in (
+            # x101: enabled=1 margin=0.002 mode=0(soft) safety=0.9
+            "x101 = 1", "y101 = 0.002", "z101 = 0", "w101 = 0.9",
+            # x102: bmin.xyz + 细格边长
+            "x102 = 0", "y102 = 0", "z102 = 0", "w102 = 0.1",
+            # x103: 细格维度 xyz + 粗格边长
+            "x103 = 10", "y103 = 8", "z103 = 6", "w103 = 0.4",
+            # x104 携带 drag_mode 变量（模式三门控在 shader 内再确认）+ 粗格维度
+            "x104 = $ssmtdrag_drag_enabled_testns", "y104 = 3", "z104 = 2", "w104 = 2",
+        ):
+            self.assertIn(expected, lines)
+        # 反向断言：不得退回「一行多值」
+        for bad in (
+            "x101 = 1 0.002",
+            "x102 = 0 0 0",
+            "x103 = 10 8 6",
+            "x104 = $ssmtdrag_drag_enabled_testns 3",
+        ):
+            self.assertNotIn(bad, text)
 
     def test_jiggle_section_without_collision_writes_zero_and_no_bindings(self):
         node, sections, comps = self._emit()  # 无 collision_grid

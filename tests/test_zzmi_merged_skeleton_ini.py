@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -87,6 +88,12 @@ _fake_global_properties = types.SimpleNamespace(
     import_merged_vgmap=lambda: True,
     forbid_auto_texture_ini=lambda: False,
     zzz_use_slot_fix=lambda: False,
+    # 2026-09-13 新增的两个 ZZMI 开关。这里**显式给 False**：本文件既有的用例
+    # 全部锁定"旧行为"（整缺 DrawIB 被引用 → 补占位；表情部件也照常替换几何），
+    # 新开关的行为由下面 ZZMIRemovedPartSwitchTests / ZZMIMorphPartTests 覆盖。
+    zzmi_removed_parts_keep_original=lambda: False,
+    zzmi_morph_parts_keep_geometry=lambda: False,
+    zzmi_morph_parts_list=lambda: "",
 )
 # vg_map 导出写文件：path_generate_mod_folder 必须指向临时目录，防止测试残留
 # 污染仓库根（2026-08-23 曾把 Meshes/zz_vgmap_*.buf 写到仓库根）
@@ -245,11 +252,79 @@ _install_module(
     TimerUtils=types.SimpleNamespace(start_stage=lambda *_a, **_k: None, end_stage=lambda *_a, **_k: None),
 )
 
+# 段名安全化 + 合并骨架契约判定：**装载真实模块**（2026-09-13）。
+# 这两个模块是纯函数、无 bpy 依赖，如果只给空桩，下面的集成用例就验不到
+# 真行为；而 zzmi.py 里的 try/except 兜底会让"模块缺失"静默退化 —— 那样
+# 这一层安全网就永远不会被测试覆盖。
+for _dep_name, _dep_rel in (
+    ("ini_name_safety", ("common", "ini_name_safety.py")),
+    ("zzmi_merged_contract", ("common", "zzmi_merged_contract.py")),
+):
+    _dep_path = REPO_ROOT.joinpath(*_dep_rel)
+    _dep_spec = importlib.util.spec_from_file_location(
+        f"{PKG}.common.{_dep_name}", _dep_path
+    )
+    _dep_module = importlib.util.module_from_spec(_dep_spec)
+    sys.modules[_dep_spec.name] = _dep_module
+    _dep_spec.loader.exec_module(_dep_module)
+
 _module_path = REPO_ROOT / "ui" / "universal" / "zzmi.py"
 _spec = importlib.util.spec_from_file_location(f"{PKG}.ui.universal.zzmi", _module_path)
 _zzmi_module = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _zzmi_module
 _spec.loader.exec_module(_zzmi_module)
+
+# 2026-09-15：槽数从 2 扩到 5（见 notes/softbody-m1-status.md §20.9 —— 用户角色
+# 一帧里身体/腿各出现 5 次，2 槽会在 `>= 3` 处回绕，第 4/5 次复用第 1/2 次捕获的
+# 调色板 ⇒ 接缝差帧裂开）。测试不再写死"2 个槽/回绕 3"，一律从被测模块推导，
+# 以后调槽数只需改 `ui/universal/zzmi.py` 里的元组。
+_SLOT_COUNT = len(_zzmi_module.ZZMI_MERGED_SKELETON_SLOTS)
+_OCC_WRAP = _SLOT_COUNT + 1
+_OCC_SLOTS = tuple(_zzmi_module.ZZMI_MERGED_SKELETON_SLOTS)
+
+def _slot_expr(cid, slot):
+    """与生成器同一函数取的槽位键（键 = 出现次序），避免两边各写一份。"""
+    return _zzmi_module.zzmi_merged_slot_key_expr(cid, slot)
+
+def _occ_draw_regex(slot, skeleton, draw_count):
+    """匹配"按本部件第 slot 次出现直接绘制 skeleton（draw = draw_count）"的块（组件号无关）。"""
+    return re.compile(
+        rf"if \$zz_ms_occ_\d+ == {slot}\n"
+        rf"    vs-t0 = {skeleton}\n"
+        rf"    draw = {draw_count}, 0\n"
+        "endif"
+    )
+
+
+def _occ_cond_index(text, slot):
+    """返回"第 slot 次出现"条件在文本中的下标（组件号无关）。"""
+    match = re.search(rf"if \$zz_ms_occ_\d+ == {slot}\b", text)
+    if not match:
+        raise AssertionError(f"未找到第 {slot} 次出现条件")
+    return match.start()
+
+
+def _has_occ_slot(text, slot):
+    """文本里是否存在"某个部件的第 slot 次出现"条件（组件号无关，供 fixture 编号不确定处用）。"""
+    blob = text if isinstance(text, str) else "\n".join(text)
+    return re.search(rf"if \$zz_ms_occ_\d+ == {slot}\b", blob) is not None
+
+
+def _has_occ_gated_merged_draw(text):
+    """是否存在"按本部件出现次直接绘制合并骨架"的条件（用于断言宿主**不得**自足绘制）。"""
+    blob = text if isinstance(text, str) else "\n".join(text)
+    return re.search(
+        r"if \$zz_ms_occ_\d+ == \d+\n    vs-t0 = ResourceZZMergedSkeleton", blob
+    ) is not None
+
+
+def _expected_attach_runs(component_ids, indent=""):
+    """按槽数展开的 attach run 列表（外层槽、内层部件；与生成器一致）。"""
+    return [
+        f"{indent}run = CustomShaderZZMIMergedSkeletonAttach_C{cid}_s{slot}"
+        for slot in _OCC_SLOTS
+        for cid in component_ids
+    ]
 
 
 class _FakeGameType:
@@ -423,11 +498,11 @@ class ZZSIMergedSkeletonIniTests(unittest.TestCase):
         # 到达标记、按出现次把当帧 palette 复制进对应槽、再顶层无条件 run 全部
         # (部件, 槽) attach。
         idx_occ_inc = text.index("$zz_ms_occ_0 = $zz_ms_occ_0 + 1")
-        idx_occ_wrap = text.index("$zz_ms_occ_0 >= 3")
+        idx_occ_wrap = text.index(f"$zz_ms_occ_0 >= {_OCC_WRAP}")
         idx_seen1 = text.index("$zz_ms_seen_01 = $zz_ms_seen_01 + ($zz_ms_occ_0 == 1)")
         idx_seen2 = text.index("$zz_ms_seen_02 = $zz_ms_seen_02 + ($zz_ms_occ_0 == 2)")
+        # 槽位键由生成器统一给出，断言只认"palette 捕获这一行"的存在与顺序
         idx_copy = text.index(
-            "if $zz_ms_occ_0 == 1\n"
             "    ResourceZZPalette_b20f90ea_s1 = copy vs-t0 unless_null"
         )
         idx_run = text.index("run = CustomShaderZZMIMergedSkeletonAttach_C0_s1")
@@ -575,7 +650,7 @@ class ZZSIMergedSkeletonIniTests(unittest.TestCase):
             for i, line in enumerate(lines)
             if line.startswith("[ResourceZZMergedSkeleton_G")
         ]
-        self.assertEqual(skeleton_arrays, ["array = 168"] * 4)
+        self.assertEqual(skeleton_arrays, ["array = 168"] * (2 * _SLOT_COUNT))
         # 无捕获段、无校准资源、无 cb 引用
         self.assertNotIn("Cb1Capture", text)
         self.assertNotIn("ResourceZZCb1", text)
@@ -703,7 +778,7 @@ class ZZSIMergedSkeletonIniTests(unittest.TestCase):
 
         self.assertIn("[ResourceZZMergedSkeleton_G4_s1]", text)
         self.assertIn("[ResourceZZMergedSkeleton_G4_s2]", text)
-        self.assertEqual(text.count("[ResourceZZMergedSkeleton_G4_s"), 2)
+        self.assertEqual(text.count("[ResourceZZMergedSkeleton_G4_s"), _SLOT_COUNT)
         self.assertIn("array = 266", text)
         meshes_path = Path(_FAKE_MOD_FOLDER) / "Meshes"
         add_slots = [
@@ -976,7 +1051,7 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
 
         # 出现次顶层自增 + 回绕为槽位 1（1/2 循环）
         self.assertIn("$zz_ms_occ_1 = $zz_ms_occ_1 + 1", text)
-        self.assertIn("if $zz_ms_occ_1 >= 3", text)
+        self.assertIn(f"if $zz_ms_occ_1 >= {_OCC_WRAP}", text)
         self.assertIn("    $zz_ms_occ_1 = 1", text)
         # 到达标记顶层 sticky 累加（绝不在 if 体内赋值）
         self.assertIn("$zz_ms_seen_11 = $zz_ms_seen_11 + ($zz_ms_occ_1 == 1)", text)
@@ -1009,15 +1084,11 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         lines = _all_builder_lines(builder)
         text = "\n".join(lines)
 
-        # 本部件（b20f90ea = 组件 1）每槽一条绘制，条件只读自己的出现次
-        for slot, skeleton in ((1, "ResourceZZMergedSkeleton_G0_s1"),
-                               (2, "ResourceZZMergedSkeleton_G0_s2")):
-            self.assertIn(
-                f"if $zz_ms_occ_1 == {slot}\n"
-                f"    vs-t0 = {skeleton}\n"
-                "    draw = 4643, 0\n"
-                "endif",
+        # 本部件（b20f90ea）每槽一条绘制，条件只读**本部件自己的出现次**
+        for slot in _OCC_SLOTS:
+            self.assertRegex(
                 text,
+                _occ_draw_regex(slot, f"ResourceZZMergedSkeleton_G0_s{slot}", 4643),
             )
         # 任何 if 条件都不得再挂组级 seen（那正是"先到的部件整帧不画"的成因）
         for line in lines:
@@ -1028,8 +1099,8 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         self.assertNotIn("$zz_ms_group_ready", text)
         # 槽 1 绘制在槽 2 绘制之前，且各自换绑自己的槽骨架
         self.assertLess(
-            text.index("if $zz_ms_occ_1 == 1"),
-            text.index("if $zz_ms_occ_1 == 2"),
+            _occ_cond_index(text, 1),
+            _occ_cond_index(text, 2),
         )
 
     def test_guard_body_contains_only_bindings_and_draw(self):
@@ -1042,10 +1113,10 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         exporter.add_unity_vs_texture_override_vb_sections(builder, models[0])
         lines = _all_builder_lines(builder)
 
-        # 出现次 palette 捕获与自足绘制各有一条 `if $zz_ms_occ_0 == 1`
+        # 出现次 palette 捕获与自足绘制各有一条"第 1 次"条件
         guard_starts = [
             index for index, line in enumerate(lines)
-            if line.startswith("if $zz_ms_occ_0 == 1")
+            if re.match(r"if \$zz_ms_occ_\d+ == 1$", line)
         ]
         self.assertEqual(len(guard_starts), 2, "palette 捕获 + 自足绘制各一条")
         start = guard_starts[-1]
@@ -1101,7 +1172,7 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         lines = text.splitlines()
         start = next(
             index for index, line in enumerate(lines)
-            if line.startswith("if $zz_ms_seen_01 == 1")
+            if line.startswith("if $zz_ms_seen_01 >= 1")
         )
         end = lines.index("endif", start)
         body = [line.strip() for line in lines[start + 1 : end]]
@@ -1142,8 +1213,8 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         self.assertTrue(run_lines)
         for depth, line in run_lines:
             self.assertEqual(depth, 0, f"attach run 进了 if 体内: {line!r}")
-        # 每部件每槽各一条 ⇒ 2 部件 × 2 槽
-        self.assertEqual(len(run_lines), 4)
+        # 每部件每槽各一条 = 2 部件 * 槽数
+        self.assertEqual(len(run_lines), _SLOT_COUNT * 2)
 
     def test_slot_locals_are_shared_across_group_deform_sections(self):
         """同一 IB 被画多次（10>2 的多实例）：组内部件的 run 序列逐字相同。
@@ -1162,28 +1233,15 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         self.assertEqual(run_a, run_b)
         self.assertEqual(
             run_a,
-            [
-                "run = CustomShaderZZMIMergedSkeletonAttach_C0_s1",
-                "run = CustomShaderZZMIMergedSkeletonAttach_C1_s1",
-                "run = CustomShaderZZMIMergedSkeletonAttach_C0_s2",
-                "run = CustomShaderZZMIMergedSkeletonAttach_C1_s2",
-            ],
+            _expected_attach_runs([0, 1]),
         )
         # 绘制门控按**本部件自己**的出现次（v9.1）：每个部件只画自己的几何，
         # 不等组内其它部件——组级 seen 门控只会在最后到达的部件那段成立。
-        self.assertIn(
-            "if $zz_ms_occ_0 == 1\n"
-            "    vs-t0 = ResourceZZMergedSkeleton_G0_s1\n"
-            "    draw = 12314, 0\n"
-            "endif",
-            text_a,
+        self.assertRegex(
+            text_a, _occ_draw_regex(1, "ResourceZZMergedSkeleton_G0_s1", 12314)
         )
-        self.assertIn(
-            "if $zz_ms_occ_1 == 1\n"
-            "    vs-t0 = ResourceZZMergedSkeleton_G0_s1\n"
-            "    draw = 4643, 0\n"
-            "endif",
-            text_b,
+        self.assertRegex(
+            text_b, _occ_draw_regex(1, "ResourceZZMergedSkeleton_G0_s1", 4643)
         )
         for text in (text_a, text_b):
             for line in text.splitlines():
@@ -1280,7 +1338,7 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         self.assertEqual(
             stripped.count("ResourceZZPalette_5144c409_s2 = copy vs-t0 unless_null"), 1
         )
-        self.assertIn("if $zz_ms_occ_0 == 1", lines)
+        self.assertTrue(_has_occ_slot(lines, 1))
         self.assertIn("else", lines)
         # 本组 2 个组件 × 2 个槽 = 4 条顶层 attach
         self.assertEqual(exporter._merged_group_component_ids(2), [0, 1])
@@ -1396,19 +1454,11 @@ class ZZSIDirectPathGuardTests(unittest.TestCase):
         text = self._vb_text(exporter, models[0])
 
         # 1) 每槽绘制条件只读本部件出现次（无组级 seen、无 phase / drawn / ready）
-        self.assertIn(
-            "if $zz_ms_occ_0 == 1\n"
-            "    vs-t0 = ResourceZZMergedSkeleton_G0_s1\n"
-            "    draw = 12314, 0\n"
-            "endif",
-            text,
+        self.assertRegex(
+            text, _occ_draw_regex(1, "ResourceZZMergedSkeleton_G0_s1", 12314)
         )
-        self.assertIn(
-            "if $zz_ms_occ_0 == 2\n"
-            "    vs-t0 = ResourceZZMergedSkeleton_G0_s2\n"
-            "    draw = 12314, 0\n"
-            "endif",
-            text,
+        self.assertRegex(
+            text, _occ_draw_regex(2, "ResourceZZMergedSkeleton_G0_s2", 12314)
         )
         for line in text.splitlines():
             if line.startswith("if "):
@@ -1425,7 +1475,7 @@ class ZZSIDirectPathGuardTests(unittest.TestCase):
         ]
         self.assertEqual(bare_draws, [], f"直连路径不得有顶层无条件 draw: {bare_draws}")
         # 4) 顶点数取导出 buffer 实际行数（合并几何从导出 VB 读）
-        self.assertEqual(text.count("    draw = 12314, 0"), 2)
+        self.assertEqual(text.count("    draw = 12314, 0"), _SLOT_COUNT)
         # 5) 直连路径不写 SO 重定向资源
         self.assertNotIn("ResourceZZRedirectSO_", text)
         self.assertNotIn("so0 = ref", text)
@@ -1484,9 +1534,9 @@ class ZZSIDirectPathGuardTests(unittest.TestCase):
         )
         text = self._vb_text(exporter, exporter.drawib_model_list[1])
 
-        self.assertIn("if $zz_ms_seen_01 == 1 && $zz_ms_seen_11 == 1", text)
-        self.assertIn("if $zz_ms_seen_02 == 1 && $zz_ms_seen_12 == 1", text)
-        self.assertNotIn("if $zz_ms_occ_1 == 1\n    vs-t0 = ResourceZZMergedSkeleton", text)
+        self.assertIn("if $zz_ms_seen_01 >= 1 && $zz_ms_seen_11 >= 1", text)
+        self.assertIn("if $zz_ms_seen_02 >= 1 && $zz_ms_seen_12 >= 1", text)
+        self.assertFalse(_has_occ_gated_merged_draw(text))
 
     def test_no_frame_latch_variables_in_constants_or_present(self):
         """直连/重定向路径都不再声明或复位帧闩锁/相位变量（v9 契约）。"""
@@ -1622,14 +1672,10 @@ class ZZSIDirectPathGuardTests(unittest.TestCase):
         text = self._vb_text(exporter, model)
 
         # 单部件组：出现次恒为 1 的那一轮直接绘制（组件号 0）
-        self.assertIn("if $zz_ms_occ_0 == 1", text)
-        self.assertIn("if $zz_ms_occ_0 == 2", text)
-        self.assertIn(
-            "if $zz_ms_occ_0 == 1\n"
-            "    vs-t0 = ResourceZZMergedSkeleton_G0_s1\n"
-            "    draw = 4643, 0\n"
-            "endif",
-            text,
+        self.assertTrue(_has_occ_slot(text, 1))
+        self.assertTrue(_has_occ_slot(text, 2))
+        self.assertRegex(
+            text, _occ_draw_regex(1, "ResourceZZMergedSkeleton_G0_s1", 4643)
         )
         # 单部件组不得出现其它部件的变量（曾把组级 seen 当门控）
         self.assertNotIn("$zz_ms_seen_11", text)
@@ -1746,7 +1792,7 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
         self.assertEqual(text.count("    ResourceZZRedirectSO_s2 = ref so0"), 1)
         # 组级守卫 + 显式绑定 SO/宿主的 vb0/vb2 + 宿主导出顶点数
         self.assertIn(
-            "if $zz_ms_seen_01 == 1 && $zz_ms_seen_11 == 1 && $zz_ms_seen_21 == 1\n"
+            "if $zz_ms_seen_01 >= 1 && $zz_ms_seen_11 >= 1 && $zz_ms_seen_21 >= 1\n"
             "    vs-t0 = ResourceZZMergedSkeleton_G0_s1\n"
             "    so0 = ref ResourceZZRedirectSO_s1\n"
             "    vb2 = Resourcea23aa8a3Blend\n"
@@ -1757,7 +1803,7 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
             text,
         )
         # 宿主的几何**不得**自足绘制（它跨部件、必须等全组到位）
-        self.assertNotIn("if $zz_ms_occ_0 == 1\n    vs-t0 = ResourceZZMergedSkeleton", text)
+        self.assertFalse(_has_occ_gated_merged_draw(text))
 
     def test_compatible_sibling_also_replays_host_geometry(self):
         """关键回归：布局兼容的兄弟挂点也要发同一条重放（与提交顺序无关）。"""
@@ -1766,16 +1812,13 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
         sib_text = self._vb_text(exporter, models[1])
 
         # 兄弟挂点：先自足画自己的几何（3 顶点占位）……
-        self.assertIn(
-            "if $zz_ms_occ_1 == 1\n"
-            "    vs-t0 = ResourceZZMergedSkeleton_G0_s1\n"
-            "    draw = 3, 0\n"
-            "endif",
+        self.assertRegex(
             sib_text,
+            _occ_draw_regex(1, "ResourceZZMergedSkeleton_G0_s1", 3),
         )
         # ……再发宿主合并几何的组级守卫重放（宿主排在前面的帧由它闭合）
         self.assertIn(
-            "if $zz_ms_seen_01 == 1 && $zz_ms_seen_11 == 1 && $zz_ms_seen_21 == 1\n"
+            "if $zz_ms_seen_01 >= 1 && $zz_ms_seen_11 >= 1 && $zz_ms_seen_21 >= 1\n"
             "    vs-t0 = ResourceZZMergedSkeleton_G0_s1\n"
             "    so0 = ref ResourceZZRedirectSO_s1\n"
             "    vb2 = Resourcea23aa8a3Blend\n"
@@ -2000,7 +2043,7 @@ class ZZMIStubObjectTests(unittest.TestCase):
         names = [str(dc.get_workspace_unique_str()) for dc in ordered]
         self.assertEqual(names, ["LOD0.b20f90ea-19182-0"])
 
-    def _write_vgmap_json(self, bare, gid, group=None, excluded=False):
+    def _write_vgmap_json(self, bare, gid, group=None, excluded=False, original_vertex_count=None):
         type_dir = os.path.join(self.tmp, "LOD0", bare, "TYPE_GPU_TEST_")
         os.makedirs(type_dir, exist_ok=True)
         payload = {"VGMap": {"0": str(gid)}, "VGOffset": 0, "VGCount": 1}
@@ -2008,10 +2051,13 @@ class ZZMIStubObjectTests(unittest.TestCase):
             payload["SkeletonGroup"] = group
         if excluded:
             payload["VGMapDedupExcluded"] = True
+        # 导入时记录的原部件顶点数：用于区分"join 合并(宿主变大)"与"删除部件"
+        if original_vertex_count is not None:
+            payload["OriginalVertexCount"] = int(original_vertex_count)
         with open(os.path.join(type_dir, bare + ".json"), "w", encoding="utf-8") as f:
             json.dump(payload, f)
 
-    def _register_present_object_with_groups(self, name, used_gids, group_names=None):
+    def _register_present_object_with_groups(self, name, used_gids, group_names=None, extra_vertices=0):
         mesh = _fake_bpy_data.meshes.new(name=name + "_mesh")
         group_names = list(group_names or [str(gid) for gid in used_gids])
         obj = _fake_bpy_data.objects.new(name=name, object_data=mesh)
@@ -2025,17 +2071,37 @@ class ZZMIStubObjectTests(unittest.TestCase):
             )
             for group_index in group_indices
         ]
+        # extra_vertices：模拟"join 合并把别的部件顶点并进宿主"后宿主顶点数变大
+        for _ in range(int(extra_vertices or 0)):
+            mesh.vertices.append(
+                types.SimpleNamespace(
+                    groups=[types.SimpleNamespace(group=0, weight=1.0)]
+                )
+            )
         return obj
 
     def test_stub_when_absent_drawib_absorbed_into_other_object(self):
         # 84618ee0 全缺，但其 VGMap 全局 id=7 被现存对象（b20f90ea）的顶点引用 = 被合并
         self._write_vgmap_json("84618ee0-22296-0", 7)
         self._write_vgmap_json("84618ee0-1164-22296", 7)
-        self._register_present_object_with_groups("LOD0.b20f90ea-19182-0", [7])
+        # ★ 2026-09-14：join 合并的判据是"宿主顶点数变大"（删除部件不会变大）
+        #   ⇒ 这里显式建模：宿主（b20f90ea）json 记录 OriginalVertexCount=1，
+        #     而现存对象有 2 个顶点（extra_vertices=1）。
+        self._write_vgmap_json("b20f90ea-19182-0", 7, original_vertex_count=1)
+        self._register_present_object_with_groups(
+            "LOD0.b20f90ea-19182-0", [7], extra_vertices=1
+        )
 
         dcm = sys.modules[f"{PKG}.common.draw_call_model"].DrawCallModel
         ordered = [dcm(obj_name="LOD0.b20f90ea-19182-0")]
-        exporter = _make_exporter([], merged_vgmap=True, ordered_drawcalls=ordered)
+        # 宿主 b20f90ea 导入时 1 个顶点、现在 2 个 ⇒ 判据认定为"被 join 合并"
+        models = [
+            _FakeDrawIBModel(
+                "b20f90ea",
+                [_FakeSubmesh("LOD0.b20f90ea-19182-0", 154, 51, original_vertex_count=1)],
+            )
+        ]
+        exporter = _make_exporter(models, merged_vgmap=True, ordered_drawcalls=ordered)
 
         names = [str(dc.get_workspace_unique_str()) for dc in ordered]
         self.assertIn("LOD0.84618ee0-22296-0", names)
@@ -2058,19 +2124,83 @@ class ZZMIStubObjectTests(unittest.TestCase):
         self.assertNotIn("LOD0.84618ee0-1164-22296", names)
         self.assertEqual(exporter._zzmi_stub_object_names, [])
 
-    def test_absorption_uses_numeric_vertex_group_name_not_blender_index(self):
-        """替换模型组名稀疏时，吸收判定必须读取组名而不是内部索引。"""
+    def test_stub_when_present_object_borrows_only_missing_drawib_bones(self):
+        """回归（2026-09-14 用户实测：join 合并上下半身后下半身整块消失）。
+
+        真实数据：身体 json OriginalVertexCount=10859、现存 92870 顶点，其顶点引用的
+        26 个全局槽 [209..254] 是身体自己的 VGMap 盖不住的，全部属于被并掉的
+        DrawIB 4a178546（同骨架组 G2、47 槽）——没有任何部件能把它们写进合并骨架。
+
+        本用例把"宿主顶点数不变"单独建模出来，专门压 foreign 判据本身，并顺带压
+        `_copy` 对象名（导出期对象名 = `LOD0.<submesh>.<部件名>_copy`，不能按对象名
+        切分子网格）。
+        """
+        # 缺席 DrawIB：全局槽 200（宿主自己的 VGMap 里没有）
+        self._write_vgmap_json("84618ee0-22296-0", 200)
+        self._write_vgmap_json("84618ee0-1164-22296", 200)
+        # 宿主：导入期 VGMap 只有槽 7，但现存顶点引用了 7 和外来槽 200
+        host_dir = os.path.join(self.tmp, "LOD0", "b20f90ea-19182-0", "TYPE_GPU_TEST_")
+        os.makedirs(host_dir, exist_ok=True)
+        with open(
+            os.path.join(host_dir, "b20f90ea-19182-0.json"), "w", encoding="utf-8"
+        ) as f:
+            json.dump({"VGMap": {"0": "7"}, "VGOffset": 0, "VGCount": 1,
+                       "OriginalVertexCount": 2}, f)
+        self._register_present_object_with_groups(
+            "LOD0.b20f90ea-19182-0.身体_copy", [7, 200]
+        )
+
+        dcm = sys.modules[f"{PKG}.common.draw_call_model"].DrawCallModel
+        ordered = [dcm(obj_name="LOD0.b20f90ea-19182-0.身体_copy")]
+        exporter = _make_exporter([], merged_vgmap=True, ordered_drawcalls=ordered)
+
+        names = [str(dc.get_workspace_unique_str()) for dc in ordered]
+        self.assertIn("LOD0.84618ee0-22296-0", names)
+        self.assertIn("LOD0.84618ee0-1164-22296", names)
+        self.assertEqual(len(exporter._zzmi_stub_object_names), 2)
+        exporter._cleanup_stub_objects()
+
+    def test_no_stub_when_present_object_only_shares_own_bones(self):
+        """幸存部件只引用双方共享的槽（自己 VGMap 里也有）⇒ 不是"被 join 合并"，不插桩。
+
+        这正是"删掉脸"那条历史路径：头发引用的槽在自己的 VGMap 里 ⇒ 不补占位
+        ⇒ 游戏继续画原版脸。
+        """
         self._write_vgmap_json("84618ee0-22296-0", 7)
         self._write_vgmap_json("84618ee0-1164-22296", 7)
-        self._register_present_object_with_groups(
-            "LOD0.b20f90ea-19182-0",
-            [7],
-            group_names=["unused", "7"],
-        )
+        self._write_vgmap_json("b20f90ea-19182-0", 7, original_vertex_count=1)
+        self._register_present_object_with_groups("LOD0.b20f90ea-19182-0", [7])
 
         dcm = sys.modules[f"{PKG}.common.draw_call_model"].DrawCallModel
         ordered = [dcm(obj_name="LOD0.b20f90ea-19182-0")]
         exporter = _make_exporter([], merged_vgmap=True, ordered_drawcalls=ordered)
+
+        names = [str(dc.get_workspace_unique_str()) for dc in ordered]
+        self.assertNotIn("LOD0.84618ee0-22296-0", names)
+        self.assertEqual(exporter._zzmi_stub_object_names, [])
+
+    def test_absorption_uses_numeric_vertex_group_name_not_blender_index(self):
+        """替换模型组名稀疏时，吸收判定必须读取组名而不是内部索引。"""
+        self._write_vgmap_json("84618ee0-22296-0", 7)
+        self._write_vgmap_json("84618ee0-1164-22296", 7)
+        # 宿主 json 记录 OriginalVertexCount=1 + 现存 2 顶点 ⇒ 判为"join 合并"
+        self._write_vgmap_json("b20f90ea-19182-0", 7, original_vertex_count=1)
+        self._register_present_object_with_groups(
+            "LOD0.b20f90ea-19182-0",
+            [7],
+            group_names=["unused", "7"],
+            extra_vertices=1,
+        )
+
+        dcm = sys.modules[f"{PKG}.common.draw_call_model"].DrawCallModel
+        ordered = [dcm(obj_name="LOD0.b20f90ea-19182-0")]
+        models = [
+            _FakeDrawIBModel(
+                "b20f90ea",
+                [_FakeSubmesh("LOD0.b20f90ea-19182-0", 154, 51, original_vertex_count=1)],
+            )
+        ]
+        exporter = _make_exporter(models, merged_vgmap=True, ordered_drawcalls=ordered)
 
         names = [str(dc.get_workspace_unique_str()) for dc in ordered]
         self.assertIn("LOD0.84618ee0-22296-0", names)
@@ -2142,6 +2272,131 @@ class ZZMIStubObjectTests(unittest.TestCase):
         self.assertNotIn("LOD0.84618ee0-1164-22296", names)
         self.assertEqual(exporter._zzmi_stub_object_names, [])
         exporter._cleanup_stub_objects()
+
+    def test_switch_on_keeps_original_for_absorbed_absent_drawib(self):
+        """开关勾选（默认）：整缺且骨骼被引用的 DrawIB 也不插桩 —— 游戏画原版。
+
+        用户实测场景：删掉「脸」以后，脸是整缺 DrawIB，但它的一部分骨骼（槽 0 等）
+        仍被头发/头饰那些幸存部件引用，旧逻辑据此补了隐形占位 → 原版脸被顶掉、
+        脸上什么都没有。勾选本开关后必须**不插桩**。
+        """
+        self._write_vgmap_json("84618ee0-22296-0", 7)
+        self._write_vgmap_json("84618ee0-1164-22296", 7)
+        self._register_present_object_with_groups("LOD0.b20f90ea-19182-0", [7])
+
+        dcm = sys.modules[f"{PKG}.common.draw_call_model"].DrawCallModel
+        ordered = [dcm(obj_name="LOD0.b20f90ea-19182-0")]
+        # 注意：占位对象是在 ExportZZMI.__init__ 里创建的，开关必须在构造前设好。
+        _fake_global_properties.zzmi_removed_parts_keep_original = lambda: True
+        try:
+            exporter = _make_exporter([], merged_vgmap=True, ordered_drawcalls=ordered)
+            names = [str(dc.get_workspace_unique_str()) for dc in ordered]
+            self.assertNotIn("LOD0.84618ee0-22296-0", names)
+            self.assertNotIn("LOD0.84618ee0-1164-22296", names)
+            self.assertEqual(exporter._zzmi_stub_object_names, [])
+        finally:
+            _fake_global_properties.zzmi_removed_parts_keep_original = lambda: False
+            exporter._cleanup_stub_objects()
+
+
+class ZZMIMorphPartTests(unittest.TestCase):
+    """表情部件（脸）走『只换贴图不改几何』（2026-09-13）。
+
+    背景证据（用户机器上的抓帧 log.txt）：
+        000006 CopyResource(Dst=池 41554b66, Src=基础顶点 31aa5dc2)
+        000006 CSSetShader(743108cc03f39cbf); Dispatch(10,1,1)      ← 算表情
+        000010 CopyResource(Dst=变形 vb0 153d04c7, Src=池)          ← 结果进顶点缓冲
+    导出器原来把 153d04c7 的 vb0 换成 mod 静态顶点 ⇒ 表情整帧被丢掉。
+    """
+
+    def setUp(self):
+        _fake_global_properties.zzmi_morph_parts_keep_geometry = lambda: True
+        _fake_global_properties.zzmi_morph_parts_list = lambda: ""
+        _fake_global_properties.zzmi_morph_parts_texture_only = lambda: False
+
+    def tearDown(self):
+        _fake_global_properties.zzmi_morph_parts_keep_geometry = lambda: False
+        _fake_global_properties.zzmi_morph_parts_list = lambda: ""
+        _fake_global_properties.zzmi_morph_parts_texture_only = lambda: False
+
+    def _morph_exporter(self):
+        submesh = _FakeSubmesh("LOD0.c28e6303-7308-0", 0, 10)
+        submesh.match_cs = "743108cc03f39cbf"
+        model = _FakeDrawIBModel("c28e6303", [submesh])
+        model.draw_ib_alias = "脸"
+        exporter = _make_exporter([model], merged_vgmap=True)
+        return exporter, model
+
+    def test_morph_part_skips_deform_and_vertex_limit_sections(self):
+        exporter, model = self._morph_exporter()
+        self.assertTrue(exporter._is_morph_part("c28e6303"))
+
+        vb_builder = _FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_vb_sections(vb_builder, model)
+        self.assertEqual(
+            _all_builder_lines(vb_builder), [],
+            "表情部件不得生成变形阶段的 vb0/vb2 覆写段（会把表情顶掉）",
+        )
+
+        vlr_builder = _FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_vlr_section(vlr_builder, model)
+        self.assertEqual(
+            _all_builder_lines(vlr_builder), [],
+            "表情部件不得改变游戏顶点缓冲分配大小",
+        )
+
+        ib_builder = _FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_ib_sections(ib_builder, model)
+        self.assertEqual(
+            _all_builder_lines(ib_builder), [],
+            "表情部件整份交回游戏：IB/贴图段也不得生成",
+        )
+
+    def test_texture_only_mode_emits_ib_and_texture_but_no_geometry(self):
+        """第 1 层需求：只换贴图 —— 变形段不发，渲染段（IB/贴图）照发。"""
+        _fake_global_properties.zzmi_morph_parts_texture_only = lambda: True
+        exporter, model = self._morph_exporter()
+
+        vb_builder = _FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_vb_sections(vb_builder, model)
+        self.assertEqual(
+            _all_builder_lines(vb_builder), [],
+            "只换贴图模式下仍不得生成变形阶段覆写段",
+        )
+
+        ib_builder = _FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_ib_sections(ib_builder, model)
+        lines = _all_builder_lines(ib_builder)
+        self.assertTrue(lines, "只换贴图模式必须生成渲染/贴图段")
+        self.assertTrue(
+            any(line.startswith("[TextureOverride_IB_c28e6303]") for line in lines)
+        )
+
+    def test_morph_part_excluded_from_merged_skeleton(self):
+        exporter, _model = self._morph_exporter()
+        components, id_dict = exporter._collect_merged_skeleton_components()
+        self.assertEqual(components, [])
+        self.assertEqual(id_dict, {})
+
+    def test_manual_list_can_mark_part_without_match_cs(self):
+        submesh = _FakeSubmesh("LOD0.c28e6303-7308-0", 0, 10)
+        model = _FakeDrawIBModel("c28e6303", [submesh])
+        model.draw_ib_alias = "脸_copy"
+        exporter = _make_exporter([model], merged_vgmap=True)
+        # 自动判断拿不到 match_cs 时，手填名字片段照样命中
+        _fake_global_properties.zzmi_morph_parts_list = lambda: "脸"
+        exporter._morph_draw_ibs_cache = None
+        self.assertTrue(exporter._is_morph_part("c28e6303"))
+
+    def test_switch_off_keeps_old_geometry_replacement(self):
+        _fake_global_properties.zzmi_morph_parts_keep_geometry = lambda: False
+        exporter, model = self._morph_exporter()
+        exporter._morph_draw_ibs_cache = None
+        self.assertFalse(exporter._is_morph_part("c28e6303"))
+        builder = _FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_vb_sections(builder, model)
+        lines = _all_builder_lines(builder)
+        self.assertTrue(any("Resourcec28e6303Position" in line for line in lines))
 
 
 class _ZZMIGroup3RedirectFixture:
@@ -2415,8 +2670,8 @@ class ZZSIMergedMeshRedirectTests(_ZZMIGroup3RedirectFixture, unittest.TestCase)
         self.assertIn("run = CustomShaderZZMIMergedSkeletonAttach_C2_s1", text_c)
         self.assertIn("draw = 18776, 0", text_c)
         self.assertIn("vb0 = Resourceb20f90eaPosition", text_c)
-        self.assertIn("if $zz_ms_seen_01 == 1 && $zz_ms_seen_11 == 1 && $zz_ms_seen_21 == 1", text_c)
-        self.assertIn("if $zz_ms_seen_02 == 1 && $zz_ms_seen_12 == 1 && $zz_ms_seen_22 == 1", text_c)
+        self.assertIn("if $zz_ms_seen_01 >= 1 && $zz_ms_seen_11 >= 1 && $zz_ms_seen_21 >= 1", text_c)
+        self.assertIn("if $zz_ms_seen_02 >= 1 && $zz_ms_seen_12 >= 1 && $zz_ms_seen_22 >= 1", text_c)
 
     def test_redirect_draw_waits_for_dependencies_in_both_frame_orders(self):
         """回归 2026-08-26 实测：target 可能在 carrier 前或后到达；两种
@@ -2488,7 +2743,7 @@ class ZZSIMergedMeshRedirectTests(_ZZMIGroup3RedirectFixture, unittest.TestCase)
         exporter.add_unity_vs_texture_override_vb_sections(builder_carrier, models[0])
         text_carrier = "\n".join(builder_carrier.sections[0].SectionLineList)
         self.assertIn("ResourceZZRedirectSO_s1 = ref so0", text_carrier)
-        self.assertIn("if $zz_ms_seen_01 == 1 && $zz_ms_seen_11 == 1", text_carrier)
+        self.assertIn("if $zz_ms_seen_01 >= 1 && $zz_ms_seen_11 >= 1", text_carrier)
         self.assertIn("draw = 18776, 0", text_carrier)
         self.assertNotIn("draw = 3, 0", text_carrier)
 
@@ -2797,18 +3052,18 @@ class ZZMIMultiInstanceLatchRemovalTests(_ZZMIGroup3RedirectFixture, unittest.Te
         # 1) 出现次顶层自增 + 回绕为槽位 1（组 3 有 3 个部件）
         for cid in range(3):
             self.assertIn(f"$zz_ms_occ_{cid} = $zz_ms_occ_{cid} + 1", vb_text)
-            self.assertIn(f"if $zz_ms_occ_{cid} >= 3", vb_text)
+            self.assertIn(f"if $zz_ms_occ_{cid} >= {_OCC_WRAP}", vb_text)
             self.assertIn(f"    $zz_ms_occ_{cid} = 1", vb_text)
         # 2) 到达标记顶层 sticky 累加
         for cid in range(3):
-            for slot in (1, 2):
+            for slot in _OCC_SLOTS:
                 self.assertIn(
                     f"$zz_ms_seen_{cid}{slot} = $zz_ms_seen_{cid}{slot}"
-                    f" + ($zz_ms_occ_{cid} == {slot})",
+                    f" + ({_slot_expr(cid, slot)})",
                     vb_text,
                 )
         # 3) 按槽捕获 palette；SO 捕获只在 owner（carrier b20f90ea）段
-        self.assertIn("if $zz_ms_occ_1 == 1", vb_text)
+        self.assertTrue(_has_occ_slot(vb_text, 1))
         self.assertIn(
             "    ResourceZZPalette_b20f90ea_s1 = copy vs-t0 unless_null", vb_text
         )
@@ -2816,11 +3071,11 @@ class ZZMIMultiInstanceLatchRemovalTests(_ZZMIGroup3RedirectFixture, unittest.Te
             "    ResourceZZPalette_b20f90ea_s2 = copy vs-t0 unless_null", vb_text
         )
         self.assertNotIn("ResourceZZPalette_a23aa8a3_s1 = copy vs-t0 unless_null\n    ResourceZZRedirectSO", vb_text)
-        # 4) 每槽守卫条件 = 组内全部部件 seen 相与
-        for slot in (1, 2):
+        # 4) 每槽守卫条件 = 本槽轮次条件 && 组内全部部件 seen 相与
+        for slot in _OCC_SLOTS:
             self.assertIn(
-                f"if $zz_ms_seen_0{slot} == 1 && $zz_ms_seen_1{slot} == 1"
-                f" && $zz_ms_seen_2{slot} == 1",
+                f"if $zz_ms_seen_0{slot} >= 1"
+                f" && $zz_ms_seen_1{slot} >= 1 && $zz_ms_seen_2{slot} >= 1",
                 vb_text,
             )
         # 5) attach run 全在顶层（含全部 部件 × 槽）
@@ -2842,15 +3097,16 @@ class ZZMIMultiInstanceLatchRemovalTests(_ZZMIGroup3RedirectFixture, unittest.Te
             sorted(
                 f"CustomShaderZZMIMergedSkeletonAttach_C{cid}_s{slot}"
                 for cid in range(3)
-                for slot in (1, 2)
+                for slot in _OCC_SLOTS
             ),
         )
-        # 6) 守卫体内只有绑定与 draw
-        for slot in (1, 2):
+        # 6) 守卫体内只有绑定与 draw（守卫行现在带轮次条件前缀）
+        for slot in _OCC_SLOTS:
             lines = vb_text.splitlines()
+            guard_prefix = f"if $zz_ms_seen_0{slot} >= 1"
             start = next(
                 i for i, line in enumerate(lines)
-                if line.startswith(f"if $zz_ms_seen_0{slot} == 1")
+                if line.startswith(guard_prefix)
             )
             end = lines.index("endif", start)
             body = lines[start + 1 : end]
@@ -2932,10 +3188,10 @@ class ZZMIMultiInstanceLatchRemovalTests(_ZZMIGroup3RedirectFixture, unittest.Te
         # 部件段），故合并 draw 按"槽 × 发守卫的部件段"成套出现（每段每槽恰好一次）。
         draw_count = vb_text.count("    draw = 18776, 0")
         self.assertGreaterEqual(draw_count, 2)
-        self.assertEqual(draw_count % 2, 0)
+        self.assertEqual(draw_count, _SLOT_COUNT * 3)
         for slot_cond in (
-            "if $zz_ms_seen_01 == 1 && $zz_ms_seen_11 == 1 && $zz_ms_seen_21 == 1",
-            "if $zz_ms_seen_02 == 1 && $zz_ms_seen_12 == 1 && $zz_ms_seen_22 == 1",
+            "if $zz_ms_seen_01 >= 1 && $zz_ms_seen_11 >= 1 && $zz_ms_seen_21 >= 1",
+            "if $zz_ms_seen_02 >= 1 && $zz_ms_seen_12 >= 1 && $zz_ms_seen_22 >= 1",
         ):
             self.assertIn(slot_cond, vb_text)
         # SO 引用按槽分别捕获（carrier 段），target 段按槽分别绑定
@@ -2948,11 +3204,11 @@ class ZZMIMultiInstanceLatchRemovalTests(_ZZMIGroup3RedirectFixture, unittest.Te
         # 回归：**载体段也必须发守卫**（只让单挂点持有守卫时，该挂点先 deform 的帧
         # 里守卫永不触发 → 该槽 SO 只剩 3 顶点前缀 → 合并几何整段消失）
         self.assertIn(
-            "if $zz_ms_seen_01 == 1 && $zz_ms_seen_11 == 1 && $zz_ms_seen_21 == 1",
+            "if $zz_ms_seen_01 >= 1 && $zz_ms_seen_11 >= 1 && $zz_ms_seen_21 >= 1",
             b_text,
         )
         self.assertIn("    draw = 18776, 0", b_text)
-        self.assertIn("if $zz_ms_seen_02 == 1 && $zz_ms_seen_12 == 1 && $zz_ms_seen_22 == 1", b_text)
+        self.assertIn("if $zz_ms_seen_02 >= 1 && $zz_ms_seen_12 >= 1 && $zz_ms_seen_22 >= 1", b_text)
 
     def test_latch_helpers_and_variables_removed_from_generator(self):
         """生成器层面：帧闩锁/相位辅助接口与变量已彻底移除（防止回归）。"""
@@ -2965,6 +3221,124 @@ class ZZMIMultiInstanceLatchRemovalTests(_ZZMIGroup3RedirectFixture, unittest.Te
         self.assertNotIn("$zz_ms_redirect_drawn", combined)
         self.assertNotIn("$zz_ms_group_ready", combined)
         self.assertNotIn("$zz_ms_group_phase", combined)
+
+
+class ZZMISectionNameSafetyTests(unittest.TestCase):
+    """段名安全化真的接进了 ZZMI 导出器（不是只加了模块）。"""
+
+    def test_sanitizer_module_is_the_real_one(self):
+        # 如果 zzmi.py 走了 try/except 兜底，这里会失败——正好当作"模块图没接上"的哨兵。
+        self.assertEqual(
+            _zzmi_module.sanitize_section_name_part("头饰[丝带]"), "头饰_丝带_"
+        )
+
+    def test_bracket_alias_emits_single_bracket_section_names(self):
+        submesh = _FakeSubmesh("LOD0.ae840e72-1446-0", 0, 5)
+        model = _FakeDrawIBModel("ae840e72", [submesh])
+        model.draw_ib_alias = "头饰[丝带]"
+        exporter = _make_exporter([model], merged_vgmap=True)
+        exporter.merged_skeleton_components = []
+        exporter.merged_skeleton_component_id_dict = {}
+
+        builder = _FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_vb_sections(builder, model)
+        headers = [
+            line
+            for section in builder.sections
+            for line in section.SectionLineList
+            if line.startswith("[") and line.endswith("]")
+        ]
+        self.assertTrue(headers)
+        for header in headers:
+            self.assertEqual(header.count("["), 1, header)
+            self.assertEqual(header.count("]"), 1, header)
+        self.assertIn(
+            "[TextureOverride_VB_ae840e72_头饰_丝带__Position]", headers
+        )
+
+    def test_two_bracket_parts_do_not_collide(self):
+        model_a = _FakeDrawIBModel(
+            "ae840e72", [_FakeSubmesh("LOD0.ae840e72-1446-0", 0, 5)]
+        )
+        model_a.draw_ib_alias = "头饰[丝带]"
+        model_b = _FakeDrawIBModel(
+            "9258d5f8", [_FakeSubmesh("LOD0.9258d5f8-4578-0", 5, 5)]
+        )
+        model_b.draw_ib_alias = "头饰[丝带1]"
+        exporter = _make_exporter([model_a, model_b], merged_vgmap=True)
+        exporter.merged_skeleton_components = []
+        exporter.merged_skeleton_component_id_dict = {}
+
+        names = []
+        for model in (model_a, model_b):
+            builder = _FakeIniBuilder()
+            exporter.add_unity_vs_texture_override_vb_sections(builder, model)
+            names.extend(
+                line
+                for section in builder.sections
+                for line in section.SectionLineList
+                if line.startswith("[TextureOverride_VB_")
+            )
+        self.assertEqual(len(names), len(set(names)), names)
+
+
+class ZZMIMergedContractGuardTests(unittest.TestCase):
+    """导出前守卫：契约不满足必须抛错中止，不能静默产出坏 mod。"""
+
+    def test_raises_when_workspace_has_data_but_checkbox_off(self):
+        models = [
+            _FakeDrawIBModel("b20f90ea", [_FakeSubmesh("LOD0.b20f90ea-19182-0", 154, 51)])
+        ]
+        exporter = _make_exporter(models, merged_vgmap=False)
+        exporter.merged_skeleton_components, exporter.merged_skeleton_component_id_dict = (
+            exporter._collect_merged_skeleton_components()
+        )
+        self.assertEqual(exporter._merged_parts_with_data, 1)
+        with self.assertRaises(RuntimeError) as ctx:
+            exporter._enforce_merged_skeleton_contract()
+        self.assertIn("关闭", str(ctx.exception))
+
+    def test_raises_when_every_component_is_rejected(self):
+        # VGMap 不完整覆盖 0..50 ⇒ 收集阶段整部件拒绝，但工作空间确实带数据。
+        bad_map = {0: 1}
+        models = [
+            _FakeDrawIBModel(
+                "b20f90ea",
+                [_FakeSubmesh("LOD0.b20f90ea-19182-0", 154, 51, vg_map=bad_map)],
+            )
+        ]
+        exporter = _make_exporter(models, merged_vgmap=True)
+        exporter.merged_skeleton_components, exporter.merged_skeleton_component_id_dict = (
+            exporter._collect_merged_skeleton_components()
+        )
+        self.assertEqual(exporter.merged_skeleton_components, [])
+        self.assertTrue(exporter._merged_skip_reasons)
+        with self.assertRaises(RuntimeError) as ctx:
+            exporter._enforce_merged_skeleton_contract()
+        self.assertIn("全部被导出器拒绝", str(ctx.exception))
+        self.assertIn("b20f90ea", str(ctx.exception))
+
+    def test_healthy_merge_passes_the_guard(self):
+        models = [
+            _FakeDrawIBModel("84618ee0", [_FakeSubmesh("LOD0.84618ee0-22296-0", 105, 49)]),
+            _FakeDrawIBModel("a23aa8a3", [_FakeSubmesh("LOD0.a23aa8a3-42759-0", 0, 105)]),
+        ]
+        exporter = _make_exporter(models, merged_vgmap=True)
+        exporter.merged_skeleton_components, exporter.merged_skeleton_component_id_dict = (
+            exporter._collect_merged_skeleton_components()
+        )
+        self.assertTrue(exporter.merged_skeleton_components)
+        exporter._enforce_merged_skeleton_contract()  # 不抛
+        self.assertEqual(exporter._merged_contract["level"], "ok")
+
+    def test_no_merged_data_is_a_notice_not_an_error(self):
+        models = [_FakeDrawIBModel("b20f90ea", [_FakeSubmesh("LOD0.b20f90ea-19182-0")])]
+        exporter = _make_exporter(models, merged_vgmap=True)
+        exporter.merged_skeleton_components, exporter.merged_skeleton_component_id_dict = (
+            exporter._collect_merged_skeleton_components()
+        )
+        exporter._enforce_merged_skeleton_contract()  # 不抛
+        self.assertEqual(exporter._merged_contract["level"], "notice")
 
 
 if __name__ == "__main__":

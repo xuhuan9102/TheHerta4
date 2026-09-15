@@ -3819,6 +3819,19 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         ])
         # 碰撞检测参数（防穿模）：仅在模式三/拉扯模式生效。槽位 101–104 在拖拽着色器族内空闲。
         # 显式写全（含关闭时的 x101 = 0），遵守「读了必设」残留纪律。
+        #
+        # 2026-09-12 测试版修复：这里原先是「一行写四个值」
+        #     x101 = 1 0.002 0 0.9
+        # 那是**语法错误**，不是能用的简写。`xNNN` 只取一个 float
+        # （IniParams[N] 的 x 分量），右边整串被 CommandListExpression::parse
+        # 当作「一个表达式」分词，而 tokenise() 在遇到连续两个操作数时直接抛
+        # `Unexpected identifier`（CommandList.cpp 的 import_operand 标号处）。
+        # 后果：这一行不被任何解析器接受，x101~x104 **全部保持 0**，
+        # 着色器门控 `if (COLLISION_PARAMS.x > 0.5)` 永远为假 ——
+        # 碰撞解算一次都不执行，而且不报错、不提示。
+        # 同一分支的「关」一侧本来就写成一分量一行（x101 = 0 / x102 = 0 …），
+        # 所以这里改成一分量一行，与它对齐、也与本节点其它所有 IniParams
+        # 发射的写法对齐。完整证据链见 notes/50。
         collision_grid = comp.get("collision_grid")
         if collision_grid:
             drag_mode_var = self._runtime_variable_names(ns)[0]
@@ -3829,10 +3842,26 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             nx, ny, nz = collision_grid["dims"]
             cnx, cny, cnz = collision_grid["cdims"]
             lines.extend([
-                f"x101 = 1 {margin} {mode} {safety}",
-                f"x102 = {self._fmt(float(bmin[0]))} {self._fmt(float(bmin[1]))} {self._fmt(float(bmin[2]))} {self._fmt(collision_grid['h'])}",
-                f"x103 = {nx} {ny} {nz} {self._fmt(collision_grid['h_c'])}",
-                f"x104 = {drag_mode_var} {cnx} {cny} {cnz}",
+                # slot 101 —— 开关 / 裕量 / 模式 / 安全系数
+                "x101 = 1",
+                f"y101 = {margin}",
+                f"z101 = {mode}",
+                f"w101 = {safety}",
+                # slot 102 —— 网格原点(xyz) / 细格边长(w)
+                f"x102 = {self._fmt(float(bmin[0]))}",
+                f"y102 = {self._fmt(float(bmin[1]))}",
+                f"z102 = {self._fmt(float(bmin[2]))}",
+                f"w102 = {self._fmt(float(collision_grid['h']))}",
+                # slot 103 —— 细格维度(xyz) / 粗格边长(w)
+                f"x103 = {nx}",
+                f"y103 = {ny}",
+                f"z103 = {nz}",
+                f"w103 = {self._fmt(float(collision_grid['h_c']))}",
+                # slot 104 —— 拖拽模式变量(x) / 粗格维度(yzw)
+                f"x104 = {drag_mode_var}",
+                f"y104 = {cnx}",
+                f"z104 = {cny}",
+                f"w104 = {cnz}",
             ])
         else:
             lines.extend(["x101 = 0", "x102 = 0", "x103 = 0", "x104 = 0"])

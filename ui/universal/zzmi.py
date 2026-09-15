@@ -14,12 +14,57 @@ from ...utils.json_utils import JsonUtils
 from ...utils.timer_utils import TimerUtils
 from .unity import ExportUnity
 
+# 段名安全化 / 合并骨架契约判定（2026-09-13 新增模块）。
+# 与下面的 ZZMI_VG_MAP_ALGORITHM_VERSION 同样加保护：轻量 fake 测试环境只装了
+# 被显式 stub 的模块，缺这两个模块时不能让整个导出模块 import 失败。
+try:
+    from ...common.ini_name_safety import sanitize_section_name_part
+    from ...common.zzmi_merged_contract import evaluate_merged_skeleton_contract
+except Exception:  # pragma: no cover - 仅兼容不完整模块图
+    def sanitize_section_name_part(text, fallback: str = "part") -> str:  # type: ignore[misc]
+        cleaned = str(text or "").translate(str.maketrans({"[": "_", "]": "_", ";": "_"}))
+        return cleaned.strip() or fallback
+
+    def evaluate_merged_skeleton_contract(**kwargs) -> dict:  # type: ignore[misc]
+        print(
+            "[ZZMI骨骼合并] 警告：合并骨架契约判定模块不可用"
+            "（common/zzmi_merged_contract.py 缺失），本次不做导出前守卫。"
+        )
+        return {"level": "ok", "message": "", "hint": ""}
+
 # 导出模块在 Blender 启动时可以直接读取反查模块的版本；轻量 fake/旧插件环境
 # 可能未加载该模块，使用同一当前版本常量仍保持“陈旧缓存拒绝”这一安全默认。
 try:
     from ...common.zzmi_skeleton import ZZMI_VG_MAP_ALGORITHM_VERSION
 except Exception:  # pragma: no cover - 仅兼容无完整 Blender 依赖的导入环境
     ZZMI_VG_MAP_ALGORITHM_VERSION = 3
+
+
+def _zzmi_prop_flag(name: str, default: bool) -> bool:
+    """读 GlobalProterties 上的布尔开关；测试用假对象缺失该属性时回落 default。
+
+    （2026-09-13 新增两个开关：删掉的部件交回游戏画原版 / 表情部件只换贴图。
+    轻量 fake 环境里的 GlobalProterties 是 SimpleNamespace，直接调用会
+    AttributeError，所以这里统一走 getattr。）
+    """
+    getter = getattr(GlobalProterties, name, None)
+    if callable(getter):
+        try:
+            return bool(getter())
+        except Exception:  # noqa: BLE001 - 假对象/未注册属性
+            return default
+    return default
+
+
+def _zzmi_prop_str(name: str, default: str) -> str:
+    """读 GlobalProterties 上的字符串开关（同上，缺失时回落 default）。"""
+    getter = getattr(GlobalProterties, name, None)
+    if callable(getter):
+        try:
+            return str(getter() or default)
+        except Exception:  # noqa: BLE001
+            return default
+    return default
 
 
 class ZZMITextureMarkName:
@@ -79,11 +124,56 @@ ZZMI_STUB_PREFIX_ROWS = 3
 # 后者最后到的是 3 顶点占位桩 → 整帧无可见几何 = 用户看到的"模型消失"帧）。
 # 自足挂点（几何只采样自己 vg_map 覆盖的槽位）改为按本轮出现次绑本槽骨架后
 # **无条件绘制**；只有画「含组内其它部件顶点的合并几何」的吸收挂点仍保留组级守卫。
-ZZMI_MERGED_SKELETON_SLOTS: tuple[int, ...] = (1, 2)
+# 2026-09-15：从 2 个槽扩到 5 个。
+#
+# 原因（实测，见 notes/softbody-m1-status.md §20.9）：产物按「本帧第几次出现」
+# 给部件分配槽位，槽数只有 2 个时，`$zz_ms_occ_N` 是 **1→2→3 回绕**
+# （`if occ >= 3 → occ = 1`）。而用户角色一帧里：
+#   身体 c209c22b 画 5 次（序号 48/59/245/275/292）
+#   腿   4a178546 画 5 次（序号 42/53/254/268/285）
+# ⇒ 第 4、5 次被当成「第 1、2 次」，复用了更早捕获的调色板；
+#   又因为组调色板是各部件各写各的，身体在第 3 子轮（序号 245）用 `_s1` 画时，
+#   腿的 `_s1` 还停在子轮 1（序号 42）⇒ 身体拿到的腿骨骼差了两个子轮
+#   ⇒ 接缝在大幅动作时裂开。
+#
+# 槽数 ≥ 每帧最大出现次数后，每一次出现独占一个槽，不再回绕复用。
+# 回绕点（`ZZMI_MERGED_SKELETON_OCC_WRAP`）、门控变量、palette/骨架资源、
+# attach 段数量全部从本元组推导，改这里即可。
+# 槽位键 = **本帧第几次出现**（`$zz_ms_occ_<i>`），槽数必须 ≥ 一帧内最大出现次数。
+#
+# ⚠ 2026-09-15 记录一次已回退的弯路：曾把键改成 `DRAW_TYPE`，以为它是"渲染轮次"。
+# 事后在上游源码里查到权威定义 —— `upstream/XXMI-Libs-Package/DirectX11/
+# DrawCallInfo.h` 里 `DRAW_TYPE` 是 **D3D draw call 种类**
+# （Draw=1 / DrawIndexed=2 / DrawInstanced=3 / DrawIndexedInstanced=4 / …），
+# 上游 ZZMI 插件（`upstream/TheHerta4/games/zzmi.py:62-75`）用它区分的是
+# **索引绘制 vs 非索引绘制**，不是轮次。按它分槽语义错误，已回退。
+# 详见 notes/softbody-m1-status.md §20.12。
+#
+# 实测（§20.9/§20.10）：该角色一帧内身体/腿各出现 **5 次**，半透裙 4 次。
+# 槽数 2 时 `>= 3` 回绕 ⇒ 第 4/5 次复用第 1/2 次捕获的调色板（这才是实测到的
+# "身体在第 3 子轮拿到腿两个子轮之前的骨骼"）。取 5 槽 + 回绕点 6 后不再复用。
+ZZMI_MERGED_SKELETON_SLOTS: tuple[int, ...] = (1, 2, 3, 4, 5)
 # 出现次回绕上限：occ 自增到该值即回绕为槽位起点（1/2 循环）。
 ZZMI_MERGED_SKELETON_OCC_WRAP = len(ZZMI_MERGED_SKELETON_SLOTS) + 1
 # 计数器出现在 if 条件前必须能在顶层解析出的下限（槽位起点）。
 ZZMI_MERGED_SKELETON_OCC_SLOT_BASE = ZZMI_MERGED_SKELETON_SLOTS[0]
+
+
+def zzmi_merged_slot_key_expr(component_id: int, slot: int) -> str:
+    """合并骨架「部件 `component_id` 命中槽 `slot`」的 ini 条件表达式。
+
+    这是**唯一**的槽位键定义处：生成器（捕获 / 到达标记 / 自足挂点绘制 / 组级守卫）
+    与单元测试都从这里取，避免两边各写一份、换键时不同步。
+
+    当前键 = 「本帧第几次出现」（`$zz_ms_occ_<i> == <slot>`）。
+
+    ⚠ 2026-09-15：曾改成 `DRAW_TYPE`，理由是"用它区分渲染轮次"。**该理由是错的**
+    —— 上游源码 `upstream/XXMI-Libs-Package/DirectX11/DrawCallInfo.h` 定义
+    `DRAW_TYPE` 为 **D3D draw call 种类**（Draw=1/DrawIndexed=2/DrawInstanced=3/
+    DrawIndexedInstanced=4/…），与渲染轮次无关；上游 ZZMI 插件用它区分的是
+    "索引绘制 vs 非索引绘制"。已回退，详见 notes/softbody-m1-status.md §20.12。
+    """
+    return f"$zz_ms_occ_{component_id} == {slot}"
 
 
 class ExportZZMI(ExportUnity):
@@ -142,6 +232,14 @@ class ExportZZMI(ExportUnity):
         self.blueprint_model = blueprint_model
         self._zzmi_stub_object_names = []
         self._zzmi_stub_draw_calls = []
+        # 合并骨架「导入/导出契约」取证（2026-09-13）：
+        #   部件是否带反查写回的合并数据（= Blender 顶点组已被全局编号化的证据），
+        #   以及每个被拒绝部件的具体原因。两者一起交给
+        #   common/zzmi_merged_contract.py 判定，避免"静默退化成普通导出"
+        #   却不告诉用户（实机后果：模型整块不显示）。
+        self._merged_parts_with_data = 0
+        self._merged_skip_reasons: dict[str, str] = {}
+        self._merged_contract: dict = {}
         try:
             if GlobalProterties.import_merged_vgmap():
                 # 占位是合并骨架渲染身份完整性的硬前提。创建失败时中止导出，
@@ -268,18 +366,69 @@ class ExportZZMI(ExportUnity):
             if not members:
                 continue
 
+            # 用户开关（2026-09-13）：「删掉的部件交回游戏画原版」。
+            # 勾选时，凡是在蓝图里找不到对象的组件都不再补占位 —— 游戏照常画原版。
+            # 这解决了"删掉脸以后脸整个消失"的困惑（脸是整缺 DrawIB，且骨骼被
+            # 头发/头饰那些幸存部件引用，旧逻辑据此补了隐形占位把原版顶掉）。
+            # 代价：若用户其实是把几何 join 合并进了别的物体，不插桩会重复绘制 →
+            # 那个情形必须取消勾选；下面在被引用时打印明确的双绘警告。
+            keep_original = _zzmi_prop_flag("zzmi_removed_parts_keep_original", True)
             if any(member in present for member in members):
-                # 部分缺失：缺失组件补占位
+                # 部分缺失：同 DrawIB 还有组件在用
                 stub_members = [member for member in members if member not in present]
+                if keep_original and stub_members:
+                    if used_group_ids is None:
+                        used_group_ids = self._collect_used_group_ids(ordered)
+                    if self._is_drawib_absorbed(draw_ib, workspace_root, used_group_ids):
+                        print(
+                            f"[ZZMI骨骼合并] 提醒：DrawIB {draw_ib} 的 {len(stub_members)} 个缺失"
+                            "组件，其骨骼仍被现存物体引用（像是 join 合并过）。当前勾选了"
+                            "『删掉的部件交回游戏画原版』，所以不插占位 —— 若游戏里出现重影，"
+                            "请取消该勾选后重新导出。"
+                        )
+                    print(
+                        f"[ZZMI骨骼合并] DrawIB {draw_ib}：{len(stub_members)} 个缺失组件按开关"
+                        "不插占位，交回游戏画原版"
+                    )
+                    continue
             else:
                 # 整个 DrawIB 缺席：判定几何是否被合并进其它对象
                 if used_group_ids is None:
                     used_group_ids = self._collect_used_group_ids(ordered)
-                if self._is_drawib_absorbed(draw_ib, workspace_root, used_group_ids):
+                absorbed = self._is_drawib_absorbed(draw_ib, workspace_root, used_group_ids)
+                if absorbed:
+                     # ★ 2026-09-14 修复（"join 合并上下半身后，下半身整块消失"）：
+                     #   absorbed 只说"这个 DrawIB 没了、但它的全局骨骼 id 仍被现存物体引用"，
+                     #   它同时盖住两种必须区别对待的情况：
+                     #     ① **join 合并**：几何被并进别的物体 ⇒ 被并部件的骨骼没有任何人
+                     #        往合并骨架里写 ⇒ 引用这些骨骼的顶点拿到零矩阵 ⇒ 整块塌掉/不显示。
+                     #        （实测：身体 json OriginalVertexCount=10859 → 现存 92870；
+                     #          其顶点引用 26 个全局槽 [209..254] 是身体自己的 vg_map 盖不住的，
+                     #          全部属于被并掉的 DrawIB 4a178546（同骨架组 G2，47 槽）。）
+                     #        ⇒ **必须补占位**：占位对象会照常生成 VB 段（捕获当帧 palette + 跑 attach）。
+                     #     ② **删除部件**（例：用户把「脸」删掉）：几何不复存在 ⇒ 没有任何物体
+                     #        变大、也没有人引用"只有它能写"的槽 ⇒ 必须保留游戏原版绘制
+                     #        （历史实测：这里若插占位，原版脸会被顶掉）。
+                     #   两个判据都只用导入时记录的数据，不需要用户额外操作。
+                    grew = self._any_present_drawib_grew(ordered, workspace_root)
+                    foreign = False
+                    if not grew:
+                        foreign = self._present_objects_need_foreign_bones(
+                            ordered, workspace_root, draw_ib
+                        )
+                    if not (grew or foreign):
+                        print(
+                            f"[ZZMI骨骼合并] DrawIB {draw_ib} 整缺、骨骼被引用，但既没有任何现存部件"
+                            "顶点数变大，也没有人引用『只有它能写』的槽 ⇒ 判为『删掉的部件』，"
+                            "保留游戏原版绘制（不插桩）"
+                        )
+                        continue
                     stub_members = members
+                    reason = "宿主顶点数变大" if grew else "现存部件引用了只有它能写的全局骨骼槽"
                     print(
                         f"[ZZMI骨骼合并] DrawIB {draw_ib} 没有对象，但其全局骨骼被其它模型引用"
-                        f"（几何已被合并），全组件补占位小三角面"
+                        f"（{reason}）⇒ 全组件补占位小三角面，"
+                        f"以承接它的骨骼（不插桩的话引用这些骨骼的顶点会因零矩阵而整块消失）"
                     )
                 else:
                     print(f"[ZZMI骨骼合并] DrawIB {draw_ib} 无对象且骨骼未被引用，按用户意图不生成")
@@ -353,6 +502,142 @@ class ExportZZMI(ExportUnity):
             return False
         return bool(vg_values & used_group_ids)
 
+    @staticmethod
+    def _resolve_workspace_submesh_name(draw_call) -> str:
+        """解析 DrawCall 对应的 workspace 子网格目录名（= 子网格 json 所在目录名）。
+
+        ⚠ 不能用 `get_blender_obj_name()` 切分：导出期对象会被预处理成
+        `LOD0.<submesh>.<部件名>_copy`，`split(".", 1)[-1]` 会得到
+        "<submesh>.<部件名>_copy"（真实踩过的坑，导致 join 合并判定恒为 False）。
+        `get_workspace_unique_str()` 是稳定的子网格标识。
+        """
+        try:
+            unique = str(draw_call.get_workspace_unique_str() or "").strip()
+        except Exception:
+            unique = ""
+        if not unique:
+            return ""
+        if unique.upper().startswith("LOD"):
+            _, _, rest = unique.partition(".")
+            return rest.split(".", 1)[0]
+        return unique.split(".", 1)[0]
+
+    def _load_submesh_vg_values(self, submesh_name: str, workspace_root: str) -> set[int]:
+        """读取单个子网格 json 的 VGMap 全局槽集合（无数据返回空集）。"""
+        values: set[int] = set()
+        if not submesh_name:
+            return values
+        submesh_dir = os.path.join(workspace_root, "LOD0", submesh_name)
+        if not os.path.isdir(submesh_dir):
+            return values
+        for type_dir in os.listdir(submesh_dir):
+            if not type_dir.startswith("TYPE_"):
+                continue
+            json_path = os.path.join(submesh_dir, type_dir, submesh_name + ".json")
+            if not os.path.isfile(json_path):
+                continue
+            try:
+                payload = JsonUtils.LoadFromFile(json_path)
+            except Exception:
+                continue
+            for raw in ((payload or {}).get("VGMap") or {}).values():
+                try:
+                    values.add(int(raw))
+                except (TypeError, ValueError):
+                    continue
+        return values
+
+    def _present_objects_need_foreign_bones(
+        self, ordered, workspace_root: str, draw_ib: str
+    ) -> bool:
+        """现存对象是否引用了「只有该缺席 DrawIB 能写」的合并骨架槽。
+
+        判据：`现存对象引用的全局槽 - 所有现存部件自己的 VGMap 并集` 与
+        该缺席 DrawIB 的 VGMap 相交非空 —— 这些槽只有它的 palette 能被 attach 写进
+        合并骨架；没有它，引用这些槽的顶点永远拿到零矩阵（整块塌陷）。
+
+        与 `_any_present_drawib_grew` 的关系：后者看"有没有物体变大"（join 合并的
+        直接证据），本方法看"有没有人真的需要这份骨骼"（更精确，且天然排除
+        『删掉部件但幸存部件只引用双方共享骨骼』的历史误判：共享槽在自己的
+        VGMap 里，会被减掉）。
+        """
+        own = self._load_drawib_vg_values(draw_ib, workspace_root)
+        if not own:
+            return False
+        for draw_call in ordered or []:
+            try:
+                obj_name = draw_call.get_blender_obj_name()
+            except Exception:
+                continue
+            obj = bpy.data.objects.get(obj_name) if obj_name else None
+            if obj is None or obj.get("ZZMI_STUB"):
+                continue
+            submesh_name = self._resolve_workspace_submesh_name(draw_call)
+            own_slots = self._load_submesh_vg_values(submesh_name, workspace_root)
+            if not own_slots:
+                # 该部件缺导入期反查数据 ⇒ 分不清"共享槽"和"外来槽"，保守不判定
+                continue
+            if (self._collect_object_used_group_ids(obj) - own_slots) & own:
+                return True
+        return False
+
+    def _any_present_drawib_grew(self, ordered, workspace_root: str) -> bool:
+        """是否存在"当前顶点数 > 该子网格 json 记录的 OriginalVertexCount"的现存对象。
+
+        用途：把 absorbed（缺席 DrawIB 的骨骼仍被现存物体引用）的两种来源分开 ——
+          * **join 合并**（几何被并进宿主对象，例：「身体.001」）：宿主顶点数**变大** ⇒ True；
+          * **删除部件**（几何不复存在，例：删掉「脸」）：没有任何部件变大 ⇒ False。
+        只有前者需要补占位（承接被并部件的骨骼覆盖），后者必须保留游戏原版绘制。
+
+        ⚠ 实现注意：本方法在 `_ensure_stub_objects_for_missing_parts` 里被调用时，
+          `super().__init__()` 还没跑 ⇒ `self.drawib_model_list` **尚不存在**，
+          所以只能走 workspace 子网格 json（对象名 = 子网格 unique_str，一一对应）。
+        """
+        lod0_dir = os.path.join(workspace_root, "LOD0")
+        if not os.path.isdir(lod0_dir):
+            return False
+        for draw_call in (ordered or []):
+            try:
+                obj_name = draw_call.get_blender_obj_name()
+            except Exception:
+                obj_name = str(getattr(draw_call, "obj_name", "") or "")
+            obj = bpy.data.objects.get(obj_name) if obj_name else None
+            if obj is None or obj.get("ZZMI_STUB"):
+                continue
+            mesh = getattr(obj, "data", None)
+            vertices = getattr(mesh, "vertices", None)
+            if vertices is None:
+                continue
+            # 对象名形如 "LOD0.<drawib>-<index_count>-<first_index>"（有时不带 LOD0. 前缀）
+            # ⚠ 不能用对象名切分：导出期对象已被预处理成
+            # `LOD0.<submesh>.<部件名>_copy`，`split(".", 1)[-1]` 会得到
+            # "<submesh>.<部件名>_copy"（真实踩过的坑：join 合并判定恒为 False）。
+            submesh_name = self._resolve_workspace_submesh_name(draw_call)
+            if not submesh_name:
+                continue
+            submesh_dir = os.path.join(lod0_dir, submesh_name)
+            if not os.path.isdir(submesh_dir):
+                continue
+            for type_dir in os.listdir(submesh_dir):
+                if not type_dir.startswith("TYPE_"):
+                    continue
+                json_path = os.path.join(submesh_dir, type_dir, submesh_name + ".json")
+                if not os.path.isfile(json_path):
+                    continue
+                try:
+                    payload = JsonUtils.LoadFromFile(json_path)
+                except Exception:
+                    continue
+                original = int(payload.get("OriginalVertexCount", 0) or 0)
+                if original <= 0:
+                    continue
+                try:
+                    if len(vertices) > original:
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def _collect_used_group_ids(self, ordered) -> set[int]:
         """收集蓝图内全部对象实际引用（权重>0）的顶点组 id 集合。"""
         used = set()
@@ -364,21 +649,28 @@ class ExportZZMI(ExportUnity):
             obj = bpy.data.objects.get(obj_name) if obj_name else None
             if obj is None or obj.get("ZZMI_STUB"):
                 continue
-            mesh = getattr(obj, "data", None) if obj is not None else None
-            vertices = getattr(mesh, "vertices", None)
-            if vertices is None:
-                continue
-            for vertex in vertices:
-                for group_elem in vertex.groups:
-                    if group_elem.weight <= 0:
-                        continue
-                    try:
-                        group_index = int(group_elem.group)
-                        group_name = str(obj.vertex_groups[group_index].name).strip()
-                    except (AttributeError, IndexError, TypeError, ValueError):
-                        continue
-                    if group_name.isdigit():
-                        used.add(int(group_name))
+            used |= self._collect_object_used_group_ids(obj)
+        return used
+
+    @staticmethod
+    def _collect_object_used_group_ids(obj) -> set[int]:
+        """单个对象实际引用（权重>0）的**数字组名**集合（合并骨架模式下组名 = 全局骨骼 id）。"""
+        used: set[int] = set()
+        mesh = getattr(obj, "data", None)
+        vertices = getattr(mesh, "vertices", None)
+        if vertices is None:
+            return used
+        for vertex in vertices:
+            for group_elem in getattr(vertex, "groups", []):
+                if group_elem.weight <= 0:
+                    continue
+                try:
+                    group_index = int(group_elem.group)
+                    group_name = str(obj.vertex_groups[group_index].name).strip()
+                except (AttributeError, IndexError, TypeError, ValueError):
+                    continue
+                if group_name.isdigit():
+                    used.add(int(group_name))
         return used
 
     def _build_shader_replace_base_vertex_map(self) -> dict[int, int]:
@@ -532,6 +824,102 @@ class ExportZZMI(ExportUnity):
         self._zzmi_stub_object_names = []
         self._zzmi_stub_draw_calls = []
 
+    # ------------------------------------------------------------------
+    # 表情部件（morph）识别（2026-09-13）
+    #
+    # 绝区零的脸部表情不是动画：游戏每帧用计算着色器（FrameAnalysis 实测
+    # `cs=743108cc03f39cbf`）把表情算进一个池，再 CopyResource 进「变形阶段的
+    # vb0」，变形 pass 读的就是那份结果：
+    #
+    #   000006  CopyResource(Dst=池 41554b66, Src=基础顶点 31aa5dc2)
+    #   000006  CSSetShaderResources(t0=31cdb65d); CSSetUnorderedAccessViews(u0=池)
+    #   000006  CSSetShader(743108cc03f39cbf); Dispatch(10,1,1)
+    #   000007..9 同上（多通道）
+    #   000010  CopyResource(Dst=153d04c7 ← 变形 vb0, Src=池)   ← 结果落到顶点缓冲
+    #   000010  IASetVertexBuffers(vb0=153d04c7, vb1=.., vb2=..)
+    #
+    # 我们导出器原来照常规把 `153d04c7` 的 vb0 换成 mod 的静态顶点 —— 等于把
+    # 刚拷进去的表情结果整份丢掉 ⇒ 实机现象「脸正常、表情死住」（用户实测）。
+    #
+    # 而那份基础顶点是通过 D3D 的 CopyResource 进链的，不是着色器绑定，INI 无法
+    # 拦截；所以**换脸的几何形状和保表情在 mod 层面不能同时成立**。
+    #
+    # 因此表情部件走这条路径：只替换贴图/材质与 IB，不动变形阶段几何 ——
+    # 贴图改动照常生效、表情保留；改过网格形状的部分不会生效（下面会点名提醒）。
+    # ------------------------------------------------------------------
+
+    def _morph_part_draw_ibs(self) -> set[str]:
+        """本次导出按「表情部件」处理的 DrawIB 集合（开关关闭时为空集）。"""
+        cached = getattr(self, "_morph_draw_ibs_cache", None)
+        if cached is not None:
+            return cached
+
+        result: set[str] = set()
+        if not _zzmi_prop_flag("zzmi_morph_parts_keep_geometry", True):
+            self._morph_draw_ibs_cache = result
+            return result
+
+        raw_list = _zzmi_prop_str("zzmi_morph_parts_list", "")
+        manual: list[str] = []
+        for chunk in raw_list.replace("，", ",").replace("；", ",").replace(";", ",").split(","):
+            token = chunk.strip().lower()
+            if token:
+                manual.append(token)
+
+        for drawib_model in self.drawib_model_list:
+            draw_ib = str(getattr(drawib_model, "draw_ib", "") or "")
+            alias = str(getattr(drawib_model, "draw_ib_alias", "") or "").lower()
+            hit = False
+            for token in manual:
+                if token == draw_ib.lower() or (alias and token in alias):
+                    hit = True
+                    break
+            if not hit and manual:
+                # 别名有时就是 DrawIB 本身（用户没给物体起中文名），这时名字片段
+                # 命中不到 —— 再拿部件自己的名字（part_name / 工作空间唯一名）
+                # 兜一层，让用户按美术习惯填「脸」也能命中。
+                for submesh_model in getattr(drawib_model, "submesh_model_list", []) or []:
+                    haystack = (
+                        str(getattr(submesh_model, "part_name", "") or "")
+                        + " "
+                        + str(getattr(submesh_model, "unique_str", "") or "")
+                    ).lower()
+                    if any(token in haystack for token in manual):
+                        hit = True
+                        break
+            if not hit:
+                # 自动判断：SSMT 反查写回的 match_cs（该部件有计算着色器前驱）
+                for submesh_model in getattr(drawib_model, "submesh_model_list", []) or []:
+                    if str(getattr(submesh_model, "match_cs", "") or "").strip():
+                        hit = True
+                        break
+            if hit:
+                result.add(draw_ib)
+
+        self._morph_draw_ibs_cache = result
+        return result
+
+    def _is_morph_part(self, draw_ib: str) -> bool:
+        return str(draw_ib) in self._morph_part_draw_ibs()
+
+    def _warn_morph_parts(self):
+        """导出开始时点名本次按表情部件处理的 DrawIB（避免用户"改了没生效"却不知道为什么）。"""
+        morph = self._morph_part_draw_ibs()
+        if not morph:
+            return
+        names = []
+        for drawib_model in self.drawib_model_list:
+            draw_ib = str(getattr(drawib_model, "draw_ib", "") or "")
+            if draw_ib in morph:
+                alias = str(getattr(drawib_model, "draw_ib_alias", "") or "")
+                names.append(f"{draw_ib}({alias})" if alias and alias != draw_ib else draw_ib)
+        print(
+            "[ZZMI骨骼合并] 表情部件整份交回游戏（保表情/贴图/UV）: "
+            + ", ".join(names)
+            + "  —— 这些部件本 mod 不做任何改动；如果你要改它们（比如换脸贴图），"
+            "请到面板取消『表情部件（脸）整份交回游戏』（代价：表情会丢）。"
+        )
+
     def _collect_merged_skeleton_components(self):
         """收集 ZZMI 合并骨架组件信息（按 DrawIB 去重，骨架组+vg_offset 排序）。
 
@@ -543,13 +931,32 @@ class ExportZZMI(ExportUnity):
         返回 (components, {draw_ib: component_id})。
         """
         components = []
+        self._merged_parts_with_data = 0
+        self._merged_skip_reasons = {}
         if not GlobalProterties.import_merged_vgmap():
+            # 开关关闭：这里不记录"有数据但被跳过"的原因——契约判定要能区分
+            # 「工作空间本来就没有合并数据」（正常普通导出）与「有数据却被拒」，
+            # 前者靠 _count_merged_parts_with_data 单独取证。
+            self._merged_parts_with_data = self._count_merged_parts_with_data()
             return components, {}
         for drawib_model in self.drawib_model_list:
+            if self._is_morph_part(str(getattr(drawib_model, "draw_ib", ""))):
+                # 表情部件不参与合并骨架：它的几何由游戏自己的 morph 链负责，
+                # 我们既不替换几何，也就不需要它的 palette/vg_map 槽位。
+                continue
             for submesh_model in drawib_model.submesh_model_list:
+                vg_count_probe = int(getattr(submesh_model, "vg_count", 0) or 0)
+                has_map_probe = bool(getattr(submesh_model, "vg_map", None))
+                if vg_count_probe > 0 or has_map_probe:
+                    # 「Blender 顶点组已被全局编号化」的证据：导入段把 VGMap 写进了
+                    # 工作空间，导入器据此建全局顶点组（并随之存进 .blend）。
+                    self._merged_parts_with_data += 1
                 if not bool(
                     getattr(submesh_model, "merged_skeleton_metadata_valid", True)
                 ):
+                    self._merged_skip_reasons[drawib_model.draw_ib] = (
+                        "合并元数据含非整数/越界值（缓存损坏）"
+                    )
                     print(
                         f"[ZZMI骨骼合并] 警告 {drawib_model.draw_ib}: "
                         "骨骼合并元数据含非整数/越界值，该部件不进入合并骨架；"
@@ -558,12 +965,20 @@ class ExportZZMI(ExportUnity):
                     continue
                 vg_count = int(getattr(submesh_model, "vg_count", 0) or 0)
                 if vg_count <= 0:
+                    if has_map_probe:
+                        self._merged_skip_reasons[drawib_model.draw_ib] = (
+                            "有 VGMap 但 VGCount 为 0（缓存写入不完整）"
+                        )
                     continue
                 cache_version = getattr(submesh_model, "vg_map_algorithm_version", None)
                 if (
                     cache_version is not None
                     and int(cache_version or 0) != ZZMI_VG_MAP_ALGORITHM_VERSION
                 ):
+                    self._merged_skip_reasons[drawib_model.draw_ib] = (
+                        f"VGMap 缓存版本 {cache_version} != 当前 "
+                        f"{ZZMI_VG_MAP_ALGORITHM_VERSION}（旧策略缓存）"
+                    )
                     print(
                         f"[ZZMI骨骼合并] 警告 {drawib_model.draw_ib}: "
                         f"VGMap 缓存版本 {cache_version} != 当前版本 "
@@ -601,6 +1016,11 @@ class ExportZZMI(ExportUnity):
                     or vg_offset < 0
                     or skeleton_group < 0
                 ):
+                    self._merged_skip_reasons[drawib_model.draw_ib] = (
+                        f"VGMap 未完整覆盖 0..{vg_count - 1}"
+                        f"（缺失 {missing_keys[:5]}，多余 {extra_keys[:5]}，"
+                        f"偏移 {vg_offset}，分组 {skeleton_group}）"
+                    )
                     print(
                         f"[ZZMI骨骼合并] 警告 {drawib_model.draw_ib}: VGMap 未完整覆盖 "
                         f"0..{vg_count - 1}（缺失 {missing_keys[:5]}，多余 {extra_keys[:5]}）"
@@ -634,6 +1054,10 @@ class ExportZZMI(ExportUnity):
                     if slot >= buffer_slots
                 })
                 if invalid_slots:
+                    self._merged_skip_reasons[component["draw_ib"]] = (
+                        f"VGMap 槽位 {invalid_slots[:5]} 超出合并骨架范围 "
+                        f"0..{buffer_slots - 1}"
+                    )
                     print(
                         f"[ZZMI骨骼合并] 警告 {component['draw_ib']}: VGMap 槽位 "
                         f"{invalid_slots[:5]} 超出合并骨架范围 0..{buffer_slots - 1}，"
@@ -645,6 +1069,50 @@ class ExportZZMI(ExportUnity):
         components.sort(key=lambda c: (c["skeleton_group"], c["vg_offset"], c["draw_ib"]))
         component_id_dict = {c["draw_ib"]: i for i, c in enumerate(components)}
         return components, component_id_dict
+
+    def _count_merged_parts_with_data(self) -> int:
+        """统计工作空间里带合并骨架数据的部件数（开关关闭时也要取证）。
+
+        开关关闭时 `_collect_merged_skeleton_components` 会提前返回，但契约判定
+        仍需要知道「Blender 顶点组是不是已经被全局编号化」。只要子网格带
+        `VGCount > 0` 或非空 `VGMap`，就说明导入段生效过 —— 这时若导出段没有
+        生成合并骨架，产出的 mod 必然在游戏里不显示。
+        """
+        count = 0
+        for drawib_model in self.drawib_model_list:
+            for submesh_model in drawib_model.submesh_model_list:
+                vg_count = int(getattr(submesh_model, "vg_count", 0) or 0)
+                vg_map = getattr(submesh_model, "vg_map", None)
+                if vg_count > 0 or vg_map:
+                    count += 1
+                    break
+        return count
+
+    def _enforce_merged_skeleton_contract(self):
+        """执行合并骨架的「导入/导出契约」判定：不满足就中止导出。
+
+        判定逻辑在 `common/zzmi_merged_contract.py`（纯函数，可单测）。
+        `level == "error"` 时抛 `RuntimeError`，由 Blender 导出算子弹红框报错，
+        避免把「全局编号几何 + 没有合并骨架运行时」这份必然坏掉的产物交付出去。
+        """
+        contract = evaluate_merged_skeleton_contract(
+            checkbox_enabled=bool(GlobalProterties.import_merged_vgmap()),
+            parts_with_data=self._merged_parts_with_data,
+            component_count=len(self.merged_skeleton_components),
+            skip_reasons=self._merged_skip_reasons,
+        )
+        self._merged_contract = contract
+        level = contract.get("level", "ok")
+        if level == "ok":
+            return
+        print("[ZZMI骨骼合并] " + contract.get("message", ""))
+        if contract.get("hint"):
+            print("[ZZMI骨骼合并] " + contract["hint"])
+        if level == "error":
+            raise RuntimeError(
+                contract.get("message", "")
+                + ((" " + contract["hint"]) if contract.get("hint") else "")
+            )
 
     def _get_submesh_ib_key(self, submesh_model, draw_ib):
         return f"{draw_ib}_{submesh_model.match_first_index}"
@@ -933,14 +1401,25 @@ class ExportZZMI(ExportUnity):
     def _merged_group_slot_seen_condition(
         self, skeleton_group: int, slot: int
     ) -> str:
-        """该组该槽的守卫条件：组内全部部件的 `seen_<i><k> == 1` 相与。
+        """该组该槽的守卫条件：**当前轮次就是本槽** 且 组内全部部件本帧在该轮次到过。
 
         这些 `$zz_ms_seen_*` 变量由各部件 deform 段的**顶层** sticky 累加赋值
         （见 `_append_merged_skeleton_deform_block`）；因此不会被加载期优化器
         按初值静态折叠，守卫不会被删除。
+
+        ★ 2026-09-15：槽位键由"出现次序号"换成 `DRAW_TYPE` 轮次身份
+        （见 `_merged_slot_match_expr` 的长注释与 notes §20.10）。因此守卫里
+        **必须**带上本槽的轮次条件：`seen_<i><k> >= 1` 是**sticky**（一旦满足
+        整帧都为真），若不带轮次条件，槽 k 的重放会在后面的**别的轮次**里反复
+        触发，用那一轮早已过期的矩阵画几何。
+
+        ★ 2026-09-15：由 `== 1` 改为 `>= 1`。`== 1` 要求每个部件每帧**恰好**在
+        该槽到达一次；一旦某部件被多画一次（反射/阴影/多实例），计数变 2，守卫
+        永远不闭合，宿主整帧不画（身体整块消失）。`>= 1` 只要求"当帧到达过"，
+        对多 pass 安全；多余触发只是把宿主几何幂等地重写一遍 SO，无害。
         """
         return " && ".join(
-            f"{self._merged_seen_var(component_id, slot)} == 1"
+            f"{self._merged_seen_var(component_id, slot)} >= 1"
             for component_id in self._merged_group_component_ids(skeleton_group)
         )
 
@@ -976,8 +1455,8 @@ class ExportZZMI(ExportUnity):
         occ_var = self._merged_occ_var(component_id)
         slot_first = slots[0]
 
-        # 1) 出现次（顶层）
-        texture_override_vb_section.append("; 出现次（顶层）")
+        # 1) 出现次（顶层）：槽位键就是它（见 `zzmi_merged_slot_key_expr`）。
+        texture_override_vb_section.append("; 出现次（顶层，槽位键）")
         texture_override_vb_section.append(f"{occ_var} = {occ_var} + 1")
         texture_override_vb_section.append(f"if {occ_var} >= {ZZMI_MERGED_SKELETON_OCC_WRAP}")
         texture_override_vb_section.append(f"    {occ_var} = {slot_first}")
@@ -988,7 +1467,8 @@ class ExportZZMI(ExportUnity):
         for slot in slots:
             seen_var = self._merged_seen_var(component_id, slot)
             texture_override_vb_section.append(
-                f"{seen_var} = {seen_var} + ({occ_var} == {slot})"
+                f"{seen_var} = {seen_var} + "
+                f"({zzmi_merged_slot_key_expr(component_id, slot)})"
             )
 
         # 3) 按槽捕获 palette（与 SO owner / 合并宿主的 SO 引用）
@@ -1012,7 +1492,11 @@ class ExportZZMI(ExportUnity):
             palette_line = (
                 f"{self._merged_palette_name(draw_ib, slot)} = copy vs-t0 unless_null"
             )
-            condition = f"if {occ_var} == {slot}" if index == 0 else "else"
+            condition = (
+                f"if {zzmi_merged_slot_key_expr(component_id, slot)}"
+                if index == 0
+                else "else"
+            )
             texture_override_vb_section.append(condition)
             texture_override_vb_section.append(f"    {palette_line}")
             for _so_owner_target_ib in so_owner_target_ibs:
@@ -1199,6 +1683,11 @@ class ExportZZMI(ExportUnity):
         `(引用的骨骼 id - 本部件 vg_map 值集合) ∩ 本组合法槽位` 非空即被吸收。
         被吸收的部件没有自己的可见几何（它的行已经写进 target 的对象里），
         渲染侧不能重复绘制。
+
+         ★ 2026-09-15 修正：之前把"借来的槽全来自合成占位部件"判成"不算被吸收"
+         （走自足直连），结果腿部骨骼每帧比身体晚一拍，走路时抖动。正确做法是
+         仍然算"被吸收"——这样导出器会在组内每个兼容挂点上重放宿主几何，
+         等当帧所有部件的 palette 都捕获完再写，腿骨不再晚一帧。
         """
         component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
         if component_id is None:
@@ -1215,7 +1704,47 @@ class ExportZZMI(ExportUnity):
                 )
             )
         absorbed = (self._collect_drawib_referenced_bone_ids(draw_ib) - own) & legal
+        if not absorbed:
+            return False
         return bool(absorbed)
+
+    def _zzmi_stub_draw_ibs(self) -> set[str]:
+        """本次导出我们合成的隐形占位对象所属的 DrawIB 集合。"""
+        result: set[str] = set()
+        for name in self._zzmi_stub_object_names or []:
+            text = str(name)
+            bare = text.split(".", 1)[-1] if "." in text else text
+            if not bare:
+                continue
+            result.add(bare.split("-", 1)[0])
+        return result
+
+    def _merged_absorbed_sources_are_synthesized_stubs(
+        self, skeleton_group: int, draw_ib: str
+    ) -> bool:
+        """本部件"借来"的骨骼槽是否全部由我们合成的占位部件提供（用户 join 合并）。"""
+        stub_draw_ibs = self._zzmi_stub_draw_ibs()
+        if not stub_draw_ibs:
+            return False
+        stub_slots: set[int] = set()
+        for component_id in self._merged_group_component_ids(skeleton_group):
+            component = self.merged_skeleton_components[int(component_id)]
+            if str(component["draw_ib"]) not in stub_draw_ibs:
+                continue
+            for raw in (component.get("vg_map") or {}).values():
+                try:
+                    stub_slots.add(int(raw))
+                except (TypeError, ValueError):
+                    continue
+        if not stub_slots:
+            return False
+        component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
+        if component_id is None:
+            return False
+        component = self.merged_skeleton_components[int(component_id)]
+        own = set((component.get("vg_map") or {}).values())
+        borrowed = self._collect_drawib_referenced_bone_ids(draw_ib) - own
+        return bool(borrowed) and borrowed <= stub_slots
 
     def _merged_group_redirect_target(self, skeleton_group: int) -> str | None:
         """本骨架组被重定向到的 target DrawIB；该组未发生重定向时返回 None。
@@ -1422,9 +1951,7 @@ class ExportZZMI(ExportUnity):
             return
 
         if self._merged_direct_draw_is_self_contained(skeleton_group, draw_ib):
-            occ_var = self._merged_occ_var(
-                int(self.merged_skeleton_component_id_dict[draw_ib])
-            )
+            component_id = int(self.merged_skeleton_component_id_dict[draw_ib])
             replay_hosts = [
                 host
                 for host in hosts
@@ -1436,7 +1963,7 @@ class ExportZZMI(ExportUnity):
                     "（本段 attach 已用当帧 palette 写全自己的槽位；不等组内其它部件"
                     "——组级门控只会在最后到达的部件那段成立，先到的部件整帧不画）"
                 )
-                section.append(f"if {occ_var} == {slot}")
+                section.append(f"if {zzmi_merged_slot_key_expr(component_id, slot)}")
                 section.append(
                     f"    vs-t0 = {self._merged_skeleton_name(skeleton_group, slot)}"
                 )
@@ -1461,6 +1988,11 @@ class ExportZZMI(ExportUnity):
             section.append("endif")
 
     def add_unity_vs_texture_override_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        if self._is_morph_part(str(getattr(drawib_model, "draw_ib", ""))):
+            # 表情部件：不发变形阶段的顶点覆写 —— 让游戏自己的 morph 链（计算着色器
+            # → 池 → CopyResource → 变形 vb0）原样跑完，表情才不会被顶掉。
+            # 渲染侧的 IB / 贴图段照常生成，所以"换贴图/材质"的改动依然生效。
+            return
         d3d11_game_type = drawib_model.d3d11GameType
         draw_ib = drawib_model.draw_ib
 
@@ -1476,7 +2008,14 @@ class ExportZZMI(ExportUnity):
         texture_override_vb_section.append("; " + draw_ib)
         for category_name in d3d11_game_type.OrderedCategoryNameList:
             category_hash = drawib_model.category_hash_dict.get(category_name, "")
-            texture_override_vb_name_suffix = "VB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + category_name
+            # 别名来自物体名，可能带 [ ] （例：头饰[丝带]）。方括号是段名定界符，
+            # 直接拼进 `[TextureOverride_...]` 会让段名提前结束、与同族部件撞名
+            # （2026-09-13 实测：叶瞬光导出出现 4 条 duplicate-section）。
+            texture_override_vb_name_suffix = (
+                "VB_" + draw_ib + "_"
+                + sanitize_section_name_part(drawib_model.draw_ib_alias, draw_ib)
+                + "_" + category_name
+            )
             texture_override_vb_section.append("[TextureOverride_" + texture_override_vb_name_suffix + "]")
             texture_override_vb_section.append("hash = " + category_hash)
 
@@ -1527,6 +2066,10 @@ class ExportZZMI(ExportUnity):
         target（组内最后 deform draw 的 IB）SO = 自身真实几何 + 全部重定向
         合并网格之和。
         """
+        if self._is_morph_part(str(getattr(drawib_model, "draw_ib", ""))):
+            # 表情部件不替换几何 → 也不需要改变游戏的顶点缓冲分配大小
+            # （改了反而会让游戏的 morph 池/顶点缓冲尺寸和自己算出来的数量对不上）。
+            return
         d3d11_game_type = getattr(drawib_model, "d3d11GameType", None)
         if d3d11_game_type is None or not getattr(d3d11_game_type, "GPU_PreSkinning", False):
             return
@@ -1580,7 +2123,8 @@ class ExportZZMI(ExportUnity):
             vertex_count = redirect_target["so_vertex_count"]
         vertexlimit_section = M_IniSection(M_SectionType.TextureOverrideVertexLimitRaise)
         vertexlimit_section.append(
-            "[TextureOverride_" + draw_ib + "_" + drawib_model.draw_ib_alias
+            "[TextureOverride_" + draw_ib + "_"
+            + sanitize_section_name_part(drawib_model.draw_ib_alias, draw_ib)
             + "_VertexLimitRaise]"
         )
         vertexlimit_section.append("hash = " + drawib_model.vertex_limit_hash)
@@ -1674,11 +2218,16 @@ class ExportZZMI(ExportUnity):
             )
             if not offending:
                 continue
+            # 归组号是 int，"未知（不在导出组件范围）" 是 str；直接 sorted 会触发
+            # TypeError: '<' not supported between instances of 'str' and 'int'
+            # （用户实测：合并后引用到不在任何导出组件范围内的骨骼时必崩）。
+            # 用 (是否字符串, 值) 做 key：int 组先按数字排，字符串统一排最后。
             offending_groups = sorted(
                 {
                     id_to_group.get(bone_id, "未知（不在导出组件范围）")
                     for bone_id in offending
-                }
+                },
+                key=lambda g: (1, str(g)) if isinstance(g, str) else (0, g),
             )
             print(
                 f"[ZZMI骨骼合并] !!! 禁止跨组别骨骼合并: DrawIB {draw_ib} "
@@ -1686,6 +2235,21 @@ class ExportZZMI(ExportUnity):
                 f"{offending}（归属组: {offending_groups}）——无校准模式下这些槽位"
                 f"永远不会被写入本组骨架，游戏内将渲染为原点塌陷。"
             )
+            # 若越界 id 里有**任何**不属于本工作空间任何组件**（= 超出全部合法槽上界）
+            # 的，几乎一定是"该物体用的是上一次导入的骨骼编号"（用户重新 dump 后，
+            # 工作空间换了名字、骨骼重新编号，但合并过的旧物体仍是旧编号）。
+            all_legal_max = max((max(v) for v in group_legal.values() if v), default=0)
+            stale = sorted(bone_id for bone_id in offending if bone_id > all_legal_max)
+            if stale:
+                print(
+                    f"[ZZMI骨骼合并] ↑ 其中 id {stale[:12]}"
+                    f"{' …' if len(stale) > 12 else ''} 超出了本次工作空间的全部骨骼槽"
+                    f"（最大 {all_legal_max}）——说明这个物体用的是**上一次导入**的骨骼编号。"
+                )
+                print(
+                    "[ZZMI骨骼合并] 重新从游戏 dump/导入之后，工作空间与骨骼编号都会重排；"
+                    "请用**新导入的部件重新合并**（别沿用旧的合并结果），否则这些顶点会塌。"
+                )
             print(
                 "[ZZMI骨骼合并] 请只把同一骨架组（相同对象空间）的部件合并到同一对象，"
                 "或把这些顶点的权重改刷到本组骨骼。"
@@ -1984,13 +2548,67 @@ class ExportZZMI(ExportUnity):
             target_first_indices = self._drawib_first_match_first_index(target_ib)
             target_first_index = target_first_indices[0] if target_first_indices else 0
 
+            # 2026-09-15 修复（拆开几何时接缝差一帧）：判定"本部件是否依赖组内
+            # **其它**部件的骨骼"必须按「部件独占段」算，不能用 json 的 VGMap 覆盖率。
+            #
+            # 原因：合并骨架里各部件的 VGMap 会大面积重叠 —— 身体（c209c22b）的 VGMap
+            # 覆盖全局槽 3..213，**包含**腿（4a178546）的独占段 32..78。于是
+            # `referenced - set(vg_map.values())` 恒为空集，依赖被整个吃掉：
+            #   用户把几何拆成独立对象后，产物里 `合并宿主重放` = 0 处，
+            #   每个部件在**自己那段**当场画出，而组调色板里其它部件的骨骼可能
+            #   还是上一帧的值 ⇒ 接缝两侧差一帧，跑动/大幅动作时裂开。
+            #   实测：合并版 ini 里 `合并宿主重放` 6 处（不裂），拆开版 0 处（裂）。
+            #
+            # 每个部件在组内的独占段 = [vg_offset, vg_offset + vg_count)；引用到
+            # 别的部件独占段里的槽 ⇒ 只能等那个部件当帧捕获后才能拿到正确矩阵 ⇒
+            # 必须走宿主重放（等全组当帧到齐再画）。
+            segment_by_ib = {
+                str(c.get("draw_ib", "")): (
+                    int(c.get("vg_offset", 0) or 0),
+                    int(c.get("vg_count", 0) or 0),
+                )
+                for c in components
+            }
             carriers: list[dict] = []
+            # 2026-09-15：记录"确实依赖了别的部件独占段骨骼"的部件 —— 不管后面
+            # 因为什么原因被豁免，只要最终没生成宿主重放，就必须大声报警。
+            # 否则产物会**静默**变成"接缝差一帧、跑动时裂开"（实测踩过）。
+            foreign_dependent: list[str] = []
             for component in components:
                 referenced = self._collect_drawib_referenced_bone_ids(component["draw_ib"])
-                own = set((component.get("vg_map") or {}).values())
-                absorbed = (referenced - own) & legal
+                own_start, own_count = segment_by_ib.get(
+                    str(component.get("draw_ib", "")), (0, 0)
+                )
+                if own_count <= 0:
+                    # 没有段信息（旧缓存）⇒ 退回原来的 VGMap 覆盖率判据，
+                    # 宁可少判也不要误判成"未合并"。
+                    own = set((component.get("vg_map") or {}).values())
+                    absorbed = (referenced - own) & legal
+                else:
+                    own_segment = set(range(own_start, own_start + own_count))
+                    foreign_slots: set[int] = set()
+                    for other_ib, (other_start, other_count) in segment_by_ib.items():
+                        if other_ib == str(component.get("draw_ib", "")):
+                            continue
+                        if other_count <= 0:
+                            continue
+                        foreign_slots |= set(
+                            range(other_start, other_start + other_count)
+                        )
+                    absorbed = (referenced - own_segment) & foreign_slots
                 if not absorbed:
                     continue  # 未合并其它部件
+                foreign_dependent.append(str(component.get("draw_ib", "")))
+                if self._merged_absorbed_sources_are_synthesized_stubs(
+                    skeleton_group, component["draw_ib"]
+                ):
+                    # 借来的槽全部由合成的隐形占位部件提供 ⇒ 不重定向：占位部件自己
+                    # 的 palette/attach 每帧写一次就够了。
+                    unredirected[component["draw_ib"]] = {
+                        "reason": "absorbed-from-synthesized-stub",
+                        "target": "",
+                    }
+                    continue
                 if int(component.get("deform_draw", 0) or 0) == int(last["deform_draw"]):
                     continue  # 已挂在最后 pass：无需重定向
                 if int(component.get("deform_draw", 0) or 0) <= 0:
@@ -2018,7 +2636,46 @@ class ExportZZMI(ExportUnity):
                 })
 
             if not carriers:
+                if foreign_dependent:
+                    print(
+                        "[ZZMI骨骼合并] !!! 接缝风险：部件 "
+                        f"{foreign_dependent} 引用了组 G{skeleton_group} 其它部件的骨骼，"
+                        "但本次**没有生成合并宿主重放**——"
+                        "游戏里这些部件的几何会在各自的挂点上当场画出，"
+                        "那一刻组调色板里其它部件的骨骼可能还是上一帧的值，"
+                        "表现为「接缝在大幅动作/跑动时裂开、像延迟」。"
+                    )
+                    for ib in foreign_dependent:
+                        waived = unredirected.get(ib) or {}
+                        if waived.get("reason"):
+                            print(
+                                f"[ZZMI骨骼合并]     部件 {ib} 未重放的原因: "
+                                f"{waived['reason']}（目标 {waived.get('target') or '-'}）"
+                            )
+                    print(
+                        "[ZZMI骨骼合并] 避开办法（任选其一）：\n"
+                        "                  ① 把互相依赖的部件 **join 成一个对象**再导出"
+                        "（几何合并后就是同一挂点、同一帧数据）；\n"
+                        "                  ② 把接缝处的权重刷到**本部件自己的独占骨骼段**内"
+                        "（不跨段引用即可完全避开）；\n"
+                        "                  ③ 保持拆开但**确保各部件都有有效的 DeformDrawIndex**"
+                        "且不是跨 IB —— 重放才能生成。"
+                    )
                 continue
+
+            # 「最后挂点」本身就是"等全组当帧到齐"的那个时刻（`last` 按
+            # DeformDrawIndex 取最大值），它天然拿到当帧数据，不重放是**设计如此**
+            # ——不能当成风险。实测 G1：半透裙 4 / 身体 11 / 腿 17，腿就是最后挂点。
+            legit_waived = {str(target_ib), *(str(c.get("draw_ib", "")) for c in carriers)}
+            waived_foreign = [
+                ib for ib in foreign_dependent if ib not in legit_waived
+            ]
+            if waived_foreign:
+                print(
+                    "[ZZMI骨骼合并] !!! 接缝风险：部件 "
+                    f"{waived_foreign} 同样引用了组 G{skeleton_group} 其它部件的骨骼，"
+                    "但未纳入重放（原因见上）；这几个部件的接缝在大幅动作时可能裂开。"
+                )
 
             # 一段 deferred deform draw 只能在同一种已知 Blend 输入布局下执行。
             # 元数据缺失也不能按“兼容”回退，否则换角色或旧工作空间恰好混入
@@ -2250,11 +2907,9 @@ class ExportZZMI(ExportUnity):
                 ),
             }
             print(
-                f"[ZZMI骨骼合并] 合并网格自动重定向: "
-                f"{[c['draw_ib'] for c in carriers]} -> DrawIB {target_ib}"
-                f"（组 G{skeleton_group} 最后 deform draw {last['deform_draw']}，"
-                f"SO={so_total} 顶点，base_vertex 依次 "
-                f"{[carrier_map[c['draw_ib']]['base_vertex'] for c in carriers]}）"
+                f"[ZZMI骨骼合并] 合并宿主 {[c['draw_ib'] for c in carriers]} "
+                f"引用了组 G{skeleton_group} 其它部件的骨骼；"
+                f"自动重定向已停用，将改用直连宿主重放（等全组当帧到齐后重画宿主）"
             )
 
         return carrier_map, target_map, unredirected
@@ -2602,6 +3257,19 @@ class ExportZZMI(ExportUnity):
         ini_builder.append_section(so0_resource_section)
 
     def add_unity_vs_texture_override_ib_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        if self._is_morph_part(str(getattr(drawib_model, "draw_ib", ""))):
+            # 表情部件（2026-09-13）两条子路径：
+            #   ① 默认「整份交回游戏」：连渲染侧的 IB/贴图段也不发 —— 表情、贴图、
+            #      UV 全是游戏自己的，绝对不会错（用户实测"脸终于正常了"就是这个）。
+            #   ② 勾了「只换贴图（不改几何）」：继续往下走，照常发 IB + 贴图段，
+            #      但变形阶段（vb0/vb2/VLR）在别处已经被跳过 ⇒ 几何与表情走游戏、
+            #      贴图与材质走 mod。前提是该部件网格不能动（索引仍是导出那份）。
+            if not _zzmi_prop_flag("zzmi_morph_parts_texture_only", False):
+                return
+            print(
+                f"[ZZMI骨骼合并] 表情部件 {drawib_model.draw_ib} 走『只换贴图』路径："
+                "几何/表情交给游戏，贴图/材质用 mod 的（网格必须保持原样）"
+            )
         texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
         draw_ib = drawib_model.draw_ib
 
@@ -2896,6 +3564,22 @@ class ExportZZMI(ExportUnity):
             self._cleanup_stub_objects()
 
     def _export_impl(self):
+        # ZZMI 骨骼合并：先收集组件并做「导入/导出契约」判定，**再**动手写任何文件。
+        #
+        # 2026-09-13 修复：这里以前是"收集完就继续"。组件列表为空时导出器会
+        # **静默**退回普通导出（只发 handling = skip / draw = N, 0）；可导入段
+        # 已经把顶点组建到全局骨骼编号空间（并且随 .blend 一起保存），普通导出的
+        # 产物在游戏里会整块不显示。用户实测的"做了骨骼合并以后 mod 无法正常显示"
+        # 走的就是这条路径。现在契约不满足就**中止导出**并指名原因。
+        self.merged_skeleton_components, self.merged_skeleton_component_id_dict = (
+            self._collect_merged_skeleton_components()
+        )
+        self.has_merged_skeleton = len(self.merged_skeleton_components) > 0
+        # 表情部件点名（2026-09-13）：这些部件只换贴图、几何交给游戏，避免用户
+        # "改了脸没生效"却不知道原因。
+        self._warn_morph_parts()
+        self._enforce_merged_skeleton_contract()
+
         TimerUtils.start_stage("缓冲文件生成")
         self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
         TimerUtils.end_stage("缓冲文件生成")
@@ -2914,11 +3598,6 @@ class ExportZZMI(ExportUnity):
 
         print(f"[CrossIB ZZMI] export: has_cross_ib={self.has_cross_ib}")
 
-        # ZZMI 骨骼合并：组件信息收集（复选框 + 反查数据双条件；不满足则完全走旧逻辑）
-        self.merged_skeleton_components, self.merged_skeleton_component_id_dict = (
-            self._collect_merged_skeleton_components()
-        )
-        self.has_merged_skeleton = len(self.merged_skeleton_components) > 0
         if self.has_merged_skeleton:
             buffer_slots = max(
                 c["vg_offset"] + c["vg_count"] for c in self.merged_skeleton_components
@@ -2934,6 +3613,14 @@ class ExportZZMI(ExportUnity):
             self._redirect_carrier_map, self._redirect_target_map, unredirected = (
                 self._build_merged_mesh_redirect_plan()
             )
+            # ★ 2026-09-15 全面修复：自动重定向（SO + base_vertex + 目标挂点）在本工程
+            # 两次实测都让身体整块消失（10:02 整块消失；本次"身体合进腿"也命中同一路径）。
+            # 直连宿主重放（等组内全部部件当帧到齐后在最后一个兼容挂点上画宿主）已由
+            # 用户在游戏内验证能正常显示。因此导出统一改用直连宿主重放：清空重定向计划，
+            # 让 INI 生成器走 `group_plan is None` 的直连路径。
+            if self._redirect_carrier_map or self._redirect_target_map:
+                self._redirect_carrier_map = {}
+                self._redirect_target_map = {}
             # 无法自动重定向的合并网格（缺反查缓存/跨 IB）大声报警
             self._warn_merged_mesh_timing(unredirected)
 
