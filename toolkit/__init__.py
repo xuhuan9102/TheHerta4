@@ -45,6 +45,11 @@ from .bmtp_collection_linker import bmtp_collection_linker_list
 from .bmtp_mesh_tools import bmtp_mesh_tools_list
 from .bmtp_modifier_tools import bmtp_modifier_tools_list
 from .bmtp_uv_tools import bmtp_uv_tools_list
+from .uv_guard_unsubdivide import (
+    uv_guard_unsubdivide_operators,
+    register_uv_guard_unsubdivide_menu,
+    unregister_uv_guard_unsubdivide_menu,
+)
 
 from .tt_properties import tt_properties_list
 from .tt_dependency_check import tt_dependency_check_list
@@ -132,6 +137,7 @@ __all__ = [
     'bmtp_mesh_tools_list',
     'bmtp_modifier_tools_list',
     'bmtp_uv_tools_list',
+    'uv_guard_unsubdivide_operators',
     'tt_properties_list',
     'tt_dependency_check_list',
     'tt_dds_conversion_list',
@@ -266,6 +272,19 @@ def register():
             print(f"[TheHerta4]   已注册BMTP网格工具: {op_class.__name__}")
         except Exception as e:
             print(f"[TheHerta4]   注册BMTP网格工具失败: {op_class.__name__} - {e}")
+    
+    # 反细分＆细分·UV防错乱（标准实现：另一位开发者的独立插件 v3.7）
+    for op_class in uv_guard_unsubdivide_operators:
+        try:
+            bpy.utils.register_class(op_class)
+            print(f"[TheHerta4]   已注册反细分·UV防错乱: {op_class.__name__}")
+        except Exception as e:
+            print(f"[TheHerta4]   注册反细分·UV防错乱失败: {op_class.__name__} - {e}")
+    try:
+        register_uv_guard_unsubdivide_menu()
+        print("[TheHerta4]   已注册反细分·UV防错乱菜单入口")
+    except Exception as e:
+        print(f"[TheHerta4]   注册反细分·UV防错乱菜单入口失败: {e}")
     
     for op_class in bmtp_modifier_tools_list:
         try:
@@ -714,6 +733,17 @@ def unregister():
             pass
     
     for op_class in reversed(bmtp_mesh_tools_list):
+        try:
+            bpy.utils.unregister_class(op_class)
+        except Exception:
+            pass
+    
+    try:
+        unregister_uv_guard_unsubdivide_menu()
+    except Exception:
+        pass
+    
+    for op_class in reversed(uv_guard_unsubdivide_operators):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:

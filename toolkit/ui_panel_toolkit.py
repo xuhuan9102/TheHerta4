@@ -402,18 +402,12 @@ class BMTP_MeshEditPanel(bpy.types.Panel):
         col.operator("toolkit.bmtp_tris_to_quads_preserve_uv", text="三角面转四边面(按UV孤岛)", icon='MESH_GRID')
         col.operator("toolkit.bmtp_quads_to_tris", text="四边面转三角面", icon='MOD_TRIANGULATE')
 
-        # 反细分＆细分·UV防错乱（编辑模式；"连接边界顶点"仅细分模式需要）
+        # 反细分＆细分·UV防错乱（标准实现：toolkit/uv_guard_unsubdivide.py）。
+        # 参数是算子自带属性 —— 点按钮后在左下角「重做」面板（F9）里调。
         sub = box.box()
         sub.label(text="反细分＆细分·UV防错乱", icon='UV_ISLANDSEL')
-        sub.prop(props, "us_operation", expand=True)
-        sub.prop(props, "us_only_selected")
-        if props.us_operation == 'SUBDIVIDE':
-            sub.prop(props, "us_cuts")
-            sub.prop(props, "us_connect_boundary")
-        else:
-            sub.prop(props, "us_iterations")
-            sub.prop(props, "us_protection_rings")
-        sub.operator("toolkit.bmtp_uv_island_aware_unsubdivide", text="执行", icon='PLAY')
+        sub.operator("toolkit.uv_guard_unsubdivide", text="反细分·UV孤岛保护", icon='PLAY')
+        sub.operator("toolkit.uv_guard_subdivide", text="细分·UV防错乱", icon='PLAY')
 
         box = layout.box()
         box.label(text="模型分割", icon='MESH_PLANE')
