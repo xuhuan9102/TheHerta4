@@ -878,6 +878,67 @@ def _us_restore_seams(bm, original_seams):
         edge.seam = original_seams.get(key, False)
 
 
+def _us_read_bmesh_seams(bm):
+    """把 bmesh 的 seam 读成 {顶点索引对: bool}（键排序，不依赖遍历顺序）。"""
+    bm.edges.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+    bm.verts.index_update()
+    seams = {}
+    for edge in bm.edges:
+        try:
+            a, b = edge.verts[0].index, edge.verts[1].index
+        except Exception:
+            continue
+        seams[(a, b) if a < b else (b, a)] = bool(edge.seam)
+    return seams
+
+
+def _us_snapshot_other_edit_meshes_seams(context, active_mesh):
+    """多物体编辑：快照**除活动网格外**其它网格的缝合线。
+
+    ``bpy.ops.mesh.mark_seam(clear=True)`` 与 ``bpy.ops.uv.seams_from_islands``
+    都是**全局**算子——它们作用于编辑模式内的所有对象，而本算子的 seam 快照/还原
+    起初只覆盖活动网格 ⇒ 其它对象的 seam 被 clear 后没有任何还原路径，保存即永久
+    丢失（多物体编辑实机复现：A=12 条 seam 保留、B=12 条全丢）。
+
+    只快照活动网格之外的网格（活动网格由 ``_us_restore_seams`` 那条既有路径还原），
+    按 ``objects_in_mode_unique_data`` 遍历并按网格对象身份去重（多用户网格只处理
+    一次）。取不到编辑态 bmesh 的网格直接跳过：宁可少动，也绝不误写。
+    """
+    snapshots = []
+    seen = {id(active_mesh)}
+    for obj in _iter_face_convert_target_objects(context):
+        mesh = getattr(obj, "data", None)
+        if mesh is None or id(mesh) in seen:
+            continue
+        seen.add(id(mesh))
+        try:
+            bm_other = bmesh.from_edit_mesh(mesh)
+            seams = _us_read_bmesh_seams(bm_other)
+        except Exception:
+            continue
+        snapshots.append((mesh, seams))
+    return snapshots
+
+
+def _us_restore_other_edit_meshes_seams(snapshots):
+    """把 ``_us_snapshot_other_edit_meshes_seams`` 的快照按顶点索引对写回。
+
+    必须在全局 seam 算子（clear / seams_from_islands）之后、任何提前 return 之前
+    调用，否则异常路径同样会留下被清空的 seam。
+    """
+    restored = 0
+    for mesh, seams in snapshots or ():
+        try:
+            bm_other = bmesh.from_edit_mesh(mesh)
+            _us_restore_seams(bm_other, seams)
+            bmesh.update_edit_mesh(mesh)
+        except Exception:
+            continue
+        restored += 1
+    return restored
+
+
 def _us_fix_t_junctions(bm, enabled, only_selected, max_connections=20000):
     """消除处理区与保留区交界处的 T 型顶点，细分与反细分共用同一实现。
 
@@ -1223,7 +1284,12 @@ def _us_straight_unsubdivide(bm, boundary_edges, protected_verts, allowed_verts,
       1) 度=4 的内部点：溶解 = 合并四周的面，方向保持、不产生新边；
       2) 度=2 且两邻居近似共线的点：溶解 = 把左右邻居用一条顺向直边接合；
     - 边界顶点绝不删除；不跨不同边界链的势力范围（相位不穿插）；
-    - 结果只会是顺向四边形 + 保留边界中点带来的五边形，不会有旋转 45° 的菱形；
+    - **不产生斜边/菱形**（实机实测 skew_edges=0），但**输出不是纯四边形**：
+      保留边界中点会让贴边一圈出现五边形，保护圈与粗格面心（偶,偶）残留还会带来
+      六/七/八边形，且对称输入的存活格点可能略偏（左下角多留几个点）；
+    - ``step = 1 << iterations`` ⇒ 只对齐 factor 2（iterations=1）/ 4（iterations=2）
+      的重采样：细分段的 ``us_cuts`` 是 1..10（factor 2..11），两者**不互逆**，
+      cuts≥2 之后按 iterations 反细分回不到原网格（该不对称属已知限制）；
     - 返回 (删除顶点数, 编入坐标的顶点数)。
     """
     coords = _us_assign_grid_coords(bm, boundary_edges, set(boundary_edges))
@@ -1317,7 +1383,8 @@ class BMTP_OT_UVIslandAwareUnsubdivide(bpy.types.Operator):
     bl_label = "反细分＆细分·UV防错乱"
     bl_description = (
         "反细分/细分二合一：按UV孤岛边界保护顶点后再反细分，"
-        "原有缝合线数据原样保留；可选消除处理区交界处的T型顶点（两种模式行为一致）"
+        "原有缝合线数据原样保留（含多物体编辑时的其它对象）；"
+        "细分子模式可选消除处理区交界处的T型顶点（反细分子模式只做定向直合，不连边）"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -1404,6 +1471,11 @@ class BMTP_OT_UVIslandAwareUnsubdivide(bpy.types.Operator):
                 continue
             original_seams[(a, b) if a < b else (b, a)] = bool(edge.seam)
 
+        # 1b. 多物体编辑：下面的 mark_seam(clear=True) / seams_from_islands 是
+        #     **全局**算子（作用于编辑模式内所有对象），而上面的快照只有活动网格
+        #     ⇒ 其余对象的 seam 必须单独快照，否则被清空后无法还原（永久丢数据）。
+        other_seam_snapshots = _us_snapshot_other_edit_meshes_seams(context, me)
+
         # 2. 临时用UV孤岛生成缝合线，借它反推孤岛边界
         bpy.ops.mesh.mark_seam(clear=True)
         op_ok = True
@@ -1437,8 +1509,10 @@ class BMTP_OT_UVIslandAwareUnsubdivide(bpy.types.Operator):
                 boundary_verts.add(edge.verts[0])
                 boundary_verts.add(edge.verts[1])
 
-        # 4. 立刻恢复原有缝合线状态
+        # 4. 立刻恢复原有缝合线状态（含多物体编辑下其它对象的 seam —— 它们被上面
+        #    的全局算子一起清过，这里是唯一还原点，必须在任何提前 return 之前执行）
         _us_restore_seams(bm, original_seams)
+        _us_restore_other_edit_meshes_seams(other_seam_snapshots)
         bmesh.update_edit_mesh(me)
 
         if not boundary_verts:
