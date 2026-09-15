@@ -574,6 +574,54 @@ def ImprotFromWorkSpaceFull(self, context):
                         f"已按 fail-closed 排除: {fc_shown}{fc_suffix}",
                     )
 
+    # EFMI 多 pass 布局写回（2026-09-15）：pass 槽位镜像所需的各部件 pass 布局
+    # （NumViews/PS 哈希/贴图槽位，推导机制见 ui/universal/efmi_pass_mirror.py）
+    # 在**导入时**一次算好存进工作空间 Config/PassLayouts.json——下次导出不再依赖
+    # 提取文件还在；来源日志更新时读侧自动淘汰、回退实时扫描（生成侧
+    # efmi.py::_efmi_pass_layouts 先读此缓存）。按 IB 增量合并：本批导入只更新
+    # 自己这些部件，旧批次部件不丢。任何失败都不阻断导入（生成侧有兜底）。
+    if GlobalConfig.logic_name == LogicName.EFMI:
+        try:
+            from ..common.efmi_skeleton import EFMISkeletonMergeHelper as _EFMIPassHelper
+            from .universal.efmi_pass_mirror import (
+                efmi_merge_pass_layouts,
+                efmi_read_pass_layouts,
+                efmi_scan_pass_layouts,
+                efmi_write_pass_layouts,
+            )
+            _pm_workspace = str(GlobalConfig.path_workspace_folder() or "").strip()
+            _pm_lod_map, _pm_default_dir = _EFMIPassHelper.resolve_frame_analysis_dirs_by_lod(
+                _pm_workspace
+            )
+            _pm_log_paths = []
+            for _pm_dir in list(_pm_lod_map.values()) + ([_pm_default_dir] if _pm_default_dir else []):
+                _pm_log = os.path.join(str(_pm_dir), "log.txt")
+                if os.path.isfile(_pm_log) and _pm_log not in _pm_log_paths:
+                    _pm_log_paths.append(_pm_log)
+            # import_key 形如 LOD0.d6128f13-14664-0 → IB = 去 LOD 前缀后第一段
+            _pm_part_ibs = {
+                str(target.get("import_key", "") or "").split(".", 1)[-1].split("-")[0].strip().lower()
+                for target in import_targets
+            } - {""}
+            if _pm_log_paths and _pm_part_ibs and _pm_workspace:
+                _pm_new = efmi_scan_pass_layouts(_pm_log_paths, _pm_part_ibs)
+                if _pm_new:
+                    _pm_old = efmi_read_pass_layouts(_pm_workspace)
+                    _pm_written = efmi_write_pass_layouts(
+                        _pm_workspace,
+                        efmi_merge_pass_layouts(_pm_old, _pm_new),
+                        _pm_log_paths,
+                    )
+                    if _pm_written:
+                        print(
+                            f"[EFMI多pass镜像] pass 布局已写回工作空间: {_pm_written}"
+                            f"（更新 {len(_pm_new)} 个部件）"
+                        )
+                    else:
+                        print("[EFMI多pass镜像] pass 布局写回失败（不阻断导入）")
+        except Exception as _pm_exc:
+            print(f"[EFMI多pass镜像] pass 布局写回异常（不阻断导入）: {_pm_exc}")
+
     # ZZMI 骨骼合并数据预生成（与 EFMI 同构的分支选项）：
     # 复选框（import_merged_vgmap，「使用融合统一顶点组」）关闭时完全不执行，保持旧逻辑；
     # 开启时把 FrameAnalysis 反查的 VGMap/VGOffset/VGCount 写回工作空间 json，

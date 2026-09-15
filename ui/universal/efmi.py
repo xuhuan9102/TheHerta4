@@ -2725,11 +2725,166 @@ class ExportEFMI:
                             else:
                                 slot = "ps-t" + slot
                         section.append(slot + " = " + texture_markup_info.get_resource_name())
+                        self._efmi_append_pass_mirrors(
+                            section, submesh_model, slot, texture_markup_info
+                        )
             else:
                 for texture_markup_info in texture_markup_info_list:
                     if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
                         continue
                     section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+                    self._efmi_append_pass_mirrors(
+                        section, submesh_model, texture_markup_info.mark_slot, texture_markup_info
+                    )
+
+    def _efmi_append_pass_mirrors(self, section, submesh_model, primary_slot, texture_markup_info):
+        """多 pass 槽位镜像：把贴图绑定按抓帧推导同步到其它可见 pass 的槽位。
+
+        机制/事故史见 ui/universal/efmi_pass_mirror.py 模块文档；要点：
+        G-buffer（t0/t1）与第二层（t12…）各读不同槽，只在标记槽绑定会让那些
+        pass 仍读原图 → 颜色偏差；直绑会闪退（那些槽在前向层是 StructuredBuffer），
+        必须按 pass 的 PS 标签门控。标签"只借不抢"：别家已注册的哈希借用其标签。
+        """
+        from .efmi_pass_mirror import (
+            efmi_mirror_block_lines,
+            efmi_mirror_condition,
+            efmi_plan_mirror_slots,
+            efmi_scan_foreign_shader_tags,
+        )
+        orig_hash = str(getattr(texture_markup_info, "mark_hash", "") or "").strip().lower()
+        resource_name = texture_markup_info.get_resource_name()
+        if not orig_hash or not resource_name:
+            return
+        ib = str(getattr(submesh_model, "match_draw_ib", "") or "").strip().lower()
+        layouts = self._efmi_pass_layouts().get(ib)
+        if not layouts:
+            return
+        mirrors = efmi_plan_mirror_slots(layouts, orig_hash, primary_slot)
+        if not mirrors:
+            return
+        # 按（角色, 目标槽）分组：同组同槽的多个 PS 合并进同一个 if 块
+        by_role_slot = {}
+        for ps_hash, target_slot, role in mirrors:
+            by_role_slot.setdefault((role, target_slot), []).append(ps_hash)
+        for (role, target_slot), ps_hashes in sorted(
+            by_role_slot.items(), key=lambda item: (item[0][0], item[0][1])
+        ):
+            foreign = efmi_scan_foreign_shader_tags(
+                self._efmi_foreign_ini_texts(), ps_hashes
+            )
+            foreign_tags = [foreign[ps] for ps in ps_hashes if ps in foreign]
+            to_register = [ps for ps in ps_hashes if ps not in foreign]
+            needed = getattr(self, "_efmi_pass_tag_needed", None)
+            if needed is None:
+                needed = {}
+                self._efmi_pass_tag_needed = needed
+            needed.setdefault(role, set()).update(to_register)
+            condition = efmi_mirror_condition(role, foreign_tags)
+            section.extend(efmi_mirror_block_lines(condition, target_slot, resource_name))
+
+    def _efmi_pass_layouts(self):
+        """本次导出各部件的 pass 布局（懒加载缓存）。
+
+        顺序（2026-09-15 起）：① 工作空间缓存 Config/PassLayouts.json——**导入时**
+        由 SSMT4ImportRaw 算好写回（含来源日志指纹，见 efmi_pass_mirror 模块），
+        提取文件随后被清理也能用；② 缓存缺失/被淘汰/无覆盖时才实时扫描
+        FrameAnalysis 日志。两侧都用 efmi_pass_mirror 的同一套布局结构。
+        """
+        cache = getattr(self, "_efmi_pass_layouts_cache", None)
+        if cache is not None:
+            return cache
+        from .efmi_pass_mirror import efmi_read_pass_layouts, efmi_scan_pass_layouts
+        part_ibs = {
+            str(getattr(submesh_model, "match_draw_ib", "") or "").strip().lower()
+            for submesh_model in self.submesh_model_list
+        } - {""}
+        workspace_root = str(GlobalConfig.path_workspace_folder() or "").strip()
+        # ① 工作空间缓存（导入时写回）
+        cache = efmi_read_pass_layouts(workspace_root, part_ibs) if workspace_root else {}
+        if cache:
+            missing = part_ibs - set(cache)
+            if not missing:
+                self._efmi_pass_layouts_cache = cache
+                return cache
+            # 缓存只覆盖部分部件：用它，剩余部件继续走实时扫描补齐
+        log_paths = []
+        try:
+            from ...common.efmi_skeleton import EFMISkeletonMergeHelper
+            if workspace_root:
+                lod_map, default_dir = EFMISkeletonMergeHelper.resolve_frame_analysis_dirs_by_lod(
+                    workspace_root
+                )
+                directories = list(lod_map.values()) + ([default_dir] if default_dir else [])
+                for directory in directories:
+                    candidate = os.path.join(str(directory), "log.txt")
+                    if os.path.isfile(candidate) and candidate not in log_paths:
+                        log_paths.append(candidate)
+        except Exception as exc:
+            print(f"[EFMI多pass镜像] FrameAnalysis 目录定位失败（{exc}），不发射镜像")
+        # ② 实时扫描兜底（只补缓存没有的部件，已缓存的以缓存为准）
+        scan_ibs = part_ibs - set(cache)
+        if log_paths and scan_ibs:
+            scanned = efmi_scan_pass_layouts(log_paths, scan_ibs)
+            for ib, layouts in scanned.items():
+                cache.setdefault(ib, layouts)
+        self._efmi_pass_layouts_cache = cache
+        return cache
+
+    def _efmi_foreign_ini_texts(self):
+        """Mods 目录全部 ini 文本（懒加载缓存；别家标签扫描用——只借不抢）。"""
+        cache = getattr(self, "_efmi_foreign_ini_texts_cache", None)
+        if cache is not None:
+            return cache
+        texts = []
+        try:
+            mods_dir = str(GlobalConfig.path_mods_folder() or "").strip()
+            if mods_dir and os.path.isdir(mods_dir):
+                for root, _dirs, files in os.walk(mods_dir):
+                    for name in files:
+                        if not name.lower().endswith(".ini"):
+                            continue
+                        if name.lower().startswith("disabled"):
+                            continue
+                        path = os.path.join(root, name)
+                        try:
+                            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                                texts.append(handle.read())
+                        except OSError:
+                            continue
+        except Exception as exc:
+            print(f"[EFMI多pass镜像] Mods 目录扫描失败（{exc}），按无别家标签处理")
+        self._efmi_foreign_ini_texts_cache = texts
+        return texts
+
+    def _efmi_append_pass_mirror_sections(self, ini_builder):
+        """把多 pass 镜像用到的角色标签注册段写进 ini（只注册别家未占用的哈希）。"""
+        needed = getattr(self, "_efmi_pass_tag_needed", None) or {}
+        if not any(needed.values()):
+            return
+        from .efmi_pass_mirror import (
+            efmi_pass_override_lines,
+            efmi_scan_regex_taggers,
+        )
+        # 正则打标器预警（RabbitFX 按字节码特征打 1718.x，成对扫描看不到）：
+        # 我们自注册的 ShaderOverride 优先级压过 ShaderRegex——若某个被注册哈希
+        # 恰好也被正则打标器命中，那个打标器对该 shader 失效。点名出来，
+        # 手动借标签配方 = 在镜像条件里追加 `|| ps == <它的标签>`（参考
+        # 艾尔黛拉.ini 的 1718.2 借法，2026-09-15 实机）。
+        regex_taggers = efmi_scan_regex_taggers(self._efmi_foreign_ini_texts())
+        if regex_taggers:
+            print(
+                "[EFMI多pass镜像] 检测到正则打标器（无 hash 行、按字节码打标签）: "
+                + ", ".join("%s(%s)" % (tag, name) for tag, name in sorted(regex_taggers.items()))
+                + "。若自注册的哈希也被它们命中，那些打标器对对应 shader 失效；"
+                "需要共存时在镜像条件手动追加 `|| ps == <标签>`。"
+            )
+        section = M_IniSection(M_SectionType.ShaderOverride)
+        mod_name = GlobalConfig.get_workspace_name()
+        for role in sorted(needed):
+            section.extend(
+                efmi_pass_override_lines(mod_name, role, sorted(needed[role]))
+            )
+        ini_builder.append_section(section)
 
     def prepare_merged_skeleton(self):
         """收集合并骨架逻辑部件（幂等，可在缓冲区生成前调用）。
@@ -2753,78 +2908,6 @@ class ExportEFMI:
                 f"[EFMI骨骼合并] 合并骨架: {len(self.merged_skeleton_components)} 个逻辑部件, "
                 f"单池共 {total_bones} 槽（跨 LOD 共用同一骨架缓冲）"
             )
-
-    def _efmi_shadow_log_paths(self) -> list[str]:
-        """本次导出可用的 FrameAnalysis log.txt（工作空间级 + 各 LOD tab，去重，最多 4 份）。"""
-        paths: list[str] = []
-        try:
-            from ...common.efmi_skeleton import EFMISkeletonMergeHelper
-            workspace_root = str(GlobalConfig.path_workspace_folder() or "").strip()
-            if not workspace_root:
-                return paths
-            lod_map, default_dir = EFMISkeletonMergeHelper.resolve_frame_analysis_dirs_by_lod(
-                workspace_root
-            )
-            directories = list(lod_map.values()) + ([default_dir] if default_dir else [])
-        except Exception as exc:
-            print(f"[EFMI阴影门控] FrameAnalysis 目录定位失败（{exc}），改用常量兜底")
-            return paths
-        for directory in directories:
-            if not directory:
-                continue
-            candidate = os.path.join(str(directory), "log.txt")
-            if os.path.isfile(candidate) and candidate not in paths:
-                paths.append(candidate)
-            if len(paths) >= 4:
-                break
-        return paths
-
-    def _efmi_shadow_pass_ps_hashes(self) -> tuple:
-        """推导「深度/阴影类 pass」的 ps 全集（抓帧不可用 → 常量兜底）。
-
-        判据与依据见 ui/universal/efmi_shadow_gate.py 模块文档：NumViews==0（无颜色
-        输出 = 深度/阴影类 pass）且该 draw 绘制了本模组部件；同一 ps 若也用于有 RT 的
-        pass 则剔除（不敢门控，避免可见 pass 缺件）。
-        """
-        from .efmi_shadow_gate import (
-            EFMI_SHADOW_FALLBACK_PS_HASHES,
-            EFMI_SHADOW_SOURCE_FRAME_ANALYSIS,
-            EFMI_SHADOW_SOURCE_NOT_GATED,
-            efmi_derive_shadow_ps_hashes,
-        )
-
-        part_ibs = {
-            str(getattr(submesh_model, "match_draw_ib", "") or "").strip().lower()
-            for submesh_model in self.submesh_model_list
-        } - {""}
-        log_paths = self._efmi_shadow_log_paths()
-        if not part_ibs or not log_paths:
-            print(
-                "[EFMI阴影门控] 无可用抓帧推导 pass（部件 %d 个 / log %d 份），"
-                "改用常量兜底 %s"
-                % (len(part_ibs), len(log_paths), list(EFMI_SHADOW_FALLBACK_PS_HASHES))
-            )
-            return tuple(EFMI_SHADOW_FALLBACK_PS_HASHES)
-        try:
-            hashes, source = efmi_derive_shadow_ps_hashes(log_paths, part_ibs)
-        except Exception as exc:
-            print(f"[EFMI阴影门控] 抓帧推导失败（{exc}），改用常量兜底")
-            return tuple(EFMI_SHADOW_FALLBACK_PS_HASHES)
-        if source == EFMI_SHADOW_SOURCE_NOT_GATED:
-            print(
-                "[EFMI阴影门控] 抓帧显示兜底常量 ps 也用于有 RT 的 pass（可见 pass）"
-                "→ 本模组不发射阴影门控（fail-open，绝不门控可见 pass）"
-            )
-            return ()
-        if source == EFMI_SHADOW_SOURCE_FRAME_ANALYSIS:
-            label = "抓帧推导"
-        else:
-            label = "常量兜底"
-        print(
-            "[EFMI阴影门控] 深度/阴影 pass ps（%s，%d 份抓帧）= %s"
-            % (label, len(log_paths), list(hashes))
-        )
-        return tuple(hashes)
 
     def generate_ini_file(self):
         ini_builder = M_IniBuilder()
@@ -2859,40 +2942,14 @@ class ExportEFMI:
         # 与粘合层（CommandList_Component_DrawInstances，在 _add_merged_skeleton_section 追加）
         merged_command_lists = M_IniSection(M_SectionType.CommandList)
 
-        # EFMI 阴影 pass 单投射源门控（实机定位 2026-09-13；详见 efmi_shadow_gate 模块）：
-        # 同一逻辑部件若以 LOD0/LOD1 两个 component 各投一遍，两套「按 component 分帧
-        # 导入」的矩阵在运动时错开 → 身体自遮黑块。修法 = LOD0 入口在阴影 pass 内不回画。
-        # 门控条件 `if ps != <过滤号>` 需要本模组先注册阴影 PS 的 ShaderOverride
-        # （过滤号由该段提供；颜色 pass 的 ps 不命中它，故只影响阴影 pass）。
-        # 判定/行构造模块按函数内导入（与既有约定一致：测试夹具以 fake 包骨架加载本模块，
+        # EFMI 深度/阴影 pass 门控（2026-09-15 起 rt_width 口径、全 IB 挂载；
+        # 历史与勿回退理由见 efmi_shadow_gate 模块文档）：无颜色 RT 的 pass
+        # （NumViews==0 的深度/阴影类 pass）里模组网格一律不回画，根除合并骨架
+        # 分帧矩阵错开导致的自遮黑块/错位投影，角色整体不产生投影。
+        # 不再注册任何 ShaderOverride/filter_index 标签——零哈希、与角色无关。
+        # 行构造模块按函数内导入（与既有约定一致：测试夹具以 fake 包骨架加载本模块，
         # 不会为每个 sibling 建 sys.modules 条目）。
-        from .efmi_shadow_gate import (
-            efmi_lod_index,
-            efmi_shadow_gate_needed,
-            efmi_shadow_gate_open_lines,
-            efmi_shadow_override_lines,
-            efmi_shadow_override_section_name,
-            efmi_shadow_part_keys,
-        )
-        shadow_override_section = M_IniSection(M_SectionType.ShaderOverride)
-        shadow_override_emitted = False
-        # 惰性推导：只在真的需要门控（存在 LOD0/LOD1 配对部件）时扫抓帧
-        shadow_ps_hashes = None
-        # 逻辑部件键 = 各部件 drawcall obj_name 归一化（剥 SSMT 前缀 + 归一 _chain<N> 后缀）
-        # ——必须在循环外一次算好：同一源物体各 LOD 的键必须一致，逐部件单独算会退化成
-        # 「按运行时名配对」（不同 LOD 的 IB/前缀/链路后缀都不同 → 永远配不上）。
-        shadow_part_keys, shadow_keep_lod_keys = efmi_shadow_part_keys(
-            (
-                submesh_model.unique_str,
-                [
-                    str(getattr(draw_call_model, "obj_name", "") or "")
-                    for draw_call_model in (
-                        getattr(submesh_model, "drawcall_model_list", None) or []
-                    )
-                ],
-            )
-            for submesh_model in self.submesh_model_list
-        )
+        from .efmi_shadow_gate import efmi_shadow_gate_open_lines
 
         for submesh_model in self.submesh_model_list:
             drawib_model = drawib_drawibmodel_dict.get(submesh_model.match_draw_ib)
@@ -2940,23 +2997,10 @@ class ExportEFMI:
                 # 嵌套 CommandList 内的 handling=skip 在部分 3Dmigoto 分支不一定生效，
                 # 粘合层里仍保留一份作为双保险。
                 texture_override_ib_section.append("handling = skip")
-                # [阴影 pass 单投射源]：判定与行构造全在 ui/universal/efmi_shadow_gate.py
-                # （纯逻辑、可单测）。键已在循环外按「逻辑部件键 = 源物体名（剥 SSMT 运行时
-                # 前缀 + 归一链路复制后缀 _chain<N>）」算好；用原样 obj_name 配对会永远配不上
-                # （LOD0/LOD1 是不同 IB，LOD1 还带 _chain1）→ 门控一条都发不出来。
-                _shadow_gate = efmi_shadow_gate_needed(
-                    efmi_lod_index(submesh_model.unique_str),
-                    shadow_part_keys.get(submesh_model.unique_str),
-                    shadow_keep_lod_keys,
-                )
-                if _shadow_gate and shadow_ps_hashes is None:
-                    shadow_ps_hashes = self._efmi_shadow_pass_ps_hashes()
-                if _shadow_gate and not shadow_ps_hashes:
-                    # 抓帧证明兜底常量落在有 RT 的 pass 上 → 整体不门控（fail-open：
-                    # 宁可自遮黑块回来，也绝不门控可见 pass 造成缺件）
-                    _shadow_gate = False
-                if _shadow_gate:
-                    texture_override_ib_section.extend(efmi_shadow_gate_open_lines())
+                # [深度/阴影 pass 门控]：rt_width 口径、全 IB 挂载（2026-09-15 实机验证；
+                # 行构造与历史见 ui/universal/efmi_shadow_gate.py）。无颜色 RT 的 pass 里
+                # 模组网格一律不回画 → 自遮黑块/错位投影根除；零哈希、与角色无关。
+                texture_override_ib_section.extend(efmi_shadow_gate_open_lines())
                 texture_override_ib_section.append(f"$\\EFMIv1\\component_id = {merged_component_id}")
                 # 不再写裸版 $lod_level：v10/v13 下每个 component 恒为单绘制入口
                 # （len(draws)==1，含 same-IB 折叠，draws 不追加第二入口），此写入
@@ -2986,22 +3030,7 @@ class ExportEFMI:
                 texture_override_ib_section.append(
                     "run = CommandList_Component_DrawInstances"
                 )
-                if _shadow_gate:
-                    texture_override_ib_section.append("endif")
-                    if not shadow_override_emitted:
-                        # 门控条件 `if ps != <阶段标签>`：标签由本段注册（同 ini 内即可）。
-                        # ps 全集按抓帧推导（无 RT 且绘制了本模组部件的 pass 全都要门控，
-                        # 只注册一个会漏掉其余深度/阴影 pass），见 efmi_shadow_gate 模块。
-                        # 整份 mod 发射一次足够——后续门控入口共用同一标签。
-                        shadow_override_section.extend(
-                            efmi_shadow_override_lines(
-                                efmi_shadow_override_section_name(
-                                    GlobalConfig.get_workspace_name()
-                                ),
-                                shadow_ps_hashes,
-                            )
-                        )
-                        shadow_override_emitted = True
+                texture_override_ib_section.append("endif")
                 if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
                     texture_override_ib_section.append("$active0 = 1")
                     if GlobalProterties.generate_branch_mod_gui():
@@ -3198,8 +3227,9 @@ class ExportEFMI:
             texture_override_ib_section.new_line()
 
         ini_builder.append_section(texture_override_ib_section)
-        # 空段由 M_IniBuilder.append_section 自行丢弃（无门控 = 不发射 ShaderOverride）
-        ini_builder.append_section(shadow_override_section)
+        # 多 pass 镜像用到的角色标签（G-buffer 99002 / 前向第二层 9903 族）注册段：
+        # 只注册别家 ini 未占用的哈希（只借不抢）；无镜像需求时不发射。
+        self._efmi_append_pass_mirror_sections(ini_builder)
         if self.has_merged_skeleton:
             ini_builder.append_section(merged_command_lists)
 
