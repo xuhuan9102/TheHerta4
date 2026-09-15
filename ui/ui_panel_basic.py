@@ -687,6 +687,13 @@ class PanelBasicInformation(bpy.types.Panel):
                 box.label(text="留空 = 自动判断；填 DrawIB(如 c28e6303) 或 脸", icon='INFO')
                 # 三层需求里的第 1 层：只换贴图、几何与表情交回游戏。
                 box.prop(global_properties, "zzmi_morph_parts_texture_only")
+            # 2026-09-15 用户裁定：自动重定向默认停用（两次实测让身体整块消失），
+            # 但保留为一个默认关闭的开关以便实机复核对拍。
+            layout.prop(global_properties, "zzmi_merged_redirect_enabled")
+            layout.label(
+                text="默认关 = 直连宿主重放；勾上 = 恢复自动重定向（仅供实机复核）",
+                icon='INFO',
+            )
         # EFMI 专用：多 LOD 使用 LOD0 分组投影，关闭则两侧独立去重。
         if GlobalConfig.logic_name == LogicName.EFMI:
             layout.prop(global_properties, "efmi_lod_group_projection")

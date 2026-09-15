@@ -3616,9 +3616,17 @@ class ExportZZMI(ExportUnity):
             # ★ 2026-09-15 全面修复：自动重定向（SO + base_vertex + 目标挂点）在本工程
             # 两次实测都让身体整块消失（10:02 整块消失；本次"身体合进腿"也命中同一路径）。
             # 直连宿主重放（等组内全部部件当帧到齐后在最后一个兼容挂点上画宿主）已由
-            # 用户在游戏内验证能正常显示。因此导出统一改用直连宿主重放：清空重定向计划，
-            # 让 INI 生成器走 `group_plan is None` 的直连路径。
-            if self._redirect_carrier_map or self._redirect_target_map:
+            # 用户在游戏内验证能正常显示。因此导出**默认**统一改用直连宿主重放：清空重定向
+            # 计划，让 INI 生成器走 `group_plan is None` 的直连路径。
+            #
+            # 2026-09-15 用户裁定（A1 = F1）：把「停用自动重定向」从硬编码改为**默认关闭的
+            # 开关** `zzmi_merged_redirect_enabled`（`common/global_properties.py`，默认 False）。
+            # 开关默认关（属性缺失也视为关）时，下面的条件与改动前**逐字节等价**
+            # （`not False and (<原条件>) == (<原条件>)`）⇒ 默认行为完全不变；
+            # 勾上开关即恢复自动重定向这条路径，供实机复核 B 记录的故障现场（模型消失）。
+            if not _zzmi_prop_flag(
+                "zzmi_merged_redirect_enabled", False
+            ) and (self._redirect_carrier_map or self._redirect_target_map):
                 self._redirect_carrier_map = {}
                 self._redirect_target_map = {}
             # 无法自动重定向的合并网格（缺反查缓存/跨 IB）大声报警

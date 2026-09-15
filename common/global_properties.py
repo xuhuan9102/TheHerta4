@@ -255,6 +255,20 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=False,
     ) # type: ignore
 
+    zzmi_merged_redirect_enabled: bpy.props.BoolProperty(
+        name="恢复合并网格自动重定向（实验，默认关）",
+        description=(
+            "合并骨架导出时，把**挂在早 pass 的合并网格**自动挪到组内最后一个 deform draw\n"
+            "蒙皮/渲染（SO + base_vertex + 目标挂点整套重定向）。\n"
+            "不勾（默认）= 走『直连宿主重放』：等组内全部部件当帧到齐后在最后一个兼容挂点\n"
+            "上重画宿主。本工程 2026-09-15 两次实测里，自动重定向会让身体整块消失，而直连\n"
+            "宿主重放已由用户在游戏内验证正常 —— 所以默认关。\n"
+            "勾上 = 恢复自动重定向这条路径，仅供**实机复核与对比导出**；若勾上后模型消失/出现\n"
+            "异常，请取消勾选后重新导出。"
+        ),
+        default=False,
+    ) # type: ignore
+
     efmi_lod_group_projection: bpy.props.BoolProperty(
         name="EFMI LOD 分组投影",
         description="EFMI 多 LOD 时，以 LOD0 的去重分组关系约束 LOD1：LOD0 已合并的对应组在 LOD1 也合并、未合并的组不互并；两侧仍使用互不重叠的独立槽位段。开启时还会过滤几何未匹配的 LOD1 物体并自动创建匹配链；关闭后双侧完全独立去重、不过滤、不建链",
@@ -565,6 +579,16 @@ class GlobalProterties(bpy.types.PropertyGroup):
     def zzmi_morph_parts_texture_only(cls) -> bool:
         """表情部件是否走『只换贴图、几何交回游戏』（默认 False = 整份交回游戏）。"""
         return cls._bool_attr("zzmi_morph_parts_texture_only", False)
+
+    @classmethod
+    def zzmi_merged_redirect_enabled(cls) -> bool:
+        """是否恢复「合并网格自动重定向」（默认 False = 走直连宿主重放）。
+
+        见 `ui/universal/zzmi.py::_export_impl`：默认关时清空 `_redirect_carrier_map` /
+        `_redirect_target_map`，INI 生成走 `group_plan is None` 的直连路径；勾上则保留
+        重定向计划，恢复「把早 pass 的合并网格挪到组内最后一个 deform draw」这条路径。
+        """
+        return cls._bool_attr("zzmi_merged_redirect_enabled", False)
 
     @classmethod
     def efmi_lod_group_projection(cls):

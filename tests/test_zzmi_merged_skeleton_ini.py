@@ -3341,5 +3341,133 @@ class ZZMIMergedContractGuardTests(unittest.TestCase):
         self.assertEqual(exporter._merged_contract["level"], "notice")
 
 
+class ZZMIMergedRedirectSwitchTests(_ZZMIGroup3RedirectFixture, unittest.TestCase):
+    """A1 = F1：`zzmi_merged_redirect_enabled` 默认关 ⇒ 清空重定向计划、走直连路径。
+
+    本类**不复制也不重述**生成器里的判定表达式：直接驱动真实的
+    `ExportZZMI._export_impl`，并在开关判定点**之后**的第一条语句
+    （`_warn_merged_mesh_timing`）用哨兵异常停下，从而观测切换后的两张计划表。
+    """
+
+    class _StopAfterSwitch(Exception):
+        pass
+
+    def _plan_is_non_empty(self, exporter):
+        """前提：本夹具本来能产出一份非空计划（否则「被清空」无从谈起）。"""
+        carrier_map, target_map, _unredirected = exporter._build_merged_mesh_redirect_plan()
+        self.assertTrue(carrier_map, "夹具本应产出非空 carrier 计划")
+        self.assertTrue(target_map, "夹具本应产出非空 target 计划")
+        return carrier_map, target_map
+
+    def _drive_export_impl_to_switch(self, exporter, components):
+        """驱动真实 `_export_impl`，在开关判定点之后立刻停下（哨兵异常）。"""
+        ids = {c["draw_ib"]: i for i, c in enumerate(components)}
+
+        def _stop(_self, _unredirected=None):
+            raise self._StopAfterSwitch()
+
+        with mock.patch.object(
+            type(exporter),
+            "_collect_merged_skeleton_components",
+            lambda _self: (components, ids),
+        ), mock.patch.object(
+            # fake 基类未定义该方法（真实环境在 ExportUnity 上），故 create=True
+            type(exporter), "generate_buffer_files", lambda *a, **k: None, create=True
+        ), mock.patch.object(
+            type(exporter), "_warn_merged_mesh_timing", _stop
+        ):
+            with self.assertRaises(self._StopAfterSwitch):
+                exporter._export_impl()
+
+    def _force_switch(self, value):
+        """临时把开关挂到假 GlobalProterties 上（并登记清理）。"""
+        sentinel = object()
+        previous = getattr(_fake_global_properties, "zzmi_merged_redirect_enabled", sentinel)
+        _fake_global_properties.zzmi_merged_redirect_enabled = lambda: value
+
+        def _restore():
+            if previous is sentinel:
+                try:
+                    delattr(_fake_global_properties, "zzmi_merged_redirect_enabled")
+                except AttributeError:
+                    pass
+            else:
+                _fake_global_properties.zzmi_merged_redirect_enabled = previous
+
+        self.addCleanup(_restore)
+
+    def _emitted_vb_text(self, exporter, models):
+        builder = _FakeIniBuilder()
+        for model in models:
+            exporter.add_unity_vs_texture_override_vb_sections(builder, model)
+        return "\n".join(_all_builder_lines(builder))
+
+    # ---- 1) 默认关：清空计划 ⇒ group_plan 恒 None ⇒ 走直连路径 ----
+    def test_default_off_clears_redirect_plan(self):
+        exporter, _models = self._group3_exporter()
+        components = self._group3_components()
+        self._plan_is_non_empty(exporter)
+        # 默认关：假 GlobalProterties 里**没有**该属性（真实默认也是 False）
+        self.assertFalse(hasattr(_fake_global_properties, "zzmi_merged_redirect_enabled"))
+
+        self._drive_export_impl_to_switch(exporter, components)
+
+        self.assertEqual(exporter._redirect_carrier_map, {})
+        self.assertEqual(exporter._redirect_target_map, {})
+        # 直连路径的判据：组 target 查不到计划（`group_plan is None`）
+        self.assertIsNone(exporter._redirect_target_map.get("a23aa8a3"))
+        self.assertIsNone(exporter._merged_group_redirect_target(3))
+
+    # ---- 2) 打开开关：保留计划 ⇒ 恢复自动重定向 ----
+    def test_switch_on_keeps_redirect_plan(self):
+        exporter, _models = self._group3_exporter()
+        components = self._group3_components()
+        expected_carrier, expected_target = self._plan_is_non_empty(exporter)
+        self._force_switch(True)
+
+        self._drive_export_impl_to_switch(exporter, components)
+
+        self.assertEqual(exporter._redirect_carrier_map, expected_carrier)
+        self.assertEqual(exporter._redirect_target_map, expected_target)
+        self.assertIn("b20f90ea", exporter._redirect_carrier_map)
+        self.assertIn("a23aa8a3", exporter._redirect_target_map)
+        # group_plan 非 None ⇒ INI 生成走重定向分支
+        self.assertEqual(exporter._merged_group_redirect_target(3), "a23aa8a3")
+
+    # ---- 3) 产物差异：开/关的生成文本不同，且差异点就是重定向相关段 ----
+    def test_switch_only_changes_redirect_sections(self):
+        # 关（默认）：走直连路径
+        off_exporter, off_models = self._group3_exporter()
+        off_components = self._group3_components()
+        self._drive_export_impl_to_switch(off_exporter, off_components)
+        off_text = self._emitted_vb_text(off_exporter, off_models)
+
+        # 开：恢复重定向路径
+        on_exporter, on_models = self._group3_exporter()
+        on_components = self._group3_components()
+        self._force_switch(True)
+        self._drive_export_impl_to_switch(on_exporter, on_components)
+        on_text = self._emitted_vb_text(on_exporter, on_models)
+
+        self.assertNotEqual(off_text, on_text, "开关必须真的改变产物（实机复核入口）")
+
+        on_lines = on_text.split("\n")
+        off_lines = off_text.split("\n")
+
+        # 重定向专属：载体的 3 顶点前缀 stub 发在**列 0**（`append("draw = 3, 0")`）；
+        # 直连路径的同名 draw 只出现在**缩进的守卫体内**（`    draw = 3, 0`）⇒ 按整行判别。
+        self.assertIn("draw = 3, 0", on_lines)
+        self.assertNotIn("draw = 3, 0", off_lines)
+
+        # 直连专属：这两条段头只由 `_append_merged_direct_slot_guards` /
+        # `_append_merged_absorbed_replay`（= `group_plan is None` 分支）发射。
+        for direct_marker in (
+            "; 直连路径自足挂点：按本轮出现次绑本槽骨架后直接绘制本部件几何",
+            "; 合并宿主重放（直连路径）：本组全部部件在该槽都已当帧到达才写宿主 SO",
+        ):
+            self.assertIn(direct_marker, off_text)
+            self.assertNotIn(direct_marker, on_text)
+
+
 if __name__ == "__main__":
     unittest.main()
