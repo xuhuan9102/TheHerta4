@@ -30,10 +30,14 @@ Blender 里每个面由 ``material_index`` 指向**唯一一个**材质槽，一
   - DiffuseMap  -> Base Color + Alpha
   - NormalMap   -> 与导入侧「自动上贴图时使用法线贴图」同一套按游戏类型接法
                    （IdentityV 反相 G / 标准 / ZZMI·GIMI 由 R/G 重建 Z）
-  - LightMap    -> 绝区零（ZZMI）走通道拆分（G->金属度、B->高光），其它走自发光
+  - LightMap    -> 绝区零（ZZMI）走通道拆分（G->金属度、B->高光）；其它接金属度
   - MaterialMap -> 粗糙度
   - BodyMaskMap -> 自发光强度（黑白遮罩，白色发光）
   - 其它类型    -> 不接
+
+2026-10-09：各通道都按工作文件的那套排版摆进 NodeFrame 分组框
+（DiffuseMap / LightMap / MaterialMap / NormalMap / BodyMaskMap），
+LightMap、MaterialMap、BodyMaskMap 一律直连对应输入，不再插转换/缩放节点。
 """
 
 import os
@@ -82,9 +86,110 @@ _MAX_MATERIAL_NAME_BYTES = 60
 #: 取图时优先尝试的扩展名顺序（工作空间里可能同时存在原始 .dds 与转换出的 .png）。
 _PREFERRED_TEXTURE_EXTENSIONS = (".png", ".dds")
 
-#: 身体发光遮罩接自发光强度时的缩放：遮罩是「哪里发光」而不是发光强度，
-#: 白色直接当强度会非常刺眼，缩小后只是「比不发光亮一点」。
+#: 身体发光遮罩接自发光强度时的缩放。2026-10-09 起遮罩改为直连（与工作文件的
+#: MOD 规范材质一致），此常量不再参与接线，保留仅为兼容既有测试的引用。
 _BODYMASK_EMISSION_SCALE = 0.35
+
+# ---------------------------------------------------------------
+# 渲染材质的节点排版（照搬工作文件里那套 MOD 规范材质）
+# ---------------------------------------------------------------
+#: 渲染材质里原理化 BSDF / 材质输出的坐标
+_RENDER_PRINCIPLED = (890, 280)
+_RENDER_OUTPUT = (1170, 280)
+
+#: 分组框：通道接法 -> (label, 位置, 尺寸)。尺寸只是初始值，
+#: 框开了 shrink，子节点变多/变宽时会自动跟着长。
+_RENDER_FRAME = {
+    "DIFFUSE": ("DiffuseMap", (0, 936), (300, 337)),
+    "LIGHTMAP": ("LightMap", (0, 576), (300, 337)),
+    "SURFACE": ("MaterialMap", (0, 196), (300, 337)),
+    "NORMAL": ("NormalMap", (0, -184), (700, 337)),
+    "BODYMASK": ("BodyMaskMap", (0, -564), (300, 337)),
+}
+
+#: 分组框内贴图节点的相对坐标
+_RENDER_TEX = (30, -36)
+
+#: 框内并排节点的相对坐标（法线链的第 2、3 个节点）
+_RENDER_EXTRA = (350, -36)
+_RENDER_EXTRA_2 = (530, -36)
+
+
+def _find_render_frame(node_tree, socket_type: str):
+    """按 label 找已建好的分组框；同 label 的框会被复用（LightMap 的两种接法共用）。"""
+    spec = _RENDER_FRAME.get(socket_type)
+    if spec is None:
+        return None
+    for node in node_tree.nodes:
+        if node.type == "FRAME" and node.label == spec[0]:
+            return node
+    return None
+
+
+def _ensure_render_frame(node_tree, socket_type: str):
+    """取得该通道的分组框，没有就按规格新建。"""
+    frame = _find_render_frame(node_tree, socket_type)
+    if frame is not None:
+        return frame
+    spec = _RENDER_FRAME.get(socket_type)
+    if spec is None:
+        return None
+    label, location, size = spec
+    frame = node_tree.nodes.new("NodeFrame")
+    frame.label = label
+    frame.location = location
+    try:
+        frame.width, frame.height = size
+    except Exception:
+        pass
+    try:
+        frame.shrink = True
+    except Exception:
+        pass
+    return frame
+
+
+def _attach_to_frame(node_tree, node, socket_type: str, location=None):
+    """把节点放进该通道的分组框并设相对坐标。
+
+    必须先挂 parent 再设 location —— 反着来的话坐标会被当成绝对坐标，
+    节点会跳到 ``框位置 + 原坐标`` 上。
+    """
+    frame = _ensure_render_frame(node_tree, socket_type)
+    if frame is None:
+        return None
+    node.parent = frame
+    node.location = _RENDER_TEX if location is None else location
+    return frame
+
+
+def _attach_normal_chain(node_tree, nodes):
+    """把法线链的整组节点整体平移到 NormalMap 框内，保持它们彼此的相对位置。
+
+    法线图是按游戏类型搭的（IdentityV 反相 G / 标准 / ZZMI·GIMI 由 R/G 重建 Z），
+    节点数与形状都不同，所以不逐个指定坐标，而是取整组包围盒的最小角对齐到框内
+    左上角，组内相对关系原样保留。
+    """
+    created = [node for node in nodes if node is not None]
+    if not created:
+        return None
+    frame = _ensure_render_frame(node_tree, "NORMAL")
+    if frame is None:
+        return None
+    # 目标相对坐标要在挂 parent 之前算好：Blender 设 parent 时会保持节点的视觉
+    # 位置、把 location 重解释成相对值，挂完再基于 location 做偏移就会算偏。
+    min_x = min(node.location.x for node in created)
+    min_y = min(node.location.y for node in created)
+    targets = [
+        (node,
+         node.location.x - min_x + _RENDER_TEX[0],
+         node.location.y - min_y + _RENDER_TEX[1])
+        for node in created
+    ]
+    for node, target_x, target_y in targets:
+        node.parent = frame
+        node.location = (target_x, target_y)
+    return frame
 
 
 def _truncate_name(name: str) -> str:
@@ -253,9 +358,9 @@ def _make_principled_material(material):
     _clear_nodes(node_tree)
 
     principled = node_tree.nodes.new("ShaderNodeBsdfPrincipled")
-    principled.location = (0, 0)
+    principled.location = _RENDER_PRINCIPLED
     output = node_tree.nodes.new("ShaderNodeOutputMaterial")
-    output.location = (320, 0)
+    output.location = _RENDER_OUTPUT
     node_tree.links.new(principled.outputs["BSDF"], output.inputs["Surface"])
     return node_tree, principled
 
@@ -280,116 +385,259 @@ def _link_texture_image(texture_path: str, colorspace: str):
 # ---------------------------------------------------------------
 # 通道接线（都只往已建好的节点树上加，可在同一材质里累加）
 # ---------------------------------------------------------------
+_SRGB_GROUP = "sRGB->Non-Color"
+_NORMAL_GROUP_Z = "法线贴图_补Z"
+
+#: 法线组里补 Z 那两个节点的标记，便于识别与清理（与工作文件同名）
+_ZREBUILD_LABEL = "IMGPV_ZREBUILD"
+
+#: sRGB 编解码用到的常量（与工作文件里的取值逐位一致）
+_SRGB_POWER = 1.0 / 2.4        # 0.416667
+_SRGB_MUL_HIGH = 1.055
+_SRGB_SUB_HIGH = 0.055
+_SRGB_MUL_LOW = 12.92
+_SRGB_THRESHOLD = 0.003131
+
+
+def _build_srgb_group():
+    """用节点搭出「sRGB->Non-Color」组：把 sRGB 读数还原回 Non-Color 数值。
+
+    逐通道做 ``x <= t ? 12.92·x : 1.055·x^(1/2.4) − 0.055``，合并成
+    ``a + cond·(b − a)`` 的形式，与工作文件里那个组的数值结果逐位一致。
+    """
+    group = bpy.data.node_groups.new(_SRGB_GROUP, "ShaderNodeTree")
+    group.interface.new_socket("Color", in_out="INPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket("Color", in_out="OUTPUT", socket_type="NodeSocketColor")
+
+    nodes = group.nodes
+    links = group.links
+
+    group_in = nodes.new("NodeGroupInput")
+    group_in.location = (-400, 0)
+    separate = nodes.new("ShaderNodeSeparateColor")
+    separate.location = (-200, 0)
+    combine = nodes.new("ShaderNodeCombineColor")
+    combine.location = (1100, 0)
+    group_out = nodes.new("NodeGroupOutput")
+    group_out.location = (1300, 0)
+    links.new(group_in.outputs[0], separate.inputs["Color"])
+    links.new(combine.outputs[0], group_out.inputs[0])
+
+    for index in range(3):
+        column = -140 - index * 380
+
+        power = nodes.new("ShaderNodeMath")
+        power.operation = "POWER"
+        power.location = (column, 120)
+        power.inputs[1].default_value = _SRGB_POWER
+
+        mul_high = nodes.new("ShaderNodeMath")
+        mul_high.operation = "MULTIPLY"
+        mul_high.location = (column + 180, 120)
+        mul_high.inputs[1].default_value = _SRGB_MUL_HIGH
+
+        sub_high = nodes.new("ShaderNodeMath")
+        sub_high.operation = "SUBTRACT"
+        sub_high.location = (column + 360, 120)
+        sub_high.inputs[1].default_value = _SRGB_SUB_HIGH
+
+        mul_low = nodes.new("ShaderNodeMath")
+        mul_low.operation = "MULTIPLY"
+        mul_low.location = (column, -80)
+        mul_low.inputs[1].default_value = _SRGB_MUL_LOW
+
+        sub_delta = nodes.new("ShaderNodeMath")
+        sub_delta.operation = "SUBTRACT"
+        sub_delta.location = (column + 540, 20)
+
+        greater = nodes.new("ShaderNodeMath")
+        greater.operation = "GREATER_THAN"
+        greater.location = (column, -280)
+        greater.inputs[1].default_value = _SRGB_THRESHOLD
+
+        mul_cond = nodes.new("ShaderNodeMath")
+        mul_cond.operation = "MULTIPLY"
+        mul_cond.location = (column + 720, 20)
+
+        add = nodes.new("ShaderNodeMath")
+        add.operation = "ADD"
+        add.location = (column + 900, -80)
+
+        source = separate.outputs[index]
+        links.new(source, power.inputs[0])
+        links.new(power.outputs[0], mul_high.inputs[0])
+        links.new(mul_high.outputs[0], sub_high.inputs[0])
+        links.new(source, mul_low.inputs[0])
+        links.new(sub_high.outputs[0], sub_delta.inputs[0])
+        links.new(mul_low.outputs[0], sub_delta.inputs[1])
+        links.new(source, greater.inputs[0])
+        links.new(greater.outputs[0], mul_cond.inputs[0])
+        links.new(sub_delta.outputs[0], mul_cond.inputs[1])
+        links.new(mul_low.outputs[0], add.inputs[0])
+        links.new(mul_cond.outputs[0], add.inputs[1])
+        links.new(add.outputs[0], combine.inputs[index])
+
+    return group
+
+
+def _build_normal_group_z():
+    """用节点搭出「法线贴图_补Z」组：R 直通、G 反相、B 固定 1，再过法线贴图节点。"""
+    group = bpy.data.node_groups.new(_NORMAL_GROUP_Z, "ShaderNodeTree")
+    group.interface.new_socket("Color", in_out="INPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket("Normal", in_out="OUTPUT", socket_type="NodeSocketVector")
+
+    nodes = group.nodes
+    links = group.links
+
+    group_in = nodes.new("NodeGroupInput")
+    group_in.location = (-400, 0)
+    separate = nodes.new("ShaderNodeSeparateColor")
+    separate.location = (-200, 0)
+    invert = nodes.new("ShaderNodeMath")
+    invert.operation = "SUBTRACT"
+    invert.label = _ZREBUILD_LABEL
+    invert.location = (0, -160)
+    invert.inputs[0].default_value = 1.0
+    combine = nodes.new("ShaderNodeCombineColor")
+    combine.label = _ZREBUILD_LABEL
+    combine.location = (200, 0)
+    combine.inputs["Blue"].default_value = 1.0
+    normal_map = nodes.new("ShaderNodeNormalMap")
+    normal_map.location = (400, 0)
+    normal_map.uv_map = ""
+    normal_map.inputs["Strength"].default_value = 1.0
+    group_out = nodes.new("NodeGroupOutput")
+    group_out.location = (600, 0)
+
+    links.new(group_in.outputs[0], separate.inputs["Color"])
+    links.new(separate.outputs[0], combine.inputs["Red"])       # R 直通
+    links.new(separate.outputs[1], invert.inputs[1])            # 1 − G
+    links.new(invert.outputs[0], combine.inputs["Green"])
+    links.new(combine.outputs[0], normal_map.inputs["Color"])   # B 用常量 1，不连线
+    links.new(normal_map.outputs["Normal"], group_out.inputs[0])
+    return group
+
+
+#: 组名 -> 构造函数。两个组都由本模块用节点现搭，不依赖任何外部资产文件。
+_GROUP_BUILDERS = {
+    _SRGB_GROUP: _build_srgb_group,
+    _NORMAL_GROUP_Z: _build_normal_group_z,
+}
+
+
+def _ensure_node_group(name: str):
+    """取得节点组：当前 .blend 里已有同名组就复用，否则用节点现搭一个。"""
+    group = bpy.data.node_groups.get(name)
+    if group is not None:
+        return group
+    builder = _GROUP_BUILDERS.get(name)
+    if builder is None:
+        return None
+    try:
+        return builder()
+    except Exception as ex:
+        print("[贴图标记] 建立节点组 " + name + " 失败: " + str(ex))
+        return None
+
+
+def _ensure_normal_group_z():
+    """取得「法线贴图_补Z」组（没有就地搭一个）。"""
+    return _ensure_node_group(_NORMAL_GROUP_Z)
+
+
 def _wire_normal(node_tree, principled, texture_path: str, logic_name: str) -> None:
-    """法线：直接复用导入侧「自动上贴图时使用法线贴图」的按类型接法。
+    """法线：贴图 → 「sRGB->Non-Color」→ 「法线贴图_补Z」→ Normal。
 
-    这里不自己搭图，而是转调 :meth:`MeshCreateHelper.apply_normal_texture`——
-    它与导入期是**同一份实现**，不会两边漂移。三种接法：
-
-    - ``IdentityV``：反相 G 的简单 NormalMap；
-    - 非 ZZMI 家族且非 GIMI：标准 NormalMap（**不**反相 G）；
-    - ZZMI 家族 / GIMI：由 R/G 重建 Z（BC5 缺 Z）后再接 NormalMap。
-
-    以前这里固定走「反相 G + 缺 Z 补 1」，对绝区零这类不反相 G 的游戏是错的：
-    预览材质的法线与游戏内不一致，看起来很脏。
+    2026-10-09 起与工作文件里的 MOD 规范材质完全统一：不再按游戏类型分流，
+    统一走「sRGB 读 + sRGB->Non-Color 还原组 + 补 Z 法线组」这一条链。
     """
-    from .mesh_create_helper import MeshCreateHelper
+    image = _link_texture_image(texture_path, "sRGB")
 
-    MeshCreateHelper.apply_normal_texture(
-        node_tree=node_tree,
-        diffuse=principled,
-        normal_path=texture_path,
-        logic_name=logic_name,
-    )
+    target = principled.inputs.get("Normal")
+    if target is None:
+        return
+    for link in list(target.links):
+        node_tree.links.remove(link)
 
+    tex_image = _new_texture_node(node_tree, image, _RENDER_TEX)
+    _attach_to_frame(node_tree, tex_image, "NORMAL")
 
-def _wire_emission(node_tree, principled, texture_path: str) -> None:
-    """光照贴图（非绝区零）：自发光颜色。
+    srgb_group = _ensure_node_group(_SRGB_GROUP)
+    normal_group = _ensure_normal_group_z()
 
-    这里不把自发光颜色复位成黑色：同一材质里可能还挂着身体发光遮罩（它负责
-    发光区域），复位成黑会把 LightMap 提供的发光颜色一并抹掉。贴图断开时残留
-    自发光的问题只在「单独一个 LightMap 材质」里出现，交给 Emission Strength
-    的默认值处理即可。
-    """
-    image = _link_texture_image(texture_path, "Non-Color")
-    tex_image = _new_texture_node(node_tree, image, (-500, -900))
-
-    emission_input = None
-    if "Emission Color" in principled.inputs:
-        emission_input = principled.inputs["Emission Color"]
-    elif "Emission" in principled.inputs:
-        emission_input = principled.inputs["Emission"]
-    if emission_input is None:
+    source = tex_image.outputs["Color"]
+    if srgb_group is None or normal_group is None:
+        # 拿不到节点组资产时退回直连，至少不把材质留成断的
+        node_tree.links.new(source, target)
         return
 
-    node_tree.links.new(tex_image.outputs["Color"], emission_input)
-    if "Emission Strength" in principled.inputs:
-        try:
-            principled.inputs["Emission Strength"].default_value = 1.0
-        except Exception:
-            pass
+    srgb_node = node_tree.nodes.new("ShaderNodeGroup")
+    srgb_node.node_tree = srgb_group
+    srgb_node.label = srgb_group.name
+    _attach_to_frame(node_tree, srgb_node, "NORMAL", _RENDER_EXTRA)
+
+    normal_node = node_tree.nodes.new("ShaderNodeGroup")
+    normal_node.node_tree = normal_group
+    normal_node.label = normal_group.name
+    _attach_to_frame(node_tree, normal_node, "NORMAL", _RENDER_EXTRA_2)
+
+    node_tree.links.new(source, srgb_node.inputs["Color"])
+    node_tree.links.new(srgb_node.outputs["Color"], normal_node.inputs["Color"])
+    node_tree.links.new(normal_node.outputs["Normal"], target)
 
 
-def _wire_zzz_light(node_tree, principled, texture_path: str) -> None:
-    """绝区零 LightMap：按通道语义接入（都是数据通道，不是颜色）。
+def _wire_lightmap(node_tree, principled, texture_path: str) -> None:
+    """光照贴图：贴图 → Specular IOR Level（直连，不过转换组）。
 
-    R = 阴影/轮廓 ramp 索引 —— Blender 标准节点没有对应输入，不连接；
-    G = 金属度 -> Metallic；
-    B = 光泽   -> Specular IOR Level。
-
-    直接把这张图当颜色接到自发光会让物体整体泛红（R 通道数值最大）。
+    2026-10-09 实机确认：这张图的语义是折射相关，既不是自发光也不是金属度，
+    与工作文件里的 MOD 规范材质一致，直接接「高光 IOR 级别」。
+    绝区零也不再走 G/B 通道拆分——那套拆法已删除。
     """
-    image = _link_texture_image(texture_path, "Non-Color")
-    tex_image = _new_texture_node(node_tree, image, (-800, -900))
+    image = _link_texture_image(texture_path, "sRGB")
 
-    metallic = principled.inputs.get("Metallic")
-    specular = principled.inputs.get("Specular IOR Level")
-    if specular is None:
-        specular = principled.inputs.get("Specular")
+    target = principled.inputs.get("Specular IOR Level")
+    if target is None:
+        target = principled.inputs.get("Specular")
+    if target is None:
+        return
 
-    separate = node_tree.nodes.new("ShaderNodeSeparateColor")
-    separate.location = (-520, -900)
-    if hasattr(separate, "mode"):
-        separate.mode = "RGB"
-    node_tree.links.new(separate.inputs["Color"], tex_image.outputs["Color"])
-
-    if metallic is not None:
-        for link in list(metallic.links):
+    # 旧版把这张图接在自发光 / 金属度上，换接法时一并断开，避免残留
+    for key in ("Emission Color", "Emission", "Metallic"):
+        socket = principled.inputs.get(key)
+        if socket is None:
+            continue
+        for link in list(socket.links):
             node_tree.links.remove(link)
-        node_tree.links.new(separate.outputs["Green"], metallic)
-    if specular is not None:
-        for link in list(specular.links):
-            node_tree.links.remove(link)
-        node_tree.links.new(separate.outputs["Blue"], specular)
+
+    tex_image = _new_texture_node(node_tree, image, _RENDER_TEX)
+    _attach_to_frame(node_tree, tex_image, "LIGHTMAP")
+    node_tree.links.new(tex_image.outputs["Color"], target)
 
 
 def _wire_surface(node_tree, principled, texture_path: str) -> None:
-    """质感图（MaterialMap）：粗糙度。"""
-    image = _link_texture_image(texture_path, "Non-Color")
-    tex_image = _new_texture_node(node_tree, image, (-500, -1200))
+    """质感图（MaterialMap）：粗糙度，贴图数值直连、不过转换组。"""
+    image = _link_texture_image(texture_path, "sRGB")
+    tex_image = _new_texture_node(node_tree, image, _RENDER_TEX)
+    _attach_to_frame(node_tree, tex_image, "SURFACE")
     node_tree.links.new(tex_image.outputs["Color"], principled.inputs["Roughness"])
 
 
 def _wire_bodymask(node_tree, principled, texture_path: str) -> None:
-    """身体发光遮罩（绝区零 BodyMaskMap）：接到自发光强度。
+    """身体发光遮罩（BodyMaskMap）：直接接到自发光强度，中间不过缩放节点。
 
-    黑白遮罩，白色=该处发光、黑色=不发光。它是「哪里发光」的遮罩而不是发光强度，
-    所以接在 Emission Strength 上（与 LightMap 的自发光颜色相乘），并且不把白色
-    当成最高亮度——略微高于不发光即可看出该发光的区域。
+    黑白遮罩，白色=该处发光、黑色=不发光，数值原样进 Emission Strength。
+    2026-10-09 起与工作文件的 MOD 规范材质统一：旧版在中间插了一个 ×0.35 的
+    Math 节点，换成直连后不再需要。
     """
-    image = _link_texture_image(texture_path, "Non-Color")
-    tex_image = _new_texture_node(node_tree, image, (-500, -1500))
+    image = _link_texture_image(texture_path, "sRGB")
+    tex_image = _new_texture_node(node_tree, image, _RENDER_TEX)
 
     strength = principled.inputs.get("Emission Strength")
     if strength is None:
         return
 
-    scale = node_tree.nodes.new("ShaderNodeMath")
-    scale.operation = "MULTIPLY"
-    scale.location = (-720, -1500)
-    scale.inputs[1].default_value = _BODYMASK_EMISSION_SCALE
-    node_tree.links.new(scale.inputs[0], tex_image.outputs["Color"])
-    node_tree.links.new(scale.outputs["Value"], strength)
+    _attach_to_frame(node_tree, tex_image, "BODYMASK")
+    node_tree.links.new(tex_image.outputs["Color"], strength)
 
 
 def _wire_channel(node_tree, principled, socket_type: str, texture_path: str, logic_name: str) -> None:
@@ -397,10 +645,7 @@ def _wire_channel(node_tree, principled, socket_type: str, texture_path: str, lo
     if socket_type == "NORMAL":
         _wire_normal(node_tree, principled, texture_path, logic_name)
     elif socket_type == "LIGHTMAP":
-        if LogicName.is_zzmi_family(logic_name):
-            _wire_zzz_light(node_tree, principled, texture_path)
-        else:
-            _wire_emission(node_tree, principled, texture_path)
+        _wire_lightmap(node_tree, principled, texture_path)
     elif socket_type == "SURFACE":
         _wire_surface(node_tree, principled, texture_path)
     elif socket_type == "BODYMASK":
@@ -415,60 +660,104 @@ def _wire_render_diffuse(node_tree, principled, texture_path: str) -> None:
     透明度沿用导入现有语义：受「导入贴图时忽略透明度通道」约束，忽略时不连 Alpha。
     """
     image = _link_texture_image(texture_path, "sRGB")
-    tex_image = _new_texture_node(node_tree, image, (-1100, 200))
+    tex_image = _new_texture_node(node_tree, image, _RENDER_TEX)
+    _attach_to_frame(node_tree, tex_image, "DIFFUSE")
     node_tree.links.new(tex_image.outputs["Color"], principled.inputs["Base Color"])
 
-    if _ignore_texture_alpha():
-        image.alpha_mode = "NONE"
-        return
-
-    image.alpha_mode = "CHANNEL_PACKED"
-    alpha_input = principled.inputs.get("Alpha")
-    if alpha_input is not None:
-        node_tree.links.new(tex_image.outputs["Alpha"], alpha_input)
+    # 与工作文件里的 MOD 规范材质一致：漫反射只进 Base Color，Alpha 保持 1.0
+    # （「导入贴图时忽略透明度通道」的旧语义随之一并移除）。
+    image.alpha_mode = "NONE"
 
 
 # ---------------------------------------------------------------
 # 材质构建
 # ---------------------------------------------------------------
-def _apply_diffuse_material(material, texture_path: str, logic_name: str) -> None:
-    """规范材质的漫反射：沿用 TheHerta4 原生方案（IdentityV 不透明、其余透明混合）。
+#: 规范材质里各节点的坐标（照搬工作文件的排版）
+_SPEC_PRINCIPLED = {
+    "DIFFUSE": (180, 0), "NORMAL": (0, -160), "LIGHTMAP": (40, 0),
+    "SURFACE": (120, 0), "BODYMASK": (240, 0),
+}
+_SPEC_OUTPUT = {
+    "DIFFUSE": (480, 0), "NORMAL": (280, -160), "LIGHTMAP": (320, 0),
+    "SURFACE": (420, 0), "BODYMASK": (540, 0),
+}
+_SPEC_TEX = {
+    "DIFFUSE": (-120, 0), "NORMAL": (-820, -160), "LIGHTMAP": (-260, 0),
+    "SURFACE": (-160, 0), "BODYMASK": (-120, 0),
+}
+_SPEC_SRGB = {"NORMAL": (-480, -160)}
+_SPEC_NMAP = {"NORMAL": (-240, -160)}
 
-    这两个图函数内部自行 load 贴图、设 sRGB、清空节点树，行为与旧的单材质路径
-    完全一致，这里不再重复建图。
-    """
-    from .mesh_create_helper import MeshCreateHelper
 
-    if logic_name == LogicName.IdentityV:
-        material.blend_method = "OPAQUE"
-        MeshCreateHelper.create_diffuse_material_graph(
-            node_tree=material.node_tree,
-            texture_path=texture_path,
-        )
+def _wire_spec_channel(node_tree, principled, socket_type: str, texture_path: str) -> None:
+    """规范材质：一种贴图接一个原理化通道，只有法线需要转换组。"""
+    if socket_type == "NORMAL":
+        image = _link_texture_image(texture_path, "sRGB")
+        tex_image = _new_texture_node(node_tree, image, _SPEC_TEX["NORMAL"])
+        target = principled.inputs.get("Normal")
+        if target is None:
+            return
+        srgb_group = _ensure_node_group(_SRGB_GROUP)
+        normal_group = _ensure_normal_group_z()
+        if srgb_group is None or normal_group is None:
+            node_tree.links.new(tex_image.outputs["Color"], target)
+            return
+        srgb_node = node_tree.nodes.new("ShaderNodeGroup")
+        srgb_node.node_tree = srgb_group
+        srgb_node.label = srgb_group.name
+        srgb_node.location = _SPEC_SRGB["NORMAL"]
+        normal_node = node_tree.nodes.new("ShaderNodeGroup")
+        normal_node.node_tree = normal_group
+        normal_node.label = normal_group.name
+        normal_node.location = _SPEC_NMAP["NORMAL"]
+        node_tree.links.new(tex_image.outputs["Color"], srgb_node.inputs["Color"])
+        node_tree.links.new(srgb_node.outputs["Color"], normal_node.inputs["Color"])
+        node_tree.links.new(normal_node.outputs["Normal"], target)
         return
 
-    material.blend_method = "BLEND"
-    if hasattr(material, "use_transparency_overlap"):
-        material.use_transparency_overlap = False
-    elif hasattr(material, "show_transparent_back"):
-        material.show_transparent_back = False
-    MeshCreateHelper.create_transparent_material_graph(
-        node_tree=material.node_tree,
-        texture_path=texture_path,
-    )
+    image = _link_texture_image(texture_path, "sRGB")
+    image.alpha_mode = "NONE"
+    tex_image = _new_texture_node(node_tree, image, _SPEC_TEX.get(socket_type, (-120, 0)))
+
+    if socket_type == "DIFFUSE":
+        target = principled.inputs.get("Base Color")
+    elif socket_type == "LIGHTMAP":
+        target = principled.inputs.get("Specular IOR Level")
+        if target is None:
+            target = principled.inputs.get("Specular")
+    elif socket_type == "SURFACE":
+        target = principled.inputs.get("Roughness")
+    elif socket_type == "BODYMASK":
+        target = principled.inputs.get("Emission Strength")
+    else:
+        target = None
+    if target is not None:
+        node_tree.links.new(tex_image.outputs["Color"], target)
 
 
-def _apply_spec_material(material, texture_path: str, logic_name: str) -> None:
-    """规范材质：一律按「颜色贴图」接法，不按类型接通道。
+def _apply_spec_material(material, socket_type: str, texture_path: str,
+                         logic_name: str) -> None:
+    """规范材质：原理化 BSDF + 单通道，与工作文件里的 MOD 规范材质完全一致。
 
-    规范材质（``<类型名>_<网格名>``）只用于让导出侧按材质名识别贴图类型，不需要通道
-    语义；而按类型接通道必须经过原理化 BSDF，原理化的镜面/粗糙度默认值会在渲染时
-    改变颜色（法线/光照/遮罩贴图尤其明显）。所以除渲染材质（``IMGPV_``，见
-    :func:`_build_render_material`）保留分通道接法外，其余材质统一走 TheHerta4
-    原生的颜色贴图图——纯漫反射 BSDF（``ShaderNodeBsdfDiffuse``）+ 透明混合，
-    与 DiffuseMap 完全同一套，节点树里不出现原理化 BSDF。
+    规范材质（``<类型名>_<网格名>``）本来只用于让导出侧按材质名识别贴图类型，
+    但它同样会被直接渲染，所以按类型接通道——与渲染材质（见
+    :func:`_build_render_material`）共用同一套语义与坐标。
     """
-    _apply_diffuse_material(material, texture_path, logic_name)
+    material.use_nodes = True
+    node_tree = material.node_tree
+    _clear_nodes(node_tree)
+
+    principled = node_tree.nodes.new("ShaderNodeBsdfPrincipled")
+    principled.location = _SPEC_PRINCIPLED.get(socket_type, (0, 0))
+    output = node_tree.nodes.new("ShaderNodeOutputMaterial")
+    output.location = _SPEC_OUTPUT.get(socket_type, (300, 0))
+    node_tree.links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+
+    material.blend_method = "HASHED"
+    if hasattr(material, "use_transparency_overlap"):
+        material.use_transparency_overlap = True
+
+    _wire_spec_channel(node_tree, principled, socket_type, texture_path)
 
 
 def _build_render_material(material, entries, logic_name: str) -> None:
@@ -486,14 +775,10 @@ def _build_render_material(material, entries, logic_name: str) -> None:
         elif socket_type:
             _wire_channel(node_tree, principled, socket_type, texture_path, logic_name)
 
-    if has_diffuse and logic_name != LogicName.IdentityV and not _ignore_texture_alpha():
-        material.blend_method = "BLEND"
-        if hasattr(material, "use_transparency_overlap"):
-            material.use_transparency_overlap = False
-        elif hasattr(material, "show_transparent_back"):
-            material.show_transparent_back = False
-    else:
-        material.blend_method = "OPAQUE"
+    # 与工作文件里的 MOD 规范材质一致：HASHED + 允许透明重叠，Alpha 不接线。
+    material.blend_method = "HASHED"
+    if hasattr(material, "use_transparency_overlap"):
+        material.use_transparency_overlap = True
 
 
 # ---------------------------------------------------------------
@@ -592,7 +877,7 @@ def build_marked_materials(
         socket_type = mark_socket_type(mark_name)
         material = bpy.data.materials.new(name=mark_material_name(mark_name, mesh_name))
         try:
-            _apply_spec_material(material, texture_path, logic_name)
+            _apply_spec_material(material, socket_type, texture_path, logic_name)
         except Exception as ex:
             print("[贴图标记] 建立材质失败 " + mark_name + ": " + str(ex))
             failures.append(mark_name)
@@ -802,7 +1087,7 @@ def build_missing_marked_materials(
 
         material = bpy.data.materials.new(name=target_name)
         try:
-            _apply_spec_material(material, texture_path, logic_name)
+            _apply_spec_material(material, socket_type, texture_path, logic_name)
         except Exception as ex:
             print("[贴图标记] 补齐材质失败 " + mark_name + ": " + str(ex))
             warnings.append(f"{mark_name} 建材质失败: {ex}")

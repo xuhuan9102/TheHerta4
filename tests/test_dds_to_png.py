@@ -79,22 +79,30 @@ class FakeImage:
         self.reload_count += 1
 
 
-def _write_png(path, bit_depth=8):
-    """写一个只含 IHDR 的合法 PNG 头，供 png_bit_depth 判读。"""
-    header = bytearray(26)
-    header[0:8] = b"\x89PNG\r\n\x1a\n"
-    header[8:12] = struct.pack(">I", 13)
-    header[12:16] = b"IHDR"
-    header[16:20] = struct.pack(">I", 16)
-    header[20:24] = struct.pack(">I", 16)
-    header[24] = bit_depth
-    header[25] = 6
+def _write_png(path, bit_depth=8, gama=None, srgb=False):
+    """写一个最小 PNG（IHDR + 可选 gAMA/sRGB + IEND），供位深与色彩元数据判读。"""
+
+    def chunk(kind, payload):
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", 0)
+
+    body = bytearray(b"\x89PNG\r\n\x1a\n")
+    body += chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, bit_depth, 6, 0, 0, 0))
+    if gama is not None:
+        body += chunk(b"gAMA", struct.pack(">I", gama))
+    if srgb:
+        body += chunk(b"sRGB", b"\x00")
+    body += chunk(b"IEND", b"")
     with open(path, "wb") as handle:
-        handle.write(bytes(header))
+        handle.write(bytes(body))
 
 
-def _write_dds(path, dxgi_format=None):
-    """写一个合法 DDS 头；dxgi_format 非 None 时补上 DX10 扩展头。"""
+def _write_dds(path, dxgi_format=None, legacy_d3dfmt=None):
+    """写一个合法 DDS 头。
+
+    ``dxgi_format`` 非 None 时补上 DX10 扩展头；``legacy_d3dfmt`` 非 None 时模拟
+    legacy 头把 D3DFMT 枚举值写在 dwFourCC 位置（实测真实文件里 113 =
+    D3DFMT_A16B16G16R16F = R16G16B16A16_FLOAT）。
+    """
     header = bytearray(148 if dxgi_format is not None else 128)
     header[0:4] = b"DDS "
     struct.pack_into("<I", header, 4, 124)
@@ -102,20 +110,24 @@ def _write_dds(path, dxgi_format=None):
     if dxgi_format is not None:
         header[84:88] = b"DX10"
         struct.pack_into("<I", header, 128, dxgi_format)
+    if legacy_d3dfmt is not None:
+        struct.pack_into("<I", header, 80, 0x4)  # DDPF_FOURCC
+        struct.pack_into("<I", header, 84, legacy_d3dfmt)
     with open(path, "wb") as handle:
         handle.write(bytes(header))
 
 
-def _fake_texconv_run(command, **_kwargs):
+def _fake_texconv_run(command, gama=None, srgb=False, **_kwargs):
     """按命令里的 -o/-y 真的落一个 png，让 convert_dds_to_png 的存在性检查通过。
 
     输出位深跟着命令走：带 16bit 格式的就是 16bit PNG，否则 8bit。
+    ``gama`` / ``srgb`` 用来模拟 texconv 写进产物的色彩元数据。
     """
     dds_path = command[-1]
     out_dir = command[command.index("-o") + 1]
     png_path = os.path.join(out_dir, os.path.splitext(os.path.basename(dds_path))[0] + ".png")
     bit_depth = 16 if "R16G16B16A16_UNORM" in command else 8
-    _write_png(png_path, bit_depth)
+    _write_png(png_path, bit_depth, gama=gama, srgb=srgb)
     return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
 
@@ -137,9 +149,9 @@ class DDSToPNGTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         patcher.start()
 
-    def _make_dds(self, name="X-LightMap.dds", dxgi_format=None):
+    def _make_dds(self, name="X-LightMap.dds", dxgi_format=None, legacy_d3dfmt=None):
         path = os.path.join(self.temp_dir, name)
-        _write_dds(path, dxgi_format)
+        _write_dds(path, dxgi_format, legacy_d3dfmt)
         return path
 
     def test_png_path_is_same_name_with_png_extension(self):
@@ -197,13 +209,11 @@ class DDSToPNGTests(unittest.TestCase):
         self.assertEqual("Non-Color", image.colorspace_settings.name)
         self.assertEqual("PREMUL", image.alpha_mode)
 
-    def test_existing_fresh_png_skips_conversion_but_still_relinks(self):
-        """已有比 .dds 更新的 .png 时跳过 texconv，只重连 —— 重复导入不必重跑一遍"""
+    def test_existing_png_skips_conversion_but_still_relinks(self):
+        """已有同名 png 就跳过 texconv，只重连 —— 重复导入不该反复转换"""
         dds_path = self._make_dds()
         png_path = dds_to_png.png_path_for(dds_path)
-        with open(png_path, "wb") as handle:
-            handle.write(b"\x89PNG\r\n\x1a\nexisting")
-        os.utime(png_path, (os.path.getmtime(dds_path) + 10, os.path.getmtime(dds_path) + 10))
+        _write_png(png_path, 8)
 
         image = FakeImage(dds_path)
         with mock.patch.object(dds_to_png.subprocess, "run") as run_mock:
@@ -361,6 +371,59 @@ class DDSToPNGTests(unittest.TestCase):
         self.assertFalse(dds_to_png.is_hdr_dds(linear))
         self.assertFalse(dds_to_png.is_hdr_dds(legacy))
 
+    def test_is_hdr_dds_recognizes_legacy_d3dfmt_float(self):
+        """legacy 头把 D3DFMT 枚举值写在 dwFourCC 位置时，也必须是 HDR 源
+
+        用户报的「线性贴图转换后颜色变淡」就是这个漏判：实测真实文件
+        611df76d-132-0-LightMap.dds 是 legacy 头、dwFourCC=113
+        (D3DFMT_A16B16G16R16F = R16G16B16A16_FLOAT)、G 通道真值 0.5020。
+        漏判 -> texconv 走 8bit PNG 的 sRGB 编码路径写出 188 而不是 128，整片变亮变淡。
+        """
+        for d3dfmt in (111, 112, 113, 114, 115, 116):
+            path = self._make_dds("F%d-LightMap.dds" % d3dfmt, legacy_d3dfmt=d3dfmt)
+            self.assertTrue(dds_to_png.is_hdr_dds(path), "D3DFMT %d 应判为 HDR" % d3dfmt)
+
+    def test_is_hdr_dds_rejects_legacy_non_float_fourcc(self):
+        """legacy 的 DXT1/DXT5 以及未标 DDPF_FOURCC 的未压缩头仍是普通整型源"""
+        dxt1 = self._make_dds("A-DiffuseMap.dds", legacy_d3dfmt=int.from_bytes(b"DXT1", "little"))
+        dxt5 = self._make_dds("B-DiffuseMap.dds", legacy_d3dfmt=int.from_bytes(b"DXT5", "little"))
+        uncompressed = self._make_dds("C-DiffuseMap.dds")
+
+        self.assertFalse(dds_to_png.is_hdr_dds(dxt1))
+        self.assertFalse(dds_to_png.is_hdr_dds(dxt5))
+        self.assertFalse(dds_to_png.is_hdr_dds(uncompressed))
+
+    def test_legacy_float_dds_pins_16bit_output(self):
+        """核心回归：legacy 浮点源同样必须显式指定 16bit 输出"""
+        dds_path = self._make_dds("HDR-LightMap.dds", legacy_d3dfmt=113)
+        captured = []
+
+        def capture(command, **kwargs):
+            captured.append(command)
+            return _fake_texconv_run(command, **kwargs)
+
+        with mock.patch.object(dds_to_png.subprocess, "run", side_effect=capture):
+            dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
+
+        self.assertEqual(
+            ["texconv.exe", "-f", "R16G16B16A16_UNORM", "-ft", "png",
+             "-o", self.temp_dir, "-y", dds_path],
+            captured[0],
+        )
+
+    def test_legacy_float_source_png_is_reused(self):
+        """legacy 浮点源同样：已有同名 png 就沿用，不再每次导入都重转"""
+        dds_path = self._make_dds("HDR-LightMap.dds", legacy_d3dfmt=113)
+        png_path = dds_to_png.png_path_for(dds_path)
+        _write_png(png_path, 16)
+
+        image = FakeImage(dds_path)
+        with mock.patch.object(dds_to_png.subprocess, "run") as run_mock:
+            status, _detail = dds_to_png.process_one(image, dds_path, force=False)
+
+        self.assertEqual("skipped", status)
+        run_mock.assert_not_called()
+
     def test_png_bit_depth_reads_ihdr(self):
         """位深要从 PNG 头里读出来，用于识别历史错误的 8bit 产物"""
         path = os.path.join(self.temp_dir, "probe.png")
@@ -369,6 +432,52 @@ class DDSToPNGTests(unittest.TestCase):
         _write_png(path, 8)
         self.assertEqual(8, dds_to_png.png_bit_depth(path))
         self.assertIsNone(dds_to_png.png_bit_depth(os.path.join(self.temp_dir, "missing.png")))
+
+    def test_png_color_metadata_and_strip(self):
+        """色彩元数据能读出来，也能被清掉（清第二次不应再算改动）"""
+        path = os.path.join(self.temp_dir, "meta.png")
+        _write_png(path, 8, gama=100000, srgb=False)
+        self.assertEqual((8, ["gAMA=100000"]), dds_to_png.png_color_metadata(path))
+
+        self.assertTrue(dds_to_png.strip_color_metadata(path))
+        self.assertEqual((8, []), dds_to_png.png_color_metadata(path))
+        self.assertFalse(dds_to_png.strip_color_metadata(path))
+
+    def test_linear_conversion_strips_color_metadata(self):
+        """核心回归：线性源产出的 png 必须被清掉 texconv 打的 gAMA
+
+        真实踩到过：texconv 给线性源写 gAMA=1.0，Photoshop CC 2017 / Paint.NET 会
+        据此把它从"线性"转到工作空间 sRGB（重新编码一次），整片变亮；DDS 没有这种
+        元数据，于是用户一眼就看出转换后的 png 不对。sRGB 源的 sRGB chunk 是正确
+        的，不能动（见下个用例）。
+        """
+        dds_path = self._make_dds("X-LightMap.dds")  # legacy raw，线性
+        image = FakeImage(dds_path)
+
+        def run(command, **kwargs):
+            return _fake_texconv_run(command, gama=100000, **kwargs)
+
+        with mock.patch.object(dds_to_png.subprocess, "run", side_effect=run):
+            status, _detail = dds_to_png.process_one(image, dds_path)
+
+        self.assertEqual("converted", status)
+        _depth, chunks = dds_to_png.png_color_metadata(dds_to_png.png_path_for(dds_path))
+        self.assertEqual([], chunks)
+
+    def test_srgb_conversion_keeps_srgb_chunk(self):
+        """sRGB 源的产物保持 texconv 写的色彩元数据（显示本来就是对的）"""
+        dds_path = self._make_dds("SRGB-DiffuseMap.dds", dxgi_format=99)
+        image = FakeImage(dds_path)
+
+        def run(command, **kwargs):
+            return _fake_texconv_run(command, gama=45455, srgb=True, **kwargs)
+
+        with mock.patch.object(dds_to_png.subprocess, "run", side_effect=run):
+            status, _detail = dds_to_png.process_one(image, dds_path)
+
+        self.assertEqual("converted", status)
+        _depth, chunks = dds_to_png.png_color_metadata(dds_to_png.png_path_for(dds_path))
+        self.assertIn("sRGB", chunks)
 
     def test_hdr_source_pins_16bit_output(self):
         """核心回归：BC6H 这类 float 源必须显式指定 16bit 输出。
@@ -391,40 +500,44 @@ class DDSToPNGTests(unittest.TestCase):
             captured[0],
         )
 
-    def test_stale_8bit_png_for_hdr_is_reconverted(self):
-        """HDR 源配 8bit png 是历史错误产物：即使比 .dds 新也必须重转"""
-        dds_path = self._make_dds("HDR-LightMap.dds", dxgi_format=95)
-        png_path = dds_to_png.png_path_for(dds_path)
-        _write_png(png_path, 8)
-        stamp = os.path.getmtime(dds_path) + 10
-        os.utime(png_path, (stamp, stamp))
+    def test_any_existing_png_is_reused_even_if_suspect(self):
+        """只看存在性：哪怕是 8bit 的历史产物也照样沿用，由用户自己删
 
-        image = FakeImage(dds_path)
-        with mock.patch.object(dds_to_png.subprocess, "run", side_effect=_fake_texconv_run) as run_mock:
-            status, _detail = dds_to_png.process_one(image, dds_path, force=False)
-
-        self.assertEqual("converted", status)
-        run_mock.assert_called_once()
-        self.assertEqual(16, dds_to_png.png_bit_depth(png_path))
-
-    def test_hdr_source_is_always_reconverted_even_with_16bit_png(self):
-        """HDR 源不沿用任何既有 png：位深 16 也可能是 sRGB 编码的偏亮产物
-
-        真实踩到过：texconv 不指定输出格式时把 BC6H 写成 16bit 但 sRGB 编码的 PNG，
-        均值 0.299 而非精确的 0.217，所以"位深对"不能作为沿用的依据。
+        用户明确要求不要自动判定内容并重转 —— 有问题的 png 他手动删，删掉后下次导入
+        只会补转缺的那几张。
         """
         dds_path = self._make_dds("HDR-LightMap.dds", dxgi_format=95)
         png_path = dds_to_png.png_path_for(dds_path)
-        _write_png(png_path, 16)
-        stamp = os.path.getmtime(dds_path) + 10
-        os.utime(png_path, (stamp, stamp))
+        _write_png(png_path, 8, gama=100000)
 
         image = FakeImage(dds_path)
-        with mock.patch.object(dds_to_png.subprocess, "run", side_effect=_fake_texconv_run) as run_mock:
+        with mock.patch.object(dds_to_png.subprocess, "run") as run_mock:
             status, _detail = dds_to_png.process_one(image, dds_path, force=False)
 
-        self.assertEqual("converted", status)
-        run_mock.assert_called_once()
+        self.assertEqual("skipped", status)
+        run_mock.assert_not_called()
+
+    def test_correct_png_is_reused_without_rerunning_texconv(self):
+        """浮点 / sRGB / 线性三类源，只要有同名 png 就沿用，绝不再跑一遍 texconv
+
+        用户抱怨每次导入都卡一会儿 —— 浮点/HDR 源原本被无条件重转。
+        """
+        cases = (("HDR-LightMap.dds", 95, 16), ("SRGB-DiffuseMap.dds", 99, 8),
+                 ("X-LightMap.dds", None, 8))
+        for name, dxgi, depth in cases:
+            dds_path = self._make_dds(name, dxgi_format=dxgi)
+            png_path = dds_to_png.png_path_for(dds_path)
+            _write_png(png_path, depth)
+            stamp = os.path.getmtime(dds_path) + 10
+            os.utime(png_path, (stamp, stamp))
+
+            image = FakeImage(dds_path)
+            with mock.patch.object(dds_to_png.subprocess, "run") as run_mock:
+                status, _detail = dds_to_png.process_one(image, dds_path, force=False)
+
+            self.assertEqual("skipped", status, name)
+            run_mock.assert_not_called()
+            self.assertTrue(image.filepath.endswith(".png"))
 
     def test_hdr_source_without_16bit_output_reports_failure(self):
         """结果校验：HDR 源没产出 16bit PNG 时报失败，绝不把错图重连上去"""

@@ -449,7 +449,8 @@ class PanelBasicInformation(bpy.types.Panel):
             depress=GlobalProterties.ignore_texture_alpha(),
         )
 
-        # 导入后自动转为 PNG（一键导入完成后按帧把 .dds 转成无损 PNG）
+        # 导入后自动转为 PNG（一键导入完成后按帧处理：同名 .png 已存在就只把引用换过去，
+        # 不重复转换；不存在才用 texconv 生成，避免重复导入反复转换卡顿）
         layout.prop(
             context.scene.texture_tools_props,
             "dds_auto_convert_png_after_import",

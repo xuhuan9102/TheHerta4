@@ -360,12 +360,14 @@ class BuildMarkedMaterialsTests(unittest.TestCase):
         self.extract_folder = os.path.join(self.temp_dir, "TYPE_A")
         os.makedirs(self.extract_folder, exist_ok=True)
         self.spec_calls = []
+        self.spec_types = []
         self.principled_calls = []
         self.render_calls = []
 
-        def _fake_diffuse(material, texture_path, logic_name):
-            # 规范材质的真实路径：_apply_spec_material -> _apply_diffuse_material
+        def _fake_spec(material, socket_type, texture_path, logic_name):
+            # 规范材质的真实路径：_apply_spec_material（原理化 BSDF + 单通道）
             self.spec_calls.append((material.name, texture_path, logic_name))
+            self.spec_types.append(socket_type)
 
         def _fake_principled(material):
             self.principled_calls.append(material.name)
@@ -377,12 +379,11 @@ class BuildMarkedMaterialsTests(unittest.TestCase):
         def _fake_render(material, entries, logic_name):
             self.render_calls.append((material.name, list(entries), logic_name))
 
-        # 规范材质必须走原生颜色贴图图（_apply_diffuse_material），且绝不经过
-        # 原理化 BSDF：原理化的镜面/粗糙度默认值会在渲染时改变颜色。
-        # 渲染材质的分通道接法已被 _build_render_material 的 stub 挡在外面，
-        # 所以这里任何一次原理化调用都只能来自规范材质。
+        # 2026-10-09 起规范材质与渲染材质共用「原理化 BSDF + 单通道」这一套
+        # （与工作文件里的 MOD 规范材质完全一致），所以这里只验证分派与产出，
+        # 不真建节点。
         for target, fake in (
-            ("_apply_diffuse_material", _fake_diffuse),
+            ("_apply_spec_material", _fake_spec),
             ("_make_principled_material", _fake_principled),
             ("_wire_channel", _fake_channel),
         ):
@@ -509,8 +510,12 @@ class BuildMarkedMaterialsTests(unittest.TestCase):
         self.assertEqual(created, 1)
         self.assertEqual(len(obj.data.materials), 2)
 
-    def test_zzmi_lightmap_split_is_left_to_the_render_material(self):
-        """绝区零 LightMap 的通道拆分只留给 IMGPV 渲染材质，规范材质一律走颜色图。"""
+    def test_lightmap_is_a_plain_channel_in_both_materials(self):
+        """LightMap 不再按绝区零拆通道：规范材质与渲染材质都当普通通道接。
+
+        2026-10-09 用户实机确认这张图的语义是折射相关，绝区零那套
+        G→金属度 / B→高光的拆法已整体删除。
+        """
         self._write("4a178546-18468-0-LightMap.dds")
         self._use_marks([_mark("LightMap")])
 
@@ -519,17 +524,17 @@ class BuildMarkedMaterialsTests(unittest.TestCase):
 
         self.assertEqual([call[0] for call in self.spec_calls], ["LightMap_4a178546-18468-0"])
         self.assertEqual(self.spec_calls[0][2], "ZZMI")
-        self.assertEqual(self.principled_calls, [], "规范材质不得经过原理化 BSDF")
+        self.assertEqual(self.spec_types, ["LIGHTMAP"])
         render_name, entries, _logic = self.render_calls[0]
         self.assertEqual(render_name, "IMGPV_4a178546-18468-0")
         self.assertEqual([socket_type for socket_type, _path in entries], ["LIGHTMAP"])
+        self.assertFalse(hasattr(marked, "_wire_zzz_light"), "绝区零拆通道接法应已删除")
 
-    def test_spec_materials_all_use_the_color_graph_without_principled(self):
-        """规范材质（除 IMGPV_ 渲染材质）一律用颜色贴图接法，与标记类型无关。
+    def test_spec_materials_are_built_for_every_marked_type(self):
+        """每种标记类型都建一个规范材质，并按类型分派到对应的通道接法。
 
-        用户 2026-10-07 要求：不管标记是 DiffuseMap 还是 NormalMap/LightMap/
-        未知类型，规范材质都只用于让导出侧按材质名识别贴图类型，接通道必须经过
-        原理化 BSDF，会在渲染时改变颜色，所以一律走原生的漫反射图。
+        2026-10-09 起规范材质与渲染材质统一为「原理化 BSDF + 单通道」，
+        与工作文件里的 MOD 规范材质完全一致。
         """
         mark_names = (
             "DiffuseMap",
@@ -554,8 +559,11 @@ class BuildMarkedMaterialsTests(unittest.TestCase):
             [f"{mark_name}_4a178546-18468-0" for mark_name in mark_names],
         )
         self.assertEqual([call[2] for call in self.spec_calls], ["ZZMI"] * len(mark_names))
-        self.assertEqual(self.principled_calls, [], "规范材质不得经过原理化 BSDF")
-        # 渲染材质仍然拿到全部通道（分通道接法是它的职责）
+        self.assertEqual(
+            self.spec_types,
+            ["DIFFUSE", "NORMAL", "LIGHTMAP", "SURFACE", "BODYMASK", ""],
+        )
+        # 渲染材质仍然拿到全部通道
         self.assertEqual(len(self.render_calls), 1)
         _render_name, entries, _logic = self.render_calls[0]
         self.assertEqual(
@@ -714,14 +722,14 @@ class BuildMissingMarkedMaterialsTests(unittest.TestCase):
         self.render_calls = []
         self.unique_str = "LOD0.4a178546-18468-0"
 
-        def _fake_diffuse(material, texture_path, logic_name):
+        def _fake_spec(material, socket_type, texture_path, logic_name):
             self.spec_calls.append((material.name, texture_path, logic_name))
 
         def _fake_render(material, entries, logic_name):
             self.render_calls.append((material.name, list(entries), logic_name))
 
         for target, fake in (
-            ("_apply_diffuse_material", _fake_diffuse),
+            ("_apply_spec_material", _fake_spec),
             ("_build_render_material", _fake_render),
         ):
             patcher = mock.patch.object(marked, target, fake)
@@ -952,34 +960,22 @@ class BuildMissingMarkedMaterialsTests(unittest.TestCase):
 
 
 class NormalWiringTests(unittest.TestCase):
-    """IMGPV 渲染材质的法线接法 = 导入侧「自动上贴图时使用法线贴图」同一套。
+    """法线统一走固定链：sRGB 读 → 「sRGB->Non-Color」→「法线贴图_补Z」→ Normal。
 
-    用户 2026-10-07 要求：预览材质的法线按游戏类型接（IdentityV 反相 G / 标准 /
-    ZZMI·GIMI 由 R/G 重建 Z），不再固定「反相 G + 缺 Z 补 1」。
+    2026-10-09 用户要求与工作文件里的 MOD 规范材质完全一致：不再按游戏类型分流
+    （原 IdentityV 反相 G / 标准 / ZZMI·GIMI 由 R/G 重建 Z 三种接法已删除）。
     """
 
-    def _stub_mesh_helper(self, calls):
-        module = sys.modules[f"{PKG}.common.mesh_create_helper"]
-        original = module.MeshCreateHelper
-        module.MeshCreateHelper = types.SimpleNamespace(
-            apply_normal_texture=lambda **kwargs: calls.append(kwargs)
-        )
-        self.addCleanup(setattr, module, "MeshCreateHelper", original)
+    def test_normal_wiring_is_the_fixed_group_chain(self):
+        import inspect
 
-    def test_normal_wiring_delegates_to_mesh_create_helper(self):
-        calls = []
-        self._stub_mesh_helper(calls)
-
-        marked._wire_normal("NODE_TREE", "PRINCIPLED", "n.dds", "ZZMI")
-
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["logic_name"], "ZZMI")
-        self.assertEqual(calls[0]["normal_path"], "n.dds")
-        self.assertEqual(calls[0]["node_tree"], "NODE_TREE")
-        self.assertEqual(calls[0]["diffuse"], "PRINCIPLED")
+        source = inspect.getsource(marked._wire_normal)
+        self.assertIn("_ensure_normal_group_z", source)
+        self.assertIn("_ensure_node_group", source)
+        self.assertNotIn("apply_normal_texture", source)
 
     def test_channel_dispatch_passes_logic_name_to_normal(self):
-        """logic_name 必须一路传到法线接法，否则绝区零又会被反相 G。"""
+        """logic_name 仍一路传到法线接法（签名保持不变，接法本身已与游戏无关）。"""
         seen = []
         original = marked._wire_normal
         marked._wire_normal = lambda *args: seen.append(args)
