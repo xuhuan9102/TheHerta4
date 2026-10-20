@@ -112,6 +112,33 @@ def _is_slot_style_param(param) -> bool:
     return text == "this" or text.startswith("ps-t")
 
 
+def _collect_conditional_block_indexes(lines) -> set:
+    r"""返回落在 ``if`` … ``endif`` 条件块内的行号集合。
+
+    条件块里的赋值是**运行期按条件择一**的，最典型的就是材质切换组：同一个参数
+    （如 ``Resource\RabbitFX\Glowmap``）在 ``if $swapkey15151 == 0`` / ``== 1``
+    各写一条。这类行绝不能按「该网格绘制点之前最后一次赋值生效」判成孤儿 ——
+    一判就会把除末档以外的每一档都改写成 ``= null``，表现为切换档位「空白」。
+
+    2026-10-12 实测（``SSMT BluePrint`` 产物）：档 0 的
+    ``Resource\RabbitFX\Glowmap = ref Resource_GlowMap_Gmsktwcnsg`` 被置成
+    ``= null``，只剩档 1 的 ``Resource_GlowMap_Gmsktwcnsg.001`` 生效。
+    """
+    inside = set()
+    depth = 0
+    for index, line in enumerate(lines):
+        stripped = str(line).strip().lower()
+        if stripped == "if" or stripped.startswith("if ") or stripped.startswith("if("):
+            depth += 1
+            continue
+        if stripped.startswith("endif"):
+            depth = max(0, depth - 1)
+            continue
+        if depth > 0:
+            inside.add(index)
+    return inside
+
+
 def _iter_ini_lines(sections):
     """把 ``{段名: [行...]}`` 摊平成行序列（容忍非行列表的簿记键）。"""
     values = sections.values() if hasattr(sections, "values") else (sections or ())
@@ -769,6 +796,29 @@ class SSMT_OT_CustomMaterialAssignAddTarget(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SSMT_OT_CustomMaterialAssignClearTargets(bpy.types.Operator):
+    bl_idname = "ssmt.custom_material_assign_clear_targets"
+    bl_label = "清空部件"
+    bl_description = "清空部件输入框，只保留 1 个空项"
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    node_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        node = _find_node(context, self.node_name)
+        if not node:
+            return {"CANCELLED"}
+        removed = len(node.target_items)
+        # 部件马上要被清掉，预览过的材质必须先还原：分组条目没了就没人再能写回原材质。
+        _restore_all_preview(node)
+        _restore_preview_material_shading(node, context)
+        node.target_items.clear()
+        node.target_items.add()
+        node.active_target_index = 0
+        self.report({"INFO"}, f"已清空部件输入框（原有 {removed} 项，保留 1 个空项）")
+        return {"FINISHED"}
+
+
 class SSMT_OT_CustomMaterialAssignRemoveTarget(bpy.types.Operator):
     bl_idname = "ssmt.custom_material_assign_remove_target"
     bl_label = "移除目标部件"
@@ -956,20 +1006,18 @@ def _draw_picking_header(self, context):
         )
 
 
-_SWITCH_PREFIX_SET = {
-    name.casefold()
-    for name in MATERIAL_DETECT_PRESETS
-} | {
-    "diffusemap",
-    "normalmap",
-    "lightmap",
-    "materialmap",
-    "glowmap",
-    "fxmap",
-    "ttlmap",
-    "rampmap",
-    "highlightmap",
-    "stockingmap",
+#: 明确不参与贴图切换的材质前缀。
+#:
+#: 渲染/预览用的自造材质首段不是贴图类型名（``IMGPV_<网格名>``，见
+#: ``common/marked_texture_material.py`` 的 RENDER_MATERIAL_PREFIX），必须排除。
+#:
+#: 除此之外**不再限制类型**：原实现用 ``MATERIAL_DETECT_PRESETS`` 加几个硬编码
+#: 类型做白名单，把 BodyMaskMap 这类真实贴图类型挡在外面 —— 它们即使在同一部件上
+#: 有多套材质也成不了切换组。生成侧本来就不限类型
+#: （``extract_texture_type_from_resource`` / ``find_matching_materials`` 都只是按
+#: 前缀字符串匹配），所以白名单只会漏掉本该支持的贴图。
+_SWITCH_PREFIX_EXCLUDE = {
+    "imgpv",
 }
 
 
@@ -984,7 +1032,11 @@ def _parse_switch_var_base(node):
 
 
 def _collect_switch_prefix_groups(obj):
-    """按材质前缀收集同一部件的多套材质。"""
+    """按材质前缀收集同一部件的多套材质。
+
+    不限贴图类型（只排除 ``_SWITCH_PREFIX_EXCLUDE`` 里的自造材质）：材质转资源的
+    生成侧按前缀字符串匹配，任何前缀的多套材质都能生成切换行，所以这里也照此口径。
+    """
     groups = OrderedDict()
     if obj is None or getattr(obj, "type", "") != "MESH":
         return groups
@@ -997,7 +1049,7 @@ def _collect_switch_prefix_groups(obj):
         if len(parts) < 2:
             continue
         prefix = parts[0].strip()
-        if not prefix or prefix.casefold() not in _SWITCH_PREFIX_SET:
+        if not prefix or prefix.casefold() in _SWITCH_PREFIX_EXCLUDE:
             continue
         names = groups.setdefault(prefix.casefold(), [])
         if name not in names:
@@ -2745,6 +2797,10 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             "ssmt.custom_material_assign_add_target", text="添加", icon="ADD"
         )
         add.node_name = self.name
+        clear_targets = header.operator(
+            "ssmt.custom_material_assign_clear_targets", text="清空", icon="TRASH"
+        )
+        clear_targets.node_name = self.name
 
         grouped = OrderedDict()
         for index, item in enumerate(self.target_items):
@@ -2796,12 +2852,23 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             matching = [entries for entries in merged_groups.values() if entries[0][0] == index]
             if matching:
                 for entries in matching:
-                    box = rows.box()
                     first_group = entries[0][2]
-                    box.label(text=f"部件指定组（{first_group.state_count} 档）", icon="LINKED")
+                    group_box = rows.box()
+                    # 组头：明确写出「这一组有几个部件共用同一个切换变量」。
+                    # 以前这里只写「部件指定组（N 档）」，成员行又和独立部件长得一样，
+                    # 滚到中段就完全看不出它们是一组（数据其实早已合并成同一个 $swapkey）。
+                    group_box.label(
+                        text=f"贴图切换组（{len(entries)} 个部件共用同一个切换）",
+                        icon="LINKED",
+                    )
+                    draw_switch_controls(group_box, first_group)
+                    members_box = group_box.box()
+                    members_box.label(
+                        text=f"组内共用此切换的部件（{len(entries)} 个）",
+                        icon="GROUP",
+                    )
                     for member_index, member_item, _group in entries:
-                        draw_target_row(box, member_index, member_item, f"部件 {member_index + 1}")
-                    draw_switch_controls(box, first_group)
+                        draw_target_row(members_box, member_index, member_item, f"部件 {member_index + 1}")
                 continue
             box = rows.box()
             draw_target_row(box, index, item, f"部件 {index + 1}")
@@ -3160,11 +3227,15 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 # 导出给第一个子网格写、而该段每个网格又都有自己的绑定时的那
                 # 一份段级默认值）。置空它们不影响任何绘制，却能解除对
                 # Resource 定义段的引用，让贴图真正可回收。
+                # 例外：``if`` … ``endif`` 条件块内的赋值按运行期条件择一
+                # （材质切换组同一参数在多个分支各写一条），不是孤儿，必须原样
+                # 保留 —— 否则除末档以外的档位会被整批置成 ``= null``。
                 used_indexes = {
                     index for _, bindings, _ in mesh_verdicts for index in bindings.values()
                 }
+                conditional_indexes = _collect_conditional_block_indexes(lines)
                 for index, line in enumerate(lines):
-                    if index in used_indexes:
+                    if index in used_indexes or index in conditional_indexes:
                         continue
                     match = _TEXTURE_BINDING_RE.match(str(line))
                     if match:
@@ -3388,6 +3459,7 @@ classes = (
     SSMT_OT_CustomMaterialDetect,
     SSMT_OT_CustomMaterialDetectClear,
     SSMT_OT_CustomMaterialAssignAddTarget,
+    SSMT_OT_CustomMaterialAssignClearTargets,
     SSMT_OT_CustomMaterialAssignAddSelected,
     SSMT_OT_CustomMaterialAssignScanObjects,
     SSMT_OT_CustomMaterialAssignRemoveTarget,

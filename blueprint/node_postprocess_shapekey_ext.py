@@ -441,6 +441,84 @@ class SSMT_OT_ShapeKeyGroupAdd(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SSMT_OT_ShapeKeyGroupDuplicate(bpy.types.Operator):
+    bl_idname = "ssmt.shapekey_group_duplicate"
+    bl_label = "复制分组"
+    bl_options = {'REGISTER', 'INTERNAL'}
+    node_name: bpy.props.StringProperty()
+    target_group_index: bpy.props.IntProperty(default=1)
+
+    # 需要原样克隆的分组标量字段（不含 group_index；形态键成员归属不复制）
+    _CLONED_FIELDS = (
+        "group_mode",
+        "enable_auto_playback",
+        "auto_playback_frame_count",
+        "auto_playback_step_frames",
+        "auto_playback_cycle_mode",
+        "auto_playback_duration",
+        "playback_fps",
+        "speed_percent_min",
+        "speed_percent_max",
+        "speed_percent",
+        "speed_percent_mode",
+        "max_step_unroll",
+        "remark",
+        "button_icon_image",
+        "use_remark_as_icon",
+        "use_image_as_icon",
+        "expanded",
+        "remark_font_family",
+        "remark_font_size",
+        "remark_text_color",
+        "remark_stroke_width",
+        "remark_stroke_color",
+        "active_interval_index",
+    )
+    # 向量型字段：先从 bpy_prop_array 转成 tuple 再赋值，避免类型不匹配
+    _VECTOR_FIELDS = ("remark_text_color", "remark_stroke_color")
+
+    def execute(self, context):
+        space = getattr(context, "space_data", None)
+        tree = getattr(space, "edit_tree", None) or getattr(space, "node_tree", None) if space and space.type == 'NODE_EDITOR' else None
+        node = tree.nodes.get(self.node_name) if tree else None
+        if not node or node.bl_idname != 'SSMTNode_PostProcess_ShapeKeyExt':
+            return {'CANCELLED'}
+
+        source = None
+        max_idx = 0
+        for setting in node.play_group_settings:
+            if setting.group_index > max_idx:
+                max_idx = setting.group_index
+            if setting.group_index == self.target_group_index:
+                source = setting
+        if source is None:
+            self.report({'WARNING'}, f"找不到要复制的分组 {self.target_group_index}")
+            return {'CANCELLED'}
+
+        new_group = node.play_group_settings.add()
+        new_group.group_index = max_idx + 1
+
+        for field in self._CLONED_FIELDS:
+            value = getattr(source, field)
+            if field in self._VECTOR_FIELDS:
+                value = tuple(value)
+            setattr(new_group, field, value)
+
+        # 逐条复制变速区间（start / end / base_step）
+        for interval in source.speed_intervals:
+            new_interval = new_group.speed_intervals.add()
+            new_interval.start = interval.start
+            new_interval.end = interval.end
+            new_interval.base_step = interval.base_step
+
+        # 复制后展开，便于立刻看到新分组；备注原样保留，不加后缀
+        new_group.expanded = True
+        # 不复制 play_group_entries 的成员归属：原分组成员保持不动
+        node.active_group_index = new_group.group_index
+        self.report({'INFO'}, f"已复制分组 {self.target_group_index} → 新分组 {new_group.group_index}")
+        return {'FINISHED'}
+
+
 class SSMT_OT_ShapeKeyGroupRemove(bpy.types.Operator):
     bl_idname = "ssmt.shapekey_group_remove"
     bl_label = "删除分组"
@@ -771,6 +849,328 @@ class SSMT_OT_ShapeKeyExt_Refresh(bpy.types.Operator):
                     return {'CANCELLED'}
         self.report({'WARNING'}, "无法找到形态键扩展配置节点")
         return {'CANCELLED'}
+
+
+# ============================================================================
+# 快捷键图形键盘选择器（任务3）
+# ----------------------------------------------------------------------------
+# 布局常量：每行 = ((显示名, 写回 token, 键宽), ...)，键宽单位是标准键盘的 1u。
+# token 就是 3dmigoto 键名（普通键小写 / 虚拟键 VK_XXX 大写），与节点默认值风格一致
+# （home / ctrl home / VK_LBUTTON）。左右同名修饰键共用 token（两个 Shift 都是 shift）。
+# ============================================================================
+KEY_PICKER_MODIFIERS = ("ctrl", "shift", "alt")
+
+# 主键区：标准 104 键布局
+# 行1 Esc+F1~F12 / 行2 数字行 / 行3 Tab 行 / 行4 Caps 行 / 行5 Shift 行 / 行6 底行
+KEY_PICKER_MAIN_ROWS = (
+    (("Esc", "esc", 1.0), ("F1", "f1", 1.0), ("F2", "f2", 1.0), ("F3", "f3", 1.0),
+     ("F4", "f4", 1.0), ("F5", "f5", 1.0), ("F6", "f6", 1.0), ("F7", "f7", 1.0),
+     ("F8", "f8", 1.0), ("F9", "f9", 1.0), ("F10", "f10", 1.0), ("F11", "f11", 1.0),
+     ("F12", "f12", 1.0)),
+    (("`", "VK_OEM_3", 1.0), ("1", "1", 1.0), ("2", "2", 1.0), ("3", "3", 1.0),
+     ("4", "4", 1.0), ("5", "5", 1.0), ("6", "6", 1.0), ("7", "7", 1.0),
+     ("8", "8", 1.0), ("9", "9", 1.0), ("0", "0", 1.0), ("-", "VK_OEM_MINUS", 1.0),
+     ("=", "VK_OEM_PLUS", 1.0), ("Backspace", "backspace", 2.0)),
+    (("Tab", "tab", 1.5), ("Q", "q", 1.0), ("W", "w", 1.0), ("E", "e", 1.0),
+     ("R", "r", 1.0), ("T", "t", 1.0), ("Y", "y", 1.0), ("U", "u", 1.0),
+     ("I", "i", 1.0), ("O", "o", 1.0), ("P", "p", 1.0), ("[", "VK_OEM_4", 1.0),
+     ("]", "VK_OEM_6", 1.0), ("\\", "VK_OEM_5", 1.5)),
+    (("CapsLock", "capslock", 1.75), ("A", "a", 1.0), ("S", "s", 1.0), ("D", "d", 1.0),
+     ("F", "f", 1.0), ("G", "g", 1.0), ("H", "h", 1.0), ("J", "j", 1.0),
+     ("K", "k", 1.0), ("L", "l", 1.0), (";", "VK_OEM_1", 1.0), ("'", "VK_OEM_7", 1.0),
+     ("Enter", "enter", 2.25)),
+    (("Shift", "shift", 2.25), ("Z", "z", 1.0), ("X", "x", 1.0), ("C", "c", 1.0),
+     ("V", "v", 1.0), ("B", "b", 1.0), ("N", "n", 1.0), ("M", "m", 1.0),
+     (",", "VK_OEM_COMMA", 1.0), (".", "VK_OEM_PERIOD", 1.0), ("/", "VK_OEM_2", 1.0),
+     ("Shift", "shift", 2.25)),
+    (("Ctrl", "ctrl", 1.25), ("Win", "VK_LWIN", 1.25), ("Alt", "alt", 1.25),
+     ("Space", "space", 6.25), ("AltGr", "VK_RMENU", 1.25), ("Win", "VK_RWIN", 1.25),
+     ("Menu", "VK_APPS", 1.25), ("Ctrl", "ctrl", 1.25)),
+)
+
+# 编辑键区两行 / 方向键区两行 / 小键盘区 / 鼠标行（弹窗里左列=编辑+方向，右列=小键盘）
+KEY_PICKER_EDITING_ROWS = (
+    (("Ins", "insert", 1.0), ("HM", "home", 1.0), ("PgUp", "pageup", 1.0)),
+    (("Del", "delete", 1.0), ("End", "end", 1.0), ("PgDn", "pagedown", 1.0)),
+)
+# 方向键第一行左右留空占位，让 ↑ 居中在 ← ↓ → 上方
+KEY_PICKER_ARROW_ROWS = (
+    (("", "", 1.0), ("↑", "up", 1.0), ("", "", 1.0)),
+    (("←", "left", 1.0), ("↓", "down", 1.0), ("→", "right", 1.0)),
+)
+KEY_PICKER_NUMPAD_ROWS = (
+    (("PrtSc", "VK_SNAPSHOT", 1.0), ("ScrLk", "VK_SCROLL", 1.0), ("Pause", "VK_PAUSE", 1.0)),
+    (("NumLock", "VK_NUMLOCK", 1.0),),
+    (("÷", "VK_DIVIDE", 1.0), ("×", "VK_MULTIPLY", 1.0), ("−", "VK_SUBTRACT", 1.0)),
+    (("7", "VK_NUMPAD7", 1.0), ("8", "VK_NUMPAD8", 1.0), ("9", "VK_NUMPAD9", 1.0),
+     ("+", "VK_ADD", 1.0)),
+    (("4", "VK_NUMPAD4", 1.0), ("5", "VK_NUMPAD5", 1.0), ("6", "VK_NUMPAD6", 1.0)),
+    (("1", "VK_NUMPAD1", 1.0), ("2", "VK_NUMPAD2", 1.0), ("3", "VK_NUMPAD3", 1.0)),
+    (("0", "VK_NUMPAD0", 2.0), (".", "VK_DECIMAL", 1.0)),
+)
+KEY_PICKER_MOUSE_ROW = (
+    ("左键", "VK_LBUTTON", 1.25), ("右键", "VK_RBUTTON", 1.25), ("中键", "VK_MBUTTON", 1.25),
+    ("第四键", "VK_XBUTTON1", 1.25), ("第五键", "VK_XBUTTON2", 1.25),
+    ("滚轮↑", "MOUSE_WHEEL_UP", 1.25), ("滚轮↓", "MOUSE_WHEEL_DOWN", 1.25),
+)
+
+KEY_PICKER_EXTRA_ROWS = (
+    KEY_PICKER_EDITING_ROWS + KEY_PICKER_ARROW_ROWS + KEY_PICKER_NUMPAD_ROWS
+    + (KEY_PICKER_MOUSE_ROW,)
+)
+
+
+def key_picker_row_tokens(row_def):
+    """一行里真正可写回的 token（跳过方向键区的空白占位键）。"""
+    return [token for _label, token, _width in row_def if token]
+
+
+def key_picker_all_tokens():
+    """全部可点按键 token（测试用来校验无重复；修饰键左右各一个属正常重复）。"""
+    tokens = []
+    for row in KEY_PICKER_MAIN_ROWS + KEY_PICKER_EXTRA_ROWS:
+        tokens.extend(key_picker_row_tokens(row))
+    return tokens
+
+
+def key_picker_is_modifier(token):
+    return str(token or "").strip().lower() in KEY_PICKER_MODIFIERS
+
+
+def key_picker_parse(text):
+    """'ctrl shift home' / 'VK_LBUTTON' → (修饰键元组, 主键)。"""
+    mods = []
+    key = ""
+    for raw in str(text or "").split():
+        token = raw.strip()
+        if not token:
+            continue
+        low = token.lower()
+        if low in KEY_PICKER_MODIFIERS:
+            if low not in mods:
+                mods.append(low)
+        else:
+            key = token
+    return tuple(m for m in KEY_PICKER_MODIFIERS if m in mods), key
+
+
+def key_picker_format(mods, key):
+    """组合键写回格式：修饰键固定 ctrl→shift→alt，普通键小写、VK 名保持大写。"""
+    ordered = [m for m in KEY_PICKER_MODIFIERS if m in tuple(mods or ())]
+    main = str(key or "").strip()
+    if main:
+        main = main.upper() if main.upper().startswith("VK_") else main.lower()
+    return " ".join(ordered + ([main] if main else []))
+
+
+def key_picker_toggle_modifier(mods, token):
+    """点击修饰键：已选则取消，未选则加上（可多选），返回新元组。"""
+    name = str(token or "").strip().lower()
+    current = [m for m in KEY_PICKER_MODIFIERS if m in tuple(mods or ())]
+    if name in current:
+        current.remove(name)
+    elif name in KEY_PICKER_MODIFIERS:
+        current.append(name)
+    return tuple(m for m in KEY_PICKER_MODIFIERS if m in current)
+
+
+def key_picker_apply_click(mods, key, token):
+    """点击按键：修饰键 = 多选切换；普通键 = 替换当前主键。"""
+    if key_picker_is_modifier(token):
+        return key_picker_toggle_modifier(mods, token), key
+    return tuple(m for m in KEY_PICKER_MODIFIERS if m in tuple(mods or ())), str(token or "").strip()
+
+
+def key_picker_display(mods, key):
+    return key_picker_format(mods, key) or "（未设置）"
+
+
+def _force_key_picker_redraw():
+    """弹窗重绘兜底：Blender 5.x 的 invoke_props_dialog 弹窗是独立窗口（screen 名 temp），
+    area.tag_redraw 刷不到它。延迟一拍后对每个窗口各做一次窗口级重绘，尽力让已打开
+    弹窗的按键高亮与底部「当前组合键」原地更新；绝不重新 invoke 弹窗。"""
+    wm = bpy.context.window_manager
+    for window in list(getattr(wm, "windows", None) or []):
+        try:
+            with bpy.context.temp_override(window=window):
+                bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        except Exception:
+            continue
+    return None
+
+
+class SSMT_OT_KeyPickerPick(bpy.types.Operator):
+    """图形键盘里的单个按键：点击后更新组合键状态并刷新弹窗。"""
+    bl_idname = "ssmt.key_picker_pick"
+    bl_label = "选择按键"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    token: bpy.props.StringProperty()
+    action: bpy.props.StringProperty(default="pick")
+    node_name: bpy.props.StringProperty()
+    node_tree_name: bpy.props.StringProperty()
+    target_prop: bpy.props.StringProperty()
+
+    def execute(self, context):
+        wm = context.window_manager
+        mods, key = key_picker_parse(getattr(wm, "ssmt_kp_combo", ""))
+        if self.action == "clear":
+            mods, key = (), ""
+        else:
+            mods, key = key_picker_apply_click(mods, key, self.token)
+        wm.ssmt_kp_combo = key_picker_format(mods, key)
+        wm.ssmt_kp_just_picked = True
+        # 弹窗此刻仍然开着：只让已打开的弹窗原地重绘。
+        # 绝不能再 invoke 一个新弹窗，否则每点一个键就叠加一个窗口。
+        for area in self._redraw_areas(context):
+            try:
+                area.tag_redraw()
+            except Exception:
+                pass
+            for region in list(getattr(area, "regions", None) or []):
+                try:
+                    region.tag_redraw()
+                except Exception:
+                    pass
+        # 标签重绘只覆盖普通区域，弹窗本身需要一次窗口级重绘；延迟到本步结束后执行
+        try:
+            bpy.app.timers.register(_force_key_picker_redraw, first_interval=0.01)
+        except Exception:
+            pass
+        return {'FINISHED'}
+
+    @staticmethod
+    def _redraw_areas(context):
+        """收集需要重绘的区域：当前区域 + 当前窗口的所有区域（含承载弹窗的区域）。"""
+        areas = []
+        area = getattr(context, "area", None)
+        if area is not None:
+            areas.append(area)
+        window = getattr(context, "window", None)
+        screen = getattr(window, "screen", None) if window is not None else None
+        for candidate in list(getattr(screen, "areas", None) or []):
+            areas.append(candidate)
+        return areas
+
+
+class SSMT_OT_KeyPicker(bpy.types.Operator):
+    bl_idname = "ssmt.key_picker"
+    bl_label = "快捷键选择"
+    bl_options = {'REGISTER', 'INTERNAL'}
+    bl_description = "点选图形键盘设置快捷键；Ctrl/Shift/Alt 可多选组成组合键"
+
+    node_name: bpy.props.StringProperty()
+    node_tree_name: bpy.props.StringProperty()
+    target_prop: bpy.props.StringProperty()
+
+    @staticmethod
+    def _find_node(tree_name, node_name):
+        tree = None
+        node_groups = getattr(bpy.data, "node_groups", None)
+        getter = getattr(node_groups, "get", None)
+        if getter and tree_name:
+            tree = getter(tree_name)
+        if tree is None and tree_name:
+            for collection_name in ("scenes", "materials", "worlds"):
+                for owner in getattr(bpy.data, collection_name, []) or []:
+                    candidate = getattr(owner, "node_tree", None)
+                    if candidate is not None and candidate.name == tree_name:
+                        tree = candidate
+                        break
+                if tree is not None:
+                    break
+        nodes = getattr(tree, "nodes", None)
+        getter = getattr(nodes, "get", None)
+        return getter(node_name) if getter and node_name else None
+
+    def invoke(self, context, event):
+        wm = context.window_manager
+        current = ""
+        picked = bool(getattr(wm, "ssmt_kp_just_picked", False))
+        if picked and getattr(wm, "ssmt_kp_prop", "") == self.target_prop:
+            current = getattr(wm, "ssmt_kp_combo", "") or ""
+        else:
+            node = self._find_node(self.node_tree_name, self.node_name)
+            if node is not None and self.target_prop:
+                current = getattr(node, self.target_prop, "") or ""
+        wm.ssmt_kp_just_picked = False
+        wm.ssmt_kp_prop = self.target_prop
+        wm.ssmt_kp_node = self.node_name
+        wm.ssmt_kp_tree = self.node_tree_name
+        wm.ssmt_kp_combo = key_picker_format(*key_picker_parse(current))
+        return wm.invoke_props_dialog(self, width=1000)
+
+    def execute(self, context):
+        wm = context.window_manager
+        node = self._find_node(self.node_tree_name, self.node_name)
+        if node is None or not self.target_prop:
+            self.report({'WARNING'}, "无法找到形态键扩展配置节点")
+            return {'CANCELLED'}
+        setattr(node, self.target_prop, getattr(wm, "ssmt_kp_combo", "") or "")
+        wm.ssmt_kp_just_picked = False
+        return {'FINISHED'}
+
+    def draw(self, context):
+        wm = context.window_manager
+        mods, key = key_picker_parse(getattr(wm, "ssmt_kp_combo", ""))
+        layout = self.layout
+        column = layout.column(align=True)
+        for row_def in KEY_PICKER_MAIN_ROWS:
+            self._draw_key_row(column, row_def, mods, key)
+        column.separator()
+        # 编辑键区 + 方向键区（左列）与小键盘区（右列）并排，模拟真实键盘右侧分区
+        split = column.split(factor=0.5)
+        nav_column = split.column(align=True)
+        numpad_column = split.column(align=True)
+        for row_def in KEY_PICKER_EDITING_ROWS:
+            self._draw_key_row(nav_column, row_def, mods, key)
+        nav_column.separator()
+        for row_def in KEY_PICKER_ARROW_ROWS:
+            self._draw_key_row(nav_column, row_def, mods, key)
+        for row_def in KEY_PICKER_NUMPAD_ROWS:
+            self._draw_key_row(numpad_column, row_def, mods, key)
+        column.separator()
+        self._draw_key_row(column, KEY_PICKER_MOUSE_ROW, mods, key)
+        column.separator()
+        box = layout.box()
+        box.label(text=f"当前组合键：{key_picker_display(mods, key)}", icon='KEYINGSET')
+        row = box.row(align=True)
+        clear_op = row.operator("ssmt.key_picker_pick", text="清除", icon='X')
+        self._fill_pick_op(clear_op, "", "clear")
+
+    def _fill_pick_op(self, op, token, action="pick"):
+        op.token = token
+        op.action = action
+        op.node_name = self.node_name
+        op.node_tree_name = self.node_tree_name
+        op.target_prop = self.target_prop
+
+    def _draw_key_row(self, layout, row_def, mods, key):
+        # 按真实键盘键宽分配：逐键 split，factor = 本键宽 / 行内剩余宽度。
+        # 最后一个键直接占满剩余空间（split 不能取 factor=1.0）。
+        row = layout.row(align=True)
+        total_width = sum(max(float(width), 0.01) for _label, _token, width in row_def)
+        remaining = total_width
+        last_index = len(row_def) - 1
+        for index, (label, token, width) in enumerate(row_def):
+            width = max(float(width), 0.01)
+            if index >= last_index or remaining <= width:
+                cell = row
+            else:
+                factor = min(max(width / remaining, 0.01), 0.99)
+                split = row.split(factor=factor, align=True)
+                cell = split.column(align=True)
+                row = split.column(align=True)
+                remaining = max(remaining - width, 0.01)
+            if not token:
+                cell.label(text="")  # 方向键区占位，只留空
+                continue
+            if key_picker_is_modifier(token):
+                selected = token in mods
+            else:
+                selected = key.strip().lower() == token.lower()
+            op = cell.operator("ssmt.key_picker_pick", text=f"[{label}]" if selected else label)
+            self._fill_pick_op(op, token)
 
 
 class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
@@ -2710,6 +3110,10 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             set_op.node_name = self.name
             set_op.target_group_index = setting.group_index
 
+            dup_op = row.operator("ssmt.shapekey_group_duplicate", text="", icon='DUPLICATE')
+            dup_op.node_name = self.name
+            dup_op.target_group_index = setting.group_index
+
             row.separator()
             op_up = row.operator("ssmt.shapekey_group_move", text="", icon='TRIA_UP')
             op_up.node_name = self.name
@@ -2774,7 +3178,12 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         # --- 底部：全局快捷键设置 ---
         box = layout.box()
         box.label(text="快捷键设置", icon='KEYINGSET')
-        box.prop(self, "auto_play_toggle_key", text="自动播放开关")
+        row = box.row(align=True)
+        op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+        op.node_name = self.name
+        op.node_tree_name = self.id_data.name
+        op.target_prop = "auto_play_toggle_key"
+        row.prop(self, "auto_play_toggle_key", text="自动播放")
         box.prop(self, "auto_play_key_global", text="全局生效")
 
     def _draw_slider_ui(self, layout):
@@ -2789,11 +3198,36 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         box = layout.box()
         box.label(text="快捷键设置", icon='KEYINGSET')
         col = box.column(align=True)
-        col.prop(self, "help_key", text="显示/隐藏面板")
-        col.prop(self, "reset_key", text="重置位置")
-        col.prop(self, "zoom_in_key", text="放大")
-        col.prop(self, "zoom_out_key", text="缩小")
-        col.prop(self, "drag_key", text="拖拽键")
+        row = col.row(align=True)
+        op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+        op.node_name = self.name
+        op.node_tree_name = self.id_data.name
+        op.target_prop = "help_key"
+        row.prop(self, "help_key", text="显隐面板")
+        row = col.row(align=True)
+        op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+        op.node_name = self.name
+        op.node_tree_name = self.id_data.name
+        op.target_prop = "reset_key"
+        row.prop(self, "reset_key", text="重置位置")
+        row = col.row(align=True)
+        op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+        op.node_name = self.name
+        op.node_tree_name = self.id_data.name
+        op.target_prop = "zoom_in_key"
+        row.prop(self, "zoom_in_key", text="放大")
+        row = col.row(align=True)
+        op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+        op.node_name = self.name
+        op.node_tree_name = self.id_data.name
+        op.target_prop = "zoom_out_key"
+        row.prop(self, "zoom_out_key", text="缩小")
+        row = col.row(align=True)
+        op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+        op.node_name = self.name
+        op.node_tree_name = self.id_data.name
+        op.target_prop = "drag_key"
+        row.prop(self, "drag_key", text="拖拽键")
 
         box = layout.box()
         box.label(text="UI尺寸设置", icon='PROPERTIES')
@@ -3149,13 +3583,39 @@ classes = (
     SSMT_OT_ScanShapeKeyExt, SSMT_OT_SpeedIntervalAdd, SSMT_OT_SpeedIntervalRemove,
     SSMT_OT_SelectPlayGroup, SSMT_OT_OpenGroupSettings, SSMT_OT_ShapeKeyMoveUpDown,
     SSMT_OT_ShapeKeyAssignToCurrentGroup, SSMT_OT_ShapeKeyUnassignFromGroup,
-    SSMT_OT_ShapeKeyGroupAdd, SSMT_OT_ShapeKeyGroupRemove, SSMT_OT_ShapeKeyGroupMoveUpDown,
+    SSMT_OT_ShapeKeyGroupAdd, SSMT_OT_ShapeKeyGroupDuplicate, SSMT_OT_ShapeKeyGroupRemove,
+    SSMT_OT_ShapeKeyGroupMoveUpDown,
     SSMT_OT_ShapeKeyExt_ParseSliderObject, SSMT_OT_ShapeKeyExt_Refresh,
+    SSMT_OT_KeyPicker, SSMT_OT_KeyPickerPick,
 )
+
+# 快捷键选择器的弹窗状态：WindowManager 动态属性（唯一 ssmt_kp_ 前缀，不挂到节点上）
+KEY_PICKER_WM_PROPS = (
+    "ssmt_kp_combo", "ssmt_kp_prop", "ssmt_kp_node", "ssmt_kp_tree", "ssmt_kp_just_picked",
+)
+
 
 def register():
     for cls in classes: bpy.utils.register_class(cls)
+    wm = bpy.types.WindowManager
+    if not hasattr(wm, "ssmt_kp_combo"):
+        wm.ssmt_kp_combo = bpy.props.StringProperty(default="")
+    if not hasattr(wm, "ssmt_kp_prop"):
+        wm.ssmt_kp_prop = bpy.props.StringProperty(default="")
+    if not hasattr(wm, "ssmt_kp_node"):
+        wm.ssmt_kp_node = bpy.props.StringProperty(default="")
+    if not hasattr(wm, "ssmt_kp_tree"):
+        wm.ssmt_kp_tree = bpy.props.StringProperty(default="")
+    if not hasattr(wm, "ssmt_kp_just_picked"):
+        wm.ssmt_kp_just_picked = bpy.props.BoolProperty(default=False)
 
 
 def unregister():
+    wm = bpy.types.WindowManager
+    for prop_name in KEY_PICKER_WM_PROPS:
+        if hasattr(wm, prop_name):
+            try:
+                delattr(wm, prop_name)
+            except Exception:
+                pass
     for cls in reversed(classes): bpy.utils.unregister_class(cls)

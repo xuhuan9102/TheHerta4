@@ -59,6 +59,7 @@ except ImportError:
 class SSMT_SwapPanelEntry(bpy.types.PropertyGroup):
     """面板中一个物体切换按钮的条目信息（仅用于节点 UI 预览）。"""
     variable_name: bpy.props.StringProperty(name="变量名", default="")   # 如 $swapkey6
+    variables: bpy.props.StringProperty(name="变量列表", default="")      # 如 $swapkey3|$swapkey4
     comment: bpy.props.StringProperty(name="备注", default="")
     option_count: bpy.props.IntProperty(name="选项数", default=2, min=1, max=1024)
     hotkey: bpy.props.StringProperty(name="按键", default="")
@@ -603,7 +604,8 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
         if self.swap_panel_entries:
             for entry in self.swap_panel_entries:
                 note = entry.comment or "(无备注)"
-                box.label(text=f"  {entry.variable_name}  |  {note}  |  {entry.option_count}项", icon='NONE')
+                vars_text = entry.variables.replace("|", " / ") or entry.variable_name
+                box.label(text=f"  {vars_text}  |  {note}  |  {entry.option_count}项", icon='NONE')
         else:
             box.label(text="未检测到切换，点击「刷新列表」", icon='INFO')
 
@@ -768,47 +770,114 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
         collect(tree)
         return collected
 
+    @staticmethod
+    def _entry_variable_names(entry):
+        """返回条目记录的变量列表（``variables`` 为空时回退到 ``variable_name``）。"""
+        names = [
+            part.strip()
+            for part in str(getattr(entry, "variables", "") or "").split("|")
+            if part.strip()
+        ]
+        if not names:
+            first = str(getattr(entry, "variable_name", "") or "").strip()
+            if first:
+                names = [first]
+        return names
+
+    @classmethod
+    def _append_entry_variable(cls, entry, variable_name):
+        """把一个变量并入已有条目（``|`` 连接并去重）。"""
+        names = cls._entry_variable_names(entry)
+        if variable_name and variable_name not in names:
+            names.append(variable_name)
+        entry.variables = "|".join(names)
+        if not str(getattr(entry, "variable_name", "") or "").strip() and names:
+            entry.variable_name = names[0]
+
+    def _find_entry_index(self, variable_name, comment, allow_variable_match=False):
+        """查找可合并的已有条目；找不到返回 -1。
+
+        合并规则：备注非空时按备注合并（不同变量也合并）；备注为空时按变量名合并，
+        且空备注条目只与空备注条目合并。贴图切换 / 自定义材质切换 / INI 分支额外保留
+        原有「同变量合并」行为（``allow_variable_match=True``）。
+        """
+        comment = str(comment or "").strip()
+        variable_name = str(variable_name or "").strip()
+        if not variable_name:
+            return -1
+        for index, entry in enumerate(self.swap_panel_entries):
+            entry_comment = str(getattr(entry, "comment", "") or "").strip()
+            names = self._entry_variable_names(entry)
+            if allow_variable_match and variable_name in names:
+                return index
+            if comment:
+                if entry_comment == comment:
+                    return index
+            elif not entry_comment and variable_name in names:
+                return index
+        return -1
+
     def _refresh_entries(self):
         """刷新节点 UI 中的物体切换列表：蓝图节点 + 可选 INI 配置。"""
         self._ensure_namespace()
         self.swap_panel_entries.clear()
 
-        # 1. 蓝图物体切换节点
+        # 1. 蓝图物体切换节点：备注相同即合并（变量名不同也合并）
         nodes = self._collect_swap_nodes()
         idx_map = {}
         for node in nodes:
             if not VARIABLE_REGISTRY_AVAILABLE:
                 break
-            var = get_node_variable_name(node)
+            var = str(get_node_variable_name(node) or "").strip()
             if not var:
+                continue
+            comment = str(getattr(node, "comment", "") or "")
+            option_count = max(1, int(getattr(node, "input_slot_count", 2) or 2))
+            hotkey = str(getattr(node, "hotkey", "") or "")
+            # 备注相同（或备注为空且变量相同）的节点合并成一条，避免面板重复列出同一切换。
+            existing = self._find_entry_index(var, comment)
+            if existing >= 0:
+                entry = self.swap_panel_entries[existing]
+                self._append_entry_variable(entry, var)
+                entry.option_count = max(entry.option_count, option_count)
+                if not entry.hotkey:
+                    entry.hotkey = hotkey
+                idx_map[var] = existing
                 continue
             entry = self.swap_panel_entries.add()
             entry.variable_name = var
-            entry.comment = str(getattr(node, "comment", "") or "")
-            entry.option_count = max(1, int(getattr(node, "input_slot_count", 2) or 2))
-            entry.hotkey = str(getattr(node, "hotkey", "") or "")
+            entry.variables = var
+            entry.comment = comment
+            entry.option_count = option_count
+            entry.hotkey = hotkey
             entry.node_name = node.name
             idx_map[var] = len(self.swap_panel_entries) - 1
 
         # 2. 蓝图贴图切换节点：每个组对应一个多状态切换功能。
         for node, group in self._collect_diffuse_groups():
-            var = diffuse_group_variable_name(group)
+            var = str(diffuse_group_variable_name(group) or "").strip()
             if not var:
                 continue
-            if var in idx_map:
-                entry = self.swap_panel_entries[idx_map[var]]
-                comment = str(getattr(group, "comment", "") or getattr(group, "name", "") or "").strip()
+            comment = str(getattr(group, "comment", "") or getattr(group, "name", "") or "").strip()
+            option_count = diffuse_group_option_count(group)
+            hotkey = diffuse_group_hotkey(group)
+            existing = self._find_entry_index(var, comment, allow_variable_match=True)
+            if existing >= 0:
+                entry = self.swap_panel_entries[existing]
+                self._append_entry_variable(entry, var)
                 if comment and comment not in entry.comment.split(" / "):
                     entry.comment = " / ".join(part for part in (entry.comment, comment) if part)
-                entry.option_count = max(entry.option_count, diffuse_group_option_count(group))
+                entry.option_count = max(entry.option_count, option_count)
                 if not entry.hotkey:
-                    entry.hotkey = diffuse_group_hotkey(group)
+                    entry.hotkey = hotkey
+                idx_map[var] = existing
                 continue
             entry = self.swap_panel_entries.add()
             entry.variable_name = var
-            entry.comment = str(getattr(group, "comment", "") or getattr(group, "name", "") or "")
-            entry.option_count = diffuse_group_option_count(group)
-            entry.hotkey = diffuse_group_hotkey(group)
+            entry.variables = var
+            entry.comment = comment
+            entry.option_count = option_count
+            entry.hotkey = hotkey
             entry.node_name = f"{node.name}:{getattr(group, 'name', '')}"
             idx_map[var] = len(self.swap_panel_entries) - 1
 
@@ -820,16 +889,20 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
             comment = str(getattr(group, "comment", "") or "").strip()
             option_count = max(2, int(getattr(group, "state_count", 2) or 2))
             hotkey = str(getattr(group, "key", "") or "").strip()
-            if var in idx_map:
-                entry = self.swap_panel_entries[idx_map[var]]
+            existing = self._find_entry_index(var, comment, allow_variable_match=True)
+            if existing >= 0:
+                entry = self.swap_panel_entries[existing]
+                self._append_entry_variable(entry, var)
                 if comment and comment not in entry.comment.split(" / "):
                     entry.comment = " / ".join(part for part in (entry.comment, comment) if part)
                 entry.option_count = max(entry.option_count, option_count)
                 if not entry.hotkey:
                     entry.hotkey = hotkey
+                idx_map[var] = existing
                 continue
             entry = self.swap_panel_entries.add()
             entry.variable_name = var
+            entry.variables = var
             entry.comment = comment
             entry.option_count = option_count
             entry.hotkey = hotkey
@@ -842,21 +915,29 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
         if ini_path and os.path.isfile(ini_path):
             ini_swaps = self._parse_ini_key_swaps(ini_path)
             for s in ini_swaps:
-                var = s["var_name"]
-                if var in idx_map:
-                    entry = self.swap_panel_entries[idx_map[var]]
-                    if s["comment"]:
+                var = str(s["var_name"] or "").strip()
+                if not var:
+                    continue
+                comment = str(s["comment"] or "").strip()
+                existing = self._find_entry_index(var, comment, allow_variable_match=True)
+                if existing >= 0:
+                    entry = self.swap_panel_entries[existing]
+                    self._append_entry_variable(entry, var)
+                    if comment:
                         entry.comment = s["comment"]
                     entry.option_count = s["option_count"]
                     if s["key"]:
                         entry.hotkey = s["key"]
+                    idx_map[var] = existing
                 else:
                     entry = self.swap_panel_entries.add()
                     entry.variable_name = var
+                    entry.variables = var
                     entry.comment = s["comment"]
                     entry.option_count = s["option_count"]
                     entry.hotkey = s["key"]
                     entry.node_name = ""
+                    idx_map[var] = len(self.swap_panel_entries) - 1
         self._refresh_button_image_entries()
         return len(self.swap_panel_entries)
 
@@ -1047,25 +1128,74 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
         buttons = []
         by_variable = {}
 
+        def button_var_names(button):
+            names = [
+                str(name).strip()
+                for name in (button.get("var_names") or [])
+                if str(name).strip()
+            ]
+            if not names:
+                first = str(button.get("var_name") or "").strip()
+                if first:
+                    names = [first]
+            return names
+
+        def append_button_variable(button, var_name, option_count):
+            """把变量与选项数并入按钮（变量去重，两个列表保持一一对应）。"""
+            names = button_var_names(button)
+            counts = [max(1, int(count or 2)) for count in (button.get("option_counts") or [])]
+            while len(counts) < len(names):
+                counts.append(max(1, int(button.get("option_count", 2) or 2)))
+            if var_name in names:
+                index = names.index(var_name)
+                counts[index] = max(counts[index], option_count)
+            else:
+                names.append(var_name)
+                counts.append(option_count)
+            button["var_names"] = names
+            button["option_counts"] = counts
+            button["var_name"] = names[0]
+            button["option_count"] = max(
+                int(button.get("option_count", 2) or 2), option_count
+            )
+            for name in names:
+                by_variable[name] = button
+
         def add_button(item):
             var_name = str(item.get("var_name") or "").strip()
             if not var_name:
                 return
+            comment = str(item.get("comment") or "").strip()
+            option_count = max(1, int(item.get("option_count", 2) or 2))
+            # 1) 该变量已属于某个按钮：合并备注 / 按键 / 选项数。
             existing = by_variable.get(var_name)
             if existing is not None:
-                comment = str(item.get("comment") or "").strip()
                 old_comment = str(existing.get("comment") or "").strip()
                 if comment and comment not in old_comment.split(" / "):
                     existing["comment"] = " / ".join(part for part in (old_comment, comment) if part)
                 if not existing.get("hotkey") and item.get("hotkey"):
                     existing["hotkey"] = item["hotkey"]
-                existing["option_count"] = max(
-                    int(existing.get("option_count", 2) or 2),
-                    int(item.get("option_count", 2) or 2),
-                )
+                append_button_variable(existing, var_name, option_count)
                 return
-            by_variable[var_name] = item
-            buttons.append(item)
+            # 2) 备注非空且已有同备注按钮：把变量追加进那个按钮（一个按钮切换全部同名变量）。
+            if comment:
+                for button in buttons:
+                    old_comment = str(button.get("comment") or "").strip()
+                    if comment in [part.strip() for part in old_comment.split(" / ")]:
+                        if not button.get("hotkey") and item.get("hotkey"):
+                            button["hotkey"] = item["hotkey"]
+                        append_button_variable(button, var_name, option_count)
+                        return
+            # 3) 新建按钮。
+            new_button = dict(item)
+            names = button_var_names(item) or [var_name]
+            counts = [max(1, int(count or 2)) for count in (item.get("option_counts") or [])]
+            while len(counts) < len(names):
+                counts.append(option_count)
+            new_button["var_names"] = names
+            new_button["option_counts"] = counts[:len(names)]
+            buttons.append(new_button)
+            by_variable[var_name] = new_button
 
         # 1. Explicit INI takes priority; otherwise inspect the generated INI.
         explicit = (self.ini_file_path or "").strip()
@@ -1145,16 +1275,32 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
         merged = []
         by_hotkey = {}
         for source_index, button in enumerate(buttons):
-            var_name = str(button.get("var_name") or "").strip()
-            if not var_name:
-                continue
+            # 尊重已合并的多变量按钮：有 var_names 就不再退化成单个 var_name。
+            var_names = [
+                str(name).strip()
+                for name in (button.get("var_names") or [])
+                if str(name).strip()
+            ]
+            if not var_names:
+                first = str(button.get("var_name") or "").strip()
+                if not first:
+                    continue
+                var_names = [first]
+            default_count = max(1, int(button.get("option_count", 2) or 2))
+            option_counts = [
+                max(1, int(count or 2))
+                for count in (button.get("option_counts") or [])
+            ]
+            while len(option_counts) < len(var_names):
+                option_counts.append(default_count)
+            option_counts = option_counts[:len(var_names)]
             hotkey = cls._normalize_hotkey(button.get("hotkey"))
             group_key = hotkey if hotkey else f"__unbound_{source_index}"
             group_index = by_hotkey.get(group_key)
             if group_index is None:
                 item = dict(button)
-                item["var_names"] = [var_name]
-                item["option_counts"] = [max(1, int(button.get("option_count", 2) or 2))]
+                item["var_names"] = list(var_names)
+                item["option_counts"] = list(option_counts)
                 item["image_paths"] = [str(button.get("image_path") or "").strip()]
                 item["comments"] = []
                 if str(button.get("comment") or "").strip():
@@ -1165,8 +1311,13 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
                 continue
 
             item = merged[group_index]
-            item["var_names"].append(var_name)
-            item["option_counts"].append(max(1, int(button.get("option_count", 2) or 2)))
+            for var_name, option_count in zip(var_names, option_counts):
+                if var_name in item["var_names"]:
+                    index = item["var_names"].index(var_name)
+                    item["option_counts"][index] = max(item["option_counts"][index], option_count)
+                    continue
+                item["var_names"].append(var_name)
+                item["option_counts"].append(option_count)
             item["image_paths"].append(str(button.get("image_path") or "").strip())
             comment = str(button.get("comment") or "").strip()
             if comment and comment not in item["comments"]:
