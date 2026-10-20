@@ -51,6 +51,15 @@ _RESOURCE_SECTION_RE = re.compile(r"^\[Resource[-_]", re.IGNORECASE)
 #: ini 中的部件锚点注释 ``; [mesh:物体名]``（可带 ``[vertex_count:N]``）。
 _MESH_COMMENT_RE = re.compile(r"\[mesh:([^\]]+)\]", re.IGNORECASE)
 
+#: IB 键（``8位hex-数字-数字``，如 ``6ef3d666-888-0``）。
+#: 导出 ini 的 mesh 注释常只带 IB 键（``LOD0.6ef3d666-888-0``），而 Blender
+#: 物体名后面还挂着部件名（``LOD0.6ef3d666-888-0.武器翅膀花纹贴片``），精确
+#: 名查找对不上，只能靠 IB 键把两者关联起来。前后边界避免把更长的 hex 串
+#: 当成 IB 前缀截断匹配。
+_IB_KEY_RE = re.compile(
+    r"(?<![0-9a-fA-F])([0-9a-fA-F]{8})-(\d+)-(\d+)(?!\d)"
+)
+
 #: 探测「该部件读不读得到材质」时依次尝试的贴图类型。
 #: 与材质转资源的前缀体系一致；只要有一种命中就认为材质可用。
 _MATERIAL_PROBE_TYPES = (
@@ -2022,6 +2031,34 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 names.add(obj.name)
         return names
 
+    @staticmethod
+    def _ib_key_from_name(name):
+        """从名字里提取 IB 键（``8位hex-数字-数字``，小写）；提取不到返回 ``None``。
+
+        允许名字带 ``LOD0.`` 前缀、``.部件名`` 后缀与 ``_copy`` 之类的尾巴：
+        导出 ini 的 mesh 注释通常只有 IB 键，而 Blender 物体名还带着部件名，
+        两边要靠这个键对齐。匹配不到时返回 ``None``（调用方按归属不明处理）。
+        """
+        match = _IB_KEY_RE.search(str(name or ""))
+        if not match:
+            return None
+        return "{}-{}-{}".format(
+            match.group(1), match.group(2), match.group(3)
+        ).lower()
+
+    def _target_ib_set(self):
+        """目标部件物体名里的 IB 键集合（小写）。
+
+        同一个 IB 可能带多个部件（只指定其中一部分），所以集合里出现的 IB
+        在名字查不到物体时按「可能含目标部件」保守处理。
+        """
+        keys = set()
+        for name in self._target_object_set():
+            key = self._ib_key_from_name(name)
+            if key:
+                keys.add(key)
+        return keys
+
     def _is_primary_switch_group(self, group, collection):
         variable = str(getattr(group, "switch_variable", "") or "").strip()
         if not variable:
@@ -2995,17 +3032,41 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
     # 清除未指定部件的游戏贴图（勾选 clear_non_target_textures 时启用）
     # ------------------------------------------------------------------ #
 
-    def _mesh_name_verdict(self, mesh_name, mesh_verdict_cache):
-        """``[mesh:...]`` 名 -> ``target`` / ``non_target`` / ``unknown``。"""
+    def _mesh_name_verdict(self, mesh_name, mesh_verdict_cache, target_ibs=None):
+        """``[mesh:...]`` 名 -> ``target`` / ``non_target`` / ``unknown``。
+
+        精确名找得到物体时按目标列表判定，和原来一致。**找不到物体时**改用
+        IB 键回退：导出 ini 的 mesh 注释常只有 IB 键（``LOD0.6ef3d666-888-0``），
+        而物体名后面带部件名（``LOD0.6ef3d666-888-0.武器翅膀花纹贴片``），精确
+        查找必然落空——若不做回退，整段都会被当成「归属不明」保护起来，未指定
+        部件的贴图永远清不掉。
+
+        * IB 键在目标集合里 -> ``target``：同一个 IB 可能还有别的目标部件
+          （名字没在这条注释里出现），保守按目标保留。
+        * IB 键存在但不在集合里 -> ``non_target``：本段确实没有目标部件。
+        * 连 IB 键都提取不到 -> ``unknown``：保持原来的保守语义，原样保留。
+
+        ``target_ibs`` 可由调用方预算一次传进来（``_clear_non_target_textures``
+        会传）；不传时内部用 ``_target_ib_set()`` 现算，方便测试直接调用。
+        """
         verdict = mesh_verdict_cache.get(mesh_name)
         if verdict is None:
             obj = self.find_object_by_mesh_name(mesh_name, object_filter=None)
-            if obj is None:
-                verdict = "unknown"
-            elif self._is_custom_target(obj):
-                verdict = "target"
+            if obj is not None:
+                if self._is_custom_target(obj):
+                    verdict = "target"
+                else:
+                    verdict = "non_target"
             else:
-                verdict = "non_target"
+                if target_ibs is None:
+                    target_ibs = self._target_ib_set()
+                ib_key = self._ib_key_from_name(mesh_name)
+                if ib_key is None:
+                    verdict = "unknown"
+                elif ib_key in target_ibs:
+                    verdict = "target"
+                else:
+                    verdict = "non_target"
             mesh_verdict_cache[mesh_name] = verdict
         return verdict
 
@@ -3144,6 +3205,8 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         target_names = self._target_object_set()
         if not target_names:
             return 0
+        # 名字查不到物体时的 IB 回退集合（每个文件/段共用一份，避免重复计算）。
+        target_ibs = self._target_ib_set()
 
         ini_files = sorted(glob.glob(os.path.join(mod_export_path, "*.ini")))
         if not ini_files:
@@ -3191,7 +3254,9 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 mesh_verdicts = []
                 boundary = None
                 for mesh_name, bindings, draw_pos in mesh_bindings:
-                    verdict = self._mesh_name_verdict(mesh_name, mesh_verdict_cache)
+                    verdict = self._mesh_name_verdict(
+                        mesh_name, mesh_verdict_cache, target_ibs
+                    )
                     if verdict == "target":
                         target_obj = self.find_object_by_mesh_name(mesh_name, object_filter=None)
                         if target_obj is not None and not self._target_has_readable_material(
@@ -3205,8 +3270,9 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                     mesh_verdicts.append((verdict, bindings, draw_pos))
                     if verdict not in ("non_target", "missing_material"):
                         # target：目标部件正在使用；unknown：名字对不上任何导出
-                        # 物体，归属不明。两者都必须原样保留，并构成 MOD 覆盖的
-                        # 边界——只有排在它们之前的绘制才拿得到游戏原生贴图。
+                        # 物体、也提取不到 IB 键，归属不明。两者都必须原样保留，
+                        # 并构成 MOD 覆盖的边界——只有排在它们之前的绘制才拿得到
+                        # 游戏原生贴图。
                         protected_lines.update(bindings.values())
                         if boundary is None or draw_pos < boundary:
                             boundary = draw_pos

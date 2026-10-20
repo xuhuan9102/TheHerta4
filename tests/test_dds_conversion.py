@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import types
@@ -141,6 +142,166 @@ class DDSConversionTests(unittest.TestCase):
         self.assertEqual(texture_type, "default")
         self.assertEqual(dds_format, "bc7_unorm")
         self.assertEqual(matched_by, "Default")
+
+    def test_default_rules_materialmap_is_srgb(self):
+        """MaterialMap 规则必须是 bc7_unorm_srgb（用户 2026-10-20 明确要求）"""
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        texture_type, dds_format, _matched_by = dds_conversion.resolve_dds_target(
+            "MaterialMap_VivianGemAMaterialMap.png", props
+        )
+        self.assertEqual(texture_type, "MaterialMap")
+        self.assertEqual(dds_format, "bc7_unorm_srgb")
+
+    def test_vivian_diffuse_without_hint_keeps_legacy_default(self):
+        """源图名只有 Diffuse、没有 DiffuseMap：不传 hint 时维持原行为（默认线性）"""
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        texture_type, dds_format, matched_by = dds_conversion.resolve_dds_target(
+            "VivianGemADiffuse.png", props
+        )
+        self.assertEqual(texture_type, "default")
+        self.assertEqual(dds_format, "bc7_unorm")
+        self.assertEqual(matched_by, "Default")
+
+    def test_format_for_texture_type_by_material_prefix(self):
+        """材质类型名（材质名前缀）直接决定格式；带后缀时只看首个 token、大小写不敏感。"""
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        self.assertEqual("bc7_unorm_srgb", dds_conversion.format_for_texture_type("DiffuseMap", props))
+        self.assertEqual("bc7_unorm_srgb", dds_conversion.format_for_texture_type("MaterialMap", props))
+        self.assertEqual("r8g8b8a8_unorm", dds_conversion.format_for_texture_type("NormalMap", props))
+        self.assertEqual("bc7_unorm", dds_conversion.format_for_texture_type("LightMap", props))
+        self.assertEqual("", dds_conversion.format_for_texture_type("UnknownMask", props))
+        self.assertEqual(
+            "bc7_unorm_srgb",
+            dds_conversion.format_for_texture_type("DiffuseMap_VivianGemADiffuse", props),
+        )
+        self.assertEqual(
+            "bc7_unorm_srgb", dds_conversion.format_for_texture_type("diffusemap_xxx", props)
+        )
+
+    def test_texture_type_decides_format_not_source_filename(self):
+        """鞋子端到端：VivianGemADiffuse.png 不含 DiffuseMap 关键字，但材质类型
+        DiffuseMap 必须让输出走 bc7_unorm_srgb（DXGI 99），不能再按源文件名兜回线性。"""
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        self.assertEqual(
+            "bc7_unorm_srgb",
+            dds_conversion.resolve_texture_dds_format(
+                "C:/mod/Textures/VivianGemADiffuse.png",
+                props,
+                texture_type="DiffuseMap",
+            ),
+        )
+        self.assertEqual(
+            "bc7_unorm_srgb",
+            dds_conversion.resolve_texture_dds_format(
+                "C:/mod/Textures/VivianGemAMaterialMap.png",
+                props,
+                texture_type="MaterialMap",
+            ),
+        )
+
+    def test_vivian_diffuse_uses_name_hint(self):
+        """源文件名没命中时，用 name_hints（材质名 / 槽位标签）重试得到 sRGB 格式"""
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        texture_type, dds_format, _matched_by = dds_conversion.resolve_dds_target(
+            "VivianGemADiffuse.png", props, name_hints=["DiffuseMap_VivianGemADiffuse"]
+        )
+        self.assertEqual(texture_type, "DiffuseMap")
+        self.assertEqual(dds_format, "bc7_unorm_srgb")
+
+    def test_name_hints_try_in_order_and_stop_at_first_hit(self):
+        """hints 按顺序逐个重试，第一个命中即返回；前面的无效候选被跳过"""
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        texture_type, dds_format, _matched_by = dds_conversion.resolve_dds_target(
+            "3.png", props, name_hints=["", "not_a_map", "NormalMap_Body", "DiffuseMap_Body"]
+        )
+        self.assertEqual(texture_type, "NormalMap")
+        self.assertEqual(dds_format, "r8g8b8a8_unorm")
+
+    def test_resolve_texture_dds_format_override_wins(self):
+        """显式 format_override 非空时直接返回它，不再看文件名 / hints"""
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        self.assertEqual(
+            "bc3_unorm_srgb",
+            dds_conversion.resolve_texture_dds_format(
+                "VivianGemADiffuse.png", props, name_hints=["DiffuseMap"], format_override="bc3_unorm_srgb"
+            ),
+        )
+
+    def test_resolve_texture_dds_format_uses_hint_and_defaults(self):
+        props = types.SimpleNamespace(dds_use_custom_rules=False, dds_rules=[])
+        self.assertEqual(
+            "bc7_unorm_srgb",
+            dds_conversion.resolve_texture_dds_format(
+                "VivianGemADiffuse.png", props, name_hints=["DiffuseMap_VivianGemADiffuse"]
+            ),
+        )
+        self.assertEqual(
+            "bc7_unorm",
+            dds_conversion.resolve_texture_dds_format("VivianGemADiffuse.png", props),
+        )
+
+
+def _dds_header(fourcc=b"DX10", dxgi_format=None, magic=b"DDS "):
+    """最小 DDS 头：148 字节（DX10）/ 128 字节（legacy 也可补齐到 148）。"""
+    header = bytearray(148)
+    header[0:4] = magic
+    struct.pack_into("<I", header, 4, 124)
+    header[84:88] = fourcc
+    if dxgi_format is not None:
+        struct.pack_into("<I", header, 128, dxgi_format)
+    return bytes(header)
+
+
+class DDSHeaderFormatTests(unittest.TestCase):
+    """已有 DDS 的格式校验：只读文件头，决定「存在即跳过」能否成立。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="dds_header_")
+        self.addCleanup(shutil.rmtree, self.temp_dir, True)
+
+    def _write(self, name, payload):
+        path = os.path.join(self.temp_dir, name)
+        with open(path, "wb") as handle:
+            handle.write(payload)
+        return path
+
+    def test_dxgi_format_read_from_dx10_header(self):
+        path = self._write("srgb.dds", _dds_header(b"DX10", 99))
+        self.assertEqual(99, dds_conversion.dds_header_dxgi_format(path))
+
+    def test_legacy_fourcc_has_no_dxgi_format(self):
+        path = self._write("legacy.dds", _dds_header(b"DXT5", None))
+        self.assertIsNone(dds_conversion.dds_header_dxgi_format(path))
+
+    def test_existing_dds_matches_srgb_vs_linear(self):
+        """DXGI 98 ≠ bc7_unorm_srgb，DXGI 99 = bc7_unorm_srgb"""
+        path = self._write("linear.dds", _dds_header(b"DX10", 98))
+        self.assertTrue(dds_conversion.existing_dds_matches_format(path, "bc7_unorm"))
+        self.assertFalse(dds_conversion.existing_dds_matches_format(path, "bc7_unorm_srgb"))
+
+        path = self._write("srgb.dds", _dds_header(b"DX10", 99))
+        self.assertTrue(dds_conversion.existing_dds_matches_format(path, "BC7_UNORM_SRGB"))
+        self.assertFalse(dds_conversion.existing_dds_matches_format(path, "bc7_unorm"))
+
+    def test_legacy_fourcc_never_matches_srgb_target(self):
+        """legacy FOURCC 头没有 sRGB 变体 → 任何 _srgb 目标都必须重转"""
+        path = self._write("legacy_bc3.dds", _dds_header(b"DXT5", None))
+        self.assertFalse(dds_conversion.existing_dds_matches_format(path, "bc3_unorm_srgb"))
+        self.assertTrue(dds_conversion.existing_dds_matches_format(path, "bc3_unorm"))
+
+    def test_unknown_or_broken_files_force_reconversion(self):
+        """文件不存在 / 短头 / magic 不对 / 未知格式 都返回 False（重转安全默认）"""
+        missing = os.path.join(self.temp_dir, "missing.dds")
+        self.assertFalse(dds_conversion.existing_dds_matches_format(missing, "bc7_unorm"))
+
+        short = self._write("short.dds", b"DDS " + b"\x00" * 20)
+        self.assertFalse(dds_conversion.existing_dds_matches_format(short, "bc7_unorm"))
+
+        bad_magic = self._write("bad.dds", _dds_header(b"DX10", 99, magic=b"NOPE"))
+        self.assertFalse(dds_conversion.existing_dds_matches_format(bad_magic, "bc7_unorm_srgb"))
+
+        unknown = self._write("unknown.dds", _dds_header(b"ZZZZ", None))
+        self.assertFalse(dds_conversion.existing_dds_matches_format(unknown, "bc1_unorm"))
 
 
 class _FakeColorspaceSettings:

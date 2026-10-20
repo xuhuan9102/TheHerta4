@@ -10,7 +10,11 @@ from pathlib import Path
 
 import bpy
 
-from ..toolkit.tt_dds_conversion import convert_texture_to_dds
+from ..toolkit.tt_dds_conversion import (
+    convert_texture_to_dds,
+    existing_dds_matches_format,
+    resolve_texture_dds_format,
+)
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 
 
@@ -137,7 +141,7 @@ def ensure_resource(text, name, filename):
     return text.rstrip() + "\n\n" + new_block
 
 
-def copy_texture(texture_path, ini_path, export_as_dds=False):
+def copy_texture(texture_path, ini_path, export_as_dds=False, texture_type="", name_hints=()):
     source = abs_path(texture_path)
     if not source.is_file():
         raise FileNotFoundError(f"贴图不存在：{source}")
@@ -148,8 +152,26 @@ def copy_texture(texture_path, ini_path, export_as_dds=False):
     # filename 直接取本函数返回值，所以文件名跟着变。转换失败回退为原样复制。
     if export_as_dds and source.suffix.lower() != ".dds":
         converted = texture_dir / f"{source.stem}.dds"
-        if not converted.exists():
-            ok, reason = convert_texture_to_dds(str(source), str(converted))
+        # 「已存在 DDS」不能盲信：格式与当前规则期望不一致时必须重转，
+        # 否则规则改对后旧线性 DDS 会被永远沿用。
+        needs_conversion = not converted.exists()
+        if not needs_conversion:
+            expected_format = resolve_texture_dds_format(
+                str(source),
+                None,
+                texture_type=texture_type,
+                name_hints=name_hints,
+            )
+            needs_conversion = not existing_dds_matches_format(
+                str(converted), expected_format
+            )
+        if needs_conversion:
+            ok, reason = convert_texture_to_dds(
+                str(source),
+                str(converted),
+                texture_type=texture_type,
+                name_hints=name_hints,
+            )
             if not ok:
                 print(f"贴图转 DDS 失败，回退为原样复制: {source} - {reason}")
                 converted = None
@@ -382,6 +404,8 @@ def apply_group(text, group, ini_path, owner_id):
             item.path,
             ini_path,
             export_as_dds=bool(getattr(group, "export_as_dds", False)),
+            texture_type="DiffuseMap",
+            name_hints=["DiffuseMap"],
         )
         resource = f"Resource_DiffuseSwitch_{resource_group_id}_B{index}"
         text = ensure_resource(text, resource, filename)

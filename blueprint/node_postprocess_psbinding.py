@@ -6,7 +6,11 @@ import re
 from collections import OrderedDict
 from pathlib import Path
 
-from ..toolkit.tt_dds_conversion import convert_texture_to_dds
+from ..toolkit.tt_dds_conversion import (
+    convert_texture_to_dds,
+    existing_dds_matches_format,
+    resolve_texture_dds_format,
+)
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 
 
@@ -304,7 +308,16 @@ class SSMTNode_PostProcess_PSBinding(SSMTNode_PostProcess_Base):
             sections[sec_name] = [f"filename = {filename}"]
 
     # ---------- 复制贴图 ----------
-    def _copy_texture_file(self, src_path, dest_dir):
+    @staticmethod
+    def _texture_type_from_suffix(suffix):
+        """从资源名后缀里提取已知贴图类型；提取不到返回空串（走文件名兜底）。"""
+        lowered = str(suffix or "").lower()
+        for name in ("DiffuseMap", "NormalMap", "LightMap", "MaterialMap"):
+            if name.lower() in lowered:
+                return name
+        return ""
+
+    def _copy_texture_file(self, src_path, dest_dir, texture_type="", name_hints=()):
         src = Path(src_path)
         if not src.is_file():
             print(f"文件不存在: {src_path}")
@@ -317,8 +330,26 @@ class SSMTNode_PostProcess_PSBinding(SSMTNode_PostProcess_Base):
         # 因此自然跟着指向 .dds。转换失败回退为原样复制，不中断导出。
         if getattr(self, "export_textures_as_dds", False) and src.suffix.lower() != ".dds":
             converted = textures_dir / f"{src.stem}.dds"
-            if not converted.exists():
-                ok, reason = convert_texture_to_dds(str(src), str(converted))
+            # 「已存在 DDS」不能盲信：格式与当前规则期望不一致时必须重转，
+            # 否则规则改对后旧线性 DDS 会被永远沿用。
+            needs_conversion = not converted.exists()
+            if not needs_conversion:
+                expected_format = resolve_texture_dds_format(
+                    str(src),
+                    None,
+                    texture_type=texture_type,
+                    name_hints=name_hints,
+                )
+                needs_conversion = not existing_dds_matches_format(
+                    str(converted), expected_format
+                )
+            if needs_conversion:
+                ok, reason = convert_texture_to_dds(
+                    str(src),
+                    str(converted),
+                    texture_type=texture_type,
+                    name_hints=name_hints,
+                )
                 if not ok:
                     print(f"贴图转 DDS 失败，回退为原样复制: {src_path} - {reason}")
                     converted = None
@@ -362,7 +393,12 @@ class SSMTNode_PostProcess_PSBinding(SSMTNode_PostProcess_Base):
 
             final_filename = None
             if bind.auto_copy:
-                final_filename = self._copy_texture_file(tex_file, output_root)
+                final_filename = self._copy_texture_file(
+                    tex_file,
+                    output_root,
+                    texture_type=self._texture_type_from_suffix(suffix),
+                    name_hints=(suffix,),
+                )
                 if final_filename is None:
                     final_filename = tex_file
             else:

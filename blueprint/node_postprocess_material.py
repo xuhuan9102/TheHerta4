@@ -8,7 +8,11 @@ import shutil
 
 from ..common.global_config import GlobalConfig
 from ..common.logic_name import LogicName
-from ..toolkit.tt_dds_conversion import convert_texture_to_dds
+from ..toolkit.tt_dds_conversion import (
+    convert_texture_to_dds,
+    existing_dds_matches_format,
+    resolve_texture_dds_format,
+)
 from . import fx_namespace
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 
@@ -1356,17 +1360,38 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if file_extension.lower() != ".dds" and getattr(self, "export_textures_as_dds", False):
                 converted_name = f"{stem}.dds"
                 converted_path = os.path.join(target_folder, converted_name)
-                if os.path.exists(converted_path) and not self.material_to_resource_override:
-                    return converted_name
+                # 导出侧已知贴图类型（材质名本身就是 DiffuseMap_xxx 这类命名），
+                # 拿它当兜底提示：编辑期源图名可能只有 Diffuse 而没有 DiffuseMap
+                # （实测 VivianGemADiffuse.png），只按源文件名匹配会落到线性默认规则。
+                name_hints = [getattr(material, "name", ""), stem]
+                # 材质名前缀就是贴图类型（DiffuseMap / MaterialMap / ...），导出侧
+                # 必须用它决定 DDS 格式，不能再让源文件名带偏。
+                texture_type = str(getattr(material, "name", "") or "").strip().split("_")[0]
+                # 「已存在 DDS」不能盲信：必须与当前规则期望的格式一致才跳过，
+                # 否则规则改对后旧线性 DDS 会被永远沿用。
+                if os.path.exists(converted_path):
+                    expected_format = resolve_texture_dds_format(
+                        source_path,
+                        bpy.context.scene.texture_tools_props,
+                        texture_type=texture_type,
+                        name_hints=name_hints,
+                    )
+                    if existing_dds_matches_format(converted_path, expected_format) and (
+                        not self.material_to_resource_override or forced_filename == converted_name
+                    ):
+                        return converted_name
                 # 同一轮导出内这张图已经转过：forced_filename 是本次导出里同一材质
                 # （同一 stem）上一次调用返回的 .dds 名，且文件确实存在。此时再调一次
                 # texconv 重转同一张图，结果与上一次完全相同，纯属重复劳动 ——
                 # 实测「身体」那套 5 张贴图各被重转 14 次，一次导出 82 次转换里 70 次
                 # 是这种重复（占整次导出 ~70% 的墙钟时间）。
                 # 「覆盖现有资源」的语义不受影响：本轮第一次该覆盖的仍然覆盖了。
-                if forced_filename == converted_name and os.path.exists(converted_path):
-                    return converted_name
-                ok, reason = convert_texture_to_dds(source_path, converted_path)
+                ok, reason = convert_texture_to_dds(
+                    source_path,
+                    converted_path,
+                    texture_type=texture_type,
+                    name_hints=name_hints,
+                )
                 if ok:
                     return converted_name
                 # 转换失败不中断导出：退回原样复制。文件名也必须用回源扩展名 ——

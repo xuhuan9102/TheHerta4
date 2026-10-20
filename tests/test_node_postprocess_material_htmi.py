@@ -96,6 +96,8 @@ _install_module(
 _install_module(
     f"{PKG}.toolkit.tt_dds_conversion",
     convert_texture_to_dds=lambda *_args, **_kwargs: (True, ""),
+    resolve_texture_dds_format=lambda *_args, **_kwargs: "bc7_unorm",
+    existing_dds_matches_format=lambda *_args, **_kwargs: True,
 )
 
 

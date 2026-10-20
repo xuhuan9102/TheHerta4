@@ -66,6 +66,8 @@ sys.modules["bpy"] = _fake_bpy
 # 桩成「转换成功」即可（真正转换在 test_dds_conversion 里单独覆盖）。
 _toolkit_stub = types.ModuleType(f"{PKG}.toolkit.tt_dds_conversion")
 _toolkit_stub.convert_texture_to_dds = lambda *_args, **_kwargs: (True, "")
+_toolkit_stub.resolve_texture_dds_format = lambda *_args, **_kwargs: "bc7_unorm"
+_toolkit_stub.existing_dds_matches_format = lambda *_args, **_kwargs: True
 sys.modules[_toolkit_stub.__name__] = _toolkit_stub
 
 # 材质转资源pro 的基类来自 node_postprocess_material（此处用桩）。

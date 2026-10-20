@@ -23,7 +23,11 @@ import shutil
 
 import bpy
 
-from ..toolkit.tt_dds_conversion import convert_texture_to_dds
+from ..toolkit.tt_dds_conversion import (
+    convert_texture_to_dds,
+    existing_dds_matches_format,
+    resolve_texture_dds_format,
+)
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 
 
@@ -517,10 +521,21 @@ def _apply_object_texture_replacements(ini_text, object_name, mesh_match, group,
         if getattr(group, "export_as_dds", False) and os.path.splitext(dest_name)[1].lower() != ".dds":
             converted_name = os.path.splitext(dest_name)[0] + ".dds"
             converted_path = os.path.join(texture_dir, converted_name)
+            # 槽位类型（suffix）是导出侧已知的贴图类型，作为格式推断的兜底提示。
+            name_hints = [suffix]
             if os.path.exists(converted_path):
-                converted = True
-            else:
-                ok, reason = convert_texture_to_dds(source_path, converted_path)
+                # 「已存在 DDS」不能盲信：格式与当前规则期望不一致时必须重转。
+                expected_format = resolve_texture_dds_format(
+                    source_path, None, texture_type=suffix, name_hints=name_hints
+                )
+                converted = existing_dds_matches_format(converted_path, expected_format)
+            if not converted:
+                ok, reason = convert_texture_to_dds(
+                    source_path,
+                    converted_path,
+                    texture_type=suffix,
+                    name_hints=name_hints,
+                )
                 if ok and os.path.exists(converted_path):
                     converted = True
                 else:

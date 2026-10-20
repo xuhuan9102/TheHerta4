@@ -818,5 +818,147 @@ class SlotStyleParamHelperTests(unittest.TestCase):
             self.assertFalse(module._is_slot_style_param(name), name)
 
 
+class IbKeyFromNameTests(unittest.TestCase):
+    """``_ib_key_from_name``：从名字里提取 ``8位hex-数字-数字`` 的 IB 键。"""
+
+    def test_extracts_key_with_lod_prefix_and_part_suffix(self):
+        cls = module.SSMTNode_PostProcess_CustomMaterialAssign
+        self.assertEqual(
+            cls._ib_key_from_name("LOD0.6ef3d666-888-0.武器翅膀花纹贴片"),
+            "6ef3d666-888-0",
+        )
+        self.assertEqual(
+            cls._ib_key_from_name("LOD0.24a512cb-114-15546"), "24a512cb-114-15546"
+        )
+        self.assertEqual(
+            cls._ib_key_from_name("LOD0.92cb56c9-64626-0.目标部件_copy"),
+            "92cb56c9-64626-0",
+        )
+
+    def test_returns_lowercase(self):
+        cls = module.SSMTNode_PostProcess_CustomMaterialAssign
+        self.assertEqual(cls._ib_key_from_name("LOD0.6EF3D666-888-0"), "6ef3d666-888-0")
+
+    def test_returns_none_when_key_is_absent(self):
+        cls = module.SSMTNode_PostProcess_CustomMaterialAssign
+        for name in (
+            "LOD0.aaa-1-0.杂项",
+            "LOD0.zzz-9-9.未知",
+            "未知部件",
+            "",
+            None,
+        ):
+            self.assertIsNone(cls._ib_key_from_name(name), name)
+
+    def test_longer_hex_run_is_not_truncated_into_a_key(self):
+        cls = module.SSMTNode_PostProcess_CustomMaterialAssign
+        self.assertIsNone(cls._ib_key_from_name("LOD0.6ef3d6666-888-0"))
+
+
+class IbKeyVerdictTests(unittest.TestCase):
+    """``_mesh_name_verdict`` 在找不到物体时按 IB 键回退判定。"""
+
+    def setUp(self):
+        _fake_bpy.data.objects.clear()
+        self.addCleanup(_fake_bpy.data.objects.clear)
+
+    def test_verdict_uses_target_ib_set_when_argument_is_omitted(self):
+        node = _FakeNode(["LOD0.6ef3d666-888-0.目标部件"])
+        cache = {}
+
+        self.assertEqual(
+            node._mesh_name_verdict("LOD0.6ef3d666-888-0", cache), "target"
+        )
+        self.assertEqual(
+            node._mesh_name_verdict("LOD0.24a512cb-114-15546", cache), "non_target"
+        )
+        self.assertEqual(node._mesh_name_verdict("LOD0.未知部件", cache), "unknown")
+
+    def test_found_object_still_wins_over_ib_key(self):
+        """能找到物体时沿用原来的 target/non_target 判定，不因同名 IB 改变。"""
+        _fake_bpy.data.objects["LOD0.aaa-1-0.杂项"] = types.SimpleNamespace(
+            name="LOD0.aaa-1-0.杂项", type="MESH"
+        )
+        node = _FakeNode(["LOD0.6ef3d666-888-0.目标部件"])
+        cache = {}
+
+        self.assertEqual(
+            node._mesh_name_verdict("LOD0.aaa-1-0.杂项", cache), "non_target"
+        )
+
+    def test_target_ib_set_collects_keys_from_target_objects(self):
+        node = _FakeNode(
+            [
+                "LOD0.92cb56c9-64626-0.部件A",
+                "LOD0.ca717c18-34338-0.部件B",
+                "没有IB键的物体",
+            ]
+        )
+        self.assertEqual(
+            node._target_ib_set(), {"92cb56c9-64626-0", "ca717c18-34338-0"}
+        )
+
+
+class NamelessMeshIbFallbackTests(_Base):
+    """导出 ini 的 mesh 注释只有 IB 键、物体名带部件名时的整段清理行为。"""
+
+    def test_foreign_ib_without_part_name_is_cleaned(self):
+        """无部件名的 mesh 段，IB 不在目标集合 -> 置 null、回收定义段与贴图。"""
+        self._register_objects("LOD0.92cb56c9-64626-0.目标部件")
+        # 物体名带部件名，精确查找对不上这条只有 IB 键的注释
+        self._write_ini(_ini_bindings_before_mesh("LOD0.6ef3d666-888-0"))
+        self._write_texture("Textures/aaa-1-0-DiffuseMap.dds")
+        self._write_texture("Textures/aaa-1-0-NormalMap.dds")
+
+        self._run(["LOD0.92cb56c9-64626-0.目标部件"])
+
+        content = self._read()
+        self.assertIn("Resource\\ZZMI\\Diffuse = null", content)
+        self.assertIn("Resource\\ZZMI\\NormalMap = null", content)
+        self.assertNotIn("ref Resource-aaa-1-0-DiffuseMap", content)
+        self.assertNotIn("[Resource-aaa-1-0-DiffuseMap]", content)
+        self.assertNotIn("[Resource-aaa-1-0-NormalMap]", content)
+        self.assertNotIn("ps-t0 = null", content)
+        self.assertFalse(
+            os.path.exists(os.path.join(self.mod_root, "Textures", "aaa-1-0-DiffuseMap.dds"))
+        )
+        self.assertFalse(
+            os.path.exists(os.path.join(self.mod_root, "Textures", "aaa-1-0-NormalMap.dds"))
+        )
+        # 段头与绘制行保留
+        self.assertIn("[TextureOverride_LOD0.aaa_1_0]", content)
+        self.assertIn("drawindexed = 6,0,0", content)
+
+    def test_target_ib_without_part_name_is_kept(self):
+        """无部件名的 mesh 段，IB 在目标集合 -> 保守按目标保留原样。"""
+        self._register_objects("LOD0.92cb56c9-64626-0.目标部件")
+        self._write_ini(_ini_bindings_before_mesh("LOD0.92cb56c9-64626-0"))
+        self._write_texture("Textures/aaa-1-0-DiffuseMap.dds")
+        self._write_texture("Textures/aaa-1-0-NormalMap.dds")
+        before = self._read()
+
+        self._run(["LOD0.92cb56c9-64626-0.目标部件"])
+
+        self.assertEqual(before, self._read())
+        self.assertTrue(
+            os.path.exists(os.path.join(self.mod_root, "Textures", "aaa-1-0-DiffuseMap.dds"))
+        )
+
+    def test_name_without_ib_key_stays_unknown(self):
+        """提取不到 IB 键 -> unknown，绑定、定义段、贴图全部原样保留。"""
+        self._register_objects("LOD0.92cb56c9-64626-0.目标部件")
+        self._write_ini(_ini_bindings_before_mesh("LOD0.未知部件"))
+        self._write_texture("Textures/aaa-1-0-DiffuseMap.dds")
+        before = self._read()
+
+        self._run(["LOD0.92cb56c9-64626-0.目标部件"])
+
+        self.assertEqual(before, self._read())
+        self.assertIn("[Resource-aaa-1-0-DiffuseMap]", self._read())
+        self.assertTrue(
+            os.path.exists(os.path.join(self.mod_root, "Textures", "aaa-1-0-DiffuseMap.dds"))
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
