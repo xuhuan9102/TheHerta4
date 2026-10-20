@@ -2093,3 +2093,30 @@ class _BridgeModel:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 8. 后台 worker 禁用嵌套并行
+# ---------------------------------------------------------------------------
+
+
+class NestedParallelGuardTests(_BackgroundTestBase):
+    """worker 里不能再起并行前处理/并行轮次子进程（嵌套并行会争抢资源并失败）。"""
+
+    def test_disable_nested_parallel_turns_off_both_switches(self):
+        props = self.scene_properties
+        props.enable_parallel_preprocess = True
+        props.enable_parallel_export_rounds = True
+
+        export_background._disable_nested_parallel()
+
+        self.assertFalse(props.enable_parallel_preprocess)
+        self.assertFalse(props.enable_parallel_export_rounds)
+
+    def test_disable_nested_parallel_is_silent_without_scene(self):
+        old_scene = _FAKE_BPY.context.scene
+        _FAKE_BPY.context.scene = types.SimpleNamespace(global_properties=None)
+        try:
+            export_background._disable_nested_parallel()  # 不抛即通过
+        finally:
+            _FAKE_BPY.context.scene = old_scene

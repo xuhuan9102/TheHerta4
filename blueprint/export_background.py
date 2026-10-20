@@ -626,6 +626,34 @@ def _collect_ini_variable_warnings(output_dir: str) -> list:
         return []
 
 
+def _disable_nested_parallel() -> None:
+    """后台 worker 内禁用「嵌套并行」。
+
+    worker 本身已经是一个独立 Blender 进程；若再启用并行前处理 / 并行轮次，它会
+    再起多个 Blender 子进程（实测 4 个），与主实例争抢 IO / 内存并导致子任务失败
+    （2026-10-21 用户实测：``Job 002 未生成结果清单``）。串行前处理更慢但稳定，
+    而后台导出本身不占用主界面。主线程的同步导出不受影响，仍按面板设置并行。
+    """
+    try:
+        scene = getattr(bpy.context, "scene", None)
+        if scene is None and len(bpy.data.scenes):
+            scene = bpy.data.scenes[0]
+        props = getattr(scene, "global_properties", None) if scene is not None else None
+        if props is None:
+            return
+        props.enable_parallel_preprocess = False
+        props.enable_parallel_export_rounds = False
+        try:
+            LOG.info("后台实例：已禁用嵌套并行（并行前处理 / 并行轮次）")
+        except Exception:
+            pass
+    except Exception as error:
+        try:
+            LOG.warning(f"后台实例禁用嵌套并行失败（继续导出）: {error}")
+        except Exception:
+            pass
+
+
 def _run_worker(manifest_path: str) -> None:
     """在干净实例里跑完整导出：全部轮次串行 → 后处理 → 写 result.json / log。
 
@@ -659,6 +687,8 @@ def _run_worker(manifest_path: str) -> None:
         LOG.start_collecting()
         GlobalConfig.read_from_main_json_ssmt4()
         _apply_manifest_environment(manifest)
+        # 后台实例内不再起并行前处理/并行轮次子进程（嵌套并行会导致子任务失败）
+        _disable_nested_parallel()
         output_dir = str(manifest.get("output_dir") or "") or GlobalConfig.path_generate_mod_folder()
 
         if quick_export:
