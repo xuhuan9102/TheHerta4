@@ -23,6 +23,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -2101,22 +2102,42 @@ if __name__ == "__main__":
 
 
 class NestedParallelGuardTests(_BackgroundTestBase):
-    """worker 里不能再起并行前处理/并行轮次子进程（嵌套并行会争抢资源并失败）。"""
+    """后台 worker 的嵌套并行策略：默认沿用面板；HERTA_BG_PARALLEL_INSTANCES 可限流/禁用。"""
 
-    def test_disable_nested_parallel_turns_off_both_switches(self):
+    def test_default_keeps_panel_settings(self):
         props = self.scene_properties
         props.enable_parallel_preprocess = True
         props.enable_parallel_export_rounds = True
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERTA_BG_PARALLEL_INSTANCES", None)
+            export_background._configure_worker_parallel()
+        self.assertTrue(props.enable_parallel_preprocess)
+        self.assertTrue(props.enable_parallel_export_rounds)
 
-        export_background._disable_nested_parallel()
-
+    def test_env_zero_disables_both(self):
+        props = self.scene_properties
+        props.enable_parallel_preprocess = True
+        props.enable_parallel_export_rounds = True
+        with mock.patch.dict(os.environ, {"HERTA_BG_PARALLEL_INSTANCES": "0"}):
+            export_background._configure_worker_parallel()
         self.assertFalse(props.enable_parallel_preprocess)
         self.assertFalse(props.enable_parallel_export_rounds)
 
-    def test_disable_nested_parallel_is_silent_without_scene(self):
+    def test_env_positive_limits_instances(self):
+        props = self.scene_properties
+        props.enable_parallel_preprocess = False
+        props.enable_parallel_export_rounds = True
+        props.parallel_preprocess_instances = 8
+        with mock.patch.dict(os.environ, {"HERTA_BG_PARALLEL_INSTANCES": "2"}):
+            export_background._configure_worker_parallel()
+        self.assertTrue(props.enable_parallel_preprocess)
+        self.assertEqual(2, props.parallel_preprocess_instances)
+        self.assertFalse(props.enable_parallel_export_rounds)
+
+    def test_configure_parallel_is_silent_without_scene(self):
         old_scene = _FAKE_BPY.context.scene
         _FAKE_BPY.context.scene = types.SimpleNamespace(global_properties=None)
         try:
-            export_background._disable_nested_parallel()  # 不抛即通过
+            export_background._configure_worker_parallel()  # 不抛即通过
         finally:
             _FAKE_BPY.context.scene = old_scene

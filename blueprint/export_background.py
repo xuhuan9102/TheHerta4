@@ -626,14 +626,23 @@ def _collect_ini_variable_warnings(output_dir: str) -> list:
         return []
 
 
-def _disable_nested_parallel() -> None:
-    """后台 worker 内禁用「嵌套并行」。
+def _configure_worker_parallel() -> None:
+    """后台 worker 里的「嵌套并行」策略。
 
-    worker 本身已经是一个独立 Blender 进程；若再启用并行前处理 / 并行轮次，它会
-    再起多个 Blender 子进程（实测 4 个），与主实例争抢 IO / 内存并导致子任务失败
-    （2026-10-21 用户实测：``Job 002 未生成结果清单``）。串行前处理更慢但稳定，
-    而后台导出本身不占用主界面。主线程的同步导出不受影响，仍按面板设置并行。
+    并行前处理不是线程池里跑 Python，而是**每个 job 起一个完整的 Blender 子进程**，
+    各自加载整份工程快照做前处理。worker 本身已经是一个 Blender 进程，再叠加 N 个
+    同规格子进程时，内存与磁盘 IO 会成倍上升（大工程每实例可占 1~3 GB）。
+
+    默认在 worker 内关闭并行前处理 / 并行轮次；环境变量
+    ``HERTA_BG_PARALLEL_INSTANCES`` 指定正整数时，保留并行前处理但把实例数限制到
+    该值，并保留并行临时目录（便于排查子进程日志）。
     """
+    limit_text = ""
+    try:
+        limit_text = str(os.environ.get("HERTA_BG_PARALLEL_INSTANCES", "") or "").strip()
+    except Exception:
+        limit_text = ""
+
     try:
         scene = getattr(bpy.context, "scene", None)
         if scene is None and len(bpy.data.scenes):
@@ -641,17 +650,46 @@ def _disable_nested_parallel() -> None:
         props = getattr(scene, "global_properties", None) if scene is not None else None
         if props is None:
             return
-        props.enable_parallel_preprocess = False
+
+        if not limit_text:
+            # 默认：沿用面板设置（并行前处理可用；两个子进程相关 bug 已修）
+            try:
+                LOG.info("后台实例：沿用面板的并行前处理设置")
+            except Exception:
+                pass
+            return
+
+        limit = int(limit_text) if limit_text.isdigit() else 0
+        if limit <= 0:
+            props.enable_parallel_preprocess = False
+            props.enable_parallel_export_rounds = False
+            try:
+                LOG.info("后台实例：已禁用嵌套并行（并行前处理 / 并行轮次）")
+            except Exception:
+                pass
+            return
+
+        props.enable_parallel_preprocess = True
+        props.parallel_preprocess_instances = limit
+        try:
+            props.parallel_preprocess_keep_temp_files = True
+        except Exception:
+            pass
         props.enable_parallel_export_rounds = False
         try:
-            LOG.info("后台实例：已禁用嵌套并行（并行前处理 / 并行轮次）")
+            LOG.info(f"后台实例：并行前处理实例数限制为 {limit}（并行轮次关闭）")
         except Exception:
             pass
     except Exception as error:
         try:
-            LOG.warning(f"后台实例禁用嵌套并行失败（继续导出）: {error}")
+            LOG.warning(f"后台实例配置嵌套并行失败（继续导出）: {error}")
         except Exception:
             pass
+
+
+def _disable_nested_parallel() -> None:
+    """兼容旧名：按默认策略配置 worker 内并行（默认沿用面板设置）。"""
+    _configure_worker_parallel()
 
 
 def _run_worker(manifest_path: str) -> None:
@@ -687,8 +725,8 @@ def _run_worker(manifest_path: str) -> None:
         LOG.start_collecting()
         GlobalConfig.read_from_main_json_ssmt4()
         _apply_manifest_environment(manifest)
-        # 后台实例内不再起并行前处理/并行轮次子进程（嵌套并行会导致子任务失败）
-        _disable_nested_parallel()
+        # 后台实例内配置嵌套并行（默认关闭；HERTA_BG_PARALLEL_INSTANCES 可限流开启）
+        _configure_worker_parallel()
         output_dir = str(manifest.get("output_dir") or "") or GlobalConfig.path_generate_mod_folder()
 
         if quick_export:

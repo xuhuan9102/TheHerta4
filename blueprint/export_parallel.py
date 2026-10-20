@@ -399,7 +399,11 @@ class ParallelExportCoordinator:
             "--addons",
             addon_name,
             "--python-expr",
-            f"import {addon_name}.blueprint.export_parallel as ep; ep.run_worker_cli()",
+            # 插件目录名可能含连字符（如 TheHerta4-main），不能写 `import 名字...`，
+            # 必须用 importlib.import_module（2026-10-21 实测：语法错误会让子进程静默无结果）
+            "import importlib; ep = importlib.import_module('"
+            + addon_name
+            + ".blueprint.export_parallel'); ep.run_worker_cli()",
             "--",
             "--manifest",
             job["manifest_path"],

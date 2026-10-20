@@ -408,7 +408,11 @@ class ParallelPreprocessCoordinator:
             "--addons",
             addon_name,
             "--python-expr",
-            f"import {addon_name}.blueprint.preprocess_parallel as pp; pp.run_worker_cli()",
+            # 插件目录名可能含连字符（如 TheHerta4-main），不能写 `import 名字...`，
+            # 必须用 importlib.import_module（2026-10-21 实测：语法错误会让子进程静默无结果）
+            "import importlib; pp = importlib.import_module('"
+            + addon_name
+            + ".blueprint.preprocess_parallel'); pp.run_worker_cli()",
             "--",
             "--manifest",
             job["manifest_path"],
@@ -474,7 +478,11 @@ class ParallelPreprocessCoordinator:
                     continue
                 if loaded_obj.name not in copy_map.values():
                     continue
-                if bpy.data.objects.get(loaded_obj.name):
+                # 只跳过「已经有 collection」的物体；不能再用 bpy.data.objects.get(name)
+                # 判断——libraries.load 之后物体已经在 bpy.data 里，那个判断恒为真，
+                # 会跳过 link，于是副本不在 scene 的 view layer 中（后续
+                # view_layer.objects.active = obj 会报 does not contain object）。
+                if loaded_obj.users_collection:
                     continue
                 bpy.context.scene.collection.objects.link(loaded_obj)
 
