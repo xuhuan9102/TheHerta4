@@ -2115,10 +2115,36 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
 
         return needed
 
-    def _add_auto_playback_logic_for_group(self, sections, group_id, intensity_var, frame_count, cycle_mode, speed_percent_min, speed_percent_max, speed_intervals, max_unroll, unit_speed=1, speed_percent_mode=True):
+    @staticmethod
+    def _const_var_decl_pattern(var_name):
+        """匹配 Constants 里 ``global [persist] $var = ...`` 声明的正则。"""
+        return re.compile(r'^\s*global(?:\s+persist)?\s+' + re.escape(var_name) + r'\s*=')
+
+    @classmethod
+    def _upsert_const_var_line(cls, const_lines, var_name, new_line):
+        """把 Constants 里 var_name 的声明写成 new_line：存在则替换，不存在才追加。
+
+        旧写法是「``if var_name not in const_content`` 才追加」，导致改参数后重新
+        导出时 ini 里的默认值仍是上一次的（例如 ``$frameEnd_group1 = 480`` 永远
+        不会变成 4800）。替换时保留原行位置，避免 Constants 行序来回跳；同一变量
+        若已有重复声明（历史 bug 产物），只保留第一行并删掉其余的。
+        """
+        pattern = cls._const_var_decl_pattern(var_name)
+        matched_indexes = [
+            i for i, line in enumerate(const_lines)
+            if not line.strip().startswith(';') and pattern.match(line)
+        ]
+        if not matched_indexes:
+            const_lines.append(new_line)
+            return 'appended'
+        const_lines[matched_indexes[0]] = new_line
+        for i in reversed(matched_indexes[1:]):
+            del const_lines[i]
+        return 'updated'
+
+    def _add_auto_playback_logic_for_group(self, sections, group_id, intensity_var, frame_count, cycle_mode, speed_percent_min, speed_percent_max, speed_intervals, max_unroll, unit_speed=1, speed_percent_mode=True, speed_percent=100):
         if '[Constants]' not in sections: sections['[Constants]'] = []
         const_lines = sections['[Constants]']
-        const_content = "\n".join(const_lines)
         prefix = f"group{group_id}"
         auto_enabled_var = f"$auto_play_enabled_{prefix}"
         step_accum_var = f"$step_accum_{prefix}"
@@ -2131,17 +2157,21 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         base_step_var = f"$base_step_{prefix}"
         norm_frame_var = f"$norm_frame_{prefix}"
         pingpong_dir_var = f"$pingpong_dir_{prefix}" if cycle_mode == 'PINGPONG' else None
+        try:
+            frame_count_text = str(int(frame_count))
+        except (TypeError, ValueError):
+            frame_count_text = str(frame_count)
         auto_vars = [
             f"global persist {auto_enabled_var} = 1", f"global {step_accum_var} = 0",
-            f"global {frame_var} = 0", f"global persist {frame_end_var} = {frame_count}",
-            f"global persist {speed_percent_var} = 100", f"global persist {speed_percent_min_var} = {speed_percent_min}",
+            f"global {frame_var} = 0", f"global persist {frame_end_var} = {frame_count_text}",
+            f"global persist {speed_percent_var} = {speed_percent}", f"global persist {speed_percent_min_var} = {speed_percent_min}",
             f"global persist {speed_percent_max_var} = {speed_percent_max}", f"global {step_frames_var} = 0",
             f"global {base_step_var} = 0", f"global {norm_frame_var} = 0"
         ]
         if cycle_mode == 'PINGPONG': auto_vars.append(f"global {pingpong_dir_var} = 1")
         for var_line in auto_vars:
-            var_name_only = var_line.split('=')[0].strip()
-            if var_name_only not in const_content: const_lines.append(var_line)
+            var_name_only = var_line.split('=')[0].strip().split()[-1]
+            self._upsert_const_var_line(const_lines, var_name_only, var_line)
 
         def _fmt_step(v):
             """把浮点步数格式化成 INI 可读的字符串（整数省略小数点）。"""
@@ -2154,6 +2184,10 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         present_code.append(f"; @@ShapeKeyExt:PLAY:{self._ensure_namespace()}@@")
         present_code.append(f"; ========== AUTO PLAYBACK GROUP {group_id} (Variable Speed) ==========")
         present_code.append(f"if ({auto_enabled_var} == 1)")
+        # 每帧强制把进度上限刷成「当前导出配置」：persist 变量在游戏端会把旧值
+        # 保存在 d3dx_user.ini，只更新 ini 默认值不足以压住它，必须用非 persist
+        # 赋值每帧覆盖，否则改大「总细分」后播放速度仍按旧的 frameEnd 走。
+        present_code.append(f"    {frame_end_var} = {frame_count_text}")
         present_code.append(f"    {norm_frame_var} = {frame_var} / {frame_end_var}")
         intervals = sorted(speed_intervals, key=lambda x: x.start)
         if intervals:
@@ -3394,17 +3428,29 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         for g in all_groups:
             setting = self._find_group_setting(g)
             default_val = 1 if (setting and setting.enable_auto_playback) else 0
-            auto_enabled_line = f"global persist $auto_play_enabled_group{g} = {default_val}"
-            if "$auto_play_enabled_group" + str(g) not in const_content: const_lines.append(auto_enabled_line)
+            # 这里所有变量都用 upsert：ini 里已存在同名行时必须换成当前配置的值，
+            # 否则「总细分 / 速度区间」改大后重新导出仍沿用上次的旧默认值。
+            self._upsert_const_var_line(
+                const_lines, f"$auto_play_enabled_group{g}",
+                f"global persist $auto_play_enabled_group{g} = {default_val}"
+            )
             if setting and setting.enable_auto_playback:
-                speed_percent_line = f"global persist $speed_percent_group{g} = {setting.speed_percent}"
-                if f"$speed_percent_group{g}" not in const_content: const_lines.append(speed_percent_line)
-                speed_min_line = f"global persist $speed_percent_min_group{g} = {setting.speed_percent_min}"
-                speed_max_line = f"global persist $speed_percent_max_group{g} = {setting.speed_percent_max}"
-                if f"$speed_percent_min_group{g}" not in const_content: const_lines.append(speed_min_line)
-                if f"$speed_percent_max_group{g}" not in const_content: const_lines.append(speed_max_line)
-                frame_end_line = f"global persist $frameEnd_group{g} = {setting.auto_playback_frame_count}"
-                if f"$frameEnd_group{g}" not in const_content: const_lines.append(frame_end_line)
+                self._upsert_const_var_line(
+                    const_lines, f"$speed_percent_group{g}",
+                    f"global persist $speed_percent_group{g} = {setting.speed_percent}"
+                )
+                self._upsert_const_var_line(
+                    const_lines, f"$speed_percent_min_group{g}",
+                    f"global persist $speed_percent_min_group{g} = {setting.speed_percent_min}"
+                )
+                self._upsert_const_var_line(
+                    const_lines, f"$speed_percent_max_group{g}",
+                    f"global persist $speed_percent_max_group{g} = {setting.speed_percent_max}"
+                )
+                self._upsert_const_var_line(
+                    const_lines, f"$frameEnd_group{g}",
+                    f"global persist $frameEnd_group{g} = {setting.auto_playback_frame_count}"
+                )
         # 块标记结束
         const_lines.append(self.BLOCK_END.format(ns=ns))
 
@@ -3490,7 +3536,8 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                 sections, g, group_strength_vars[g],
                 setting.auto_playback_frame_count, setting.auto_playback_cycle_mode,
                 setting.speed_percent_min, setting.speed_percent_max,
-                list(setting.speed_intervals), auto_unroll, unit_speed, percent_mode
+                list(setting.speed_intervals), auto_unroll, unit_speed, percent_mode,
+                speed_percent=setting.speed_percent
             )
 
         auto_play_key = self.auto_play_toggle_key.strip() or "space"
