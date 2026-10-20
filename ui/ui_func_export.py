@@ -15,10 +15,27 @@ from ..common.config_table_backup import (
 )
 
 from ..blueprint.model import BluePrintModel
-from ..blueprint.direct_export import execute_direct_export, has_direct_export_mode
+from ..blueprint.direct_export import (
+    collect_direct_multifile_nodes,
+    collect_direct_shapekey_nodes,
+    execute_direct_export,
+    has_direct_export_mode,
+)
 from ..blueprint.export_helper import BlueprintExportHelper
 from ..blueprint.preprocess import PreProcessHelper
 from ..blueprint.export_parallel import ExportRoundExecutor, ParallelExportCoordinator, ParallelExportError
+from ..blueprint.export_background import (
+    BACKGROUND_BUSY_MESSAGE,
+    BackgroundExportSession,
+    QUICK_EXPORT_ROUND_PLAN,
+    build_quick_export_temp_tree,
+    clear_active_session,
+    clear_progress_header,
+    format_progress_bar,
+    get_active_session,
+    push_progress_header,
+    safe_object_name,
+)
 from ..blueprint.sync import refresh_blueprint_sync_state
 from ..common.global_properties import GlobalProterties
 from ..common.logic_name import LogicName
@@ -32,7 +49,276 @@ def _raise_for_unknown_logic_name() -> None:
     )
 
 
-class SSMTGenerateModBlueprint(bpy.types.Operator):
+#: 后台导出时蓝图节点的进度配色（RGB；Blender 5.x 的 node.color 是 3 分量，
+#: 旧版本是 4 分量，赋值时按节点现有维度补齐 —— 见 ``_node_color_for``）
+_BG_NODE_RUNNING_COLOR = (0.95, 0.72, 0.1)
+_BG_NODE_DONE_COLOR = (0.22, 0.78, 0.3)
+
+
+#: 后台导出 modal 轮询的共用实现：Generate Mod 与快速局部导出共用同一套
+#: 进度显示 / 节点高亮 / 三种收尾，避免两处复制。
+class _BackgroundExportMixin:
+    """后台导出 modal：轮询进度、节点高亮、原生进度条与收尾分支。"""
+
+    def modal(self, context, event):
+        """后台导出轮询：每 0.5s 读一次 stage.json / result.json 并刷新状态栏。"""
+        session = getattr(self, "_bg_session", None)
+        if session is None:
+            self._stop_background_timer(context)
+            clear_progress_header()
+            return {'CANCELLED'}
+
+        if event.type == 'ESC':
+            self._finish_background_export(context, session, "cancel")
+            return {'CANCELLED'}
+
+        status = session.poll()
+        self._sync_node_highlight(session)
+        text = session.progress_text()
+        progress_bar = self._update_progress_bar(context, session)
+        if progress_bar:
+            text = f"{text} {progress_bar}"
+        push_progress_header(text)
+
+        if status == "running":
+            return {'RUNNING_MODAL'}
+
+        if status == "success":
+            self._finish_background_export(context, session, "success")
+            return {'FINISHED'}
+
+        if status == "cancelled":
+            self._finish_background_export(context, session, "cancel")
+            return {'CANCELLED'}
+
+        self._finish_background_export(context, session, "error")
+        return {'CANCELLED'}
+
+    def _finish_background_export(self, context, session, outcome):
+        """收尾：恢复节点颜色、结束进度条、停 timer、按结果更新 header 并清理。
+
+        失败 / 取消**不再**用 ``self.report({'ERROR'})`` / ``self.report({'WARNING'})``：
+        Blender 原生 Report 弹窗会挡住界面，改为把摘要留在 header（保留到用户操作）
+        并 ``print`` 到控制台（含 worker.log 路径）。成功仍用 INFO（INFO 不弹窗）。
+        """
+        self._end_progress_bar(context)
+        self._restore_node_colors()
+        self._stop_background_timer(context)
+        clear_active_session(session)
+
+        if outcome == "cancel":
+            session.cancel()
+            log_path = session.cleanup()
+            push_progress_header("后台导出已取消")
+            print(f"⚠️ 后台导出已取消（日志: {log_path}）")
+            return
+
+        if outcome == "success":
+            log_path = session.cleanup()
+            self._open_background_output_folder(session)
+            clear_progress_header()
+            self.report({'INFO'}, f"{session.success_summary()}（日志: {log_path}）")
+            return
+
+        message = session.error_summary()
+        session.cleanup()
+        clear_active_session(session)
+        push_progress_header(f"后台导出失败：{message[:160]}")
+        print(f"❌ {message}")
+
+    def _update_progress_bar(self, context, session):
+        """把步骤进度同步到 ``window_manager`` 的原生进度条，并返回**文本进度条**。
+
+        文本条（``[████░░] 40%``）**总是**返回并拼到 header 上：Blender 原生
+        ``progress_*`` 只画在状态栏，弹出窗口/其它区域遮挡时看不到，header 里
+        带一条文本进度条才能保证用户随时看到「完成多少步」。
+
+        任何异常都静默：进度显示失败绝不能影响导出。
+        """
+        total = 0
+        done = 0
+        try:
+            total = int(getattr(session, "total_steps", 0) or 0)
+            done = int(getattr(session, "done_steps", 0) or 0)
+        except (TypeError, ValueError):
+            total = 0
+            done = 0
+        if total <= 0:
+            return ""
+
+        try:
+            window_manager = getattr(context, "window_manager", None)
+            if window_manager is None:
+                return format_progress_bar(done, total)
+
+            if not getattr(self, "_bg_progress_started", False):
+                begin = getattr(window_manager, "progress_begin", None)
+                if not callable(begin):
+                    return format_progress_bar(done, total)
+                begin(0, total)
+                self._bg_progress_started = True
+
+            update = getattr(window_manager, "progress_update", None)
+            if callable(update):
+                update(max(0, min(done, total)))
+            return format_progress_bar(done, total)
+        except Exception:
+            self._bg_progress_started = False
+            try:
+                return format_progress_bar(done, total)
+            except Exception:
+                return ""
+
+    def _end_progress_bar(self, context):
+        """结束原生进度条（success / cancel / error 三个收尾分支都会走到）；重复调用安全。"""
+        started = bool(getattr(self, "_bg_progress_started", False))
+        self._bg_progress_started = False
+        if not started:
+            return
+        try:
+            window_manager = getattr(context, "window_manager", None)
+            end = getattr(window_manager, "progress_end", None)
+            if callable(end):
+                end()
+        except Exception:
+            pass
+
+    def _sync_node_highlight(self, session):
+        """把后台导出的节点级进度画到蓝图上：正在执行=黄、已完成=绿。
+
+        节点名可能含中文 / 重名，按 ``session.stage_nodes`` 的名字精确取；
+        第一次改色前记录原 ``use_custom_color`` / ``color``，收尾由
+        ``_restore_node_colors`` 原样恢复。任何异常都静默（进度不能影响导出）。
+        """
+        try:
+            nodes_state = dict(getattr(session, "stage_nodes", None) or {})
+            if not nodes_state:
+                return
+
+            tree_name = str(getattr(session, "tree_name", "") or "")
+            tree = bpy.data.node_groups.get(tree_name) if tree_name else None
+            if tree is None:
+                return
+
+            records = getattr(self, "_bg_node_colors", None)
+            if records is None:
+                records = {}
+                self._bg_node_colors = records
+
+            for name, status in nodes_state.items():
+                if status not in ("running", "done"):
+                    continue
+                node = self._find_blueprint_node(tree, name)
+                if node is None:
+                    continue
+
+                if name not in records:
+                    records[name] = {
+                        "node": node,
+                        "use_custom_color": bool(getattr(node, "use_custom_color", False)),
+                        "color": self._node_color_tuple(node),
+                    }
+
+                color = (
+                    _BG_NODE_RUNNING_COLOR if status == "running" else _BG_NODE_DONE_COLOR
+                )
+                node.use_custom_color = True
+                node.color = self._node_color_for(node, color)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _find_blueprint_node(tree, name):
+        """按名字取蓝图节点：优先 ``nodes.get``（O(1)），否则线性兜底。"""
+        collection = getattr(tree, "nodes", None)
+        if collection is None:
+            return None
+
+        getter = getattr(collection, "get", None)
+        if callable(getter):
+            node = getter(name)
+            if node is not None:
+                return node
+
+        for candidate in collection or []:
+            if str(getattr(candidate, "name", "") or "") == name:
+                return candidate
+        return None
+
+    @staticmethod
+    def _node_color_tuple(node):
+        """取节点原色（保留 Blender 自身的维度：5.x 是 3 分量，旧版是 4 分量）。"""
+        try:
+            color = tuple(getattr(node, "color", ()) or ())
+        except Exception:
+            color = ()
+        try:
+            return tuple(float(value) for value in color[:4])
+        except (TypeError, ValueError):
+            return (0.0, 0.0, 0.0)
+
+    @staticmethod
+    def _node_color_for(node, rgb):
+        """按节点当前 ``color`` 的维度生成赋值序列（兼容 3 / 4 分量）。"""
+        try:
+            current = tuple(getattr(node, "color", ()) or ())
+        except Exception:
+            current = ()
+        values = tuple(float(value) for value in tuple(rgb)[:3])
+        if len(current) >= 4:
+            return values + (1.0,)
+        return values
+
+    def _restore_node_colors(self):
+        """恢复后台导出期间改过的节点颜色；重复调用安全。"""
+        records = getattr(self, "_bg_node_colors", None) or {}
+        self._bg_node_colors = None
+        for record in records.values():
+            try:
+                node = record.get("node")
+                if node is None:
+                    continue
+                node.use_custom_color = bool(record.get("use_custom_color", False))
+                node.color = record.get("color") or (0.0, 0.0, 0.0)
+            except Exception:
+                continue
+
+    def _open_background_output_folder(self, session):
+        """打开产物目录。
+
+        主进程的「本次导出蓝图」指针在 invoke 的 finally 里已还原，这里直接用
+        会话记录的输出目录（command_utils 走指针解析，会落到场景全局目录）。
+        """
+        try:
+            if not GlobalProterties.open_mod_folder_after_generate_mod():
+                return
+        except Exception:
+            return
+
+        output_dir = getattr(session, "output_dir", "")
+        try:
+            if output_dir and os.path.isdir(output_dir):
+                os.startfile(output_dir)
+                return
+        except Exception:
+            pass
+        CommandUtils.OpenGeneratedModFolder()
+
+    def _stop_background_timer(self, context):
+        self._end_progress_bar(context)
+        timer = getattr(self, "_bg_timer", None)
+        self._bg_timer = None
+        self._bg_session = None
+        self._restore_node_colors()
+        if timer is None:
+            return
+        try:
+            context.window_manager.event_timer_remove(timer)
+        except Exception:
+            pass
+
+
+class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
     """根据蓝图架构生成 Mod 文件的主导出 Blender 算子"""
     bl_idname = "ssmt.generate_mod_blueprint"
     bl_label = TR.translate("生成Mod")
@@ -84,17 +370,167 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
         return tree
 
     def invoke(self, context, event):
-        """弹窗确认导出目录中的配置表是否覆盖（含后处理节点时）
+        """入口分流：勾选「后台导出」时走后台实例 + modal 轮询，否则走原有同步路径
 
         _resolve_target_tree 会登记「本次导出使用的蓝图」（决定输出目录），
-        而走到 invoke 不代表一定会进入 execute（用户可以取消弹窗），
-        所以这里同样要用 try/finally 把这个指针还原，不能让它停在弹窗阶段。
+        而走到 invoke 不代表一定会进入 execute（用户可以取消弹窗；后台导出也会
+        在 invoke 阶段就把输出目录算进任务清单），所以这里同样要用 try/finally
+        把这个指针还原，不能让它停在弹窗 / 后台启动阶段。
         """
         previous_output_tree_name = GlobalConfig.get_output_blueprint_tree_name()
         try:
+            if GlobalProterties.is_background_export_enabled():
+                # 防重入：已有后台导出在跑时不再起第二个后台实例
+                if get_active_session() is not None:
+                    self.report({'WARNING'}, BACKGROUND_BUSY_MESSAGE)
+                    return {'CANCELLED'}
+                return self._invoke_background_export(context, event)
             return self._invoke_with_output_blueprint(context, event)
         finally:
             GlobalConfig.restore_output_blueprint_tree(previous_output_tree_name)
+
+    def _invoke_background_export(self, context, event):
+        """后台导出：保存工程快照 → 起干净后台实例跑完整导出 → modal 轮询进度。"""
+        GlobalConfig.read_from_main_json_ssmt4()
+
+        tree = self._resolve_target_tree(context)
+        if not tree:
+            self.report({'ERROR'}, "未找到当前蓝图，请在蓝图编辑器中点击 Generate Mod")
+            return {'CANCELLED'}
+
+        # 后台实例支持普通导出与直出导出。NTEMI 有独立导出器，仍回落到原有入口。
+        if GlobalConfig.logic_name == LogicName.NTEMI:
+            self.report({'WARNING'}, "NTEMI 导出不支持后台导出，已回落到同步导出")
+            return self._invoke_with_output_blueprint(context, event)
+
+        try:
+            session = self._create_background_session(tree)
+            started = session.start()
+        except Exception as error:
+            self.report({'ERROR'}, f"后台导出启动失败: {error}")
+            return {'CANCELLED'}
+
+        if not started:
+            self.report({'ERROR'}, session.error or "后台导出启动失败")
+            return {'CANCELLED'}
+
+        self._bg_session = session
+        self._bg_node_colors = {}
+        self._bg_progress_started = False
+        self._bg_timer = context.window_manager.event_timer_add(0.5, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        push_progress_header(session.progress_text())
+
+        LOG.info("")
+        LOG.info("📦 后台导出已启动（主界面不阻塞）")
+        LOG.info(f"   工程快照: {session.snapshot_path}")
+        LOG.info(f"   后台日志: {session.log_path}")
+        return {'RUNNING_MODAL'}
+
+    def _create_background_session(self, tree):
+        """按当前蓝图准备会话参数（与同步导出同一套轮次计划计算）。"""
+        has_shapekey_export = BlueprintExportHelper.has_shapekey_postprocess_node(tree)
+        max_shapekey_slot = 0
+        if has_shapekey_export:
+            max_shapekey_slot = BlueprintExportHelper.calculate_max_shapekey_slot_count(tree)
+            if max_shapekey_slot == 0:
+                has_shapekey_export = False
+
+        max_multi_file_count = BlueprintExportHelper.calculate_max_export_count(tree)
+        has_multi_file_export = BlueprintExportHelper.has_multi_file_export_nodes()
+
+        export_plan = self._build_export_round_plan(
+            has_shapekey_export=has_shapekey_export,
+            max_shapekey_slot=max_shapekey_slot,
+            has_multi_file_export=has_multi_file_export,
+            max_multi_file_count=max_multi_file_count,
+        )
+
+        direct_export = has_direct_export_mode(tree)
+        total_steps = self._estimate_background_total_steps(tree, export_plan, direct_export)
+
+        return BackgroundExportSession(
+            tree_name=tree.name,
+            output_dir=GlobalConfig.path_generate_mod_folder(),
+            round_plans=export_plan,
+            logic_name=GlobalConfig.logic_name,
+            workspace_name=GlobalConfig.get_workspace_name(),
+            has_shapekey_export=has_shapekey_export,
+            max_shapekey_slot=max_shapekey_slot,
+            has_multi_file_export=has_multi_file_export,
+            max_multi_file_count=max_multi_file_count,
+            direct_export=direct_export,
+            total_steps=total_steps,
+        )
+
+    #: 直出流程里固定执行的顶层阶段数：
+    #: Direct-CollectNodes / SetupState / CollectObjects / Preprocess /
+    #: BlueprintModel / BuildExporter / BaseExport
+    _DIRECT_BASE_STAGE_COUNT = 7
+    #: 传统形态键后处理节点的 bl_idname（非直出模式时还要额外跑附加轮次）
+    _SHAPEKEY_POSTPROCESS_IDNAME = "SSMTNode_PostProcess_ShapeKey"
+
+    def _estimate_background_total_steps(self, tree, export_plan, direct_export) -> int:
+        """预计算后台导出的总步骤数（进度条的分母）。
+
+        只算真正会被执行的步骤，worker 侧按同一份口径计步：
+
+        - 直出模式：顶层阶段数 + 后处理节点数 + 1(收尾)；
+          阶段清单 = 7 个基础阶段 + （有直出形态键节点时）形态键生成
+          + （有多文件节点时）生成多文件资源 + （需要传统形态键附加轮次时）附加轮次；
+        - 普通模式：轮次数 + 后处理节点数 + 1(收尾)。
+
+        任何异常都退化为「至少 1 步」，绝不让进度计算阻断导出启动。
+        """
+        try:
+            postprocess_nodes = self._collect_background_postprocess_nodes(tree)
+        except Exception:
+            postprocess_nodes = []
+
+        try:
+            if not direct_export:
+                return len(export_plan or []) + len(postprocess_nodes) + 1
+
+            try:
+                direct_shapekey_nodes = list(collect_direct_shapekey_nodes(tree) or [])
+            except Exception:
+                direct_shapekey_nodes = []
+            try:
+                direct_multifile_nodes = list(collect_direct_multifile_nodes(tree) or [])
+            except Exception:
+                direct_multifile_nodes = []
+
+            stage_count = self._DIRECT_BASE_STAGE_COUNT
+            if direct_shapekey_nodes:
+                stage_count += 1  # 直出-形态键生成
+            if direct_multifile_nodes:
+                stage_count += 1  # 直出-生成多文件资源
+            if direct_shapekey_nodes and self._needs_standard_shapekey_rounds(postprocess_nodes):
+                stage_count += 1  # 直出-形态键附加轮次
+            return stage_count + len(postprocess_nodes) + 1
+        except Exception:
+            return max(1, len(export_plan or []) + len(postprocess_nodes) + 1)
+
+    @staticmethod
+    def _collect_background_postprocess_nodes(tree) -> list:
+        """取导出链路上真正会执行的后处理节点（与直出用的是同一个收集函数）。"""
+        try:
+            return list(BlueprintExportHelper._collect_postprocess_nodes(tree) or [])
+        except Exception:
+            return []
+
+    @classmethod
+    def _needs_standard_shapekey_rounds(cls, postprocess_nodes) -> bool:
+        """是否存在未启用直出的形态键后处理节点（决定是否补跑传统附加轮次）。"""
+        try:
+            for node in postprocess_nodes or []:
+                if getattr(node, "bl_idname", "") != cls._SHAPEKEY_POSTPROCESS_IDNAME:
+                    continue
+                if not getattr(node, "direct_export_mode", False):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _invoke_with_output_blueprint(self, context, event):
         tree = self._resolve_target_tree(context)
@@ -593,7 +1029,7 @@ class SSMTGenerateModBlueprint(bpy.types.Operator):
                 f"第 {round_index} 轮导出的 Buffer 文件夹 {buffer_folder_name} 大小 ({current_size} 字节) 与首轮 ({reference_size} 字节) 不一致"
             )
 
-class SSMTQuickExportSelected(bpy.types.Operator):
+class SSMTQuickExportSelected(_BackgroundExportMixin, bpy.types.Operator):
     """快速局部导出选中的网格物体，无需复杂蓝图"""
     bl_idname = "ssmt.quick_export_selected"
     bl_label = TR.translate("快速局部导出")
@@ -603,6 +1039,70 @@ class SSMTQuickExportSelected(bpy.types.Operator):
     _NTEMI_QUICK_EXPORT_DISABLED_MESSAGE = (
         "NTEMI 已停用快速局部导出，请改用“NTMI ModImp Output”独立导出器。"
     )
+
+    def invoke(self, context, event):
+        """入口分流：勾选「后台导出」时起后台实例 + modal 轮询，否则走原有同步路径。"""
+        if not GlobalProterties.is_background_export_enabled():
+            return self.execute(context)
+
+        # 防重入：已有后台导出在跑时不再起第二个后台实例
+        if get_active_session() is not None:
+            self.report({'WARNING'}, BACKGROUND_BUSY_MESSAGE)
+            return {'CANCELLED'}
+
+        selected_meshes, _skipped_count = self._collect_selected_meshes(context)
+        if not selected_meshes:
+            self.report({'WARNING'}, "请先选择至少一个网格物体")
+            return {'CANCELLED'}
+
+        GlobalConfig.read_from_main_json_ssmt4()
+        # NTEMI 有独立导出器，快速导出不支持后台，回落到同步入口（与 Generate 一致）
+        if GlobalConfig.logic_name == LogicName.NTEMI:
+            return self.execute(context)
+
+        try:
+            session = self._create_quick_background_session(selected_meshes)
+            started = session.start()
+        except Exception as error:
+            self.report({'ERROR'}, f"后台导出启动失败: {error}")
+            return {'CANCELLED'}
+
+        if not started:
+            self.report({'ERROR'}, getattr(session, "error", "") or "后台导出启动失败")
+            return {'CANCELLED'}
+
+        self._bg_session = session
+        self._bg_node_colors = {}
+        self._bg_progress_started = False
+        self._bg_timer = context.window_manager.event_timer_add(0.5, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        push_progress_header(session.progress_text())
+
+        LOG.info("")
+        LOG.info("📦 快速局部导出已在后台启动（主界面不阻塞）")
+        LOG.info(f"   后台日志: {session.log_path}")
+        return {'RUNNING_MODAL'}
+
+    def _create_quick_background_session(self, selected_meshes):
+        """按选中的网格准备后台会话（manifest 里带 quick_export / object_names）。"""
+        object_names = [safe_object_name(obj) for obj in selected_meshes]
+        object_names = [name for name in object_names if name]
+
+        # 临时蓝图树只有 Object Info / Group / Output，不含后处理节点；
+        # 步骤口径：轮次 1 + 后处理节点 0 + 收尾 1
+        total_steps = 1 + 0 + 1
+
+        return BackgroundExportSession(
+            tree_name="",
+            output_dir=GlobalConfig.path_generate_mod_folder(),
+            round_plans=[dict(QUICK_EXPORT_ROUND_PLAN)],
+            logic_name=GlobalConfig.logic_name,
+            workspace_name=GlobalConfig.get_workspace_name(),
+            direct_export=False,
+            total_steps=total_steps,
+            quick_export=True,
+            object_names=object_names,
+        )
 
     def execute(self, context):
         selected_meshes, skipped_count = self._collect_selected_meshes(context)
@@ -636,17 +1136,7 @@ class SSMTQuickExportSelected(bpy.types.Operator):
 
             temp_tree = self._build_temp_blueprint_tree(selected_meshes)
 
-            round_plan = {
-                "round_index": 1,
-                "phase": "single",
-                "description": "快速局部导出",
-                "buffer_folder_name": "Meshes",
-                "export_index": 1,
-                "generate_ini": True,
-                "generate_classification_report": False,
-                "shapekey_mode": "unchanged",
-                "shapekey_slot_index": None,
-            }
+            round_plan = dict(QUICK_EXPORT_ROUND_PLAN)
 
             result = ExportRoundExecutor.execute_round(
                 tree=temp_tree,
@@ -685,12 +1175,7 @@ class SSMTQuickExportSelected(bpy.types.Operator):
 
     @staticmethod
     def _safe_object_name(obj) -> str:
-        if obj is None:
-            return ""
-        try:
-            return str(obj.name or "")
-        except (AttributeError, ReferenceError):
-            return ""
+        return safe_object_name(obj)
 
     @classmethod
     def _collect_selected_meshes(cls, context):
@@ -722,48 +1207,8 @@ class SSMTQuickExportSelected(bpy.types.Operator):
         return selected_meshes, skipped_count
 
     def _build_temp_blueprint_tree(self, objects):
-        tree_name = f"SSMT_QuickExport_{len(bpy.data.node_groups) + 1}"
-        tree = bpy.data.node_groups.new(name=tree_name, type='SSMTBlueprintTreeType')
-
-        group_node = tree.nodes.new('SSMTNode_Object_Group')
-        group_node.label = "Quick Export"
-        group_node.location = (300, 0)
-
-        output_node = tree.nodes.new('SSMTNode_Result_Output')
-        output_node.label = "Quick Export"
-        output_node.location = (650, 0)
-        tree.links.new(group_node.outputs[0], output_node.inputs[0])
-
-        current_y = 0
-        object_count = 0
-        for obj in objects:
-            obj_name = self._safe_object_name(obj)
-            if not obj_name:
-                continue
-            try:
-                object_id = str(obj.as_pointer())
-            except (AttributeError, ReferenceError):
-                continue
-
-            node = tree.nodes.new('SSMTNode_Object_Info')
-            node.object_name = obj_name
-            node.object_id = object_id
-            node.label = obj_name
-            node.location = (0, current_y)
-            current_y -= 180
-            object_count += 1
-
-            if group_node.inputs[-1].is_linked:
-                group_node.inputs.new('SSMTSocketObject', f"Input {len(group_node.inputs) + 1}")
-
-            tree.links.new(node.outputs[0], group_node.inputs[-1])
-
-        if object_count == 0:
-            raise ValueError("快速局部导出未能建立有效的物体节点")
-
-        group_node.location = (300, max(0, (object_count - 1) * -90))
-        output_node.location = (650, group_node.location.y)
-        return tree
+        """建临时蓝图树（实现抽到 ``export_background``，同步路径与后台 worker 共用）。"""
+        return build_quick_export_temp_tree(objects)
 
 
 def register():

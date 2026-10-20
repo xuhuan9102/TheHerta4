@@ -94,6 +94,8 @@ _FAKE_GLOBAL_PROTERTIES = types.SimpleNamespace(
     workspace_source_mode=lambda: "",
     use_specific_generate_mod_folder_path=lambda: False,
     generate_mod_folder_path=lambda: "",
+    # 后台导出开关：本文件只测同步链路，固定关闭
+    is_background_export_enabled=lambda: False,
 )
 _install_module(f"{PKG}.common.global_properties", GlobalProterties=_FAKE_GLOBAL_PROTERTIES)
 _install_module(f"{PKG}.common.global_key_count_helper", GlobalKeyCountHelper=types.SimpleNamespace(initialize=lambda: None))
@@ -109,6 +111,8 @@ _install_module(
     f"{PKG}.blueprint.direct_export",
     execute_direct_export=lambda **_kwargs: None,
     has_direct_export_mode=lambda _tree: False,
+    collect_direct_shapekey_nodes=lambda _tree: [],
+    collect_direct_multifile_nodes=lambda _tree: [],
 )
 _install_module(
     f"{PKG}.blueprint.export_helper",
@@ -136,6 +140,30 @@ _install_module(
     ExportRoundExecutor=types.SimpleNamespace(),
     ParallelExportCoordinator=types.SimpleNamespace(),
     ParallelExportError=RuntimeError,
+)
+# 后台导出只用于 invoke 分流；本文件测同步链路，给空壳即可
+_install_module(
+    f"{PKG}.blueprint.export_background",
+    BACKGROUND_BUSY_MESSAGE="已有后台导出在运行，请等它结束或按 ESC 取消",
+    BackgroundExportSession=types.SimpleNamespace(),
+    QUICK_EXPORT_ROUND_PLAN={
+        "round_index": 1,
+        "phase": "single",
+        "description": "快速局部导出",
+        "buffer_folder_name": "Meshes",
+        "export_index": 1,
+        "generate_ini": True,
+        "generate_classification_report": False,
+        "shapekey_mode": "unchanged",
+        "shapekey_slot_index": None,
+    },
+    build_quick_export_temp_tree=lambda _objects: None,
+    clear_active_session=lambda _session=None: None,
+    clear_progress_header=lambda: None,
+    format_progress_bar=lambda *_args, **_kwargs: "",
+    get_active_session=lambda: None,
+    push_progress_header=lambda _text: None,
+    safe_object_name=lambda obj: str(getattr(obj, "name", "") or ""),
 )
 _install_module(f"{PKG}.blueprint.sync", refresh_blueprint_sync_state=lambda **_kwargs: {"tree_count": 0, "updated_count": 0})
 

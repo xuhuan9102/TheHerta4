@@ -1465,6 +1465,8 @@ def draw_node_header(self, context):
     layout = self.layout
     row = layout.row(align=True)
     row.operator("ssmt.generate_mod_blueprint", text="导出", icon='EXPORT')
+    # 后台导出开关：默认开启；取消勾选才走旧的同步导出
+    layout.prop(context.scene.global_properties, "background_export_enabled")
 
 
 classes = (

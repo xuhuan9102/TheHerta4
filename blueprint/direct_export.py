@@ -8,6 +8,7 @@ from ..common.global_key_count_helper import GlobalKeyCountHelper
 from ..common.global_properties import GlobalProterties
 from ..utils.log_utils import LOG
 from ..utils.timer_utils import TimerUtils
+from . import export_progress
 from .direct_export_multifile import DirectMultiFileGenerator
 from .direct_export_shapekey import DirectShapeKeyGenerator
 from .export_helper import BlueprintExportHelper
@@ -47,6 +48,14 @@ def _get_sync_root_tree(node, context=None):
     if root_tree:
         return root_tree
     return getattr(node, "id_data", None)
+
+
+def _report_postprocess_node(node, status: str) -> None:
+    """后台导出时上报后处理节点进度；同步导出（没有进度文件）时静默。"""
+    try:
+        export_progress.report_node(str(getattr(node, "name", "") or ""), status)
+    except Exception:
+        pass
 
 
 def _prepare_postprocess_nodes(postprocess_nodes, name_mapping: dict[str, str] | None = None):
@@ -467,7 +476,15 @@ class DirectExportSession:
             elif has_shapekey:
                 LOG.info("Direct ShapeKey: skipped standard slot export; generating direct resources from Meshes0000 and preprocess records")
 
+            try:
+                export_progress.report_nodes(
+                    [str(getattr(node, "name", "") or "") for node in self.ordered_postprocess_nodes]
+                )
+            except Exception:
+                pass
+
             for postprocess_node in self.ordered_postprocess_nodes:
+                _report_postprocess_node(postprocess_node, export_progress.STATE_RUNNING)
                 if postprocess_node.bl_idname == "SSMTNode_PostProcess_ShapeKey":
                     if getattr(postprocess_node, "direct_export_mode", False):
                         # 直出模式下直接从 Meshes0000 和前处理记录构造 ShapeKey 资源。
@@ -483,6 +500,7 @@ class DirectExportSession:
                         execute_postprocess = getattr(postprocess_node, "execute_postprocess", None)
                         if callable(execute_postprocess):
                             execute_postprocess(mod_export_path)
+                    _report_postprocess_node(postprocess_node, export_progress.STATE_DONE)
                     continue
 
                 if postprocess_node.bl_idname == "SSMTNode_PostProcess_MultiFile":
@@ -499,11 +517,13 @@ class DirectExportSession:
                         execute_postprocess = getattr(postprocess_node, "execute_postprocess", None)
                         if callable(execute_postprocess):
                             execute_postprocess(mod_export_path)
+                    _report_postprocess_node(postprocess_node, export_progress.STATE_DONE)
                     continue
 
                 execute_postprocess = getattr(postprocess_node, "execute_postprocess", None)
                 if callable(execute_postprocess):
                     execute_postprocess(mod_export_path)
+                _report_postprocess_node(postprocess_node, export_progress.STATE_DONE)
 
         finally:
             try:

@@ -516,6 +516,10 @@ class PanelBasicInformation(bpy.types.Panel):
         )
         generate_operator.blueprint_name = selected_blueprint_name
 
+        # 后台导出（默认关）：勾选后生成 Mod 走「快照 + 干净后台实例」，主界面不阻塞；
+        # 取消勾选时行为与原来完全一致（同步导出）。
+        blueprint_box.prop(global_properties, "background_export_enabled", icon='RENDER_STILL')
+
         layout.separator()
 
         layout.operator(SSMTQuickExportSelected.bl_idname, text="快速局部导出", icon='EXPORT')

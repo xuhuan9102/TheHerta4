@@ -146,6 +146,16 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    background_export_enabled: bpy.props.BoolProperty(
+        name="后台导出（不阻塞界面）",
+        description=(
+            "默认开启：生成 Mod 会先保存一份工程副本，再交给独立的干净 Blender 后台实例"
+            "执行完整导出（各轮次 + 后处理），主界面不阻塞，状态栏显示进度，按 ESC 可取消；"
+            "取消勾选则沿用原有的同步导出（导出期间 Blender 会卡住直到结束）"
+        ),
+        default=True,
+    ) # type: ignore
+
     zzz_use_slot_fix: bpy.props.BoolProperty(
         name="槽位风格贴图使用SlotFix技术",
         description="仅适用于槽位风格贴图，勾选后，特定名称标记的贴图将使用SlotFix风格，能一定程度上解决槽位风格贴图跨槽位的问题，跨Pixel槽位指的是在前一个DrawCall中是ps-t3但是下一个DrawCall变为ps-t5这种情况，但由于负责维护的人也在偷懒所以并不可靠",
@@ -484,6 +494,16 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def open_mod_folder_after_generate_mod(cls):
         return cls._instance().open_mod_folder_after_generate_mod
+
+    @classmethod
+    def is_background_export_enabled(cls) -> bool:
+        """后台导出开关（默认关＝沿用原有同步导出，行为完全不变）。
+
+        注意：不能叫 ``background_export_enabled``——同名类方法会被 PropertyGroup
+        注册时的 ``background_export_enabled`` BoolProperty 描述符覆盖，类上访问拿到
+        的是描述符/bool，调用会 ``'bool' object is not callable``（2026-10-20 实测）。
+        """
+        return cls._bool_attr("background_export_enabled", False)
 
     @classmethod
     def zzz_use_slot_fix(cls):

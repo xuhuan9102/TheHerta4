@@ -283,7 +283,7 @@ class SKE_AutomationPipeline:
             self._wait_for_step_delay()
 
             print("  [Export] 调用 SSMT 导出...")
-            bpy.ops.ssmt.generate_mod_blueprint(node_tree_name=self.props.ske_node_tree_name)
+            bpy.ops.ssmt.generate_mod_blueprint('INVOKE_DEFAULT', blueprint_name=self.props.ske_node_tree_name)
             print("  [Export] 导出命令执行完毕。")
             self._wait_for_step_delay()
 
@@ -326,7 +326,7 @@ class SKE_AutomationPipeline:
                 self._wait_for_step_delay()
 
                 print("  [Export] 调用 SSMT 导出...")
-                bpy.ops.ssmt.generate_mod_blueprint(node_tree_name=self.props.ske_node_tree_name)
+                bpy.ops.ssmt.generate_mod_blueprint('INVOKE_DEFAULT', blueprint_name=self.props.ske_node_tree_name)
                 print("  [Export] 导出命令执行完毕。")
                 self._wait_for_step_delay()
 

@@ -79,6 +79,20 @@ class FakeImage:
         self.reload_count += 1
 
 
+class _FakeArea:
+    """最小 area 桩：只保留进度推送会碰到的那两个方法。"""
+
+    def __init__(self):
+        self.headers = []
+        self.redraws = 0
+
+    def header_text_set(self, text):
+        self.headers.append(text)
+
+    def tag_redraw(self):
+        self.redraws += 1
+
+
 def _write_png(path, bit_depth=8, gama=None, srgb=False):
     """写一个最小 PNG（IHDR + 可选 gAMA/sRGB + IEND），供位深与色彩元数据判读。"""
 
@@ -142,7 +156,18 @@ class DDSToPNGTests(unittest.TestCase):
         )
         _registered_timers.clear()
         dds_to_png._AUTO_JOB.update(
-            {"images": None, "force": False, "converted": 0, "skipped": 0, "failed": 0}
+            {
+                "images": None,
+                "force": False,
+                "converted": 0,
+                "skipped": 0,
+                "failed": 0,
+                "total": 0,
+                "processed": 0,
+                "current": "",
+                "active": False,
+                "started_at": 0.0,
+            }
         )
         # find_texconv 是模块级名字，patch 它即可，不碰真实 Toolset 目录
         patcher = mock.patch.object(dds_to_png, "find_texconv", return_value="texconv.exe")
@@ -358,6 +383,111 @@ class DDSToPNGTests(unittest.TestCase):
         self.assertTrue(dds_to_png.schedule_auto_convert())
         self.assertFalse(dds_to_png.schedule_auto_convert())
         self.assertEqual(1, len(_registered_timers))
+
+    def test_progress_snapshot_is_none_before_any_run(self):
+        """从未启动过时 progress_snapshot 返回 None，面板据此不画任何进度行"""
+        self.assertIsNone(dds_to_png.progress_snapshot())
+
+    def test_schedule_initializes_progress_snapshot(self):
+        """调度时把总数 / 已处理 / 当前文件 / 活动状态写进快照"""
+        _fake_bpy.context.scene.texture_tools_props = types.SimpleNamespace(
+            dds_auto_convert_png_after_import=True
+        )
+        paths = [self._make_dds("S%d-LightMap.dds" % i) for i in range(4)]
+        _fake_bpy.data.images = [FakeImage(p) for p in paths]
+
+        self.assertTrue(dds_to_png.schedule_auto_convert())
+        snapshot = dds_to_png.progress_snapshot()
+
+        self.assertEqual(4, snapshot["total"])
+        self.assertEqual(0, snapshot["processed"])
+        self.assertTrue(snapshot["active"])
+        self.assertEqual("", snapshot["current"])
+        self.assertGreater(dds_to_png._AUTO_JOB["started_at"], 0.0)
+
+    def test_auto_tick_advances_progress_and_finishes(self):
+        """每帧处理后 processed 递增、current 跟随；清空后 active=False 并汇总计数"""
+        _fake_bpy.context.scene.texture_tools_props = types.SimpleNamespace(
+            dds_auto_convert_png_after_import=True
+        )
+        paths = [self._make_dds("T%d-LightMap.dds" % i) for i in range(3)]
+        _fake_bpy.data.images = [FakeImage(p) for p in paths]
+
+        self.assertTrue(dds_to_png.schedule_auto_convert())
+        tick, _interval = _registered_timers[0]
+        expected_names = {os.path.basename(p) for p in paths}
+
+        with mock.patch.object(dds_to_png.subprocess, "run", side_effect=_fake_texconv_run):
+            for step in range(1, 4):
+                self.assertEqual(dds_to_png._AUTO_INTERVAL, tick())
+                snapshot = dds_to_png.progress_snapshot()
+                self.assertTrue(snapshot["active"])
+                self.assertEqual(3, snapshot["total"])
+                self.assertEqual(step, snapshot["processed"])
+                self.assertIn(snapshot["current"], expected_names)
+            self.assertIsNone(tick())
+
+        snapshot = dds_to_png.progress_snapshot()
+        self.assertFalse(snapshot["active"])
+        self.assertEqual(3, snapshot["processed"])
+        self.assertEqual(3, snapshot["converted"])
+        self.assertEqual(0, snapshot["skipped"])
+        self.assertEqual(0, snapshot["failed"])
+        self.assertEqual("", snapshot["current"])
+
+    def test_push_progress_ui_is_silent_without_window_manager(self):
+        """fake bpy 没有 window_manager：推送进度不能抛异常（headless 也安全）"""
+        dds_to_png._AUTO_JOB.update(
+            {"total": 2, "processed": 1, "current": "A-LightMap.dds", "active": True}
+        )
+        dds_to_png._push_progress_ui()  # 不抛即通过
+
+    def test_push_progress_ui_writes_single_status_text(self):
+        """只写一处提示（优先状态栏；没有 workspace 时只写第一个 area），不再逐 area 塞 header"""
+        area_a, area_b = _FakeArea(), _FakeArea()
+        window = types.SimpleNamespace(screen=types.SimpleNamespace(areas=[area_a, area_b]))
+        _fake_bpy.context.window_manager = types.SimpleNamespace(windows=[window])
+        self.addCleanup(lambda: _fake_bpy.context.__dict__.pop("window_manager", None))
+
+        dds_to_png._AUTO_JOB.update(
+            {"total": 57, "processed": 5, "current": "abc-132-0-LightMap.dds", "active": True}
+        )
+        dds_to_png._push_progress_ui()
+
+        self.assertEqual(["DDS→PNG 5/57 abc-132-0-LightMap.dds"], area_a.headers)
+        self.assertEqual(1, area_a.redraws)
+        self.assertEqual([], area_b.headers)
+
+    def test_progress_header_truncates_long_filename(self):
+        """header 文本要短：超长文件名截断到 40 字符以内，别把状态栏挤爆"""
+        area = _FakeArea()
+        window = types.SimpleNamespace(screen=types.SimpleNamespace(areas=[area]))
+        _fake_bpy.context.window_manager = types.SimpleNamespace(windows=[window])
+        self.addCleanup(lambda: _fake_bpy.context.__dict__.pop("window_manager", None))
+
+        long_name = "x" * 80 + ".dds"
+        dds_to_png._AUTO_JOB.update(
+            {"total": 3, "processed": 1, "current": long_name, "active": True}
+        )
+        dds_to_png._push_progress_ui()
+
+        header = area.headers[0]
+        shown = header.split(" ", 2)[2]
+        self.assertLessEqual(len(shown), dds_to_png._PROGRESS_NAME_LIMIT)
+        self.assertTrue(shown.endswith("…"))
+
+    def test_push_progress_ui_swallows_broken_areas(self):
+        """某个 area 没实现 header_text_set 时不得中断整个导入流程"""
+        class _BrokenArea:
+            pass
+
+        good = _FakeArea()
+        window = types.SimpleNamespace(screen=types.SimpleNamespace(areas=[_BrokenArea(), good]))
+        _fake_bpy.context.window_manager = types.SimpleNamespace(windows=[window])
+        self.addCleanup(lambda: _fake_bpy.context.__dict__.pop("window_manager", None))
+
+        dds_to_png._push_progress_ui()
+        self.assertEqual(1, len(good.headers))
 
     def test_is_hdr_dds_only_matches_float_formats(self):
         """HDR 判据：带 DX10 头的浮点格式（BC6H=95）为真，sRGB 整型与 legacy 为假"""

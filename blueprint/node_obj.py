@@ -408,6 +408,8 @@ class SSMTNode_Result_Output(SSMTNodeBase):
 
     def draw_buttons(self, context, layout):
         layout.operator("ssmt.generate_mod_blueprint", text="Generate Mod", icon='EXPORT')
+        # 后台导出开关放在导出按钮正下方：默认开启，取消勾选才走旧的同步导出
+        layout.prop(context.scene.global_properties, "background_export_enabled")
         
         if GlobalConfig.logic_name == LogicName.WWMI:
             layout.prop(context.scene.global_properties, "ignore_muted_shape_keys")

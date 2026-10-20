@@ -25,6 +25,7 @@ PNG 后 Blender 能正常读，控制台也不再刷这些警告。
 import os
 import struct
 import subprocess
+import time
 
 import bpy
 
@@ -174,13 +175,21 @@ def select_png_command(attrs):
 
 
 
-# 自动转换任务的分帧状态；None 表示当前没有任务在跑。
+# 自动转换任务的分帧状态；images 为 None 表示当前没有任务在跑。
+# total / processed / current / active / started_at 是给进度提示用的（见
+# :func:`progress_snapshot` 与 :func:`draw_progress`）。timer 与界面重绘在同一个
+# 主线程上，所以面板直接读这一份 dict，不需要额外同步。
 _AUTO_JOB = {
     "images": None,
     "force": False,
     "converted": 0,
     "skipped": 0,
     "failed": 0,
+    "total": 0,
+    "processed": 0,
+    "current": "",
+    "active": False,
+    "started_at": 0.0,
 }
 
 
@@ -456,6 +465,118 @@ def convert_all(force=False, reporter=None):
     return stats
 
 
+#: 进度文本里「当前文件」最多显示的字符数，太长会把 header 挤爆。
+_PROGRESS_NAME_LIMIT = 40
+
+
+def progress_snapshot():
+    """返回自动转换的进度快照；从未启动过时返回 None。
+
+    面板每帧重绘都会调用它，所以只做浅拷贝、不抛异常（``bpy`` 没起来时也能用）。
+    """
+    job = _AUTO_JOB
+    total = int(job.get("total") or 0)
+    processed = int(job.get("processed") or 0)
+    active = bool(job.get("active"))
+    if not total and not processed and not active:
+        return None
+    return {
+        "active": active,
+        "total": total,
+        "processed": processed,
+        "current": str(job.get("current") or ""),
+        "converted": int(job.get("converted") or 0),
+        "skipped": int(job.get("skipped") or 0),
+        "failed": int(job.get("failed") or 0),
+    }
+
+
+def _truncate_name(name):
+    """把文件名截断到 :data:`_PROGRESS_NAME_LIMIT` 个字符（末尾用省略号）。"""
+    if len(name) <= _PROGRESS_NAME_LIMIT:
+        return name
+    return name[:_PROGRESS_NAME_LIMIT - 1] + "…"
+
+
+def _progress_text():
+    """进度提示文本：进行中 ``DDS→PNG 5/57 文件名``，结束后给一行汇总。"""
+    job = _AUTO_JOB
+    if not job.get("active"):
+        return "DDS→PNG 完成：转换 %d / 沿用 %d / 失败 %d" % (
+            int(job.get("converted") or 0),
+            int(job.get("skipped") or 0),
+            int(job.get("failed") or 0),
+        )
+    text = "DDS→PNG %d/%d" % (int(job.get("processed") or 0), int(job.get("total") or 0))
+    current = str(job.get("current") or "")
+    if current:
+        text += " " + _truncate_name(current)
+    return text
+
+
+def _set_status_text(text):
+    """把提示文本写到**一处**：优先状态栏（workspace.status_text_set），否则单个 area 的 header。
+
+    为什么不再逐 area 写 header：Blender 的 workspace 状态栏本来就是全窗口唯一的一条提示位，
+    逐 area 写会让每个编辑器顶部都出现同一句话，非常吵（2026-10-20 用户明确要求）。
+    ``status_text_set`` 不可用时才退回到「第一个 3D 视图（没有就第一个 area）」的 header。
+    """
+    try:
+        workspace = getattr(bpy.context, "workspace", None)
+        setter = getattr(workspace, "status_text_set", None) if workspace is not None else None
+        if callable(setter):
+            setter(text)
+            return
+    except Exception:
+        pass
+    try:
+        window_manager = getattr(bpy.context, "window_manager", None)
+        for window in getattr(window_manager, "windows", None) or []:
+            screen = getattr(window, "screen", None)
+            areas = list(getattr(screen, "areas", None) or [])
+            # 先找 3D 视图；写不进去（桩/坏 area）就继续找下一个，写到成功为止
+            for area in areas:
+                if getattr(area, "type", "") != "VIEW_3D":
+                    continue
+                try:
+                    area.header_text_set(text)
+                    area.tag_redraw()
+                    return
+                except Exception:
+                    continue
+            for area in areas:
+                try:
+                    area.header_text_set(text)
+                    area.tag_redraw()
+                    return
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+
+def _push_progress_ui():
+    """把进度写到状态栏（Blender 唯一提示位）；异常一律静默。
+
+    转换由 timer 驱动，没有 operator 的 ``self.report`` 可用；状态栏文本是 Blender
+    自带的提示显示，在 timer 里改不阻塞主线程，也不用额外注册面板或属性。
+    无窗口（headless / 测试桩）时直接返回。
+    """
+    try:
+        _set_status_text(_progress_text())
+    except Exception:
+        pass
+
+
+def _clear_progress_header():
+    """完成后把状态栏上的汇总文本撤掉（显示几秒后自动清除）；异常静默。"""
+    try:
+        _set_status_text(None)
+    except Exception:
+        pass
+    return None
+
+
 def _get_props():
     """取 texture_tools_props；timer 里 bpy.context 可能没有 scene，用首个场景兜底。"""
     try:
@@ -482,13 +603,25 @@ def _auto_tick():
             f"沿用已有 PNG {job['skipped']} 个，失败 {job['failed']} 个。"
         )
         job["images"] = None
+        job["active"] = False
+        job["current"] = ""
+        _push_progress_ui()
+        # 汇总只在 header 上留几秒，随后自动撤掉，不长期占着视口顶部。
+        try:
+            bpy.app.timers.register(_clear_progress_header, first_interval=6.0)
+        except Exception:
+            pass
         return None
 
     image, dds_path = images.pop()
+    job["current"] = os.path.basename(dds_path)
+    _push_progress_ui()  # 先亮出正在处理的那张，长转换期间也能看见当前文件
     status, detail = process_one(image, dds_path, force=job["force"])
     job[status] += 1
+    job["processed"] += 1
     if status == "failed":
         print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 转换失败：{detail}")
+    _push_progress_ui()
     return _AUTO_INTERVAL
 
 
@@ -511,9 +644,15 @@ def schedule_auto_convert(context=None, force=False):
             "converted": 0,
             "skipped": 0,
             "failed": 0,
+            "total": len(targets),
+            "processed": 0,
+            "current": "",
+            "active": True,
+            "started_at": time.time(),
         }
     )
     print(f"{_LOG_PREFIX} 检测到 {len(targets)} 个 DDS 引用，开始自动转换为 PNG。")
+    _push_progress_ui()
     # 用 timer 而不是当场执行：导入算子还没返回，此时长耗时会卡住整个导入。
     bpy.app.timers.register(_auto_tick, first_interval=0.5)
     return True
