@@ -377,6 +377,7 @@ class DirectShapeKeySamplingMixin:
                     position_stride = runtime_info["position_stride"]
                     base_coords = None
                     if sampled_basis_coords is not None:
+                        # 元素对象由 position_element_cache 持有，id 在本次调用内稳定。
                         base_coords_key = (base_slice_key, id(position_element))
                         base_coords = base_coords_cache.get(base_coords_key, not_cached)
                         if base_coords is not_cached:

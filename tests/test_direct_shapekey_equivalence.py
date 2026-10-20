@@ -155,8 +155,8 @@ class _RecordedEquivalenceHarness(sampling_module.DirectShapeKeySamplingMixin):
     def _resolve_object_export_context_with_merged_members(self, _runtime_info, _obj_name):
         return self.object_context
 
-    def _resolve_recorded_shape_key_data(self, obj_name, shapekey_name, object_context, source_object_map):
-        del obj_name, shapekey_name, object_context, source_object_map
+    def _resolve_recorded_shape_key_data_from_records(self, resolved_records, shapekey_name):
+        del resolved_records, shapekey_name
         coords, basis_coords, loop_vertex_indices = self.recorded_data
         return coords, basis_coords, loop_vertex_indices, "RecordedObject"
 
