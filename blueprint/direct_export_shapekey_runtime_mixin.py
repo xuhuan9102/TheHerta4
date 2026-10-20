@@ -414,24 +414,38 @@ class DirectShapeKeyRuntimeMixin:
                         yield candidate_name, start_v, end_v, label
 
     def _build_hash_slot_data_map(self, unique_hashes, slot_to_name_to_objects):
+        # 每个对象名只做一次哈希/前缀解析（旧实现对每个 hash 都重新解析一遍，
+        # 调用次数是 哈希数 × 槽位数 × 对象数），再按前缀一次性分组。
+        obj_prefix_cache = {}
+        for name_data in slot_to_name_to_objects.values():
+            for objects in name_data.values():
+                for obj_name in objects:
+                    if obj_name in obj_prefix_cache:
+                        continue
+                    obj_hash = self.node._extract_hash_from_name(obj_name)
+                    obj_prefix_cache[obj_name] = (
+                        self.node._extract_hash_prefix(obj_hash) if obj_hash else None
+                    )
+
+        # prefix -> {slot: {name: [obj_name, ...]}}；前缀为 None 的对象也照旧参与
+        # 与 logical_prefix 为 None 的 hash 的匹配（保持旧实现的 == 语义）。
+        prefix_to_slot_data = {}
+        for slot, name_data in slot_to_name_to_objects.items():
+            for name, objects in name_data.items():
+                for obj_name in objects:
+                    obj_prefix = obj_prefix_cache[obj_name]
+                    slot_entries = prefix_to_slot_data.setdefault(obj_prefix, {}).setdefault(slot, {})
+                    slot_entries.setdefault(name, []).append(obj_name)
+
         hash_slot_data_map = {}
         for logical_hash in unique_hashes:
             logical_prefix = self.node._extract_hash_prefix(logical_hash)
-            hash_slot_data = {}
-            for slot, name_data in slot_to_name_to_objects.items():
-                slot_entries = {}
-                for name, objects in name_data.items():
-                    matched_objects = []
-                    for obj_name in objects:
-                        obj_hash = self.node._extract_hash_from_name(obj_name)
-                        obj_prefix = self.node._extract_hash_prefix(obj_hash) if obj_hash else None
-                        if obj_prefix == logical_prefix:
-                            matched_objects.append(obj_name)
-                    if matched_objects:
-                        slot_entries[name] = matched_objects
-                if slot_entries:
-                    hash_slot_data[slot] = slot_entries
-            hash_slot_data_map[logical_hash] = hash_slot_data
+            grouped_slot_data = prefix_to_slot_data.get(logical_prefix, {})
+            # 每个 hash 拿一份独立的 dict/list，避免同前缀的多个 hash 共享可变容器。
+            hash_slot_data_map[logical_hash] = {
+                slot: {name: list(objects) for name, objects in slot_data.items()}
+                for slot, slot_data in grouped_slot_data.items()
+            }
         return hash_slot_data_map
 
     def _filter_hash_slot_data_map_by_overrides(self, hash_slot_data_map, slot_position_overrides):

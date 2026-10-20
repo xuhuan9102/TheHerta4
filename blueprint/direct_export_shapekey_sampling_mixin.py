@@ -207,15 +207,26 @@ class DirectShapeKeySamplingMixin:
 
         return candidate_names
 
-    def _resolve_recorded_shape_key_data(self, obj_name, shapekey_name, object_context, source_object_map):
+    def _iter_recorded_object_records(self, obj_name, object_context, source_object_map):
+        """按候选名顺序取出该对象命中且非空的记录列表。
+
+        命中顺序与原实现逐候选名查字典完全一致，只是把候选名生成与字典查找
+        从「每个 (对象, 形态键)」降到「每个对象」一次。
+        """
         records = BlueprintExportHelper.get_direct_shapekey_position_records()
         if not records:
-            return None
+            return []
 
+        resolved_records = []
         for candidate_name in self._iter_record_candidate_names(obj_name, object_context, source_object_map):
             record = records.get(candidate_name)
             if not record:
                 continue
+            resolved_records.append((candidate_name, record))
+        return resolved_records
+
+    def _resolve_recorded_shape_key_data_from_records(self, resolved_records, shapekey_name):
+        for candidate_name, record in resolved_records:
             coords = (record.get("shape_keys", {}) or {}).get(shapekey_name)
             basis_coords = record.get("basis_coords")
             loop_vertex_indices = record.get("loop_vertex_indices")
@@ -223,11 +234,32 @@ class DirectShapeKeySamplingMixin:
                 return coords, basis_coords, loop_vertex_indices, candidate_name
         return None
 
+    def _resolve_recorded_shape_key_data(self, obj_name, shapekey_name, object_context, source_object_map):
+        resolved_records = self._iter_recorded_object_records(obj_name, object_context, source_object_map)
+        return self._resolve_recorded_shape_key_data_from_records(resolved_records, shapekey_name)
+
+    def _build_preprocess_record_object_state(self, object_context):
+        return {
+            "local_loop_indices": np.asarray(object_context.get("local_loop_indices", []), dtype=np.int32),
+            "export_indices": np.asarray(object_context.get("export_indices", []), dtype=np.int32),
+            "export_indices_key": None,
+            "loop_state": None,
+        }
+
     def _build_slot_position_overrides_from_preprocess_records(self, slot_to_name_to_objects, calculated_ranges, runtime_infos, source_object_map):
         slot_position_overrides = defaultdict(dict)
         prefix_to_runtime_info = {}
         base_slice_cache = {}
+        base_coords_cache = {}
         skip_reason_counts = defaultdict(lambda: defaultdict(int))
+        # 同一对象会在大量槽位里重复出现：下面这些缓存全部是本次调用的局部状态，
+        # 只消除重复解析/重复取样，不跨调用保留。
+        not_cached = object()
+        object_context_cache = {}
+        object_state_cache = {}
+        object_prefix_cache = {}
+        position_element_cache = {}
+        recorded_records_cache = {}
 
         for logical_hash, runtime_info in runtime_infos.items():
             logical_prefix = self.node._extract_hash_prefix(logical_hash)
@@ -240,94 +272,156 @@ class DirectShapeKeySamplingMixin:
                     if obj_name not in calculated_ranges:
                         continue
 
-                    obj_hash = self.node._extract_hash_from_name(obj_name)
-                    obj_prefix = self.node._extract_hash_prefix(obj_hash) if obj_hash else None
+                    obj_prefix = object_prefix_cache.get(obj_name, not_cached)
+                    if obj_prefix is not_cached:
+                        obj_hash = self.node._extract_hash_from_name(obj_name)
+                        obj_prefix = self.node._extract_hash_prefix(obj_hash) if obj_hash else None
+                        object_prefix_cache[obj_name] = obj_prefix
                     runtime_info = prefix_to_runtime_info.get(obj_prefix)
                     if runtime_info is None:
                         skip_reason_counts[obj_prefix]["missing_runtime_info"] += 1
                         continue
 
-                    object_context = self._resolve_object_export_context_with_merged_members(runtime_info, obj_name)
+                    object_context = object_context_cache.get(obj_name, not_cached)
+                    if object_context is not_cached:
+                        object_context = self._resolve_object_export_context_with_merged_members(runtime_info, obj_name)
+                        object_context_cache[obj_name] = object_context
                     if object_context is None:
                         skip_reason_counts[obj_prefix]["missing_object_context"] += 1
                         continue
 
-                    recorded_data = self._resolve_recorded_shape_key_data(
-                        obj_name=obj_name,
-                        shapekey_name=shapekey_name,
-                        object_context=object_context,
-                        source_object_map=source_object_map,
-                    )
+                    resolved_records = recorded_records_cache.get(obj_name, not_cached)
+                    if resolved_records is not_cached:
+                        resolved_records = self._iter_recorded_object_records(
+                            obj_name,
+                            object_context,
+                            source_object_map,
+                        )
+                        recorded_records_cache[obj_name] = resolved_records
+                    recorded_data = self._resolve_recorded_shape_key_data_from_records(resolved_records, shapekey_name)
                     if recorded_data is None:
                         skip_reason_counts[obj_prefix]["missing_record"] += 1
                         continue
 
-                    coords, basis_coords, loop_vertex_indices, _record_name = recorded_data
-                    local_loop_indices = np.asarray(object_context.get("local_loop_indices", []), dtype=np.int32)
-                    export_indices = np.asarray(object_context.get("export_indices", []), dtype=np.int32)
+                    object_state = object_state_cache.get(obj_name, not_cached)
+                    if object_state is not_cached:
+                        object_state = self._build_preprocess_record_object_state(object_context)
+                        object_state_cache[obj_name] = object_state
+
+                    coords, basis_coords, record_loop_vertex_indices, _record_name = recorded_data
+                    local_loop_indices = object_state["local_loop_indices"]
+                    export_indices = object_state["export_indices"]
                     if local_loop_indices.size == 0 or export_indices.size == 0:
                         skip_reason_counts[obj_prefix]["empty_indices"] += 1
                         continue
 
-                    loop_vertex_indices = np.asarray(loop_vertex_indices, dtype=np.int32)
-                    if int(local_loop_indices.max()) >= len(loop_vertex_indices):
-                        raise ShapeKeyDirectExportError(
-                            f"槽位 {slot_index}: 物体 '{obj_name}' 的形态键记录 loop 映射越界"
+                    loop_state = object_state["loop_state"]
+                    if loop_state is None or loop_state[0] is not record_loop_vertex_indices:
+                        loop_vertex_indices = np.asarray(record_loop_vertex_indices, dtype=np.int32)
+                        if int(local_loop_indices.max()) >= len(loop_vertex_indices):
+                            raise ShapeKeyDirectExportError(
+                                f"槽位 {slot_index}: 物体 '{obj_name}' 的形态键记录 loop 映射越界"
+                            )
+                        sampled_vertex_indices = loop_vertex_indices[local_loop_indices]
+                        sampled_vertex_max = (
+                            int(sampled_vertex_indices.max()) if sampled_vertex_indices.size else -1
                         )
-                    sampled_vertex_indices = loop_vertex_indices[local_loop_indices]
+                        loop_state = (
+                            record_loop_vertex_indices,
+                            loop_vertex_indices,
+                            sampled_vertex_indices,
+                            sampled_vertex_max,
+                        )
+                        object_state["loop_state"] = loop_state
+                    else:
+                        loop_vertex_indices = loop_state[1]
+                        sampled_vertex_indices = loop_state[2]
+                        sampled_vertex_max = loop_state[3]
+
                     coords = np.asarray(coords, dtype=np.float32)
-                    if sampled_vertex_indices.size and int(sampled_vertex_indices.max()) >= len(coords):
+                    if sampled_vertex_indices.size and sampled_vertex_max >= len(coords):
                         raise ShapeKeyDirectExportError(
                             f"槽位 {slot_index}: 物体 '{obj_name}' 的形态键记录 vertex 映射越界"
                         )
                     sampled_basis_coords = None
                     if basis_coords is not None:
                         basis_coords = np.asarray(basis_coords, dtype=np.float32)
-                        if sampled_vertex_indices.size and int(sampled_vertex_indices.max()) >= len(basis_coords):
+                        if sampled_vertex_indices.size and sampled_vertex_max >= len(basis_coords):
                             raise ShapeKeyDirectExportError(
                                 f"槽位 {slot_index}: 物体 '{obj_name}' 的 Basis 记录 vertex 映射越界"
                             )
                         sampled_basis_coords = basis_coords[sampled_vertex_indices]
 
-                    d3d11_game_type = object_context.get("d3d11_game_type")
-                    position_element = self._get_position_element_from_game_type(d3d11_game_type)
+                    position_element = position_element_cache.get(obj_name, not_cached)
+                    if position_element is not_cached:
+                        position_element = self._get_position_element_from_game_type(object_context.get("d3d11_game_type"))
+                        position_element_cache[obj_name] = position_element
                     if position_element is None:
                         skip_reason_counts[obj_prefix]["missing_position_element"] += 1
                         continue
 
-                    export_indices_key = tuple(int(index) for index in export_indices.tolist())
-                    base_slice = base_slice_cache.get((runtime_info["logical_hash"], export_indices_key))
+                    export_indices_key = object_state["export_indices_key"]
+                    if export_indices_key is None:
+                        export_indices_key = tuple(int(index) for index in export_indices.tolist())
+                        object_state["export_indices_key"] = export_indices_key
+                    base_slice_key = (runtime_info["logical_hash"], export_indices_key)
+                    base_slice = base_slice_cache.get(base_slice_key)
                     if base_slice is None:
                         base_slice = _extract_position_bytes_by_indices(
                             runtime_info["base_bytes"],
                             runtime_info["position_stride"],
                             export_indices,
                         )
-                        base_slice_cache[(runtime_info["logical_hash"], export_indices_key)] = base_slice
+                        base_slice_cache[base_slice_key] = base_slice
 
-                    position_bytes = self._compose_position_bytes_from_recorded_coords(
+                    position_stride = runtime_info["position_stride"]
+                    base_coords = None
+                    if sampled_basis_coords is not None:
+                        base_coords_key = (base_slice_key, id(position_element))
+                        base_coords = base_coords_cache.get(base_coords_key, not_cached)
+                        if base_coords is not_cached:
+                            base_coords = self._extract_position_coords_from_base_slice(
+                                base_slice,
+                                position_element,
+                                position_stride=position_stride,
+                            )
+                            base_coords_cache[base_coords_key] = base_coords
+
+                    # 先只算目标坐标（numpy），用字节级比较判断是否与基础模板一致；
+                    # 只有确实存在差异时才组装整块 Position bytes。
+                    target_coords, _base_coords = self._build_recorded_position_target_coords(
                         coords[sampled_vertex_indices],
                         sampled_basis_coords,
                         base_slice,
                         position_element,
-                        position_stride=runtime_info["position_stride"],
+                        position_stride=position_stride,
+                        base_coords=base_coords,
                     )
-                    expected_bytes = export_indices.size * runtime_info["position_stride"]
+                    if target_coords.size == 0:
+                        position_bytes = b""
+                    elif self._recorded_position_coords_match_base_slice(
+                        target_coords,
+                        base_slice,
+                        position_element,
+                        position_stride,
+                        base_coords=base_coords,
+                    ):
+                        position_bytes = base_slice
+                    else:
+                        position_bytes = self._compose_position_bytes_with_base_slice(
+                            target_coords,
+                            base_slice,
+                            position_element,
+                            position_stride=position_stride,
+                            coords_are_export_space=True,
+                        )
+
+                    expected_bytes = export_indices.size * position_stride
                     if len(position_bytes) != expected_bytes:
                         raise ShapeKeyDirectExportError(
                             f"槽位 {slot_index}: 物体 '{obj_name}' 的记录 Position 大小不匹配，"
                             f"期望={expected_bytes}，实际={len(position_bytes)}"
                         )
-
-                    export_indices_key = tuple(int(index) for index in export_indices.tolist())
-                    base_slice = base_slice_cache.get((runtime_info["logical_hash"], export_indices_key))
-                    if base_slice is None:
-                        base_slice = _extract_position_bytes_by_indices(
-                            runtime_info["base_bytes"],
-                            runtime_info["position_stride"],
-                            export_indices,
-                        )
-                        base_slice_cache[(runtime_info["logical_hash"], export_indices_key)] = base_slice
 
                     if position_bytes == base_slice:
                         slot_position_overrides[slot_index][obj_name] = {
@@ -528,10 +622,17 @@ class DirectShapeKeySamplingMixin:
             )
 
         vertex_count = int(len(base_slice) / position_stride)
-        offset, byte_width, dtype, _item_size, component_count = self._position_element_layout(
+        offset, byte_width, dtype, item_size, component_count = self._position_element_layout(
             position_element,
             position_stride,
         )
+        # 常规布局用向量化读取（数值与逐顶点 frombuffer 完全一致）；异常布局保留原逐顶点路径。
+        if byte_width % item_size == 0 and byte_width // item_size >= 3:
+            base_rows = np.frombuffer(base_slice, dtype=np.uint8).reshape(vertex_count, position_stride)
+            region = np.ascontiguousarray(base_rows[:, offset:offset + byte_width])
+            values = region.view(dtype).reshape(vertex_count, byte_width // item_size)
+            return np.asarray(values[:, :3], dtype=np.float32)
+
         coords = np.zeros((vertex_count, 3), dtype=np.float32)
         for vertex_index in range(vertex_count):
             src_start = vertex_index * position_stride + offset
@@ -540,22 +641,26 @@ class DirectShapeKeySamplingMixin:
             coords[vertex_index] = values[:3].astype(np.float32)
         return coords
 
-    def _compose_position_bytes_from_recorded_coords(
+    def _build_recorded_position_target_coords(
         self,
         sampled_coords,
         sampled_basis_coords,
         base_slice,
         position_element,
         position_stride=12,
+        base_coords=None,
     ):
+        """只计算最终写入 POSITION 的目标坐标（已在导出空间），不组装整块 bytes。
+
+        返回 (target_coords, base_coords)；无 Basis 记录时 base_coords 为 None。
+        base_coords 可由调用方传入缓存值，避免同一对象在多个槽位重复提取。
+        """
         sampled_coords = np.asarray(sampled_coords, dtype=np.float32)
         if sampled_basis_coords is None:
-            return self._compose_position_bytes_with_base_slice(
-                sampled_coords,
-                base_slice,
-                position_element,
-                position_stride=position_stride,
-            )
+            if sampled_coords.size == 0:
+                return sampled_coords, None
+            target_coords = self._convert_position_coords_for_export(sampled_coords)
+            return np.asarray(target_coords, dtype=np.float32), None
 
         sampled_basis_coords = np.asarray(sampled_basis_coords, dtype=np.float32)
         if sampled_basis_coords.shape != sampled_coords.shape:
@@ -565,12 +670,105 @@ class DirectShapeKeySamplingMixin:
 
         sampled_deltas = sampled_coords - sampled_basis_coords
         export_deltas = self._convert_position_deltas_for_export(sampled_deltas)
-        base_coords = self._extract_position_coords_from_base_slice(
+        if base_coords is None:
+            base_coords = self._extract_position_coords_from_base_slice(
+                base_slice,
+                position_element,
+                position_stride=position_stride,
+            )
+        target_coords = base_coords + np.asarray(export_deltas, dtype=np.float32)
+        return target_coords, base_coords
+
+    def _recorded_position_coords_match_base_slice(
+        self,
+        target_coords,
+        base_slice,
+        position_element,
+        position_stride=12,
+        base_coords=None,
+    ):
+        """判断目标坐标写进 base_slice 后是否与 base_slice 逐字节相同（不组装整块 bytes）。
+
+        直接比较「会被覆写的那段字节」，因此 float16 转换、第 4 分量补 1.0、
+        -0.0 / NaN 等边界都与原实现（组装后整块比较）完全一致。
+        base_coords 是 base_slice 已提取的坐标缓存；常规 12 字节 float32 布局可用它
+        直接做按位比较，省掉一次编码。
+        """
+        position_stride = int(position_stride)
+        target_coords = np.asarray(target_coords, dtype=np.float32)
+        vertex_count = int(target_coords.shape[0])
+        expected_size = vertex_count * position_stride
+        if len(base_slice) != expected_size:
+            raise ShapeKeyDirectExportError(
+                f"POSITION 模板大小不匹配: expected={expected_size}, actual={len(base_slice)}"
+            )
+
+        offset, byte_width, dtype, item_size, component_count = self._position_element_layout(
+            position_element,
+            position_stride,
+        )
+        if (
+            base_coords is not None
+            and dtype == np.float32
+            and byte_width == 12
+            and component_count == 3
+            and target_coords.shape == base_coords.shape
+            and target_coords.flags.c_contiguous
+            and base_coords.flags.c_contiguous
+        ):
+            # 常规 12 字节 float32 布局：写入的就是这 3 个 float32，按位比较即可。
+            return bool(
+                np.array_equal(
+                    target_coords.view(np.uint32),
+                    base_coords.view(np.uint32),
+                )
+            )
+
+        if dtype == np.float16:
+            component_count = max(4, component_count)
+            encoded_values = np.zeros((vertex_count, component_count), dtype=np.float16)
+            encoded_values[:, :3] = target_coords.astype(np.float16)
+            if component_count > 3:
+                encoded_values[:, 3] = 1.0
+            encoded_stride = component_count * item_size
+        else:
+            component_count = max(3, component_count)
+            encoded_values = np.zeros((vertex_count, component_count), dtype=np.float32)
+            encoded_values[:, :3] = target_coords
+            if component_count > 3:
+                encoded_values[:, 3] = 1.0
+            encoded_stride = component_count * item_size
+
+        if byte_width > encoded_stride:
+            # 元素宽度超过编码行宽的异常布局：交给原逐顶点写入路径，保持原行为。
+            return False
+
+        base_rows = np.frombuffer(base_slice, dtype=np.uint8).reshape(vertex_count, position_stride)
+        encoded_rows = encoded_values.view(np.uint8).reshape(vertex_count, encoded_stride)
+        return bool(
+            np.array_equal(
+                base_rows[:, offset:offset + byte_width],
+                encoded_rows[:, :byte_width],
+            )
+        )
+
+    def _compose_position_bytes_from_recorded_coords(
+        self,
+        sampled_coords,
+        sampled_basis_coords,
+        base_slice,
+        position_element,
+        position_stride=12,
+    ):
+        target_coords, _base_coords = self._build_recorded_position_target_coords(
+            sampled_coords,
+            sampled_basis_coords,
             base_slice,
             position_element,
             position_stride=position_stride,
         )
-        target_coords = base_coords + np.asarray(export_deltas, dtype=np.float32)
+        if target_coords.size == 0:
+            return b""
         return self._compose_position_bytes_with_base_slice(
             target_coords,
             base_slice,
@@ -620,6 +818,13 @@ class DirectShapeKeySamplingMixin:
                 encoded_values[:, 3] = 1.0
             encoded_bytes = encoded_values.tobytes()
             encoded_stride = component_count * item_size
+
+        if byte_width <= encoded_stride:
+            stride = int(position_stride)
+            output_rows = np.frombuffer(base_slice, dtype=np.uint8).reshape(vertex_count, stride).copy()
+            encoded_rows = np.frombuffer(encoded_bytes, dtype=np.uint8).reshape(vertex_count, encoded_stride)
+            output_rows[:, offset:offset + byte_width] = encoded_rows[:, :byte_width]
+            return output_rows.tobytes()
 
         output = bytearray(base_slice)
         for vertex_index in range(vertex_count):

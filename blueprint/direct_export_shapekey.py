@@ -239,7 +239,7 @@ class DirectShapeKeyGenerator(
                 "Direct ShapeKey: slot position overrides -> "
                 f"{ {slot_index: sorted(slot_data.keys()) for slot_index, slot_data in slot_position_overrides.items()} }"
             )
-            _, _, dropped_slots = self._analyze_hash_slot_filters(
+            raw_hash_slot_data_map, hash_slot_data_map, dropped_slots = self._analyze_hash_slot_filters(
                 unique_hashes=unique_hashes,
                 slot_to_name_to_objects=slot_to_name_to_objects,
                 slot_position_overrides=slot_position_overrides,
@@ -256,6 +256,12 @@ class DirectShapeKeyGenerator(
                     source_object_map=source_object_map,
                     runtime_infos=runtime_infos,
                     slot_position_overrides=slot_position_overrides,
+                )
+                # 补齐槽位后 overrides 已变化，filtered 需按新 overrides 重算；
+                # raw 与 overrides 无关，可直接复用上面 _analyze_hash_slot_filters 的结果。
+                hash_slot_data_map = self._filter_hash_slot_data_map_by_overrides(
+                    raw_hash_slot_data_map,
+                    slot_position_overrides,
                 )
             if dropped_slots and use_preprocess_records:
                 LOG.warning(f"Direct ShapeKey: missing preprocess-record slots {dropped_slots}")
@@ -287,14 +293,15 @@ class DirectShapeKeyGenerator(
                 source_object_map=source_object_map,
                 static_copy_map=static_copy_map,
             )
+            # 回退路径没有走过上面的 _analyze_hash_slot_filters，这里补算一次。
+            raw_hash_slot_data_map = self._build_hash_slot_data_map(unique_hashes, slot_to_name_to_objects)
+            hash_slot_data_map = self._filter_hash_slot_data_map_by_overrides(
+                raw_hash_slot_data_map,
+                slot_position_overrides,
+            )
             LOG.info("直出形态键: 已回退到静态副本采样路径")
             LOG.info(f"直出形态键: 槽位 Position 采样完成 {perf_counter() - stage_start:.3f}s")
 
-        raw_hash_slot_data_map = self._build_hash_slot_data_map(unique_hashes, slot_to_name_to_objects)
-        hash_slot_data_map = self._filter_hash_slot_data_map_by_overrides(
-            raw_hash_slot_data_map,
-            slot_position_overrides,
-        )
         for logical_hash in unique_hashes:
             raw_slot_data = raw_hash_slot_data_map.get(logical_hash, {})
             filtered_slot_data = hash_slot_data_map.get(logical_hash, {})
