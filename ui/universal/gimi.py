@@ -8,6 +8,22 @@ from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .unity import ExportUnity
 from ...utils.timer_utils import TimerUtils
+import contextlib
+
+# 「条件判断」后处理节点需要按 draw_ib 反查 ini 段：导出期用 draw_ib 上下文包住
+# 「构建该 draw_ib 的段」的代码，M_IniSection 构造时会快照当前 draw_ib。
+# 导入失败时导出照常，只是不登记段（独立加载/裁剪环境）。
+try:
+    from ...common import export_section_registry as _section_registry
+except Exception:  # 独立加载/裁剪环境：退化为不登记，导出行为不变
+    _section_registry = None
+
+
+def _section_registry_context(draw_ib):
+    """返回 draw_ib 的段登记上下文；登记表不可用时退化为空上下文（不改变导出行为）。"""
+    if _section_registry is None:
+        return contextlib.nullcontext()
+    return _section_registry.draw_ib_context(draw_ib)
 
 
 class GIMITextureMarkName:
@@ -111,11 +127,13 @@ class ExportGIMI(ExportUnity):
         M_IniHelper.generate_shared_slot_style_texture_ini(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
         self._integrate_object_swap_ini_hook(ini_builder)
         for drawib_model in self.drawib_model_list:
-            self.add_unity_vs_texture_override_vlr_section(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_texture_override_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_texture_override_ib_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+            # 只把这个 draw_ib 自己的 ini 段包进登记上下文；贴图搬移与全局计数留在上下文外。
+            with _section_registry_context(drawib_model.draw_ib):
+                self.add_unity_vs_texture_override_vlr_section(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_texture_override_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_texture_override_ib_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
             M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
             GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
 

@@ -14,6 +14,23 @@ from ...common.drawib_model import DrawIBModel
 from ...utils.timer_utils import TimerUtils
 
 import os
+import contextlib
+
+# 「条件判断」后处理节点需要按 draw_ib 反查 ini 段：导出期用 draw_ib 上下文包住
+# 「构建该 draw_ib 的段」的代码，M_IniSection 构造时会快照当前 draw_ib。
+# 导入失败时导出照常，只是不登记段（独立加载/裁剪环境）。
+try:
+    from ...common import export_section_registry as _section_registry
+except Exception:  # 独立加载/裁剪环境：退化为不登记，导出行为不变
+    _section_registry = None
+
+
+def _section_registry_context(draw_ib):
+    """返回 draw_ib 的段登记上下文；登记表不可用时退化为空上下文（不改变导出行为）。"""
+    if _section_registry is None:
+        return contextlib.nullcontext()
+    return _section_registry.draw_ib_context(draw_ib)
+
 
 @dataclass
 class ExportSRMI:
@@ -98,152 +115,155 @@ class ExportSRMI:
             d3d11_game_type = drawib_model.d3d11_game_type
             active_index = draw_ib_active_index_dict.get(draw_ib, 0)
 
-            if d3d11_game_type.GPU_PreSkinning and drawib_model.vertex_limit_hash:
-                vertexlimit_section = M_IniSection(M_SectionType.TextureOverrideVertexLimitRaise)
-                vertexlimit_section.append("[TextureOverride_" + draw_ib + "_" + draw_ib_alias + "_Draw]")
-                vertexlimit_section.append("hash = " + drawib_model.vertex_limit_hash)
-                if drawib_model.vertex_count > drawib_model.original_vertex_count:
-                    vertexlimit_section.append("override_byte_stride = " + str(d3d11_game_type.CategoryStrideDict.get("Position", 0)))
-                    vertexlimit_section.append("override_vertex_count = " + str(drawib_model.vertex_count))
-                    vertexlimit_section.append("uav_byte_stride = 4")
-                    vertexlimit_section.new_line()
-                ini_builder.append_section(vertexlimit_section)
+            # 从这里到资源缓冲段：全部是当前 draw_ib 自己的 ini 段，包进登记上下文；
+            # 前面的 Hash 风格贴图 / 物体切换 / 贴图搬移等全局或跨 draw_ib 流程留在上下文外。
+            with _section_registry_context(draw_ib):
+                if d3d11_game_type.GPU_PreSkinning and drawib_model.vertex_limit_hash:
+                    vertexlimit_section = M_IniSection(M_SectionType.TextureOverrideVertexLimitRaise)
+                    vertexlimit_section.append("[TextureOverride_" + draw_ib + "_" + draw_ib_alias + "_Draw]")
+                    vertexlimit_section.append("hash = " + drawib_model.vertex_limit_hash)
+                    if drawib_model.vertex_count > drawib_model.original_vertex_count:
+                        vertexlimit_section.append("override_byte_stride = " + str(d3d11_game_type.CategoryStrideDict.get("Position", 0)))
+                        vertexlimit_section.append("override_vertex_count = " + str(drawib_model.vertex_count))
+                        vertexlimit_section.append("uav_byte_stride = 4")
+                        vertexlimit_section.new_line()
+                    ini_builder.append_section(vertexlimit_section)
 
-            if not GlobalProterties.forbid_auto_texture_ini() and drawib_model.submesh_texturemarkinfolist_dict:
-                resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)
-                appended_resource_names = set()
+                if not GlobalProterties.forbid_auto_texture_ini() and drawib_model.submesh_texturemarkinfolist_dict:
+                    resource_texture_section = M_IniSection(M_SectionType.ResourceTexture)
+                    appended_resource_names = set()
+                    for submesh_model in drawib_model.submesh_model_list:
+                        for texture_markup_info in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
+                            if getattr(texture_markup_info, "mark_type", "") != "Slot":
+                                continue
+                            resource_name = texture_markup_info.get_resource_name()
+                            if resource_name in appended_resource_names:
+                                continue
+                            appended_resource_names.add(resource_name)
+                            resource_texture_section.append("[" + texture_markup_info.get_resource_name() + "]")
+                            resource_texture_section.append("filename = Textures/" + texture_markup_info.mark_filename)
+                            resource_texture_section.new_line()
+                    ini_builder.append_section(resource_texture_section)
+
+                if d3d11_game_type.GPU_PreSkinning:
+                    texture_override_vb_section = M_IniSection(M_SectionType.TextureOverrideVB)
+                    texture_override_vb_section.append("; " + draw_ib)
+                    for category_name in d3d11_game_type.OrderedCategoryNameList:
+                        category_hash = drawib_model.category_hash_dict.get(category_name, "")
+                        texture_override_vb_namesuffix = "VB_" + draw_ib + "_" + draw_ib_alias + "_" + category_name
+
+                        if category_name != "Position":
+                            texture_override_vb_section.append("[TextureOverride_" + texture_override_vb_namesuffix + "]")
+                            if category_hash:
+                                texture_override_vb_section.append("hash = " + category_hash)
+                            if category_name != "Texcoord":
+                                texture_override_vb_section.append("handling = skip")
+
+                        for original_category_name, draw_category_name in d3d11_game_type.CategoryDrawCategoryDict.items():
+                            if category_name != draw_category_name:
+                                continue
+
+                            if original_category_name == "Position":
+                                continue
+                            if original_category_name == "Blend":
+                                texture_override_vb_section.append("vb2 = Resource" + draw_ib + "Blend")
+                                texture_override_vb_section.append("if DRAW_TYPE == 1")
+                                texture_override_vb_section.append("  vb0 = Resource" + draw_ib + "Position")
+                                texture_override_vb_section.append("draw = " + str(drawib_model.vertex_count) + ", 0")
+                                texture_override_vb_section.append("endif")
+                                texture_override_vb_section.append("if DRAW_TYPE == 8")
+                                texture_override_vb_section.append("  Resource\\SRMI\\PositionBuffer = ref Resource" + draw_ib + "PositionCS")
+                                texture_override_vb_section.append("  Resource\\SRMI\\BlendBuffer = ref Resource" + draw_ib + "BlendCS")
+                                texture_override_vb_section.append("  $\\SRMI\\vertex_count = " + str(drawib_model.vertex_count))
+                                texture_override_vb_section.append("endif")
+                            else:
+                                category_original_slot = d3d11_game_type.CategoryExtractSlotDict.get(original_category_name, "")
+                                if category_original_slot:
+                                    texture_override_vb_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
+
+                        if category_name == d3d11_game_type.CategoryDrawCategoryDict.get("Position"):
+                            # $active 应该在 IB 块中添加，而不是在这里
+                            pass
+
+                        texture_override_vb_section.new_line()
+
+                    ini_builder.append_section(texture_override_vb_section)
+
+                texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
                 for submesh_model in drawib_model.submesh_model_list:
-                    for texture_markup_info in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
-                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
-                            continue
-                        resource_name = texture_markup_info.get_resource_name()
-                        if resource_name in appended_resource_names:
-                            continue
-                        appended_resource_names.add(resource_name)
-                        resource_texture_section.append("[" + texture_markup_info.get_resource_name() + "]")
-                        resource_texture_section.append("filename = Textures/" + texture_markup_info.mark_filename)
-                        resource_texture_section.new_line()
-                ini_builder.append_section(resource_texture_section)
+                    ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
+                    texture_override_ib_namesuffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
+                    part_name = drawib_model.get_submesh_part_name(submesh_model)
+                    texture_override_ib_section.append("[TextureOverride_" + texture_override_ib_namesuffix + "]")
+                    texture_override_ib_section.append("hash = " + draw_ib)
+                    texture_override_ib_section.append("match_first_index = " + str(submesh_model.match_first_index))
+                    texture_override_ib_section.append("handling = skip")
 
-            if d3d11_game_type.GPU_PreSkinning:
-                texture_override_vb_section = M_IniSection(M_SectionType.TextureOverrideVB)
-                texture_override_vb_section.append("; " + draw_ib)
-                for category_name in d3d11_game_type.OrderedCategoryNameList:
-                    category_hash = drawib_model.category_hash_dict.get(category_name, "")
-                    texture_override_vb_namesuffix = "VB_" + draw_ib + "_" + draw_ib_alias + "_" + category_name
+                    ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, [])
+                    if not ib_buf:
+                        texture_override_ib_section.new_line()
+                        continue
 
-                    if category_name != "Position":
-                        texture_override_vb_section.append("[TextureOverride_" + texture_override_vb_namesuffix + "]")
-                        if category_hash:
-                            texture_override_vb_section.append("hash = " + category_hash)
-                        if category_name != "Texcoord":
-                            texture_override_vb_section.append("handling = skip")
+                    texture_override_ib_section.append("ib = " + ib_resource_name)
 
-                    for original_category_name, draw_category_name in d3d11_game_type.CategoryDrawCategoryDict.items():
-                        if category_name != draw_category_name:
-                            continue
+                    if not GlobalProterties.forbid_auto_texture_ini():
+                        texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+                        for texture_markup_info in texture_markup_info_list:
+                            if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
+                                continue
+                            texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
 
-                        if original_category_name == "Position":
-                            continue
-                        if original_category_name == "Blend":
-                            texture_override_vb_section.append("vb2 = Resource" + draw_ib + "Blend")
-                            texture_override_vb_section.append("if DRAW_TYPE == 1")
-                            texture_override_vb_section.append("  vb0 = Resource" + draw_ib + "Position")
-                            texture_override_vb_section.append("draw = " + str(drawib_model.vertex_count) + ", 0")
-                            texture_override_vb_section.append("endif")
-                            texture_override_vb_section.append("if DRAW_TYPE == 8")
-                            texture_override_vb_section.append("  Resource\\SRMI\\PositionBuffer = ref Resource" + draw_ib + "PositionCS")
-                            texture_override_vb_section.append("  Resource\\SRMI\\BlendBuffer = ref Resource" + draw_ib + "BlendCS")
-                            texture_override_vb_section.append("  $\\SRMI\\vertex_count = " + str(drawib_model.vertex_count))
-                            texture_override_vb_section.append("endif")
-                        else:
+                    if not d3d11_game_type.GPU_PreSkinning:
+                        for original_category_name, draw_category_name in d3d11_game_type.CategoryDrawCategoryDict.items():
+                            if original_category_name != draw_category_name:
+                                continue
                             category_original_slot = d3d11_game_type.CategoryExtractSlotDict.get(original_category_name, "")
                             if category_original_slot:
-                                texture_override_vb_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
+                                texture_override_ib_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
 
-                    if category_name == d3d11_game_type.CategoryDrawCategoryDict.get("Position"):
-                        # $active 应该在 IB 块中添加，而不是在这里
-                        pass
+                    for draw_line in M_IniHelper.get_drawindexed_str_list(
+                        submesh_model.drawcall_model_list,
+                        obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+                    ):
+                        texture_override_ib_section.append(draw_line)
 
-                    texture_override_vb_section.new_line()
+                    # 添加 $active 激活参数（当存在条件键时）
+                    if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
+                        texture_override_ib_section.append("$active" + str(active_index) + " = 1")
+                        if GlobalProterties.generate_branch_mod_gui():
+                            texture_override_ib_section.append("$ActiveCharacter = 1")
 
-                ini_builder.append_section(texture_override_vb_section)
-
-            texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
-            for submesh_model in drawib_model.submesh_model_list:
-                ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
-                texture_override_ib_namesuffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
-                part_name = drawib_model.get_submesh_part_name(submesh_model)
-                texture_override_ib_section.append("[TextureOverride_" + texture_override_ib_namesuffix + "]")
-                texture_override_ib_section.append("hash = " + draw_ib)
-                texture_override_ib_section.append("match_first_index = " + str(submesh_model.match_first_index))
-                texture_override_ib_section.append("handling = skip")
-
-                ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, [])
-                if not ib_buf:
                     texture_override_ib_section.new_line()
-                    continue
 
-                texture_override_ib_section.append("ib = " + ib_resource_name)
+                ini_builder.append_section(texture_override_ib_section)
 
-                if not GlobalProterties.forbid_auto_texture_ini():
-                    texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
-                    for texture_markup_info in texture_markup_info_list:
-                        if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
-                            continue
-                        texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
-
-                if not d3d11_game_type.GPU_PreSkinning:
-                    for original_category_name, draw_category_name in d3d11_game_type.CategoryDrawCategoryDict.items():
-                        if original_category_name != draw_category_name:
-                            continue
-                        category_original_slot = d3d11_game_type.CategoryExtractSlotDict.get(original_category_name, "")
-                        if category_original_slot:
-                            texture_override_ib_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
-
-                for draw_line in M_IniHelper.get_drawindexed_str_list(
-                    submesh_model.drawcall_model_list,
-                    obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
-                ):
-                    texture_override_ib_section.append(draw_line)
-
-                # 添加 $active 激活参数（当存在条件键时）
-                if len(self.blueprint_model.keyname_mkey_dict.keys()) != 0:
-                    texture_override_ib_section.append("$active" + str(active_index) + " = 1")
-                    if GlobalProterties.generate_branch_mod_gui():
-                        texture_override_ib_section.append("$ActiveCharacter = 1")
-
-                texture_override_ib_section.new_line()
-
-            ini_builder.append_section(texture_override_ib_section)
-
-            resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
-            buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
-            for category_name in d3d11_game_type.OrderedCategoryNameList:
-                resource_buffer_section.append("[Resource" + draw_ib + category_name + "]")
-                resource_buffer_section.append("type = Buffer")
-                resource_buffer_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict.get(category_name, 0)))
-                resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + draw_ib + "-" + category_name + ".buf")
-                resource_buffer_section.new_line()
-
-            for category_name in d3d11_game_type.OrderedCategoryNameList:
-                if category_name == "Position" or category_name == "Blend":
-                    resource_buffer_section.append("[Resource" + draw_ib + category_name + "CS]")
-                    resource_buffer_section.append("type = StructuredBuffer")
+                resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
+                buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
+                for category_name in d3d11_game_type.OrderedCategoryNameList:
+                    resource_buffer_section.append("[Resource" + draw_ib + category_name + "]")
+                    resource_buffer_section.append("type = Buffer")
                     resource_buffer_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict.get(category_name, 0)))
                     resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + draw_ib + "-" + category_name + ".buf")
                     resource_buffer_section.new_line()
 
-            for submesh_model in drawib_model.submesh_model_list:
-                ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
-                resource_buffer_section.append("[" + ib_resource_name + "]")
-                resource_buffer_section.append("type = Buffer")
-                resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")
-                ib_name = getattr(submesh_model, "workspace_unique_str", "") or submesh_model.unique_str
-                resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + ib_name + "-Index.buf")
-                resource_buffer_section.new_line()
+                for category_name in d3d11_game_type.OrderedCategoryNameList:
+                    if category_name == "Position" or category_name == "Blend":
+                        resource_buffer_section.append("[Resource" + draw_ib + category_name + "CS]")
+                        resource_buffer_section.append("type = StructuredBuffer")
+                        resource_buffer_section.append("stride = " + str(d3d11_game_type.CategoryStrideDict.get(category_name, 0)))
+                        resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + draw_ib + "-" + category_name + ".buf")
+                        resource_buffer_section.new_line()
 
-            ini_builder.append_section(resource_buffer_section)
+                for submesh_model in drawib_model.submesh_model_list:
+                    ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
+                    resource_buffer_section.append("[" + ib_resource_name + "]")
+                    resource_buffer_section.append("type = Buffer")
+                    resource_buffer_section.append("format = DXGI_FORMAT_R32_UINT")
+                    ib_name = getattr(submesh_model, "workspace_unique_str", "") or submesh_model.unique_str
+                    resource_buffer_section.append("filename = " + buffer_folder_name + "\\" + ib_name + "-Index.buf")
+                    resource_buffer_section.new_line()
+
+                ini_builder.append_section(resource_buffer_section)
 
         GlobalKeyCountHelper.generated_mod_number = len(self.drawib_model_list)
         M_IniHelper.add_branch_key_sections(

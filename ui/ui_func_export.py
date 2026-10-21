@@ -722,6 +722,22 @@ class _BackgroundExportMixin:
             pass
 
 
+def _clear_export_section_registry() -> None:
+    """导出开始前清空 DrawIB→ini 段登记表（条件后处理节点依赖它做门控）。
+
+    登记表由 ``common/export_section_registry.py`` 提供，可能尚未落地（精简加载 /
+    测试桩），因此用软导入：拿不到模块或清理失败都只留一条提示，绝不让导出失败。
+    """
+    try:
+        from ..common import export_section_registry as _section_registry
+    except Exception:
+        return
+    try:
+        _section_registry.clear()
+    except Exception as error:
+        print(f"⚠️ 清理导出段登记表失败（已忽略）: {error}")
+
+
 class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
     """根据蓝图架构生成 Mod 文件的主导出 Blender 算子"""
     bl_idname = "ssmt.generate_mod_blueprint"
@@ -822,6 +838,8 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
         # 立即反馈：会话启动里要先把工程存成 480MB 快照（数秒）再起子进程，
         # 这段时间主进程没有任何进度文本 —— 先写状态栏，避免"点了导出十几秒没反应"。
         push_progress_header("后台导出：正在保存工程快照…", context)
+        # 后台导出入口：主进程侧先清掉上一次残留的 ini 段登记（worker 进程内另有一次清理）。
+        _clear_export_section_registry()
         try:
             session = self._create_background_session(tree)
             started = session.start()
@@ -1136,6 +1154,8 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
 
         BlueprintExportHelper.set_runtime_blueprint_tree(tree)
         BlueprintExportHelper.reset_direct_export_runtime_state(clear_postprocess_caches=True)
+        # 导出开始：清空上一次导出残留的 ini 段登记，条件后处理节点只应看到本次导出的段。
+        _clear_export_section_registry()
         TimerUtils.end_stage("蓝图验证")
 
         LOG.start_collecting()

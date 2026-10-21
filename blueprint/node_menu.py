@@ -1392,6 +1392,10 @@ class SSMT_MT_NodeMenu_PostProcess(bpy.types.Menu):
         # 文本追加与「创意」同级：它没有输出口，只能挂在链尾，单独成项更好找。
         layout.separator()
         _add_node_entry(layout, "文本追加", 'TEXT', "SSMTNode_PostProcess_TextAppend")
+        # 跳过与文本追加同为「只改导出 ini」的收尾节点，放在同一处。
+        _add_node_entry(layout, "跳过", 'HIDE_ON', "SSMTNode_PostProcess_Skip")
+        # 条件判断同样是「只改导出 ini」的收尾节点（哈希出现才让代码生效）。
+        _add_node_entry(layout, "条件判断", 'CON_TRANSLIKE', "SSMTNode_PostProcess_Condition")
 
 
 class SSMT_MT_NodeMenu_PostProcess_Dynamic(bpy.types.Menu):

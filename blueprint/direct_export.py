@@ -472,7 +472,10 @@ class DirectExportSession:
 
     def _build_blueprint_model(self):
         BluePrintModel.clear_object_name_mapping()
-        return BluePrintModel(tree=self.tree, context=self.context)
+        model = BluePrintModel(tree=self.tree, context=self.context)
+        # 导出期缓存：后处理节点在导出结束之后才执行，需要据此反查 DrawIB（只写不清）。
+        BlueprintExportHelper.set_current_blueprint_model(model)
+        return model
 
     def _build_exporter(self, blueprint_model, preserve_shape_key_mix: bool | None = None):
         if preserve_shape_key_mix is None:
@@ -742,6 +745,12 @@ class DirectExportSession:
                 TimerUtils.end_stage("直出-形态键附加轮次")
             elif has_shapekey:
                 LOG.info("Direct ShapeKey: skipped standard slot export; generating direct resources from Meshes0000 and preprocess records")
+
+            # 附加形态键轮次（_run_standard_shapekey_rounds → execute_round）会把运行时缓存里的
+            # 蓝图模型覆盖成轮次模型；后处理阶段要的是基态模型，这里再登记一次。
+            BlueprintExportHelper.set_current_blueprint_model(
+                self.shapekey_source_blueprint_model or self.base_blueprint_model
+            )
 
             try:
                 keys = [

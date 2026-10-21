@@ -1,3 +1,4 @@
+import contextlib
 import os
 import re
 import shutil
@@ -14,6 +15,13 @@ from .global_key_count_helper import GlobalKeyCountHelper
 from .workspace_helper import WorkSpaceHelper
 from ..blueprint.export_helper import BlueprintExportHelper
 from ..utils.log_utils import LOG
+
+# 导出段登记表（纯 Python、无 bpy 依赖）：在 draw_ib 上下文里构造的 M_IniSection
+# 会在构造时快照所属 draw_ib，写盘时整批登记，供导出后的「条件判断」后处理节点反查。
+try:
+    from . import export_section_registry as _section_registry
+except Exception:  # 独立加载本文件时兜底：退化为无登记，不影响导出
+    _section_registry = None
 
 class M_IniHelper:
     """INI 辅助工具类
@@ -399,19 +407,23 @@ class M_IniHelper:
                     target_texture_file_path = GlobalConfig.path_generatemod_texture_folder(draw_ib=draw_ib) + hash_style_texture_filename
                     print("M_IniHelper: Hash 贴图目标路径: " + target_texture_file_path)
                     
-                    resource_and_textureoverride_texture_section = M_IniSection(M_SectionType.ResourceAndTextureOverride_Texture)
-                    resource_and_textureoverride_texture_section.append("[Resource_Texture_" + texture_markup_info.mark_hash + "]")
-                    resource_and_textureoverride_texture_section.append("filename = Textures/" + hash_style_texture_filename)
-                    resource_and_textureoverride_texture_section.new_line()
+                    # 该贴图段（[Resource_Texture_<贴图hash>] + [TextureOverride_<贴图hash>]）属于当前 draw_ib：
+                    # 构造期间进入 draw_ib 上下文，供「条件判断」后处理节点按 draw_ib 反查。
+                    _draw_ib_ctx = _section_registry.draw_ib_context(draw_ib) if _section_registry is not None else contextlib.nullcontext()
+                    with _draw_ib_ctx:
+                        resource_and_textureoverride_texture_section = M_IniSection(M_SectionType.ResourceAndTextureOverride_Texture)
+                        resource_and_textureoverride_texture_section.append("[Resource_Texture_" + texture_markup_info.mark_hash + "]")
+                        resource_and_textureoverride_texture_section.append("filename = Textures/" + hash_style_texture_filename)
+                        resource_and_textureoverride_texture_section.new_line()
 
-                    resource_and_textureoverride_texture_section.append("[TextureOverride_" + texture_markup_info.mark_hash + "]")
-                    resource_and_textureoverride_texture_section.append("; " + texture_markup_info.mark_filename)
-                    resource_and_textureoverride_texture_section.append("hash = " + texture_markup_info.mark_hash)
-                    resource_and_textureoverride_texture_section.append("match_priority = 0")
-                    resource_and_textureoverride_texture_section.append("this = Resource_Texture_" + texture_markup_info.mark_hash)
-                    resource_and_textureoverride_texture_section.new_line()
+                        resource_and_textureoverride_texture_section.append("[TextureOverride_" + texture_markup_info.mark_hash + "]")
+                        resource_and_textureoverride_texture_section.append("; " + texture_markup_info.mark_filename)
+                        resource_and_textureoverride_texture_section.append("hash = " + texture_markup_info.mark_hash)
+                        resource_and_textureoverride_texture_section.append("match_priority = 0")
+                        resource_and_textureoverride_texture_section.append("this = Resource_Texture_" + texture_markup_info.mark_hash)
+                        resource_and_textureoverride_texture_section.new_line()
 
-                    ini_builder.append_section(resource_and_textureoverride_texture_section)
+                        ini_builder.append_section(resource_and_textureoverride_texture_section)
 
                     # copy only if target not exists avoid overwrite texture manually replaced by mod author.
                     if not os.path.exists(target_texture_file_path):
@@ -445,7 +457,11 @@ class M_IniHelper:
         hash_filename_cache:dict[str, str] = {}
 
         for draw_ib, draw_ib_model in drawib_drawibmodel_dict.items():
-            shared_slot_resource_section = M_IniSection(M_SectionType.ResourceTexture)
+            # 该 draw_ib 的共享槽位资源段（[Resource_...]）属于当前 draw_ib：构造期间进入 draw_ib 上下文。
+            # 归属在 M_IniSection 构造时就已快照，段内容随后统一 append、写盘时整批登记。
+            _draw_ib_ctx = _section_registry.draw_ib_context(draw_ib) if _section_registry is not None else contextlib.nullcontext()
+            with _draw_ib_ctx:
+                shared_slot_resource_section = M_IniSection(M_SectionType.ResourceTexture)
             has_shared_slot = False
 
             for submesh_model in getattr(draw_ib_model, "submesh_model_list", []):

@@ -42,6 +42,12 @@ class BlueprintExportHelper:
     capture_direct_shapekey_positions = False
     direct_shapekey_position_records = {}
 
+    # 导出期运行时缓存：本次导出的蓝图模型 / 导出器实例。
+    # 后处理节点在导出**结束之后**才执行，需要据此反查「选中的物体属于哪个 DrawIB」，
+    # 因此导出结束不清理，只在下一次导出开始时（reset_direct_export_runtime_state）统一清空。
+    _current_blueprint_model = None
+    _current_exporter = None
+
     MAX_EXPORT_COUNT_LIMIT = 1000
     BLUEPRINT_NONE_IDENTIFIER = "__NONE__"
     BLUEPRINT_NONE_ENUM_NUMBER = 0
@@ -486,8 +492,43 @@ class BlueprintExportHelper:
         BlueprintExportHelper.runtime_shapekey_buffer_names = []
         BlueprintExportHelper.runtime_shapekey_buffer_name_map = {}
 
+    # ---- 导出期蓝图模型 / 导出器的运行时缓存 ----
+    # 后处理节点在导出结束之后才运行（同进程顺序执行），所以导出结束**不清理**这两个
+    # 缓存；清理由下一次导出开始时调用的 reset_direct_export_runtime_state 负责。
+    @staticmethod
+    def set_current_blueprint_model(model):
+        """登记本次导出的蓝图模型，供导出结束后的后处理节点读取。"""
+        BlueprintExportHelper._current_blueprint_model = model
+
+    @staticmethod
+    def get_current_blueprint_model():
+        """取最近一次导出登记的蓝图模型（未导出或已重置时为 None）。"""
+        return BlueprintExportHelper._current_blueprint_model
+
+    @staticmethod
+    def clear_current_blueprint_model():
+        BlueprintExportHelper._current_blueprint_model = None
+
+    @staticmethod
+    def set_current_exporter(exporter):
+        """登记本次导出的导出器实例，供导出结束后的后处理节点读取。"""
+        BlueprintExportHelper._current_exporter = exporter
+
+    @staticmethod
+    def get_current_exporter():
+        """取最近一次导出登记的导出器（未导出或已重置时为 None）。"""
+        return BlueprintExportHelper._current_exporter
+
+    @staticmethod
+    def clear_current_exporter():
+        BlueprintExportHelper._current_exporter = None
+
     @staticmethod
     def reset_direct_export_runtime_state(clear_postprocess_caches: bool = False):
+        # 蓝图模型 / 导出器缓存只在导出开始时清空：后处理在导出结束后才运行，
+        # 提前清理会让后处理节点读不到本次导出的上下文。
+        BlueprintExportHelper.clear_current_blueprint_model()
+        BlueprintExportHelper.clear_current_exporter()
         BlueprintExportHelper.clear_runtime_shapekey_buffer_names()
         BlueprintExportHelper.set_preserve_current_shapekey_mix_for_export(False)
         BlueprintExportHelper.set_suppress_shapekey_resource_export(False)
