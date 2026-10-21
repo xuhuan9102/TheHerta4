@@ -19,6 +19,22 @@ from ...common.m_ini_helper import M_IniHelper
 from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...utils.timer_utils import TimerUtils
 from .unity import ExportUnity
+from contextlib import nullcontext
+
+# 「条件判断」后处理节点需要按 draw_ib 反查 ini 段：导出期用 draw_ib 上下文包住
+# 「构建该 draw_ib 的段」的代码，M_IniSection 构造时快照当前 draw_ib。
+# 导入失败时导出照常，只是不登记段。
+try:
+    from ...common import export_section_registry as _section_registry
+except Exception:  # pragma: no cover - 轻量 fake 宿主 / 旧插件环境
+    _section_registry = None
+
+
+def _section_registry_context(draw_ib):
+    """返回 draw_ib 的段登记上下文；登记表不可用时退化为空上下文（不改变导出行为）。"""
+    if _section_registry is None:
+        return nullcontext()
+    return _section_registry.draw_ib_context(draw_ib)
 
 
 class ZZMIDX12TextureMarkName:
@@ -209,11 +225,13 @@ class ExportZZMIDX12(ExportUnity):
         self._integrate_object_swap_ini_hook(ini_builder)
 
         for drawib_model in self.drawib_model_list:
-            # DX12 模式不需要 VertexLimitRaise
-            self.add_unity_vs_texture_override_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_texture_override_ib_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+            # 只把这个 draw_ib 自己的 ini 段包进登记上下文（DX12 模式不需要
+            # VertexLimitRaise）；贴图搬移与全局计数不是 ini 段，留在上下文外。
+            with _section_registry_context(drawib_model.draw_ib):
+                self.add_unity_vs_texture_override_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_texture_override_ib_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
             M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
             GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
 

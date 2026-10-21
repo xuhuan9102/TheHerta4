@@ -15,6 +15,23 @@ from ...utils.json_utils import JsonUtils
 from ...utils.format_utils import Fatal
 from ...utils.timer_utils import TimerUtils
 from .unity import ExportUnity
+from contextlib import nullcontext
+
+# 「条件判断」后处理节点需要知道每个 ini 段属于哪个 draw_ib：导出期用
+# ``register.draw_ib_context(draw_ib)`` 包住「构建该 draw_ib 的 ini 段」的代码，
+# M_IniSection 构造时就会快照当前 draw_ib。导入失败时导出照常，只是不登记段。
+try:
+    from ...common import export_section_registry as _section_registry
+except Exception:  # pragma: no cover - 轻量 fake 宿主 / 旧插件环境
+    _section_registry = None
+
+
+def _section_registry_context(draw_ib):
+    """返回 draw_ib 的段登记上下文；登记表不可用时退化为空上下文（不改变导出行为）。"""
+    if _section_registry is None:
+        return nullcontext()
+    return _section_registry.draw_ib_context(draw_ib)
+
 
 # 导出模块在 Blender 启动时可以直接读取反查模块的版本；轻量 fake/旧插件环境
 # 可能未加载该模块，使用同一当前版本常量仍保持“陈旧缓存拒绝”这一安全默认。
@@ -7906,11 +7923,15 @@ class ExportZZMI(ExportUnity):
         M_IniHelper.generate_shared_slot_style_texture_ini(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
         self._integrate_object_swap_ini_hook(ini_builder)
         for drawib_model in self.drawib_model_list:
-            self.add_unity_vs_texture_override_vlr_section(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_texture_override_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_texture_override_ib_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
-            self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+            # 只把这个 draw_ib 自己的 ini 段包进登记上下文：段名 / 参数都由该
+            # draw_ib 派生，「条件判断」后处理按 draw_ib 反查时才能拿全。
+            with _section_registry_context(drawib_model.draw_ib):
+                self.add_unity_vs_texture_override_vlr_section(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_texture_override_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_texture_override_ib_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+            # 下面两步不是 ini 段构建（贴图搬移 / 全局 Mod 计数），留在上下文外。
             M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
             GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
 

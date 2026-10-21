@@ -22,6 +22,23 @@ import os
 import re
 import shutil
 import tempfile
+import contextlib
+
+# 「条件判断」后处理节点需要按 draw_ib 反查 ini 段：导出期用 draw_ib 上下文包住
+# 「构建该 draw_ib 的段」的代码，M_IniSection 构造时会快照当前 draw_ib。
+# 导入失败时导出照常，只是不登记段（独立加载/裁剪环境）。
+try:
+    from ...common import export_section_registry as _section_registry
+except Exception:  # 独立加载/裁剪环境：退化为不登记，导出行为不变
+    _section_registry = None
+
+
+def _section_registry_context(draw_ib):
+    """返回 draw_ib 的段登记上下文；登记表不可用时退化为空上下文（不改变导出行为）。"""
+    if _section_registry is None:
+        return contextlib.nullcontext()
+    return _section_registry.draw_ib_context(draw_ib)
+
 
 # 与框架 cfg_ms_max_lod_level_count 一致；LodRemaps 每组件 4 个 LOD 槽位。
 _EFMI_MAX_LOD_LEVEL_COUNT = 4
@@ -3016,7 +3033,18 @@ class ExportEFMI:
 
         self._integrate_object_swap_ini_hook(ini_builder)
 
-        texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
+        # 段归属登记（见 common/export_section_registry.py）：EFMI 把所有子网格的
+        # TextureOverride / Resource 段合并进同一个 M_IniSection，而段归属只在构造
+        # M_IniSection 时快照一次。所以只有「本次导出只涉及一个 draw_ib」时，这些合并段
+        # 才能无歧义地归到它名下；多 draw_ib 合并导出无法归属单一 draw_ib，保持不登记。
+        _distinct_draw_ibs = {
+            str(getattr(_submesh_model, "match_draw_ib", "") or "")
+            for _submesh_model in self.submesh_model_list
+        }
+        _single_draw_ib = _distinct_draw_ibs.pop() if len(_distinct_draw_ibs) == 1 else ""
+
+        with _section_registry_context(_single_draw_ib):
+            texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
 
         # EFMI 骨骼合并：官方运行时架构的组件绘制回调段（CommandList_Draw_<部件前缀>）
         # 与粘合层（CommandList_Component_DrawInstances，在 _add_merged_skeleton_section 追加）
@@ -3309,7 +3337,8 @@ class ExportEFMI:
         if self.has_merged_skeleton:
             ini_builder.append_section(merged_command_lists)
 
-        resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
+        with _section_registry_context(_single_draw_ib):
+            resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
         buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
         for submesh_model in self.submesh_model_list:
             ib_resource_name = "Resource_" + submesh_model.unique_str.replace("-","_") + "_Index"

@@ -1,6 +1,29 @@
 import hashlib
 import os
+import re
 import tempfile
+
+# 导出段登记表（纯 Python、无 bpy 依赖；它不 import 本项目任何模块，故不会循环 import）。
+# 写盘前用它把「段 -> 所属 draw_ib」登记下来，供导出后的条件判断节点反查。
+try:
+    from . import export_section_registry as _section_registry
+except ImportError:  # pragma: no cover - 仅 tests/ 里按文件路径加载本模块（fake 包 __path__ 为空）时走到
+    # tests/ 部分用例用 spec_from_file_location 把本文件当成独立模块加载，相对导入找不到同级模块，
+    # 这里按文件路径兜底加载；按固定模块名复用同一实例，避免同一次测试里出现两份登记表。
+    import importlib.util as _importlib_util
+    import sys as _sys
+
+    _REGISTRY_MODULE_NAME = "theherta4_export_section_registry"
+    _section_registry = _sys.modules.get(_REGISTRY_MODULE_NAME)
+    if _section_registry is None:
+        _registry_spec = _importlib_util.spec_from_file_location(
+            _REGISTRY_MODULE_NAME,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_section_registry.py"),
+        )
+        _section_registry = _importlib_util.module_from_spec(_registry_spec)
+        _sys.modules[_REGISTRY_MODULE_NAME] = _section_registry
+        _registry_spec.loader.exec_module(_section_registry)
+
 
 
 class M_SectionType:
@@ -52,6 +75,9 @@ class M_IniSection:
         self.SectionType:M_SectionType = section_type
         self.SectionName = "" # Constants和Present可以通过设置这个，来省去添加一行[名称]
         self.SectionLineList = []
+        # 构造时快照当前 draw_ib 上下文（导出器用 export_section_registry.draw_ib_context 包裹），
+        # 用于导出后按 draw_ib 反查本节的所有段；没有上下文时为空字符串。
+        self.owner_draw_ib:str = _section_registry.current_draw_ib()
     
     def empty(self)->bool:
         '''
@@ -118,6 +144,32 @@ class M_IniBuilder:
         if not m_inisection.empty():
             self.ini_section_list.append(m_inisection)
 
+    def _collect_section_entries(self):
+        '''
+        收集本 builder 所有段，返回 [(段名, 段类型, 所属draw_ib), ...]，供导出段登记表使用。
+
+        段名有两个来源，都要收：
+        1. section.SectionName：Constants / Present 这类通过属性省掉 "[名称]" 行的段；
+        2. 段体里以 [xxx] 开头的行：很多段把段头写在 SectionLineList 里，例如 hash 风格
+           贴图的 [Resource_Texture_<贴图hash>] / [TextureOverride_<贴图hash>]，
+           只按段名关键词匹配必然漏掉它们。
+
+        同一 (段名, 段类型, draw_ib) 由 commit_ini 去重，这里只负责按顺序收集。
+        '''
+        entries = []
+        for section in self.ini_section_list:
+            names = []
+            if section.SectionName:
+                names.append(section.SectionName)
+            for line in section.SectionLineList or []:
+                m = re.match(r"^\s*\[([^\]]+)\]\s*$", line or "")
+                if m:
+                    names.append(m.group(1).strip())
+            for name in names:
+                # getattr 兜底：tests/ 里有与 M_IniSection 同 API 的假段对象会被塞进真 builder。
+                entries.append((name, section.SectionType, getattr(section, "owner_draw_ib", "")))
+        return entries
+
     @staticmethod
     def _atomic_write_lines(config_ini_path: str, lines: list[str]) -> None:
         """Write a UTF-8/LF INI without ever exposing a truncated destination."""
@@ -180,6 +232,11 @@ class M_IniBuilder:
         # Add after sha256 calculation.
         self.line_list.append("\n;sha256=" + sha256 + "\n\n") 
 
+
+        # 写盘前把本节所有段整批登记到导出段登记表（供条件判断节点按 draw_ib 反查）。
+        # 注意：sha256 相同、跳过写文件时同样要登记 —— 内容没变不代表这次导出的 draw_ib 归属没变，
+        # 而登记表用的是整批覆盖语义，漏登记会让后处理查到上一轮甚至空的数据。
+        _section_registry.commit_ini(config_ini_path, self._collect_section_entries())
 
         # Read ini and find sha256, if not same then write ini, if same do nothing.
         ini_sha256 = self.get_sha256_from_ini(config_ini_path)
@@ -260,6 +317,11 @@ class M_IniBuilder:
         # Add after sha256 calculation.
         self.line_list.append("\n;sha256=" + sha256 + "\n\n") 
 
+
+        # 写盘前把本节所有段整批登记到导出段登记表（供条件判断节点按 draw_ib 反查）。
+        # 注意：sha256 相同、跳过写文件时同样要登记 —— 内容没变不代表这次导出的 draw_ib 归属没变，
+        # 而登记表用的是整批覆盖语义，漏登记会让后处理查到上一轮甚至空的数据。
+        _section_registry.commit_ini(config_ini_path, self._collect_section_entries())
 
         # Read ini and find sha256, if not same then write ini, if same do nothing.
         ini_sha256 = self.get_sha256_from_ini(config_ini_path)

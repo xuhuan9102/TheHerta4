@@ -118,6 +118,9 @@ _MODULE_REGISTRY = [
     {"name": "node_postprocess_object_texture", "required": False},
     {"name": "node_postprocess_swap_panel", "required": False},
     {"name": "node_postprocess_text_append", "required": False},
+    {"name": "node_postprocess_skip", "required": False},
+    # 条件判断：哈希出现时选定物体所属 IB 的整段 ini 代码才生效。
+    {"name": "node_postprocess_condition", "required": False},
 ]
 
 _MODULE_AVAILABLE = {}

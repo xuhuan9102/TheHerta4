@@ -48,6 +48,14 @@ except ImportError:  # 测试 stub 包无 __path__ 时退化为绝对导入
         write_sparse_vertex_index,
     )
 
+# 「条件判断」后处理节点靠 common/export_section_registry 的登记表反查
+# 「某 DrawIB 的 ini 段」。直出形态键生成器直接改写 ini 文本、不经 M_IniBuilder，
+# 所以这里要手动登记本次生成的形态键段；模块不可用时退化为 None，绝不影响导出。
+try:
+    from ..common import export_section_registry as _section_registry
+except Exception:
+    _section_registry = None
+
 
 # 形态键权重搬运的跨模块约定：必须与 node_postprocess_shapekey.py 的
 # WEIGHT_SYNC_SHADER_NAME / SSMTNode_PostProcess_ShapeKey.WEIGHT_BUFFER_REGISTER
@@ -1471,6 +1479,23 @@ class DirectShapeKeyOutputMixin:
             # 权重搬运段：每帧「写打包窗口 → 搬运 → 清零」，必须排在 Anim 之前
             compute_blocks_to_add[f"[CustomShaderShapeKeyWeightSync_{logical_hash}]"] = sync_lines
             hash_weight_counts[logical_hash] = weight_slots
+
+            # 登记本 hash 刚生成的两类段（裸段名，不含方括号），让「条件判断」
+            # 后处理能按 draw_ib 把形态键段一起门控。登记表是追加语义且自动去重，
+            # 不同分支重复调用安全；登记失败只静默跳过，绝不能影响导出结果。
+            if _section_registry is not None:
+                try:
+                    for _register_name in (
+                        f"CustomShader_{logical_hash}_Anim",
+                        f"CustomShaderShapeKeyWeightSync_{logical_hash}",
+                    ):
+                        _section_registry.register_section(
+                            _register_name,
+                            draw_ib=logical_hash.split("-")[0],
+                            ini_path=os.path.abspath(target_ini_file),
+                        )
+                except Exception:
+                    pass
 
         new_resource_lines = []
         generated_section_names = set()

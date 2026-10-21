@@ -10,6 +10,22 @@ from ...common.global_key_count_helper import GlobalKeyCountHelper
 from ...common.m_ini_helper import M_IniHelper
 from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...utils.timer_utils import TimerUtils
+import contextlib
+
+# 「条件判断」后处理节点需要按 draw_ib 反查 ini 段：导出期用 draw_ib 上下文包住
+# 「构建该 draw_ib 的段」的代码，M_IniSection 构造时会快照当前 draw_ib。
+# 导入失败时导出照常，只是不登记段（独立加载/裁剪环境）。
+try:
+    from ...common import export_section_registry as _section_registry
+except Exception:  # 独立加载/裁剪环境：退化为不登记，导出行为不变
+    _section_registry = None
+
+
+def _section_registry_context(draw_ib):
+    """返回 draw_ib 的段登记上下文；登记表不可用时退化为空上下文（不改变导出行为）。"""
+    if _section_registry is None:
+        return contextlib.nullcontext()
+    return _section_registry.draw_ib_context(draw_ib)
 
 
 def _get_component_index(draw_ib_model: DrawIBModelWWMI, component_tmp_obj_name: str, fallback_index: int) -> int:
@@ -708,19 +724,25 @@ class ExportWWMI:
             self.add_present_section(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
             self.add_commandlist_register_mod_section(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
             self.add_commandlist_update_merged_skeleton(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
+            # 下面这些段只属于当前 draw_ib（WWMI 一个 draw_ib 一个 INI），包进登记上下文；
+            # Constants / Present / 共享 CommandList / 共享骨架 / ModInfo / Key / GUI 等全局段留在上下文外。
             self.add_blend_remap_sections(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
             self.add_resource_mod_info_section_default(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
-            self.add_texture_override_mark_bone_data_cb(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
+            with _section_registry_context(draw_ib):
+                self.add_texture_override_mark_bone_data_cb(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
             self.add_commandlist_merge_skeleton_section(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
             self.add_commandlist_trigger_shared_cleanup_section(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
-            self.add_texture_override_component(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
-            self.add_texture_override_shapekeys(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
-            self.add_resource_shapekeys(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
+            with _section_registry_context(draw_ib):
+                self.add_texture_override_component(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
+                self.add_texture_override_shapekeys(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
+                self.add_resource_shapekeys(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
 
             if GlobalProterties.import_merged_vgmap():
+                # 共享骨架资源段：属于全局共享骨架，不登记到单个 draw_ib。
                 self.add_resource_merged_skeleton(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
 
-            self.add_resource_buffer(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
+            with _section_registry_context(draw_ib):
+                self.add_resource_buffer(ini_builder=config_ini_builder, draw_ib_model=draw_ib_model)
             M_IniHelper.move_slot_style_textures(draw_ib_model=draw_ib_model)
             GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
             M_IniHelper.add_branch_key_sections(ini_builder=config_ini_builder, key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict)
