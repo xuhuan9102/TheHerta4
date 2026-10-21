@@ -3,6 +3,13 @@
 
 该节点复用“材质转资源”的完整生成逻辑，但处理前会先按目标物体白名单过滤：
 未在列表中指定的 TextureOverride 段（即其它部件）不会被触碰，保持默认配置。
+
+代码范围圈定采用「条件判断」节点的结构化口径（实现见 ``blueprint/ini_scope``）：
+段（``[Section]``）→ if/endif 块（深度配对）→ 行分类 → 绘制单元（``; [mesh:...]``
+起，到下一个兄弟 mesh / 所在块 endif / ``;MARK:`` 之前）。拆块 / 置顶 / 恢复块的
+定位统一用这套单元结果，不再各自按 ``drawindexed`` / ``;MARK:`` 关键词猜边界；
+单元是否“目标”按「属于指定部件 **且** 单元内确有材质转资源生成的材质行」判定，
+读不到材质的目标部件按非目标处理（实机 worker.log 口径）。
 """
 import bpy
 import glob
@@ -16,6 +23,23 @@ from .node_postprocess_material import (
     MATERIAL_DETECT_PRESETS,
     SSMTNode_PostProcess_MaterialBase,
 )
+
+#: 「段 → if/endif 块 → 行分类 → 绘制单元」的结构化圈定（纯函数，不依赖 bpy）。
+#: 正常插件导入走相对导入；纯 Python 单测按文件路径装载本模块时包结构不完整
+#: （``PKG.blueprint.__path__`` 为空），退化成按文件路径直接装载。
+try:  # pragma: no cover - 分支由测试装载方式决定
+    from . import ini_scope as ini_scope
+except ImportError:  # pragma: no cover
+    import importlib.util as _importlib_util
+
+    _INI_SCOPE_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "ini_scope.py"
+    )
+    _ini_scope_spec = _importlib_util.spec_from_file_location(
+        "ssmt_ini_scope_fallback", _INI_SCOPE_PATH
+    )
+    ini_scope = _importlib_util.module_from_spec(_ini_scope_spec)
+    _ini_scope_spec.loader.exec_module(ini_scope)
 
 
 NODE_IDNAME = "SSMTNode_PostProcess_CustomMaterialAssign"
@@ -2317,21 +2341,85 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         for spec in chosen.values():
             self._write_keyswap_section(sections, spec)
 
+    # ------------------------------------------------------------------ #
+    # ini_scope 结构化圈定：段 → if/endif 块 → 行分类 → 绘制单元
+    # ------------------------------------------------------------------ #
+
+    def _begin_section_ib_scope(self, section_name, lines):
+        """登记当前段的 IB 键作用域（段名 / ``hash =`` 行给出）。
+
+        同一 ini 里不同 IB 可能带同名部件，只按名字判定会把别的 IB 的绘制单元
+        也当成目标。取不到 IB 键（例如 VB 段的 ``hash`` 是缓冲 hash）时为
+        ``None``，表示不做交叉校验、保持既有按名字 / 名称映射的判定。
+        """
+        self._section_ib_scope = ini_scope.section_ib_key(section_name, lines)
+
+    def _end_section_ib_scope(self):
+        """清掉当前段的 IB 键作用域，避免影响下一次处理。"""
+        self._section_ib_scope = None
+
+    def _mesh_in_section_ib_scope(self, mesh_name):
+        """mesh 名的 IB 键是否与本段一致（任一侧取不到时按一致处理）。"""
+        return ini_scope.ib_key_matches(
+            getattr(self, "_section_ib_scope", None),
+            ini_scope.mesh_ib_key(mesh_name),
+        )
+
+    def _unit_is_named_target(self, mesh_name):
+        """单元 mesh 是否属于本节点指定部件（名字 / 映射判定 + 段 IB 交叉校验）。"""
+        if not self._mesh_in_section_ib_scope(mesh_name):
+            return False
+        return self.find_object_by_mesh_name(
+            mesh_name,
+            object_filter=self._is_custom_target,
+        ) is not None
+
+    def _unit_has_generated_material(self, lines, unit):
+        """单元内是否有材质转资源生成的材质行（``_is_generated_material_line``）。"""
+        for index in range(unit["start"], unit["end"]):
+            if self._is_generated_material_line(str(lines[index] or "").strip()):
+                return True
+        return False
+
+    def _unit_is_material_target(self, lines, unit):
+        """「实机上真的写到了材质」的目标单元。
+
+        口径 = mesh 属于 target_items **且** 单元内存在材质转资源生成的材质行。
+        实机日志里有「N 个目标部件读不到材质……已按非目标部件处理」的情况：
+        这类单元没有任何资源引用行，必须按非目标处理（混排拆分时排到非目标块、
+        保持游戏原生贴图），否则会把它们的绘制拖到自定义材质之后继承错贴图。
+        """
+        if not self._unit_is_named_target(unit["mesh"]):
+            return False
+        return self._unit_has_generated_material(lines, unit)
+
+    def _iter_draw_units(self, lines, material_target=False):
+        """用 ini_scope 圈定段内绘制单元；``material_target`` 时标注目标口径。"""
+        if not material_target:
+            return list(ini_scope.iter_draw_units(lines))
+
+        def _is_material_target(unit):
+            return self._unit_is_material_target(lines, unit)
+
+        return list(ini_scope.iter_draw_units(lines, is_target=_is_material_target))
+
     def _section_custom_mesh_names(self, lines):
         """返回段内属于本节点指定部件的 mesh 注释名称。"""
         names = []
         seen = set()
-        for line in lines:
-            mesh_name = self.extract_mesh_name(line)
-            if not mesh_name:
+        for mesh_name in ini_scope.section_mesh_names(lines):
+            if mesh_name in seen:
+                continue
+            if not self._mesh_in_section_ib_scope(mesh_name):
                 continue
             obj = self.find_object_by_mesh_name(
                 mesh_name,
                 object_filter=self._is_custom_target,
             )
-            if obj is not None and mesh_name not in seen:
-                seen.add(mesh_name)
-                names.append(mesh_name)
+            if obj is None:
+                continue
+            seen.add(mesh_name)
+            names.append(mesh_name)
         return names
 
     def _capture_section_default_resources(self, lines):
@@ -2364,6 +2452,11 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         不在目标 draw 之后做恢复，是因为当前游戏纹理状态下“draw 后恢复”并不可靠；
         改为在后续默认部件自己的 mesh 注释后插入默认赋值，和材质转资源
         “mesh 前先赋值再 draw”的既有写法一致，也更可靠。
+
+        圈定口径：绘制单元由 :func:`blueprint.ini_scope.iter_draw_units` 给出，
+        插入点 = 非指定单元起点（``; [mesh:...]`` 行）之后。这里的“指定”只看
+        部件归属（名字 / 名称映射 + 段 IB 交叉校验），不看单元里有没有生成材质行
+        —— 「该不该补恢复块」取决于后面还有没有默认部件，和本轮材质生成结果无关。
         """
         if not bool(self.restore_default_textures_after_draw):
             return
@@ -2377,27 +2470,18 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             *run_lines,
             RESTORE_MARKER_END,
         ]
+        insert_positions = []
         seen_custom_target = False
-        restore_inserted = False
-        mesh_index = 0
-        while mesh_index < len(lines):
-            line = lines[mesh_index]
-            mesh_name = self.extract_mesh_name(line)
-            if not mesh_name:
-                mesh_index += 1
+        for unit in self._iter_draw_units(lines):
+            if not self._unit_is_named_target(unit["mesh"]):
+                if seen_custom_target:
+                    insert_positions.append(min(unit["start"] + 1, len(lines)))
                 continue
-            target = self.find_object_by_mesh_name(
-                mesh_name,
-                object_filter=self._is_custom_target,
-            )
-            if target is not None:
-                seen_custom_target = True
-            elif seen_custom_target:
-                lines[mesh_index + 1:mesh_index + 1] = default_block
-                mesh_index += len(default_block) + 1
-                restore_inserted = True
-                continue
-            mesh_index += 1
+            seen_custom_target = True
+        # 从后往前插，前面记录的行号不会被已插入的块顶偏。
+        for position in reversed(insert_positions):
+            lines[position:position] = list(default_block)
+        restore_inserted = bool(insert_positions)
         # 指定部件位于段尾（例如被移动到段尾）时，段内没有后续默认部件可以
         # “顺路”恢复默认贴图，需要在段尾补一次恢复。
         # 仅对原神 GIMI ORFix 写法生效（ORFix 会在描边/夜魂通道按
@@ -2411,7 +2495,8 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             insert_at = len(lines)
             while insert_at > 0:
                 stripped = str(lines[insert_at - 1]).strip()
-                if not stripped or stripped.upper().startswith(";MARK:"):
+                if (not stripped
+                        or ini_scope.classify_line(stripped) == "mark"):
                     insert_at -= 1
                     continue
                 break
@@ -2437,83 +2522,22 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         )
 
     def _move_top_level_targets_to_end(self, lines):
-        """把顶层（不被 if 包裹）的目标 mesh 绘制块移动到本段末尾。
+        """把顶层（不被 if 包裹）的目标 mesh 绘制单元移动到本段末尾。
 
         目标部件最后绘制时，后面不再有默认部件，就不会把自定义贴图状态带到其它
         部件。若目标位于 if/endif 内部，为保证条件块完整暂不移动，仍走默认恢复。
+
+        圈定口径：单元与边界由 :func:`blueprint.ini_scope.iter_draw_units` 给出
+        （``chain`` 为空 = 顶层；单元终点已排除下一个兄弟 mesh / ``;MARK:`` /
+        目标绘制之后新开的同层 if），目标判定见 ``_unit_is_material_target``。
         """
-        if_depth = 0
-        top_mesh_indices = []
-        marker_indices = []
-
-        for index, line in enumerate(lines):
-            stripped = str(line or "").strip()
-            if not stripped:
-                continue
-            if re.match(r"^if\s+", stripped, re.IGNORECASE):
-                if_depth += 1
-                continue
-            if stripped.casefold() == "endif":
-                if_depth = max(0, if_depth - 1)
-                continue
-            if if_depth == 0:
-                if self.extract_mesh_name(line):
-                    top_mesh_indices.append(index)
-                elif stripped.startswith(";MARK:"):
-                    marker_indices.append(index)
-
         target_ranges = []
-        draw_re = re.compile(r"^\s*drawindexed(?:instanced)?\s*=", re.IGNORECASE)
-        for mesh_index in top_mesh_indices:
-            line = lines[mesh_index]
-            mesh_name = self.extract_mesh_name(line)
-            if not mesh_name:
+        for unit in self._iter_draw_units(lines, material_target=True):
+            if unit["chain"] or not unit["is_target"]:
                 continue
-            target = self.find_object_by_mesh_name(
-                mesh_name,
-                object_filter=self._is_custom_target,
-            )
-            if target is None:
+            if not unit["draw_lines"]:
                 continue
-
-            # 目标 mesh 后的材质切换 if 会出现在其 draw 之前，应一起移动；
-            # 只有看到目标自己的 draw 之后遇到的下一个顶层 mesh/if/MARK 才是边界。
-            next_boundary = len(lines)
-            nested_depth = 0
-            seen_draw = False
-            for scan_index in range(mesh_index + 1, len(lines)):
-                scan_line = lines[scan_index]
-                stripped = str(scan_line or "").strip()
-                if not stripped:
-                    continue
-                if re.match(r"^if\s+", stripped, re.IGNORECASE):
-                    if nested_depth == 0 and seen_draw:
-                        next_boundary = scan_index
-                        break
-                    nested_depth += 1
-                    continue
-                if stripped.casefold() == "endif":
-                    nested_depth = max(0, nested_depth - 1)
-                    continue
-                if nested_depth == 0:
-                    if self.extract_mesh_name(scan_line):
-                        next_boundary = scan_index
-                        break
-                    if stripped.startswith(";MARK:"):
-                        next_boundary = scan_index
-                        break
-                    if draw_re.match(stripped):
-                        seen_draw = True
-
-            segment = lines[mesh_index:next_boundary]
-            if not any(draw_re.match(str(item or "")) for item in segment):
-                continue
-            if not any(
-                self._is_generated_material_line(str(item or "").strip())
-                for item in segment
-            ):
-                continue
-            target_ranges.append((mesh_index, next_boundary))
+            target_ranges.append((unit["start"], unit["end"]))
 
         if not target_ranges:
             return
@@ -2525,105 +2549,163 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
 
         insert_at = len(lines)
         for index, line in enumerate(lines):
-            stripped = str(line or "").strip()
-            if stripped.startswith(";MARK:"):
+            if ini_scope.classify_line(str(line or "").strip()) == "mark":
                 insert_at = index
                 break
         for segment in moved_segments:
             lines[insert_at:insert_at] = segment
             insert_at += len(segment)
 
-    def _find_flat_region_target_ranges(self, lines, region_start, region_end):
-        """查找一段平铺 if 内容中的目标 mesh 范围（支持材质切换 if）。"""
-        mesh_indices = []
-        for index in range(region_start, region_end):
-            if self.extract_mesh_name(lines[index]):
-                mesh_indices.append(index)
+    def _reorder_units_non_target_first(self, lines):
+        """段级稳定重排：所有非目标绘制单元集中在段首、目标单元集中在段尾。
 
+        拆块只能保证「同一个 if 块内非目标在前」；但拆出的非目标块如果原来的位置
+        就在若干目标之后（实机例：``左手`` 与 ``阴茎.002`` 同在 ``if $swapkey6 == 0``
+        块，块本身排在 15 个目标之后），拆完 ``左手`` 块仍落在目标之后，违反
+        「非目标部件的贴图引用与绘制命令必须在所有目标之前」。所以拆块之后再做一次
+        段级稳定划分：
+
+        - 把「顶层绘制单元」与「顶层 if 块（含其全部单元）」切成连续的 chunk；
+          块的类别取块内全部单元的类别，混排块（拆块保守跳过的那种）直接放弃重排；
+        - 非目标 chunk 按原相对顺序前移，目标 chunk 按原相对顺序后移到
+          ``;MARK:`` 之前；不含绘制单元的中性块留在两类之间；
+        - 段首的前导内容（``hash`` / ``match_first_index`` / 默认贴图绑定等）保持
+          原位，``;MARK:`` 之后的内容不参与重排；
+        - 已满足顺序时不做任何改动（保证幂等）；含 ``else`` 的块保守跳过整段重排。
+
+        返回是否发生了改动。
+        """
+        units = [
+            unit
+            for unit in self._iter_draw_units(lines, material_target=True)
+            if unit["is_target"] is not None
+        ]
+        if not units:
+            return False
+
+        tail_anchor = len(lines)
+        for index, line in enumerate(lines):
+            if ini_scope.classify_line(str(line or "").strip()) == "mark":
+                tail_anchor = index
+                break
+
+        units = [unit for unit in units if unit["start"] < tail_anchor]
+        if not units:
+            return False
+
+        blocks = ini_scope.find_if_blocks(lines)
+        block_end_map = dict(blocks)
+        top_unit_starts = {
+            unit["start"] for unit in units if not unit["chain"]
+        }
+        region_start = min(
+            unit["chain"][0][0] if unit["chain"] else unit["start"]
+            for unit in units
+        )
+        if region_start >= tail_anchor:
+            return False
+
+        boundary_positions = {
+            position
+            for position in list(block_end_map) + list(top_unit_starts)
+            if region_start <= position < tail_anchor
+        }
+        boundary_positions.add(tail_anchor)
+        boundaries = sorted(boundary_positions)
+        if boundaries[0] != region_start:
+            return False
+
+        depths = ini_scope.line_depths(lines)
+        chunks = []
+        for position, chunk_start in enumerate(boundaries[:-1]):
+            chunk_end = boundaries[position + 1]
+            if chunk_start in block_end_map:
+                block_end = block_end_map[chunk_start]
+                if block_end >= tail_anchor:
+                    return False
+                # ``else`` 分支：拆开 / 整体搬动都会改语义，整段保守跳过。
+                block_depth = depths[chunk_start] + 1
+                for index in range(chunk_start + 1, block_end):
+                    if depths[index] == block_depth and ini_scope.is_else_line(lines[index]):
+                        return False
+                inside = [
+                    unit for unit in units
+                    if unit["chain"] and unit["chain"][0][0] == chunk_start
+                ]
+                if inside:
+                    flags = [unit["is_target"] for unit in inside]
+                    if all(flags):
+                        category = "target"
+                    elif not any(flags):
+                        category = "non_target"
+                    else:
+                        # 混排块（拆块保守跳过的情形）无法安全整体搬动。
+                        return False
+                else:
+                    category = "neutral"
+            elif chunk_start in top_unit_starts:
+                unit = next(
+                    unit for unit in units
+                    if unit["start"] == chunk_start and not unit["chain"]
+                )
+                category = "target" if unit["is_target"] else "non_target"
+            else:
+                return False
+            if category == "neutral":
+                # 无绘制单元的中性块里若藏有绘制命令，顺序无法保证，保守放弃。
+                for index in range(chunk_start, chunk_end):
+                    if ini_scope.classify_line(lines[index]) == "draw":
+                        return False
+            chunks.append((chunk_start, chunk_end, category))
+
+        current_categories = [category for _start, _end, category in chunks]
+        desired_chunks = (
+            [chunk for chunk in chunks if chunk[2] == "non_target"]
+            + [chunk for chunk in chunks if chunk[2] == "neutral"]
+            + [chunk for chunk in chunks if chunk[2] == "target"]
+        )
+        if [chunk[2] for chunk in desired_chunks] == current_categories:
+            return False
+
+        rebuilt = []
+        for chunk_start, chunk_end, _category in desired_chunks:
+            rebuilt.extend(lines[chunk_start:chunk_end])
+        lines[region_start:tail_anchor] = rebuilt
+        return True
+
+    def _find_flat_region_target_ranges(self, lines, region_start, region_end, units=None):
+        """查找一段平铺 if 内容中的目标单元范围。
+
+        只取直接挂在该 if 块下（``chain`` 最内层就是 ``region_start - 1`` 处那个
+        ``if``）的绘制单元；嵌套 if 内部的 mesh 不参与平铺重排。单元终点由
+        :func:`blueprint.ini_scope.iter_draw_units` 给出，并夹在本块 ``endif``
+        之前。
+        """
+        block_start = region_start - 1
+        if units is None:
+            units = self._iter_draw_units(lines, material_target=True)
         ranges = []
-        draw_re = re.compile(r"^\s*drawindexed(?:instanced)?\s*=", re.IGNORECASE)
-        for mesh_index in mesh_indices:
-            line = lines[mesh_index]
-            mesh_name = self.extract_mesh_name(line)
-            if not mesh_name:
+        for unit in units:
+            if not unit["chain"] or unit["chain"][-1][0] != block_start:
                 continue
-            target = self.find_object_by_mesh_name(
-                mesh_name,
-                object_filter=self._is_custom_target,
-            )
-            if target is None:
+            if unit["start"] < region_start or unit["start"] >= region_end:
                 continue
-
-            segment_end = region_end
-            nested_depth = 0
-            seen_draw = False
-            for scan_index in range(mesh_index + 1, region_end):
-                scan_line = lines[scan_index]
-                stripped = str(scan_line or "").strip()
-                if not stripped:
-                    continue
-                if re.match(r"^if\s+", stripped, re.IGNORECASE):
-                    nested_depth += 1
-                    continue
-                if stripped.casefold() == "endif":
-                    if nested_depth == 0 and seen_draw:
-                        segment_end = scan_index
-                        break
-                    if nested_depth > 0:
-                        nested_depth -= 1
-                    continue
-                if nested_depth == 0:
-                    if self.extract_mesh_name(scan_line):
-                        segment_end = scan_index
-                        break
-                    if stripped.startswith(";MARK:"):
-                        segment_end = scan_index
-                        break
-                    if draw_re.match(stripped):
-                        seen_draw = True
-
-            segment = lines[mesh_index:segment_end]
-            if not any(draw_re.match(str(item or "")) for item in segment):
+            if not unit["is_target"] or not unit["draw_lines"]:
                 continue
-            if not any(
-                self._is_generated_material_line(str(item or "").strip())
-                for item in segment
-            ):
-                continue
-            ranges.append((mesh_index, segment_end))
+            ranges.append((unit["start"], min(unit["end"], region_end)))
         return ranges
 
     def _move_targets_to_end_of_top_level_if_blocks(self, lines):
-        """在每个顶层 if/endif 分支内，把目标 mesh 绘制块移到该分支 endif 前。"""
-        top_level_blocks = []
-        if_depth = 0
-        block_start = -1
-        for index, line in enumerate(lines):
-            stripped = str(line or "").strip()
-            if not stripped:
-                continue
-            if re.match(r"^if\s+", stripped, re.IGNORECASE):
-                if if_depth == 0:
-                    block_start = index
-                if_depth += 1
-            elif stripped.casefold() == "endif":
-                if_depth -= 1
-                if if_depth == 0 and block_start >= 0:
-                    top_level_blocks.append((block_start, index))
-                    block_start = -1
-
-        for block_start, block_end in top_level_blocks:
+        """在每个顶层 if/endif 分支内，把目标 mesh 绘制单元移到该分支 endif 前。"""
+        for block_start, block_end in ini_scope.find_if_blocks(lines):
+            units = self._iter_draw_units(lines, material_target=True)
             # 嵌套游戏 if 内部的 mesh 不能安全按平铺块重排，跳过由默认保护处理。
-            nested_mesh_found = False
-            scan_depth = 0
-            for index in range(block_start + 1, block_end):
-                stripped = str(lines[index] or "").strip()
-                if re.match(r"^if\s+", stripped, re.IGNORECASE):
-                    scan_depth += 1
-                elif stripped.casefold() == "endif":
-                    scan_depth = max(0, scan_depth - 1)
-                elif scan_depth > 0 and self.extract_mesh_name(lines[index]):
-                    nested_mesh_found = True
+            nested_mesh_found = any(
+                unit["chain"]
+                and unit["chain"][0][0] == block_start
+                and len(unit["chain"]) > 1
+                for unit in units
+            )
             if nested_mesh_found:
                 continue
 
@@ -2631,6 +2713,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 lines,
                 block_start + 1,
                 block_end,
+                units=units,
             )
             if not ranges:
                 continue
@@ -2645,6 +2728,268 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             for segment in moved_segments:
                 lines[insert_at:insert_at] = segment
                 insert_at += len(segment)
+
+    @staticmethod
+    def _find_top_level_if_blocks(lines):
+        """返回段内所有顶层 if 块的 (起, 止) 行号（含 if 与 endif）。
+
+        解析口径与条件判断节点一致：``if`` / ``endif`` 深度配对，未闭合的块
+        保守丢弃（不参与重排）。
+        """
+        return ini_scope.find_if_blocks(lines)
+
+    @staticmethod
+    def _flat_body_guard(body):
+        """平铺 if 块体的保守检查：返回 ``None`` 表示可重排，否则返回跳过原因。
+
+        - 顶层出现 ``else`` / ``elseif``：分支依赖同一个 if 结构，拆开会改变语义；
+        - 顶层出现 ``;MARK:``：导出期段标记必须留在最外层，不能复制 / 搬动。
+
+        判定用 ``ini_scope`` 的行分类与深度，不再按字符串前缀各自猜。
+        """
+        depths = ini_scope.line_depths(body)
+        for offset, line in enumerate(body):
+            if depths[offset] != 0:
+                continue
+            if ini_scope.classify_line(line) == "mark":
+                return "if 块内出现 ;MARK: 段标记"
+            if ini_scope.is_else_line(line):
+                return "if 块内含 else/else if 分支"
+        return None
+
+    @staticmethod
+    def _split_preamble_is_safe(preamble):
+        """判断 if 块内第一个 mesh 单元之前的公共行能否复制到每个拆分块。
+
+        只允许空行、注释和普通赋值；``run`` / 绘制命令 / 控制流复制后会产生
+        重复副作用，遇到就保守放弃拆分。
+        """
+        for line in preamble:
+            kind = ini_scope.classify_line(line)
+            if kind in ("neutral", "comment"):
+                continue
+            if kind in ("run", "draw", "if", "endif", "mark"):
+                return False
+            if ini_scope.is_else_line(line):
+                return False
+        return True
+
+    def _split_if_block_lines(self, block_lines):
+        """尝试把一个顶层 if 块拆成「非目标块 + 目标块」两段行。
+
+        返回 ``(非目标块行, 目标块行)``；块内不混排、含 else/else if、或
+        前置公共行不安全时返回 ``None``（保持原样，不产生任何改动）。
+
+        目标口径：按 ``_unit_is_material_target`` —— mesh 属于指定部件**且**单元
+        内存在材质转资源生成的材质行。读不到材质的目标部件（实机日志里会被按非
+        目标处理）没有资源引用行，必须进非目标块、排在前面，否则会继承自定义
+        材质而贴错图。
+        """
+        if len(block_lines) < 3:
+            return None
+        body = block_lines[1:-1]
+        if self._flat_body_guard(body) is not None:
+            return None
+
+        # 只有块体顶层的 mesh 注释才是可重排的单元（嵌套 if 内部的 mesh 保守不动）。
+        units = [
+            unit
+            for unit in ini_scope.iter_draw_units(body)
+            if not unit["chain"]
+        ]
+        if len(units) < 2:
+            return None
+
+        target_flags = [
+            self._unit_is_material_target(body, unit) for unit in units
+        ]
+        if all(target_flags) or not any(target_flags):
+            return None
+
+        unit_starts = [unit["start"] for unit in units]
+        preamble = body[:unit_starts[0]]
+        if not self._split_preamble_is_safe(preamble):
+            self._warn_skip_if_split("if 块内 mesh 之前有不可安全复制的命令")
+            return None
+
+        non_target_block = [block_lines[0], *preamble]
+        target_block = [block_lines[0], *preamble]
+        for position, unit in enumerate(units):
+            start = unit_starts[position]
+            end = (
+                unit_starts[position + 1]
+                if position + 1 < len(unit_starts)
+                else len(body)
+            )
+            if target_flags[position]:
+                target_block.extend(body[start:end])
+            else:
+                non_target_block.extend(body[start:end])
+        non_target_block.append(block_lines[-1])
+        target_block.append(block_lines[-1])
+        return non_target_block, target_block
+
+    def _warn_skip_if_split(self, reason):
+        """同一个原因只提示一次，避免逐段刷屏。"""
+        warned = getattr(self, "_if_split_warned", None)
+        if warned is None:
+            warned = set()
+            try:
+                self._if_split_warned = warned
+            except Exception:
+                return
+        if reason in warned:
+            return
+        warned.add(reason)
+        print(f"[材质转资源] 跳过 if 块拆分：{reason}（保持原条件结构）")
+
+    @staticmethod
+    def _move_line_blocks_before_section_mark(lines, ranges):
+        """把若干行区间整体移到段尾第一个 ``;MARK:`` 之前。"""
+        moved_segments = []
+        for start, end in reversed(ranges):
+            moved_segments.insert(0, lines[start:end + 1])
+            del lines[start:end + 1]
+        insert_at = len(lines)
+        for index, line in enumerate(lines):
+            if ini_scope.classify_line(str(line or "").strip()) == "mark":
+                insert_at = index
+                break
+        for segment in moved_segments:
+            lines[insert_at:insert_at] = segment
+            insert_at += len(segment)
+
+    def _is_pure_target_if_block(self, block_lines):
+        """判断顶层 if 块内的 mesh 单元是否全部是目标（纯目标块）。
+
+        含 else/else if、块内出现 ``;MARK:``、或嵌套 if 内部还有 mesh 的块
+        一律返回 False（保守处理，不整体移动）。
+
+        这里的“是目标”只看部件归属（名字 / 名称映射 + 段 IB 交叉校验）：纯目标块
+        是**整体原样搬动**、不改变块内绘制顺序，所以沿用既有按归属判定的口径；
+        需要“单元里真的写了材质”才成立的判定只在混排拆块（``_split_if_block_lines``）
+        里使用。
+        """
+        if len(block_lines) < 3:
+            return False
+        body = block_lines[1:-1]
+        if self._flat_body_guard(body) is not None:
+            return False
+
+        units = []
+        for unit in ini_scope.iter_draw_units(body):
+            if unit["chain"]:
+                # 嵌套 if 内部的 mesh 不参与平铺分类，保守放弃整体移动。
+                return False
+            units.append(unit)
+        if not units:
+            return False
+        return all(self._unit_is_named_target(unit["mesh"]) for unit in units)
+
+    def _block_has_generated_material(self, lines, block_start, block_end):
+        """区间内是否有材质转资源生成的材质行。"""
+        for index in range(block_start, block_end + 1):
+            if self._is_generated_material_line(str(lines[index] or "").strip()):
+                return True
+        return False
+
+    def _later_pure_target_block_exists(self, lines, after_index):
+        """``after_index`` 之后是否还有纯目标 if 块（段尾已有目标块占位）。"""
+        for block_start, block_end in ini_scope.find_if_blocks(lines):
+            if block_start <= after_index:
+                continue
+            if self._is_pure_target_if_block(lines[block_start:block_end + 1]):
+                return True
+        return False
+
+    def _target_block_needs_move(self, lines, block_end, block_start=None):
+        """目标块之后还有非目标 mesh 绘制时才需要移动，否则保持原位。
+
+        ``;MARK:`` 之前已经没有需要让位的非目标绘制时保持原位。
+
+        额外保守项：块内**没有任何材质转资源生成的材质行**时（实机上这些部件按
+        非目标处理），若段尾已经另有纯目标块占位，就不再搬动本块 —— 否则拆分后
+        的无材质块会在重复处理时被反复搬到目标块前面，输出不再幂等。
+        """
+        material_block = (
+            block_start is not None
+            and self._block_has_generated_material(lines, block_start, block_end)
+        )
+        depths = ini_scope.line_depths(lines)
+        cursor = block_end + 1
+        for unit in self._iter_draw_units(lines):
+            if unit["chain"] or unit["start"] <= block_end:
+                continue
+            for index in range(cursor, unit["start"]):
+                if depths[index] == 0 and ini_scope.classify_line(lines[index]) == "mark":
+                    return False
+            if not self._unit_is_named_target(unit["mesh"]):
+                if (block_start is not None
+                        and not material_block
+                        and self._later_pure_target_block_exists(lines, block_end)):
+                    return False
+                return True
+            cursor = unit["end"]
+        return False
+
+    def _split_mixed_target_if_blocks(self, lines):
+        """拆分混排 if 块，并把目标块（纯目标块 / 拆出的目标块）移到段尾。
+
+        游戏 ini 常把多个部件包在同一个条件里（``if $switch == 1`` 下既有默认
+        部件 A 又有指定部件 B）。整块既不能置顶（会把 A 连带置顶），也不能整体
+        移到段尾（B 会被 A 拖住），所以先按类别拆成同条件、各自 endif 的多个块：
+        非目标单元一块在前、目标单元一块在后，再把拆出的目标块移到段尾（第一个
+        ``;MARK:`` 之前），随后仍走既有的目标重排与恢复块逻辑。
+
+        另外，块内 mesh 单元全部是目标的“纯目标块”若后面还有非目标绘制，也整体
+        移到段尾（内容不变），否则目标会排在非目标之前；本来就在所有非目标之后
+        的纯目标块保持原位。
+
+        圈定口径（:mod:`blueprint.ini_scope`）：``if`` / ``endif`` 块由深度配对
+        给出；单元起点是 ``; [mesh:...]`` 注释行，终点是下一个兄弟 mesh / 本块
+        ``endif`` 之前 / ``;MARK:`` 之前；单元内嵌套的材质切换 if 与 drawindexed
+        整体跟随，不会被拆散。拆块时“目标”按 ``_unit_is_material_target`` 判定
+        （属于指定部件**且**单元内确有生成材质行）；含 else/else if、块内出现
+        ``;MARK:``、或 mesh 之前有不可复制的 ``run``/绘制命令时保守跳过。
+        """
+        blocks = self._find_top_level_if_blocks(lines)
+        if not blocks:
+            return
+        block_end_map = dict(blocks)
+        rebuilt = []
+        target_block_ranges = []
+        changed = False
+        index = 0
+        while index < len(lines):
+            block_end = block_end_map.get(index)
+            if block_end is None:
+                rebuilt.append(lines[index])
+                index += 1
+                continue
+            block_lines = lines[index:block_end + 1]
+            split_blocks = self._split_if_block_lines(block_lines)
+            if split_blocks is not None:
+                changed = True
+                non_target_block, target_block = split_blocks
+                rebuilt.extend(non_target_block)
+                target_start = len(rebuilt)
+                rebuilt.extend(target_block)
+                if self._target_block_needs_move(lines, block_end, block_start=index):
+                    target_block_ranges.append((target_start, len(rebuilt) - 1))
+            elif self._is_pure_target_if_block(block_lines):
+                changed = True
+                target_start = len(rebuilt)
+                rebuilt.extend(block_lines)
+                if self._target_block_needs_move(lines, block_end, block_start=index):
+                    target_block_ranges.append((target_start, len(rebuilt) - 1))
+            else:
+                rebuilt.extend(block_lines)
+            index = block_end + 1
+        if not changed:
+            return
+        lines[:] = rebuilt
+        if target_block_ranges:
+            self._move_line_blocks_before_section_mark(lines, target_block_ranges)
 
     def process_texture_override_section(
         self,
@@ -2684,27 +3029,37 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             )
 
         lines = all_sections.get(section_name, [])
-        if not self._section_custom_mesh_names(lines):
-            return next_swap_key_num
+        # 段级 IB 交叉校验作用域：段名 / hash 行给出的 IB 键与 mesh 名不一致时，
+        # 该单元不算目标（避免同名部件跨 IB 误判）。
+        self._begin_section_ib_scope(section_name, lines)
+        try:
+            if not self._section_custom_mesh_names(lines):
+                return next_swap_key_num
 
-        self._prepare_material_group_switch_map(material_group_to_swapkey)
-        max_ui_number = self._max_ui_switch_number()
-        if max_ui_number >= 0 and next_swap_key_num <= max_ui_number:
-            next_swap_key_num = max_ui_number + 1
+            self._prepare_material_group_switch_map(material_group_to_swapkey)
+            max_ui_number = self._max_ui_switch_number()
+            if max_ui_number >= 0 and next_swap_key_num <= max_ui_number:
+                next_swap_key_num = max_ui_number + 1
 
-        result = super().process_texture_override_section(
-            section_name,
-            all_sections,
-            material_group_to_swapkey,
-            swap_key_prefix=swap_key_prefix,
-            next_swap_key_num=next_swap_key_num,
-            used_swap_keys=used_swap_keys,
-            transparency_sections_to_add=transparency_sections_to_add,
-        )
-        self._move_targets_to_end_of_top_level_if_blocks(lines)
-        self._move_top_level_targets_to_end(lines)
-        self._insert_restore_blocks(lines)
-        return result
+            result = super().process_texture_override_section(
+                section_name,
+                all_sections,
+                material_group_to_swapkey,
+                swap_key_prefix=swap_key_prefix,
+                next_swap_key_num=next_swap_key_num,
+                used_swap_keys=used_swap_keys,
+                transparency_sections_to_add=transparency_sections_to_add,
+            )
+            self._split_mixed_target_if_blocks(lines)
+            self._move_targets_to_end_of_top_level_if_blocks(lines)
+            self._move_top_level_targets_to_end(lines)
+            # 拆块只保证块内非目标在前；这里再做段级稳定划分，保证
+            # 「所有非目标绘制单元 < 所有目标绘制单元」（含被移到段中的非目标块）。
+            self._reorder_units_non_target_first(lines)
+            self._insert_restore_blocks(lines)
+            return result
+        finally:
+            self._end_section_ib_scope()
 
     def draw_material_detection_panel(self, context, layout):
         """材质检测窗口（可折叠），检测范围跟随“使用全局指定”开关。"""

@@ -11,6 +11,10 @@
 * 同一物体被两个同类节点接管时导出前报错；
 * HIMI（崩坏 3）走 HI3FX 命名空间：``$\\HI3FX\\h/s/v`` 注入、复位改走
   ``CommandList\\HI3FX\\Reset``，同步与 ColorShift 自动跳过。
+* ini_scope 结构化圈定（2026-10-22 实机 bug 回归）：同一 IB 下近似部件名不误匹配、
+  mesh 在条件块内且还有嵌套材质切换 if 时参数插在 draw 前而复位在最内层 endif
+  之后、块内 run 排在 draw 之后时参数仍插在 draw 前、两个目标共享同一 IB 时各自
+  单元都保留参数块（互不剥离）。
 """
 
 import importlib.util
@@ -154,6 +158,22 @@ MESH_NAME = "LOD0.fd054d1d-30030-0.Body"
 GLOW_SECTION = "TextureOverride_LOD0.fd054d1d_30030_0"
 SECOND_OBJECT = "LOD0.aa11bb22-30030-0.Body"
 SECOND_SECTION = "TextureOverride_LOD0.aa11bb22_30030_0"
+
+# 实机 bug（2026-10-22 导出 INI 实测）：同一个 IB 下的两个部件，旧口径按
+# 「IB 后缀互相包含」匹配，导致「右手.001」的单元被当成「右乳球.001」的目标，
+# 参数块插进了别的部件里。新口径 = IB 键一致 + 部件名完全相等。
+SHARED_IB_TARGET = "LOD0.c209c22b-30030-0.右乳球.001"
+SHARED_IB_NEAR = "LOD0.c209c22b-30030-0.右手.001"
+SHARED_IB_SECTION = "TextureOverride_LOD0.c209c22b_30030_0"
+
+# 实机 bug（4:15:54 导出）：同一个 `if $swapkey4 == 0` 块内相邻的多个目标单元，
+# 前一个单元的可写范围被扩到共享的 endif，把兄弟单元整个吞进来后互相剥离参数块
+# （音擎.002 / 珠子.002 / 肛塞.002 都没有 Params）。
+CHAIN_UNIT_NAMES = (
+    "LOD0.c209c22b-30030-0.乳钩.001",
+    "LOD0.c209c22b-30030-0.音擎.002",
+    "LOD0.c209c22b-30030-0.珠子.002",
+)
 
 
 class _FakeObject:
@@ -1198,6 +1218,258 @@ class RabbitFXProTests(unittest.TestCase):
         labels = [entry[1] for entry in layout.log if entry[0] == "label"]
         self.assertTrue(any("HI3FX" in text for text in labels), labels)
         self.assertTrue(any("W-Engine 同步" in text for text in labels))
+
+    # ──────────────── ini_scope 结构化圈定（实机 bug 回归） ────────────────
+
+    def test_part_name_matching_only_accepts_same_part(self):
+        """部件名口径：剥掉 LOD / IB 编号 / ``_copy`` 后必须相等，序号也要一致。"""
+        self.assertEqual(
+            pro._part_name("LOD0.c209c22b-45087-0.右手.001_copy"), "右手.001"
+        )
+        self.assertEqual(pro._part_name("LOD0.c209c22b-45087-0.双乳钩"), "双乳钩")
+        # 序号分隔符写法可以不同，序号本身必须一致。
+        self.assertTrue(pro._part_names_equal("右手.001", "右手_001"))
+        self.assertFalse(pro._part_names_equal("右手.001", "右手.002"))
+        self.assertFalse(pro._part_names_equal("右手", "右手.001"))
+        self.assertFalse(pro._part_names_equal("右手.001", "右乳球.001"))
+
+    def test_near_part_under_shared_ib_is_not_matched(self):
+        """同 IB 下近似名不误匹配：``右手.001`` 不是 ``右乳球.001`` 的目标。
+
+        实机 bug：``_extract_resource_suffix`` 只取到 IB 编号，``_mesh_name_matches``
+        后缀互相包含 → 同一 IB 的所有 mesh 都被当成目标，参数写进了别的部件。
+        """
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            f"[mesh:{SHARED_IB_TARGET}]\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+            "drawindexed = 100, 0, 0\n"
+            f"[mesh:{SHARED_IB_NEAR}]\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_2\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+            "drawindexed = 200, 0, 0\n"
+        )
+        # 段里根本没有的部件（同 IB 的另一个部件名）：不能借着「同 IB」乱注，
+        # 也不能走整段回退（段里明明有 mesh 注释）。
+        _write_ini(self.ini_path, section)
+        node = _make_node(
+            target_items=[_item(_fake_object("LOD0.c209c22b-30030-0.双乳钩"))]
+        )
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path), section)
+
+        # 把「右手.001」当目标：只改它自己的单元，右乳球.001 的单元不受影响。
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_NEAR))])
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+        near_index = content.index(f"[mesh:{SHARED_IB_NEAR}]")
+        self.assertEqual(content.count(pro._PARAM_BEGIN), 1)
+        self.assertGreater(content.index(pro._PARAM_BEGIN), near_index)
+        self.assertNotIn(pro._PARAM_BEGIN, content[:near_index])
+
+        # 换成把「右乳球.001」当目标：同样只改自己的单元，右手.001 不受影响。
+        _write_ini(self.ini_path, section)
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_TARGET))])
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+        near_index = content.index(f"[mesh:{SHARED_IB_NEAR}]")
+        self.assertEqual(content.count(pro._PARAM_BEGIN), 1)
+        self.assertLess(content.index(pro._PARAM_BEGIN), near_index)
+        self.assertNotIn(pro._PARAM_BEGIN, content[near_index:])
+
+    def test_params_before_draw_inside_condition_and_reset_after_endif(self):
+        """mesh 在 ``if $swapkey4 == 0`` 块内、块里还有嵌套材质切换 if。
+
+        参数块插在该 if 块内、目标 draw 之前；复位块插在 chain 最内层 ``endif``
+        之后（而不是猜「draw 之后最后一个 endif」）。
+        """
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            "if $swapkey4 == 0\n"
+            f"    [mesh:{SHARED_IB_TARGET}]\n"
+            "    Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "    if $material == 1\n"
+            "        run = CommandList\\RabbitFX\\Run\n"
+            "        drawindexed = 100, 0, 0\n"
+            "    endif\n"
+            "    if $material == 2\n"
+            "        drawindexed = 200, 0, 0\n"
+            "    endif\n"
+            "endif\n"
+            f"[mesh:{SHARED_IB_NEAR}]\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_2\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+            "drawindexed = 300, 0, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_TARGET))])
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        params_index = content.index(pro._PARAM_BEGIN)
+        # 参数块在 if 块内、目标 draw 之前（缩进跟随锚点行）。
+        self.assertLess(content.index("if $material == 1"), params_index)
+        self.assertLess(params_index, content.index("drawindexed = 100, 0, 0"))
+        self.assertIn("        ; === RabbitFXPro Params ===", content)
+        # 复位块在 chain 最内层 endif 之后、下一个 mesh 之前。
+        reset_index = content.index(pro._RESET_BEGIN)
+        self.assertEqual(content[:reset_index].count("endif"), 3)
+        self.assertLess(content.index("drawindexed = 200, 0, 0"), reset_index)
+        self.assertLess(reset_index, content.index(f"[mesh:{SHARED_IB_NEAR}]"))
+        self.assertNotIn(pro._PARAM_BEGIN, content[content.index(f"[mesh:{SHARED_IB_NEAR}]"):])
+
+        # 复位块落在单元区间之外，重跑也必须能剥掉（幂等）。
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path), content)
+
+    def test_run_after_draw_keeps_params_before_draw(self):
+        """块内 ``run`` 排在 draw 之后：参数仍插在 draw 前，并补一条 Run 生效。"""
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            f"[mesh:{SHARED_IB_TARGET}]\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "drawindexed = 100, 0, 0\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_TARGET))])
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        draw_index = content.index("drawindexed = 100, 0, 0")
+        self.assertLess(content.index(pro._PARAM_BEGIN), draw_index)
+        first_run = content.index("run = CommandList\\RabbitFX\\Run")
+        self.assertLess(content.index(pro._PARAM_BEGIN), first_run)
+        self.assertLess(first_run, draw_index)
+        # 原有的那条 run 还在，另外补了一条让参数在本次绘制前生效。
+        self.assertEqual(content.count("run = CommandList\\RabbitFX\\Run"), 2)
+        self.assertLess(draw_index, content.index(pro._RESET_BEGIN))
+
+    def test_two_targets_sharing_ib_each_keep_their_params(self):
+        """两个目标共享同一 IB：各自单元都注入参数块，本轮互不剥离。"""
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            f"[mesh:{SHARED_IB_TARGET}]\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+            "drawindexed = 100, 0, 0\n"
+            f"[mesh:{SHARED_IB_NEAR}]\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_2\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+            "drawindexed = 200, 0, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(
+            target_items=[
+                _item(_fake_object(SHARED_IB_TARGET)),
+                _item(_fake_object(SHARED_IB_NEAR)),
+            ]
+        )
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        near_index = content.index(f"[mesh:{SHARED_IB_NEAR}]")
+        self.assertEqual(content.count(pro._PARAM_BEGIN), 2)
+        self.assertEqual(content.count("$\\RabbitFX\\brightness = 8.0"), 2)
+        self.assertEqual(content[:near_index].count(pro._PARAM_BEGIN), 1)
+        self.assertEqual(content[near_index:].count(pro._PARAM_BEGIN), 1)
+
+        # 重跑幂等：新一轮把上一轮的两块换成本轮的两块，不累积也不互相剥掉。
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path), content)
+
+    def test_fallback_whole_section_without_mesh_comment(self):
+        """段里没有 mesh 注释时的回退：整段按第一个 draw/run 定位，仍能注入。"""
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+            "drawindexed = 100, 0, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_TARGET))])
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        draw_index = content.index("drawindexed = 100, 0, 0")
+        self.assertLess(content.index(pro._PARAM_BEGIN), draw_index)
+        self.assertLess(
+            content.index("run = CommandList\\RabbitFX\\Run"), draw_index
+        )
+        self.assertLess(draw_index, content.index(pro._RESET_BEGIN))
+
+    def test_adjacent_sibling_units_in_same_block_each_get_params(self):
+        """同一 if 块内相邻的 3 个目标单元：每个都有自己的 Params（不吞并、不剥离）。
+
+        实机 bug（4:15:54 导出）：``if $swapkey4 == 0`` 下乳钩.001 之后的
+        音擎.002 / 珠子.002 / 肛塞.002 都没有参数块 —— 前一个单元的可写范围被扩到
+        共享的 ``endif``，把兄弟单元整个吞进来，注入时把兄弟刚写好的块当成上一轮
+        残留剥掉了。
+        """
+        unit_lines = []
+        for index, name in enumerate(CHAIN_UNIT_NAMES, start=1):
+            unit_lines.extend(
+                [
+                    f"    ; [mesh:{name}]",
+                    f"    Resource\\ZZMI\\GlowMap = ref ResourceTexture_Glowmap_{index}.Glowmap",
+                    f"    Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_{index}",
+                    "    run = CommandList\\ZZMI\\SetTextures",
+                    "    run = CommandList\\RabbitFX\\Run",
+                    f"    drawindexed = {index * 100}, 0, 0",
+                ]
+            )
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            "if $swapkey4 == 0\n"
+            + "\n".join(unit_lines)
+            + "\nendif\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(
+            target_items=[_item(_fake_object(name)) for name in CHAIN_UNIT_NAMES]
+        )
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        self.assertEqual(content.count(pro._PARAM_BEGIN), 3)
+        self.assertEqual(content.count(pro._RESET_BEGIN), 3)
+        marks = [f"; [mesh:{name}]" for name in CHAIN_UNIT_NAMES]
+        positions = [content.index(mark) for mark in marks]
+        endif_index = content.index("endif")
+        self.assertLess(positions[-1], endif_index)
+        for index, start in enumerate(positions):
+            stop = positions[index + 1] if index + 1 < len(positions) else endif_index
+            segment = content[start:stop]
+            draw_line = f"drawindexed = {(index + 1) * 100}, 0, 0"
+            self.assertEqual(segment.count(pro._PARAM_BEGIN), 1, segment)
+            # 参数在各自单元的 Run / draw 之前（单元之间互不吞并）。
+            self.assertLess(
+                segment.index(pro._PARAM_BEGIN),
+                segment.index("run = CommandList\\RabbitFX\\Run"),
+            )
+            self.assertLess(
+                segment.index("run = CommandList\\RabbitFX\\Run"),
+                segment.index(draw_line),
+            )
+            # 前两个兄弟单元的复位块写在下一个兄弟之前；最后一个写在 endif 之后。
+            if index + 1 < len(positions):
+                self.assertEqual(segment.count(pro._RESET_BEGIN), 1, segment)
+
+        # 重跑幂等：3 块各自替换成新的 3 块，不累积、不互相剥掉。
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path), content)
 
 
 if __name__ == "__main__":
