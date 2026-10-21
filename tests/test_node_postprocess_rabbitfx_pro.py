@@ -1279,11 +1279,11 @@ class RabbitFXProTests(unittest.TestCase):
         self.assertLess(content.index(pro._PARAM_BEGIN), near_index)
         self.assertNotIn(pro._PARAM_BEGIN, content[near_index:])
 
-    def test_params_before_draw_inside_condition_and_reset_after_endif(self):
+    def test_params_before_draw_inside_condition_and_reset_before_chain_endif(self):
         """mesh 在 ``if $swapkey4 == 0`` 块内、块里还有嵌套材质切换 if。
 
-        参数块插在该 if 块内、目标 draw 之前；复位块插在 chain 最内层 ``endif``
-        之后（而不是猜「draw 之后最后一个 endif」）。
+        参数块插在该 if 块内、目标 draw 之前；复位块统一写在 draw 之后、chain 的
+        ``endif`` **之前**（留在条件块内，实机要求不要写到 endif 之外）。
         """
         section = (
             f"[{SHARED_IB_SECTION}]\n"
@@ -1315,14 +1315,17 @@ class RabbitFXProTests(unittest.TestCase):
         self.assertLess(content.index("if $material == 1"), params_index)
         self.assertLess(params_index, content.index("drawindexed = 100, 0, 0"))
         self.assertIn("        ; === RabbitFXPro Params ===", content)
-        # 复位块在 chain 最内层 endif 之后、下一个 mesh 之前。
+        # 复位块在两个嵌套材质 if 之后、chain 的 endif 之前（条件块内）。
         reset_index = content.index(pro._RESET_BEGIN)
-        self.assertEqual(content[:reset_index].count("endif"), 3)
+        reset_end = content.index(pro._RESET_END)
+        self.assertEqual(content[:reset_index].count("endif"), 2)
         self.assertLess(content.index("drawindexed = 200, 0, 0"), reset_index)
-        self.assertLess(reset_index, content.index(f"[mesh:{SHARED_IB_NEAR}]"))
+        tail = content[reset_end + len(pro._RESET_END):].strip().splitlines()[0]
+        self.assertEqual(tail.strip(), "endif")
+        self.assertLess(reset_end, content.index(f"[mesh:{SHARED_IB_NEAR}]"))
         self.assertNotIn(pro._PARAM_BEGIN, content[content.index(f"[mesh:{SHARED_IB_NEAR}]"):])
 
-        # 复位块落在单元区间之外，重跑也必须能剥掉（幂等）。
+        # 复位块在单元区间内，重跑幂等。
         node.execute_postprocess(self.export_dir)
         self.assertEqual(_read_ini(self.ini_path), content)
 
@@ -1463,13 +1466,151 @@ class RabbitFXProTests(unittest.TestCase):
                 segment.index("run = CommandList\\RabbitFX\\Run"),
                 segment.index(draw_line),
             )
-            # 前两个兄弟单元的复位块写在下一个兄弟之前；最后一个写在 endif 之后。
-            if index + 1 < len(positions):
-                self.assertEqual(segment.count(pro._RESET_BEGIN), 1, segment)
+            # 每个兄弟单元的复位块都在自己的单元区间内、chain 的 endif 之前。
+            self.assertEqual(segment.count(pro._RESET_BEGIN), 1, segment)
 
         # 重跑幂等：3 块各自替换成新的 3 块，不累积、不互相剥掉。
         node.execute_postprocess(self.export_dir)
         self.assertEqual(_read_ini(self.ini_path), content)
+
+    def test_last_sibling_reset_stays_inside_endif_without_duplicates(self):
+        """chain 最后一个兄弟（双乳钩形状）：复位块留在 endif 之前，不重复块外复位行。
+
+        实机 bug：块内把 Reset 写全（``Glowmap = ref null`` / ``brightness = 0``），
+        而 endif 之外还有材质转资源写的同样三行 → 块内块外两套等价复位。
+        """
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            "if $swapkey4 == 1\n"
+            f"    ; [mesh:{SHARED_IB_TARGET}]\n"
+            "    Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "    run = CommandList\\RabbitFX\\Run\n"
+            "    drawindexed = 100, 0, 0\n"
+            "endif\n"
+            "Resource\\RabbitFX\\Glowmap = ref null\n"
+            "$\\RabbitFX\\brightness = 0\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_TARGET))])
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        self.assertEqual(content.count(pro._PARAM_BEGIN), 1)
+        reset_index = content.index(pro._RESET_BEGIN)
+        reset_end = content.index(pro._RESET_END)
+        draw_index = content.index("drawindexed = 100, 0, 0")
+        endif_index = content.index("endif")
+        # 复位块在 draw 之后、chain 的 endif 之前（留在条件块内，不写到 endif 之外）。
+        self.assertLess(draw_index, reset_index)
+        self.assertLess(reset_end, endif_index)
+        # 块外材质转资源的三行不重复写进 Reset 块。
+        reset_block = content[reset_index:reset_end]
+        self.assertNotIn("Glowmap", reset_block)
+        self.assertNotIn("brightness", reset_block)
+        self.assertEqual(content.count("Resource\\RabbitFX\\Glowmap = ref null"), 1)
+        self.assertEqual(content.count("$\\RabbitFX\\brightness = 0"), 1)
+        # 块内 1 条 Run + 块外材质转资源的 1 条 Run，Reset 块里不再重复 Run。
+        self.assertEqual(content.count("run = CommandList\\RabbitFX\\Run"), 2)
+        # 该单元 draw 后没有块内复位行，Reset 仍要补上状态复位行。
+        self.assertIn("$\\RabbitFX\\H = 0", reset_block)
+        self.assertIn("$\\RabbitFX\\interpolate = 0", reset_block)
+
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path), content)
+
+    def test_mid_sibling_reset_only_writes_missing_lines(self):
+        """中间兄弟（乳钩形状）：块内 draw 后已有材质转资源复位行 → Reset 只写缺的行。"""
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            "if $swapkey4 == 0\n"
+            f"    ; [mesh:{SHARED_IB_TARGET}]\n"
+            "    Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "    run = CommandList\\RabbitFX\\Run\n"
+            "    drawindexed = 100, 0, 0\n"
+            "    Resource\\RabbitFX\\Glowmap = ref null\n"
+            "    $\\RabbitFX\\brightness = 0\n"
+            "    run = CommandList\\RabbitFX\\Run\n"
+            f"    ; [mesh:{SHARED_IB_NEAR}]\n"
+            "    Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_2\n"
+            "    run = CommandList\\RabbitFX\\Run\n"
+            "    drawindexed = 200, 0, 0\n"
+            "endif\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_TARGET))])
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        near_index = content.index(f"; [mesh:{SHARED_IB_NEAR}]")
+        reset_index = content.index(pro._RESET_BEGIN)
+        reset_end = content.index(pro._RESET_END)
+        reset_block = content[reset_index:reset_end]
+        # 只写块内还没写过的变量行；材质转资源已有的两行不重复。
+        self.assertIn("$\\RabbitFX\\H = 0", reset_block)
+        self.assertNotIn("Glowmap", reset_block)
+        self.assertNotIn("brightness", reset_block)
+        self.assertEqual(content.count("Resource\\RabbitFX\\Glowmap = ref null"), 1)
+        self.assertEqual(content.count("$\\RabbitFX\\brightness = 0"), 1)
+        # 复位块在 draw 之后、下一个兄弟 mesh 之前（条件块内）。
+        self.assertLess(content.index("drawindexed = 100, 0, 0"), reset_index)
+        self.assertLess(reset_end, near_index)
+        # 兄弟单元不是目标，不受影响。
+        self.assertNotIn(pro._PARAM_BEGIN, content[near_index:])
+
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path), content)
+
+    def test_unconditional_unit_null_reset_lines_are_deduped(self):
+        """无 chain 的单元（肛门触手形状）：材质转资源写 ``= null``，Reset 不重复。
+
+        ``= null`` 与 ``= ref null`` 语义相同，去重时必须归一化，否则会漏判。
+        """
+        section = (
+            f"[{SHARED_IB_SECTION}]\n"
+            "hash = c209c22b\n"
+            f"[mesh:{SHARED_IB_TARGET}]\n"
+            "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_1\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+            "drawindexed = 100, 0, 0\n"
+            "Resource\\RabbitFX\\Glowmap = null\n"
+            "$\\RabbitFX\\brightness = 0\n"
+            "run = CommandList\\RabbitFX\\Run\n"
+        )
+        _write_ini(self.ini_path, section)
+        node = _make_node(target_items=[_item(_fake_object(SHARED_IB_TARGET))])
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        reset_index = content.index(pro._RESET_BEGIN)
+        reset_block = content[reset_index:content.index(pro._RESET_END)]
+        self.assertNotIn("Glowmap", reset_block)
+        self.assertNotIn("brightness", reset_block)
+        self.assertEqual(content.count("Glowmap = null"), 1)
+        self.assertNotIn("Glowmap = ref null", content)
+        self.assertEqual(content.count("$\\RabbitFX\\brightness = 0"), 1)
+        self.assertLess(content.index("drawindexed = 100, 0, 0"), reset_index)
+
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path), content)
+
+    def test_reset_disabled_writes_only_params(self):
+        """``enable_reset`` 关闭时不写任何复位块。"""
+        _write_ini(self.ini_path, MATERIAL_SECTION)
+        node = _make_node(
+            enable_reset=False, target_items=[_item(_fake_object())]
+        )
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        self.assertIn(pro._PARAM_BEGIN, content)
+        self.assertNotIn(pro._RESET_BEGIN, content)
 
 
 if __name__ == "__main__":

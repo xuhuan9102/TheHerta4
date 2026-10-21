@@ -359,49 +359,108 @@ def _else_branch_endif(lines, else_index):
     return None
 
 
-def _can_extend_to_chain_endif(end, endif_index, end_line):
-    """单元末尾能否扩到 ``chain`` 最内层 ``endif``（口径见 :func:`_unit_edit_scope`）。
+#: 资源别名清空行（材质转资源写的 ``Resource\RabbitFX\Glowmap = ref null`` / ``= null``）。
+_RESET_SLOT_NULL_RE = re.compile(
+    r"^resource\\[^=\s]+\\[^=\s]+\s*=\s*(?:ref\s+)?null\s*$", re.IGNORECASE
+)
+#: 变量归零行（``$\RabbitFX\H = 0`` / ``brightness = 0`` / ...）。
+_RESET_PARAM_ZERO_RE = re.compile(
+    r"^\$\\[^=\s]+\\(?:h|s|v|brightness|interpolate)\s*=\s*0(?:\.0+)?\s*$",
+    re.IGNORECASE,
+)
+#: 命令列表调用行（``Run`` / ``Reset``）。
+_RESET_RUN_RE = re.compile(
+    r"^run\s*=\s*commandlist\\[^\\\s]+\\(?:run|reset)\s*$", re.IGNORECASE
+)
 
-    同一个 ``if`` 块里可以有多个**兄弟** mesh 单元（实机：``if $swapkey4 == 0``
-    下面乳钩.001 / 音擎.002 / 珠子.002 / 肛塞.002 各一个单元）。只有 chain 内
-    最后一个单元的末尾才正好是 ``endif``；前几个单元的末尾是下一个兄弟的
-    ``; [mesh:...]`` 行。前者扩到 ``endif + 1``（复位块写在 endif 之后），后者
-    必须停在单元末尾 —— 否则区间会把兄弟单元整个吞进去，注入时把兄弟刚写好的
-    参数块当成「上一轮残留」剥掉（实机漏注入的成因）。
 
-    末尾是 ``else`` / ``elseif`` 时（同一条件的另一分支）仍扩到 ``endif``，
-    复位块才不会插进某个分支里。
+def _reset_line_key(line):
+    """复位行的归一化比较键（去重用）。
+
+    ``= ref null`` 与 ``= null``、``= 0`` 与 ``= 0.0`` 是同一件事，实机里材质转资源
+    这两种写法都有；不归一化会漏掉去重、写出等价但重复的复位行。
     """
-    if end == endif_index:
-        return True
-    if end > endif_index:
+    text = " ".join(str(line or "").strip().split())
+    text = re.sub(r"=\s*ref\s+null\s*$", "= null", text, flags=re.IGNORECASE)
+    text = re.sub(r"=\s*0(?:\.0+)?\s*$", "= 0", text)
+    return text.casefold()
+
+
+def _is_reset_like_line(line):
+    """是不是一条复位行（见 :func:`_collect_trailing_reset_lines`）。"""
+    text = str(line or "").strip()
+    if not text:
         return False
-    return ini_scope.is_else_line(end_line)
+    return bool(
+        _RESET_SLOT_NULL_RE.match(text)
+        or _RESET_PARAM_ZERO_RE.match(text)
+        or _RESET_RUN_RE.match(text)
+    )
+
+
+def _collect_trailing_reset_lines(lines, position):
+    """收集 ``position`` 之后紧邻的**块外**复位行（材质转资源写下的）。
+
+    实机 bug：chain 内最后一个兄弟单元的 draw 之后、``endif`` 之外还有材质转资源
+    写的 ``Glowmap = ref null`` / ``brightness = 0`` / ``Run``；旧去重只看单元区间，
+    于是本节点又写了一份等价复位 —— 块内块外两套。把这些紧邻的复位行一并交给
+    去重集合，重复行就不会再写进 Reset 块。
+    """
+    collected = []
+    total = len(lines)
+    index = position
+    while index < total:
+        stripped = str(lines[index]).strip()
+        if not stripped:
+            index += 1
+            continue
+        if not _is_reset_like_line(stripped):
+            break
+        collected.append(stripped)
+        index += 1
+    return collected
 
 
 def _unit_edit_scope(lines, unit):
     """单元的**可写**行范围 ``(起, 止)``（止独占）。
 
-    止 = 单元末尾；只有 chain 内最后一个兄弟单元才扩到 ``endif + 1``（复位块写
-    在 ``endif`` 之后）。兄弟单元之间必须保持区间互不重叠，否则会互相剥离本轮的
-    参数块。单元因 ``else`` 提前截断时扩到该 ``if`` 块的 ``endif`` 之后，避免
-    复位块被插进某个分支里。
+    止 = 单元内容末尾；单元是 chain 内**最后一个**兄弟（末尾正好是 ``endif``）时
+    包含该 ``endif`` —— 复位块插在它**之前**，留在条件块内（实机要求：不要写到
+    ``endif`` 之外造成块外重复）。中间的兄弟单元止于下一个 ``; [mesh:...]``，
+    区间互不重叠。因 ``else`` 截断时扩到所属 ``if`` 的 ``endif``。
+
+    止之后紧邻的本节点旧复位块会被吸收进范围，保证重跑幂等。
     """
     start = int(unit["start"])
     end = int(unit["end"])
     chain = tuple(unit.get("chain") or ())
+    end_line = str(lines[end]).strip() if 0 <= end < len(lines) else ""
     if chain:
         endif_index = chain[-1][1]
-        end_line = str(lines[end]).strip() if 0 <= end < len(lines) else ""
-        if 0 <= endif_index < len(lines) and _can_extend_to_chain_endif(
-            end, endif_index, end_line
+        if 0 <= endif_index < len(lines) and (
+            end == endif_index or ini_scope.is_else_line(end_line)
         ):
-            end = endif_index + 1
-    elif end < len(lines) and ini_scope.is_else_line(str(lines[end]).strip()):
+            return start, _absorb_reset_block(lines, endif_index + 1)
+    elif end < len(lines) and ini_scope.is_else_line(end_line):
         endif_index = _else_branch_endif(lines, end)
         if endif_index is not None:
-            end = endif_index + 1
+            return start, _absorb_reset_block(lines, endif_index + 1)
     return start, _absorb_reset_block(lines, end)
+
+
+def _reset_insert_position(unit, block):
+    """复位块在 ``block`` 内的插入位置（``block`` 坐标）。
+
+    统一口径：draw 之后、下一个兄弟 mesh / 条件块 ``endif`` 之前。最后一个兄弟
+    单元的 ``block`` 末尾是 chain 的 ``endif``（见 :func:`_unit_edit_scope`），
+    复位块插在它前面；其它单元插在块末尾（下一个 mesh 注释之前）。
+    """
+    chain = tuple(unit.get("chain") or ())
+    if chain and int(unit["end"]) == chain[-1][1]:
+        for index in range(len(block) - 1, -1, -1):
+            if ini_scope.classify_line(str(block[index]).strip()) == "endif":
+                return index
+    return len(block)
 
 
 def _section_fallback_unit(lines):
@@ -1225,12 +1284,15 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         """在结构化圈定的一个单元内注入参数块与复位块。
 
         参数块插在本单元的 ``Run`` / ``draw`` 之前（取更早者，见
-        :func:`_unit_anchor`）；复位块插在单元末尾（单元在条件块内时 =
-        ``chain`` 最内层 ``endif`` 之后）。缩进跟随锚点行 / 末尾行，条件块里
-        嵌套的材质切换 ``if`` 不会被拆散。
+        :func:`_unit_anchor`）；复位块插在 draw 之后、下一个兄弟 mesh / 条件块
+        ``endif`` 之前（见 :func:`_reset_insert_position`），不会写到 endif 之外。
+        去重集合 = 单元内容 + 紧邻的块外复位行（材质转资源写的），已有的行不再写。
+        缩进跟随锚点行 / 末尾行，条件块里嵌套的材质切换 ``if`` 不会被拆散。
         """
         profile = self.fx_profile
         start, scope_end = _unit_edit_scope(lines, unit)
+        # 块外紧邻的复位行（材质转资源pro 写在 endif 之后）也要算「已存在」。
+        trailing_reset_lines = _collect_trailing_reset_lines(lines, scope_end)
         block = _strip_previous_blocks(lines[start:scope_end])
         glow_ref, fxmap_ref, run_index = _collect_existing_refs(block, 0, len(block), profile)
         anchor, draw_index = _unit_anchor(block, 0, len(block), profile)
@@ -1267,10 +1329,20 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             insertions.append((anchor, param_lines, anchor_indent))
         if self.enable_reset:
             reset_lines = self._build_reset_lines(
-                block, wrote_glow, wrote_sync, wrote_colorshift
+                block,
+                wrote_glow,
+                wrote_sync,
+                wrote_colorshift,
+                trailing_reset_lines,
             )
             if reset_lines:
-                insertions.append((len(block), reset_lines, _trailing_indent(block)))
+                insertions.append(
+                    (
+                        _reset_insert_position(unit, block),
+                        reset_lines,
+                        _trailing_indent(block),
+                    )
+                )
 
         # 先插靠后的位置，前面的索引才不会位移。
         for position, block_lines, indent in sorted(
@@ -1408,12 +1480,19 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             _CS_END,
         ]
 
-    def _build_reset_lines(self, block, wrote_glow, wrote_sync, wrote_colorshift):
+    def _build_reset_lines(
+        self, block, wrote_glow, wrote_sync, wrote_colorshift, extra_lines=()
+    ):
         """只复位本节点真正写过的东西；材质转资源已有的复位行不重复写。
 
         RabbitFX/NTEMIFX：运行时 ``Run`` 结尾自带变量复位，所以写 0 + 再 Run 一次即可。
         HI3FX：``Run`` **不**复位变量，写 0 会让后续绘制一直吃 ``brightness = 0``
         （模型变黑），所以改成调 ``CommandList\\HI3FX\\Reset``。
+
+        ``extra_lines`` 是单元区间**之外**紧邻的复位行（材质转资源写在 ``endif``
+        之后的那几行）：它们同样算「已存在」，否则会写出块内块外两套等价复位。
+        比较用 :func:`_reset_line_key` 归一化（``= ref null`` ↔ ``= null``、
+        ``0`` ↔ ``0.0``）。
         """
         profile = self.fx_profile
         candidates = []
@@ -1446,8 +1525,11 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             candidates.append("$\\rabbitfx\\blendmode = 0")
             if self.sync_brightness_only:
                 candidates.append("$\\rabbitfx\\syncbrightnessonly = 0")
-        existing = {str(line).strip().casefold() for line in block}
-        lines = [line for line in candidates if line and line.casefold() not in existing]
+        existing = {
+            _reset_line_key(line)
+            for line in list(block) + list(extra_lines or ())
+        }
+        lines = [line for line in candidates if line and _reset_line_key(line) not in existing]
         if not lines:
             return []
         return [_RESET_BEGIN, *lines, _RESET_END]
@@ -1458,6 +1540,7 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         """在提取源自己的绘制单元里插 ERun 块（单元圈定口径与目标相同）。"""
         profile = self.fx_profile
         start, scope_end = _unit_edit_scope(lines, unit)
+        trailing_reset_lines = _collect_trailing_reset_lines(lines, scope_end)
         block = _strip_previous_blocks(lines[start:scope_end])
         anchor, _draw_index = _unit_anchor(block, 0, len(block), profile)
         if anchor < 0:
@@ -1481,11 +1564,14 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
 
         if self.enable_reset:
             reset_line = f"{SET_FX_BUFFER_REF} = ref null"
-            existing = {str(line).strip().casefold() for line in block}
-            if reset_line.casefold() not in existing:
+            existing = {
+                _reset_line_key(line)
+                for line in list(block) + list(trailing_reset_lines)
+            }
+            if _reset_line_key(reset_line) not in existing:
                 _insert_block(
                     block,
-                    len(block),
+                    _reset_insert_position(unit, block),
                     [_RESET_BEGIN, reset_line, _RESET_END],
                     _trailing_indent(block),
                 )
