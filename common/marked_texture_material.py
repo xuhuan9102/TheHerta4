@@ -862,8 +862,43 @@ def bare_name_from_unique_str(unique_str: str) -> str:
     return text
 
 
+def unique_str_from_name_prefix(name: str) -> str:
+    """从物体/网格名称前缀解析工作空间身份（如 ``LOD0.fcbae9a5-120-0``）。
+
+    名称形如 ``LOD0.<draw_ib>-<index_count>-<first_index>[.<部件名>][.001]``，
+    复用 :class:`ObjectPrefixHelper` 的现成前缀解析（与导出侧同口径）。
+    解析不出结构化前缀时返回空串。
+    """
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        return ""
+    try:
+        from .object_prefix_helper import ObjectPrefixHelper
+
+        prefix_info = ObjectPrefixHelper.extract_prefix_info(clean_name)
+    except Exception:
+        return ""
+    if not prefix_info:
+        return ""
+    return str(prefix_info[0] or "").strip()
+
+
 def object_workspace_unique_str(obj) -> str:
-    """取物体的工作空间身份：优先导入时写入的自定义属性，其次退回网格名/物体名。"""
+    """取物体的工作空间身份：**以物体名称前缀为准**，属性只作最后兜底。
+
+    用户 2026-10-23 明确要求：只要物体名称前缀符合就按名称走，不要管属性里写的
+    什么。原因是 ``3DMigoto:WorkspaceUniqueStr`` 是导入时写的一次性快照，物体改名
+    （例如 LOD1 -> LOD0）后不会同步——继续按属性查会去查一个工作空间里根本不
+    存在的 LOD 目录，于是报「读不到贴图标记」。
+    """
+    for candidate in (
+        getattr(obj, "name", ""),
+        getattr(getattr(obj, "data", None), "name", ""),
+    ):
+        resolved = unique_str_from_name_prefix(candidate)
+        if resolved:
+            return resolved
+
     try:
         raw = str(obj.get(WORKSPACE_UNIQUE_STR_PROP, "") or "").strip()
     except Exception:
