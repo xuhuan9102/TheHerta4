@@ -31,7 +31,18 @@ EFMI 侧 t37「宁松勿漏」裁决的前提是作用 A，**在 HIMI 不成立�
 非合并路径**逐字节不变**：所有新增行都在「该部件带合并数据 且 通过 G1」时才出现，
 否则逐字走基类实现（``ui/universal/unity.py``）——由
 ``tests/test_himi_merged_runtime.py::HIMIExporterWiringTests::test_vb_section_without_plan_matches_base``
-逐行锁死；站位也**完全不调用**（``import_merged_vgmap()`` 关闭时）。
+逐行锁死。
+
+**t107/t108 修正：站位不再整段跳过（普通模式三条规则照跑）。** 原先
+``import_merged_vgmap()`` 关闭时 ``_himi_inject_stub_objects`` 直接 ``return []``，
+把「要不要产出合并骨架资源」和「该压掉的原版 draw」绑成了同一根开关。这两件事正交：
+站位的全部正当性都是「用 ``handling = skip`` 压掉原版那一笔」，而三条规则的证据来源
+（工作空间 VGMap + 场景顶点组）没有一条依赖合并骨架资源。绑在一起的后果是用户实测的
+两种形态：① 同一 IB 的第二笔原版 draw（``4386@57792``）没有任何段接住 ⇒ 原版几何与
+mod 几何同时出现 ⇒ 两份重叠、其中一份没有贴图、顶点槽错位串到别的物体；② 整族被并入
+另一个 IB（``1b62725d`` 并进头发）后，那个 IB 的原版 draw 同样没有任何段接住。
+``_himi_add_missing_writer_stubs``（t106）仍留在开关后面 —— 它按 palette 槽位记账，
+确实只在合并骨架运行时成立。
 
 注入顺序（T26 F1）
 ------------------
@@ -2339,22 +2350,28 @@ class ExportHIMI(ExportUnity):
         return blender_create_stub_object(bare)
 
     def _himi_inject_stub_objects(self) -> list:
-        """按计划书 §7.7.3/§7.7.4 的三条规则注入站位（开关关闭时完全不调用）。
+        """按计划书 §7.7.3/§7.7.4 的三条规则注入站位。
+
+        **t107：普通模式（``import_merged_vgmap()`` 关闭）不再整段跳过** —— 三条判定规则
+        全部照跑，与开关无关。理由：那个开关管的是「要不要产出合并骨架资源」，而站位的
+        全部正当性都在**另一件事**上 —— 用 `handling = skip` 把原版那一笔压掉。规则①
+        （部分在场的家族给缺失成员补站位）、规则②④（整族缺席但它的 palette 槽被现存
+        对象实际引用 ⇒ 几何被别的 IB 接管）的证据都来自「工作空间 VGMap + 场景顶点组」，
+        没有一条依赖合并骨架资源。曾经的整段跳过导致两类漏压都无人接住（用户实测：
+        ① 同一 IB 的第二笔 ``4386@57792`` 原版 draw；② 整族被并入头发之后的那个 IB）。
 
         创建失败**不得静默继续**：站位是「原版 draw 会被压制」的唯一凭据，失败后继续
         导出会得到「几何已合并 + 原版照画」的重影产物；与 ZZMI 同款，用 ``Fatal``
         中止导出（调用方的 ``finally`` 会清理半成品）。
         """
-        if not bool(GlobalProterties.import_merged_vgmap()):
-            # ST12：非合并路径完全不调用站位逻辑（产物与改造前逐字节相同）。
-            return []
+        merged_runtime = bool(GlobalProterties.import_merged_vgmap())
         from ...utils.format_utils import Fatal
 
         # 自愈必须早于 present 集合构造（残留站位对象会被误判为真实部件）。
         self._himi_purge_stale_stub_state()
 
         workspace_root = GlobalConfig.path_workspace_folder()
-        if not self._himi_merged_data_present(workspace_root):
+        if merged_runtime and not self._himi_merged_data_present(workspace_root):
             # 前置门（计划书 §7.7.7 S1/S2）：**没有合并数据 ⇒ 没有合并骨架资源 ⇒
             # 站位无从谈起**。HIMI 的站位不承载作用 A（静态骨架），它的唯一效果就是
             # 用 `handling = skip` 压掉原版 draw；在「本次导出根本不产出合并骨架」的
@@ -2407,19 +2424,35 @@ class ExportHIMI(ExportUnity):
             used_group_ids=used_group_ids,
         )
         self._himi_stub_decision = decision
+        # t108：逐家族把判定结论打进导出日志。
+        # 「为什么这个 IB 没被跳过」是用户最常问、也最难凭产物反推的问题：站位判定
+        # 只看「场景真相 + 工作空间 VGMap」，产物 ini 里除了「没有段」之外不留痕迹。
+        # 这里每个家族一行（decision / rule / in_scene / absent / stub / skipped），
+        # 失败排查直接读日志，不用再靠猜。
+        for family_ib, family_info in sorted((decision.families or {}).items()):
+            if not isinstance(family_info, dict):
+                continue
+            print(
+                f"{_STUB_LOG_PREFIX} 判定 {family_ib}: "
+                f"decision={family_info.get('decision')} rule={family_info.get('rule')} "
+                f"in_scene={family_info.get('in_scene')} absent={family_info.get('absent')} "
+                f"stub={family_info.get('stub') or []} skipped={family_info.get('skipped') or []}"
+            )
         for line in decision.diagnostics:
             try:
                 print(f"{_STUB_LOG_PREFIX} {line}")
             except UnicodeEncodeError:
                 encoding = getattr(sys.stdout, "encoding", "utf-8") or "utf-8"
                 print(f"{_STUB_LOG_PREFIX} {line}".encode(encoding, errors="replace").decode(encoding, errors="replace"))
-        self._himi_add_missing_writer_stubs(
-            decision,
-            workspace_root=workspace_root,
-            scene_present=scene_present,
-            used_group_ids=used_group_ids,
-            family_map=family_map,
-        )
+        if merged_runtime:
+            # t106 的 writer 站位只对合并骨架运行时成立（它按 palette 槽位记账）。
+            self._himi_add_missing_writer_stubs(
+                decision,
+                workspace_root=workspace_root,
+                scene_present=scene_present,
+                used_group_ids=used_group_ids,
+                family_map=family_map,
+            )
 
         created: list = []
         for bare in decision.stub_members:

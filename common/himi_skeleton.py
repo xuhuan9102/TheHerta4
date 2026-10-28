@@ -91,6 +91,8 @@ HIMI_STUB_REASON_NO_DECLARED = "no_declared_namespace"
 HIMI_STUB_REASON_NO_FAMILY_MAP = "no_family_map"
 HIMI_STUB_REASON_NO_USED = "no_used"
 HIMI_STUB_REASON_WRITERLESS = "writerless_family"
+#: t107：本次导出只允许规则①（普通模式），该家族落在规则②/④ 的地盘 ⇒ 不判定。
+HIMI_STUB_REASON_RULE_GATED = "rule_gated"
 
 DUMP_LINE_RE = re.compile(
     r"^(\d{6})\s+3DMigoto Dumping (?:Buffer|Texture2D) .*[\\/]([^\\/]+) -> .*[\\/]([^\\/]+)$"
@@ -1184,6 +1186,29 @@ class HIMIStubDecision:
         return len(self.stub_members)
 
 
+def _member_present_in_scene(member: str, present) -> bool:
+    """组件 ``member``（DrawIB 身份，如 ``09c6e58a-57792-0``）在场景里是否有对象。
+
+    **必须按 DrawIB 身份判，不能只做 bare 精确相等**：导出侧 ``present`` 的每一项是
+    「DrawIB 身份 + 网格名」（``09c6e58a-57792-0.捆绑绳子``），而家族成员只到身份
+    （``09c6e58a-57792-0``）。精确相等会让**在场的成员也被判成缺席** ⇒ 规则① 给在场
+    组件也插桩 ⇒ 它的 3 索引站位与真部件的段抢同一个 ``match_first_index``（先命中者
+    生效）⇒ 整个部件在游戏里消失（用户实测形态：「部件整块不见了」）。
+
+    网格名可能带副本/重命名后缀，所以只认 ``member.`` 前缀，不认任意前缀
+    （``09c6e58a-57792-0`` 不得匹配 ``09c6e58a-57792-01.x``）。
+    """
+    member = str(member or "")
+    if not member:
+        return False
+    prefix = member + "."
+    for bare in present or ():
+        bare = str(bare or "")
+        if bare == member or bare.startswith(prefix):
+            return True
+    return False
+
+
 def decide_stub_injection(
     *,
     workspace_root: str,
@@ -1191,6 +1216,7 @@ def decide_stub_injection(
     family_map=None,
     lod: str = "LOD0",
     used_group_ids=None,
+    allowed_rules=None,
 ) -> HIMIStubDecision:
     """The three ZZMI stub rules, rewritten for HIMI (计划书 §7.7.3 / §7.7.4 / §7.7.12).
 
@@ -1219,9 +1245,24 @@ def decide_stub_injection(
     （口径锚点：
     ``tests/test_himi_stub_objects.py::test_st2_absent_family_with_own_slot_referenced_gets_all_members``
     —— 它逐组件断言「只对专属槽位被引用的那一个补站位，另一个记入 skipped」）。
+
+    **``allowed_rules``（t107）**
+    -----------------------------
+    ``None`` = 三条规则全开（合并骨架运行时路径）。``("1",)`` = **只跑规则①**：
+    部分在场的家族照旧给缺失成员补站位，规则②/④ 一律不判定（记
+    ``HIMI_STUB_REASON_RULE_GATED``）。用在哪：HIMI「普通模式」（``import_merged_vgmap()``
+    关闭，不产出合并骨架资源）—— 规则① 的正当性不依赖合并骨架（缺失成员的几何被**同一
+    个导出**的幸存兄弟接管，站位只负责压掉原版那一笔），而规则②/④ 的判据全部建立在
+    VGMap/palette 记账上，没有合并运行时就没有意义。
     """
     root = str(workspace_root or "").strip()
     decision = HIMIStubDecision()
+    if allowed_rules is None:
+        allow_rule1 = allow_rule_other = True
+    else:
+        _allowed = {str(rule) for rule in allowed_rules}
+        allow_rule1 = "1" in _allowed
+        allow_rule_other = bool(_allowed - {"1"})
     if not root or not os.path.isdir(root):
         decision.diagnostics.append("站位：工作空间目录无效 ⇒ 不插桩")
         return decision
@@ -1285,11 +1326,44 @@ def decide_stub_injection(
     for draw_ib, members in sorted(family_map.items()):
         draw_ib = str(draw_ib)
         members = [str(member) for member in members]
-        in_scene = [member for member in members if member in present]
-        absent = [member for member in members if member not in present]
-        # 「家族部分在场」= 有成员按 bare 精确在场，**或**场景里有属于同一 IB 的对象
-        # （合并对象可能带副本后缀 ⇒ bare 对不上，但 IB 身份对得上；见上面的 F-A 注释）。
+        in_scene = [member for member in members if _member_present_in_scene(member, present)]
+        absent = [member for member in members if not _member_present_in_scene(member, present)]
+        # 「家族部分在场」= 有成员按 **DrawIB 身份**在场，**或**场景里有属于同一 IB 的对象
+        # （合并对象可能带副本后缀 ⇒ 身份对不上，但 IB 身份对得上；见上面的 F-A 注释）。
         partial_family = bool(in_scene) or (draw_ib in present_ibs)
+        if partial_family and not allow_rule1:
+            decision.families[draw_ib] = {
+                "decision": HIMI_STUB_REASON_RULE_GATED,
+                "members": members,
+                "in_scene": in_scene,
+                "absent": absent,
+                "absorbed": False,
+                "stub": [],
+                "skipped": absent,
+                "rule": "1",
+                "partial_family": True,
+            }
+            decision.diagnostics.append(
+                f"站位：{draw_ib} 部分在场，但本次只允许规则①之外的规则 ⇒ 不插桩"
+            )
+            continue
+        if not partial_family and not allow_rule_other:
+            decision.families[draw_ib] = {
+                "decision": HIMI_STUB_REASON_RULE_GATED,
+                "members": members,
+                "in_scene": in_scene,
+                "absent": absent,
+                "absorbed": False,
+                "stub": [],
+                "skipped": absent,
+                "rule": "2",
+                "partial_family": False,
+            }
+            decision.diagnostics.append(
+                f"站位：{draw_ib} 整族缺席，但本次只允许规则①（普通模式不产出合并骨架"
+                "资源）⇒ 不判定规则②/④、不插桩"
+            )
+            continue
         if not absent:
             decision.families[draw_ib] = {
                 "decision": HIMI_STUB_REASON_ALREADY_PRESENT,

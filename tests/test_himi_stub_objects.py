@@ -27,7 +27,12 @@ B 类（结构断言）：
 * ST9 占位**不进吸收证据**：``_collect_used_group_ids`` 排除带标记对象（自证循环防护）；
 * ST10 残留自愈**早于** present 集合构造：预置同名残留站位 ⇒ 先清理 ⇒ 该部件仍被判缺席；
 * ST11 事务闭合：``export()`` 正常与异常路径都清理站位对象与注入的 DrawCall；
-* ST12 非合并路径不受影响：``import_merged_vgmap()`` 关闭时完全不调用站位逻辑。
+* ST12 **普通模式只跑规则①**（t107 反转）：``import_merged_vgmap()`` 关闭时不再整段
+  跳过 —— 部分在场的家族照旧给缺失成员补站位，规则②/④ 仍留在开关后面；
+* ST13/ST14 在场判定按 **DrawIB 身份**（``member`` 或 ``member.<网格名>``），不做任意前缀
+  匹配（否则在场组件也被插桩、抢掉真部件那一笔）；
+* ST15 ``allowed_rules=("1",)`` 的逐条门控（规则① 放行、②/④ 记
+  ``HIMI_STUB_REASON_RULE_GATED``）。
 
 运行：``.venv\\Scripts\\python.exe -m pytest tests/test_himi_stub_objects.py -q``
 """
@@ -894,6 +899,92 @@ class StubRuleTests(_StubCase):
             {20, 21},
         )
 
+    def test_st13_present_member_with_mesh_suffix_is_not_absent(self):
+        """t107 正向：在场身份带网格名（``aaaa-1-0.捆绑绳子``）时**不得**把该成员判成缺席。
+
+        导出侧 ``present`` 的每一项是「DrawIB 身份 + 网格名」（来自
+        ``DrawCallModel.get_workspace_unique_str()``），家族成员只到身份。若用 bare 精确
+        相等，在场成员会被判成缺席 ⇒ 规则① 给在场组件也插桩 ⇒ 它的 3 索引站位与真部件的
+        段抢同一个 ``match_first_index``（先命中者生效）⇒ 整个部件在游戏里静默消失
+        （「多压 = 静默部件消失」那一档，比残留重影更难排查）。
+
+        用户实测形态（HIMI / HI3 `虚构游戏`）：`09c6e58a` 家族的两个成员
+        `09c6e58a-57792-0`（在场）与 `09c6e58a-4386-57792`（被并入、缺席）。
+        """
+        _write_workspace(
+            self.workspace,
+            [
+                {"bare": "aaaa-1-0", "vg_map": {0: 0, 1: 1}},
+                {"bare": "aaaa-2-0", "vg_map": {0: 0, 1: 1, 2: 40, 3: 41}},
+            ],
+            {"aaaa": ["aaaa-1-0", "aaaa-2-0"]},
+        )
+        decision = decide_stub_injection(
+            workspace_root=self.workspace,
+            scene_present_bares={"aaaa-1-0.rope_copy"},
+            used_group_ids={0, 1, 40},
+        )
+        self.assertEqual(decision.families["aaaa"]["in_scene"], ["aaaa-1-0"])
+        self.assertEqual(decision.families["aaaa"]["absent"], ["aaaa-2-0"])
+        self.assertEqual(decision.stub_members, ["aaaa-2-0"])
+
+    def test_st14_member_prefix_does_not_leak_across_identities(self):
+        """t107 反向：``aaaa-1-0`` 不得被 ``aaaa-1-01.x`` 误判成在场。
+
+        只认 ``member + "."`` 前缀（网格名分隔符），不做任意前缀匹配 —— 否则身份相近的
+        两个组件会互相顶替，缺席者拿不到站位。
+        """
+        self.assertFalse(_skeleton._member_present_in_scene("aaaa-1-0", {"aaaa-1-01.rope"}))
+        self.assertTrue(_skeleton._member_present_in_scene("aaaa-1-0", {"aaaa-1-0.rope"}))
+        self.assertTrue(_skeleton._member_present_in_scene("aaaa-1-0", {"aaaa-1-0"}))
+
+    def test_st15_rule1_only_gates_rule2_and_writerless(self):
+        """t107：``allowed_rules=("1",)``（普通模式）只放开规则①，规则②/④ 不判定。
+
+        普通模式不产出合并骨架资源，规则②/④ 的判据（VGMap / palette 槽位记账）失去意义，
+        所以整族缺席的家族一律记 ``HIMI_STUB_REASON_RULE_GATED``、不插桩；而**部分在场**的
+        家族照旧给缺失成员补站位 —— 那一条与合并骨架无关。
+        """
+        _write_workspace(
+            self.workspace,
+            [
+                {"bare": "aaaa-1-0", "vg_map": {0: 0, 1: 1}},
+                {"bare": "aaaa-2-0", "vg_map": {0: 0, 1: 1, 2: 40, 3: 41}},
+                {"bare": "bbbb-1-0", "vg_map": {0: 10, 1: 11}},
+                {"bare": "bbbb-2-0", "vg_map": {0: 20, 1: 21}},
+                {"bare": "cccc-1-0", "vg_map": {0: 0}},
+            ],
+            {
+                "aaaa": ["aaaa-1-0", "aaaa-2-0"],
+                "bbbb": ["bbbb-1-0", "bbbb-2-0"],
+                "cccc": ["cccc-1-0"],
+            },
+        )
+        decision = decide_stub_injection(
+            workspace_root=self.workspace,
+            scene_present_bares={"aaaa-1-0.rope", "cccc-1-0"},
+            used_group_ids={10},
+            allowed_rules=("1",),
+        )
+        # 规则①：部分在场的家族照旧补
+        self.assertEqual(decision.stub_members, ["aaaa-2-0"])
+        self.assertEqual(
+            decision.families["aaaa"]["decision"], _skeleton.HIMI_STUB_REASON_ABSORBED
+        )
+        # 规则④/②：整族缺席 ⇒ 门槛外 ⇒ 不判定、不插桩
+        self.assertEqual(
+            decision.families["bbbb"]["decision"], _skeleton.HIMI_STUB_REASON_RULE_GATED
+        )
+        self.assertEqual(decision.families["bbbb"]["stub"], [])
+        # 对照：不设门槛时同一个账本会把 bbbb 整族补上（ST2 的口径）
+        full = decide_stub_injection(
+            workspace_root=self.workspace,
+            scene_present_bares={"aaaa-1-0.rope", "cccc-1-0"},
+            used_group_ids={10},
+        )
+        self.assertIn("bbbb-1-0", full.stub_members)
+        self.assertIn("bbbb-2-0", full.stub_members)
+
     def test_st3_borrowed_slot_reference_is_not_absorption(self):
         """**ST3（借位反例，事故形态复现）**：整族缺席 + 只被借位槽位引用 ⇒ 不插桩。
 
@@ -1511,6 +1602,84 @@ class StubEndToEndIniTests(_StubCase):
         self.assertEqual(exporter.himi_stub_object_names(), [])
         self.assertIsNone(_fake_objects.get("LOD0.aaaa-2-0"))
 
+    def test_st12_normal_mode_stub_reaches_the_real_ini(self):
+        """ST12 的产物级钉子（t107）：**普通模式**下站位段照样进真实 ini。
+
+        上一条只证明「判定结果里出现了 stub_members」；这里一路跑到 ``export()`` 写完 ini，
+        确认 ``[TextureOverride_LOD0.aaaa_2_0]`` + ``handling = skip`` 真的落盘 —— 这正是
+        用户实测缺的那一段（原版第二笔 draw 的 IB override 段），也是手工补丁
+        ``match_first_index = 57792`` 在生成器里的对应物。
+        """
+        self._build_dump_fixture(separate_bones=True)
+        _properties_state["checkbox"] = False
+        _register_object("LOD0.aaaa-1-0", groups=[(0, 1.0), (40, 1.0)])
+        ordered = [_PlainDrawCall("LOD0.aaaa-1-0")]
+        blueprint_model = types.SimpleNamespace(
+            ordered_draw_obj_data_model_list=ordered, keyname_mkey_dict={}
+        )
+        exporter = ExportHIMI(blueprint_model)
+        self.assertEqual(exporter.himi_stub_bares(), {"aaaa-2-0"})
+        exporter.drawib_model_list = self._assemble_models_from_base(exporter)
+
+        mod_folder = _GLOBAL_STATE["mod"]
+        os.makedirs(os.path.join(mod_folder, "Meshes"), exist_ok=True)
+        exporter.export()
+
+        ini_path = os.path.join(mod_folder, "ws.ini")
+        self.assertTrue(os.path.isfile(ini_path), f"产物 ini 必须存在：{ini_path}")
+        lines = io.open(ini_path, encoding="utf-8").read().splitlines()
+        self.assertIn("[TextureOverride_LOD0.aaaa_2_0]", lines)
+        start = lines.index("[TextureOverride_LOD0.aaaa_2_0]")
+        block = []
+        for line in lines[start + 1 :]:
+            if line.startswith("[") and line.endswith("]"):
+                break
+            block.append(line)
+        self.assertIn("handling = skip", block)
+        self.assertIn("match_first_index = 0", block)
+
+    def test_st16_normal_mode_stubs_whole_absent_family_with_foreign_slot(self):
+        """t108：普通模式下**整族缺席**的 IB 也要能被判进（规则② 的大门不再关着）。
+
+        用户实测形态：``1b62725d`` 这个 IB 的几何已经被并进头发，场景里再没有属于它的
+        对象 ⇒ 家族整族缺席。这条只能走规则②（``own(m) ∩ foreign_used ≠ ∅``），而
+        t107 的普通模式把规则②关掉了 ⇒ 那一笔原版 draw 依旧没人压。
+        """
+        self._build_dump_fixture(separate_bones=True)
+        # 追加一个「整族缺席」的家族 bbbb：它的唯一槽 2 会被在场对象实际引用。
+        _write_workspace(
+            self.workspace,
+            [
+                {"bare": "aaaa-1-0", "vg_map": {0: 0, 1: 1}},
+                {"bare": "aaaa-2-0", "vg_map": {0: 2, 1: 3}},
+                {"bare": "bbbb-1-0", "vg_map": {0: 2}},
+            ],
+            {
+                "aaaa": ["aaaa-1-0", "aaaa-2-0"],
+                "bbbb": ["bbbb-1-0"],
+            },
+        )
+        _properties_state["checkbox"] = False
+        # 在场对象引用槽 2（bbbb 的唯一槽）⇒ 外来槽证据成立、几何被它接管。
+        _register_object("LOD0.aaaa-1-0", groups=[(0, 1.0), (2, 1.0)])
+        ordered = [_PlainDrawCall("LOD0.aaaa-1-0")]
+        blueprint_model = types.SimpleNamespace(
+            ordered_draw_obj_data_model_list=ordered, keyname_mkey_dict={}
+        )
+        exporter = ExportHIMI(blueprint_model)
+        self.assertEqual(
+            exporter.himi_stub_bares(),
+            {"aaaa-2-0", "bbbb-1-0"},
+            "规则① 补同族缺失成员；规则② 补整族缺席但槽位被引用的家族",
+        )
+        decision = exporter._himi_stub_decision
+        self.assertEqual(decision.families["bbbb"]["decision"], "absorbed")
+        self.assertNotEqual(
+            decision.families["bbbb"]["decision"],
+            _skeleton.HIMI_STUB_REASON_RULE_GATED,
+            "普通模式不得再按「只跑规则①」把整族缺席的家族挡在门外",
+        )
+
     def test_without_injection_the_family_gate_correctly_aborts_the_export(self):
         """反证（本用例保证上一条**不是恒真**）：不注入 ⇒ 家族门正确中止导出。
 
@@ -1860,16 +2029,31 @@ class StubGateInteractionTests(_StubCase):
         self.assertIn("站位对象创建失败", str(ctx.exception))
         self.assertEqual(exporter.himi_stub_object_names(), [])
 
-    def test_st12_non_merge_path_never_calls_stub_logic(self):
-        """ST12：``import_merged_vgmap()`` 关闭时**完全不调用**站位逻辑。"""
+    def test_st12_normal_mode_runs_rule1_only(self):
+        """ST12（**t107 反转**）：``import_merged_vgmap()`` 关闭时**只跑规则①**。
+
+        原口径是「关闭时完全不调用站位逻辑（产物与改造前逐字节相同）」。它错在把两件正交的
+        事绑成一根开关：那个开关管的是「要不要产出合并骨架资源」，而规则①（部分在场的家族给
+        缺失成员补站位）的正当性来自「缺失组件的几何已被**同一次导出**的幸存兄弟接管」。
+        整段跳过的实测后果（用户报的 HI3 `虚构游戏`）：同一 IB 的第二笔原版 draw
+        ``4386@57792`` 没有任何段接住 ⇒ 原版几何与 mod 几何同时出现 ⇒ 两份重叠、其中一份
+        没有贴图、顶点槽错位串到别的物体。
+
+        规则②/④ 仍留在开关后面（判据建立在 VGMap/palette 记账上），由
+        ``StubRuleTests::test_st15_rule1_only_gates_rule2_and_writerless`` 钉住。
+        """
         self._build_dump_fixture()
         _register_object("LOD0.aaaa-1-0", groups=[(0, 1.0), (40, 1.0)])
         _properties_state["checkbox"] = False
-        exporter = self._make_exporter(ordered=[])
-        self.assertEqual(exporter._himi_inject_stub_objects(), [])
-        self.assertIsNone(exporter.himi_stub_decision())
-        self.assertEqual(exporter.himi_stub_object_names(), [])
-        self.assertIsNone(_fake_objects.get("LOD0.aaaa-2-0"))
+        exporter = self._make_exporter(
+            ordered=[_PlainDrawCall("LOD0.aaaa-1-0")], inject=False
+        )
+        self.assertEqual(exporter._himi_inject_stub_objects(), ["LOD0.aaaa-2-0"])
+        decision = exporter.himi_stub_decision()
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.stub_members, ["aaaa-2-0"])
+        self.assertEqual(exporter.himi_stub_object_names(), ["LOD0.aaaa-2-0"])
+        self.assertIsNotNone(_fake_objects.get("LOD0.aaaa-2-0"))
 
     # -- helpers ---------------------------------------------------------- #
 
