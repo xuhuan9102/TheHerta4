@@ -284,6 +284,10 @@ class DirectShapeKeyOutputMixin:
         return slot_maps
 
     def _write_merged_slot_files(self, logical_hash, runtime_info, hash_slot_data, slot_position_overrides):
+        try:
+            from ..common.shapekey_native import packed_slot_deltas
+        except ImportError:
+            packed_slot_deltas = None
         use_delta = resolve_use_delta(self.node)
         actual_hash = runtime_info["actual_hash"]
         base_bytes = runtime_info["base_bytes"]
@@ -322,6 +326,18 @@ class DirectShapeKeyOutputMixin:
                     base_data.shape[1],
                 )
                 delta_channel_width = len(channel_columns)
+                packed_result = (
+                    packed_slot_deltas(base_data, target_data, channel_columns,
+                                       global_start=next_global_index)
+                    if packed_slot_deltas is not None else None
+                )
+                if packed_result is not None:
+                    packed_data, slot_index_map = packed_result
+                    if len(packed_data):
+                        merged_data_parts.append(packed_data)
+                        merged_index_map[:, slot_num - 1] = slot_index_map
+                        next_global_index += len(packed_data)
+                    continue
                 data_to_write = target_data[:, channel_columns] - base_data[:, channel_columns]
                 data_to_write[data_to_write == 0] = 0.0
                 diff_mask = ~np.isclose(
@@ -358,9 +374,9 @@ class DirectShapeKeyOutputMixin:
         data_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position{data_suffix}.buf")
         map_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_merged_map.buf")
         with open(data_path, "wb") as file_obj:
-            file_obj.write(merged_data.tobytes())
+            file_obj.write(memoryview(merged_data))
         with open(map_path, "wb") as file_obj:
-            file_obj.write(merged_index_map.reshape(-1).tobytes())
+            file_obj.write(memoryview(merged_index_map))
 
         return merged_index_map
 
@@ -440,7 +456,7 @@ class DirectShapeKeyOutputMixin:
 
         output_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_freq_indices.buf")
         with open(output_path, "wb") as file_obj:
-            file_obj.write(freq_indices.reshape(-1).tobytes())
+            file_obj.write(memoryview(freq_indices))
 
     def _write_sparse_vertex_index(
         self,
@@ -702,6 +718,14 @@ class DirectShapeKeyOutputMixin:
         与 Toolset/shapekey_anim_frame_table.hlsl 的 ``frame_table_load`` 严格对齐：
         偶数记录落在 [w0.lo, w0.hi, w1.lo]，奇数记录落在 [w1.hi, w2.lo, w2.hi]。
         """
+        try:
+            from ..common.shapekey_native import pack_half_float3
+        except ImportError:
+            pack_half_float3 = None
+        if pack_half_float3 is not None:
+            packed = pack_half_float3(values)
+            if packed is not None:
+                return packed
         records = np.ascontiguousarray(values, dtype=np.float32)
         count = records.shape[0]
         if count == 0:
@@ -736,7 +760,7 @@ class DirectShapeKeyOutputMixin:
 
         # key_records[freq_idx] = [(顶点数组, 位移载荷), ...]
         # 同一形态键可跨多个槽位出现（各槽位覆盖的顶点集合通常不相交，
-        # 相交时位移应叠加，故统一按 np.add.at 累加而不是覆盖）。
+        # 相交时按槽位顺序累加；每份 picked 来自唯一递增的 rows，份内无重复顶点）。
         key_records = {}
         for slot_index in range(slot_count):
             key_column = freq_indices[:, slot_index]
@@ -746,8 +770,14 @@ class DirectShapeKeyOutputMixin:
                 continue
             rows = np.flatnonzero(valid)
             keys = key_column[rows]
-            for freq_index in np.unique(keys):
-                picked = rows[keys == freq_index]
+            # One stable grouping pass replaces a full-column boolean scan for
+            # every key. Ties retain ascending vertex order exactly as before.
+            order = np.argsort(keys, kind="stable")
+            sorted_keys = keys[order]
+            boundaries = np.r_[0, np.flatnonzero(sorted_keys[1:] != sorted_keys[:-1]) + 1, len(keys)]
+            for begin, end in zip(boundaries[:-1], boundaries[1:]):
+                freq_index = sorted_keys[begin]
+                picked = rows[order[begin:end]]
                 key_records.setdefault(int(freq_index), []).append(
                     (picked, delta_data[index_column[picked]])
                 )
@@ -773,8 +803,11 @@ class DirectShapeKeyOutputMixin:
             accumulator = np.zeros((union_size, 3), dtype=np.float32)
             for step, freq_index in enumerate(members, start=1):
                 for vertices, payload in key_records.get(int(freq_index), ()):
-                    positions = np.searchsorted(union_rows, vertices)
-                    np.add.at(accumulator, positions, payload)
+                    # local_index is the already-built exact inverse of union_rows.
+                    # Each vertices list is unique; += is equivalent to add.at here,
+                    # including sequential accumulation across overlapping slots.
+                    positions = local_index[vertices]
+                    accumulator[positions] += payload
                 frames[step] = accumulator
 
             # 注意：这里只收集原始记录，**不能**逐段打包。半精度打包把 2 条记录装进
@@ -802,14 +835,21 @@ class DirectShapeKeyOutputMixin:
 
         # 全部组的记录拼成一个连续数组后**一次性**打包，保证
         # 「记录索引 → word 索引」的全局 1.5 倍关系处处成立。
-        all_records = (
-            np.concatenate(table_parts, axis=0)
-            if table_parts
-            else np.zeros((0, 3), dtype=np.float32)
-        )
+        try:
+            from ..common.shapekey_native import pack_half_float3_parts
+        except ImportError:
+            pack_half_float3_parts = None
+        packed = pack_half_float3_parts(table_parts) if pack_half_float3_parts is not None else None
+        if packed is None:
+            all_records = (
+                np.concatenate(table_parts, axis=0)
+                if table_parts
+                else np.zeros((0, 3), dtype=np.float32)
+            )
+            packed = self._pack_half_float3(all_records)
         table_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_frame_table.buf")
         with open(table_path, "wb") as file_obj:
-            file_obj.write(self._pack_half_float3(all_records).tobytes())
+            file_obj.write(memoryview(packed))
 
         for meta in group_meta:
             map_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_group_map_{meta['ordinal']}.buf")

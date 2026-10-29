@@ -834,6 +834,13 @@ class PreProcessHelper:
         # 这里采的是“前处理后、真正删除 ShapeKey 前”的最终顶点坐标，供直出资源构建复用。
         captured_objects = 0
         captured_keys = 0
+        fast_objects = 0
+        fast_keys = 0
+        started = perf_counter()
+        try:
+            from ..common.shapekey_native import fast_path_reason, capture_relative_shapes
+        except ImportError:
+            fast_path_reason = None
         depsgraph = bpy.context.evaluated_depsgraph_get()
 
         for obj_name in object_names:
@@ -852,8 +859,24 @@ class PreProcessHelper:
 
             all_loop_vertex_indices = numpy.empty(len(obj.data.loops), dtype=numpy.int32)
             obj.data.loops.foreach_get("vertex_index", all_loop_vertex_indices)
-            original_values = [float(key_block.value) for key_block in key_blocks]
             aliases = cls._direct_shapekey_record_aliases(obj.name)
+            if fast_path_reason is not None and not fast_path_reason(obj):
+                basis_coords, sampled = capture_relative_shapes(
+                    obj, non_basis_key_blocks,
+                    mirror=GlobalProterties.enable_non_mirror_workflow(),
+                )
+                for key_name, coords in sampled:
+                    BlueprintExportHelper.register_direct_shapekey_position_record(
+                        aliases, key_name, coords, all_loop_vertex_indices,
+                        basis_coords=basis_coords,
+                    )
+                    fast_keys += 1
+                    captured_keys += 1
+                fast_objects += 1
+                captured_objects += 1
+                continue
+
+            original_values = [float(key_block.value) for key_block in key_blocks]
             object_key_count = 0
             active_key_block = None
 
@@ -909,6 +932,11 @@ class PreProcessHelper:
                 captured_keys += object_key_count
 
         LOG.info(f"已采集直出形态键前处理顶点: {captured_objects} 个物体, {captured_keys} 个形态键")
+        LOG.info(
+            f"[ShapeKeySampling] 批量快路径 {fast_objects} 个物体/{fast_keys} 个键, "
+            f"Blender 求值 {captured_objects - fast_objects} 个物体/{captured_keys - fast_keys} 个键, "
+            f"耗时 {perf_counter() - started:.3f}s"
+        )
 
     @classmethod
     def _refresh_direct_shape_key_loop_indices(cls, object_names: List[str]):

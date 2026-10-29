@@ -1,0 +1,10 @@
+{
+  "abi": 1,
+  "source_repository": "https://github.com/v4806/herta-bc7-native",
+  "source_path": "addon_native/shapekey_sample.cpp",
+  "source_sha256": "dcbc80ad792f253fafdec3fee70b897e226f4f1e3088ad633b53c9a76dabdd6d",
+  "dll_sha256": "98ecb59416775b57cfacc9a89824fc5fa6795e5f18a576a5d60be3dcfba55517",
+  "compiler": "MSVC 14.50 x64 /O2 /MD /EHsc /std:c++20 /fp:precise",
+  "threads": 4,
+  "source_commit": "e8276eb1b6938a2644a397e872094a313fcb1ee8"
+}
