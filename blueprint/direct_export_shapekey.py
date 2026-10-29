@@ -418,7 +418,11 @@ class DirectShapeKeyGenerator(
             if not use_optimized:
                 frame_table_blocked.append("「优化查找性能」：帧表需要 freq_indices 产物")
             if drag_drive_enabled:
-                frame_table_blocked.append("「拖拽驱动形态键」：帧表模板尚未实现拖拽分支")
+                # 面板层已经互斥（有拖拽时帧表勾不上），走到这里说明是旧工程或
+                # 脚本直接设了属性，所以保留这条闸，只把说法改成「先关拖拽」。
+                frame_table_blocked.append(
+                    "「拖拽驱动形态键」：帧表模板尚未实现拖拽分支（链路里有拖拽交互时帧表不可用）"
+                )
             if frame_table_blocked:
                 # 勾选了帧表就应当明确成功或明确失败，不静默回退——否则用户无从
                 # 分辨本次导出究竟用了哪套模型。

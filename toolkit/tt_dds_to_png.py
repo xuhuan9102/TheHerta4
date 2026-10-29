@@ -27,6 +27,7 @@ import os
 import shutil
 import struct
 import subprocess
+import tempfile
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +43,9 @@ _AUTO_INTERVAL = 0.005
 # limits on the production set; 32 adds no benefit. Threads are created lazily.
 _PNG_WORKERS = 16
 _MAX_RELINKS_PER_TICK = 4
+# 单个文件不设上限就等于让最慢的那个 future 决定整批的结局：texconv 卡在坏文件或
+# 网络盘上时，进度条会永远停着。超时后放弃等待（线程自己跑完，结果丢弃）。
+_CONVERT_TIMEOUT_SECONDS = 300.0
 _LOG_PREFIX = "[DDS转PNG]"
 
 # 需要 16bit 输出的浮点/HDR 源格式（DXGI 格式号，取自 dxgiformat.h）：
@@ -199,6 +203,8 @@ _AUTO_JOB = {
     "current": "",
     "active": False,
     "started_at": 0.0,
+    "last_progress_at": 0.0,
+    "progress_mark": 0,
 }
 
 
@@ -334,6 +340,24 @@ def iter_dds_images():
     return found
 
 
+def _publish_atomically(destination, write):
+    """先写同目录临时文件再 os.replace，写失败绝不留下半截目标文件。
+
+    「伪装 DDS」（.dds 名字里装的是 PNG/JPEG）这两条分支不经过原生引擎与前缀校验，
+    以前直接写目标路径：一旦中途失败或断电，同名旧 PNG 就被截断了，而下游引用的
+    正是这个名字。临时文件必须同目录，跨卷 os.replace 会退化成非原子复制。
+    """
+    directory = os.path.dirname(destination) or "."
+    handle, temporary = tempfile.mkstemp(prefix=".herta_png_", suffix=".tmp", dir=directory)
+    os.close(handle)
+    try:
+        write(temporary)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def convert_dds_to_png(texconv, dds_path):
     """优先专用 C 流水线，未支持的格式回退 texconv，返回同目录 PNG 绝对路径。
 
@@ -346,14 +370,18 @@ def convert_dds_to_png(texconv, dds_path):
         signature = source.read(8)
     if signature.startswith(b"\x89PNG\r\n\x1a\n"):
         png_path = png_path_for(dds_path)
-        shutil.copyfile(dds_path, png_path)
+        _publish_atomically(png_path, lambda temporary: shutil.copyfile(dds_path, temporary))
         print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 PNG，直接复制容器。")
         return png_path
     if signature.startswith(b"\xff\xd8"):
         from PIL import Image
+
+        def _save_as_png(temporary):
+            with Image.open(dds_path) as image:
+                image.convert("RGB").save(temporary, format="PNG")
+
         png_path = png_path_for(dds_path)
-        with Image.open(dds_path) as image:
-            image.convert("RGB").save(png_path, format="PNG")
+        _publish_atomically(png_path, _save_as_png)
         print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 JPEG，按真实格式转为 PNG。")
         return png_path
     png_path = png_path_for(dds_path)
@@ -516,6 +544,7 @@ def _enqueue_targets(job, targets):
         group = job["groups"].setdefault(key, {
             "path": path, "images": deque(), "future": None, "result": None,
             "queued": False, "conversion_counted": False, "error_reported": False,
+            "started_at": None,
         })
         group["images"].append(image)
         job["images"].append((image, path))
@@ -721,14 +750,26 @@ def _auto_tick():
                         job["executor"] = _create_png_executor()
                     group["future"] = job["executor"].submit(
                         _convert_file_task, job["texconv"], group["path"], job["force"])
+                    group["started_at"] = time.monotonic()
                 except Exception as exc:
                     group["result"] = ("failed", str(exc))
         future = group["future"]
-        if group["result"] is None and future is not None and future.done():
-            try:
-                group["result"] = future.result()
-            except Exception as exc:
-                group["result"] = ("failed", str(exc))
+        if group["result"] is None and future is not None:
+            if future.done():
+                try:
+                    group["result"] = future.result()
+                except Exception as exc:
+                    group["result"] = ("failed", str(exc))
+            elif group["started_at"] is not None and (
+                time.monotonic() - group["started_at"] > _CONVERT_TIMEOUT_SECONDS
+            ):
+                # 线程杀不掉，只能停止等它：结果丢弃，批次因此不会永远挂着。
+                future.cancel()
+                group["result"] = (
+                    "failed",
+                    "转换超过 %d 秒未完成，已放弃等待（texconv 可能卡在这个文件上）"
+                    % int(_CONVERT_TIMEOUT_SECONDS),
+                )
         if group["result"] is not None and group["images"] and not group["queued"]:
             job["ready"].append(group)
             group["queued"] = True
@@ -759,17 +800,34 @@ def _auto_tick():
             group["queued"] = False
         if time.perf_counter() - started >= 0.008:
             break
+    # 只有「真的推进过」才算有进度：每拍都刷新时间戳的话，停滞判定永远不成立。
+    if job["processed"] != job.get("progress_mark"):
+        job["progress_mark"] = job["processed"]
+        job["last_progress_at"] = time.time()
     _push_progress_ui()
     return _AUTO_INTERVAL
 
 
 def schedule_auto_convert(context=None, force=False):
-    """导入流程结束后调度一次自动转换；未勾选或已有任务在跑时什么都不做。"""
+    """导入流程结束后调度一次自动转换；未勾选或已有任务在跑时什么都不做。
+
+    已有任务在跑时**只在它停滞超时后**才允许重开：以前这里无条件 return False，
+    一旦上一批卡死，这次会话的自动转换就再也不会有第二次机会。
+    """
     props = _get_props()
     if props is None or not getattr(props, "dds_auto_convert_png_after_import", False):
         return False
     if _AUTO_JOB["images"] is not None:
-        return False
+        stalled = (
+            time.time() - float(_AUTO_JOB.get("last_progress_at") or 0.0)
+            > _CONVERT_TIMEOUT_SECONDS
+        )
+        if not stalled:
+            return False
+        print(
+            f"{_LOG_PREFIX} 上一批自动转换停滞超过 {int(_CONVERT_TIMEOUT_SECONDS)} 秒，丢弃后重新开始。"
+        )
+        stop_auto_convert()
 
     targets = iter_dds_images()
     if not targets:
@@ -792,6 +850,8 @@ def schedule_auto_convert(context=None, force=False):
             "current": "",
             "active": True,
             "started_at": time.time(),
+            "last_progress_at": time.time(),
+            "progress_mark": 0,
         }
     )
     _enqueue_targets(_AUTO_JOB, targets)

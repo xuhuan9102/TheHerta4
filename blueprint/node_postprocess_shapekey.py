@@ -268,8 +268,36 @@ def sync_shapekey_sparse_index_mode(node, _context):
     _enforce_exclusive_sparse_frame_table(node, "use_sparse_vertex_index")
 
 
+def _enforce_exclusive_drag_frame_table(node):
+    """帧表与「拖拽驱动形态键」互斥：链路里存在拖拽交互时，帧表根本勾不上。
+
+    帧表把序列组编译成逐帧位移表并换掉整套骨架与资源段；拖拽驱动形态键绑定的是
+    ShapeKeyDrive 与点击计数缓冲（cs-t100/t101）。两者同时生效时导出期只有一条
+    ``raise``（见 ``direct_export_shapekey.py`` 的硬互斥），用户到那时候才发现已经晚了。
+    所以这里按「存储顶点增量 / 储存全部顶点属性增量」的既有做法，在勾选当场弹回。
+    """
+    if not bool(getattr(node, "use_frame_table", False)):
+        return
+    finder = getattr(node, "_find_drag_drive_node", None)
+    if not callable(finder):
+        return
+    try:
+        drag_node = finder()
+    except Exception:
+        return
+    if drag_node is None:
+        return
+    node.use_frame_table = False
+    print(
+        "⚠️ 帧表插值：链路里有拖拽交互（{}），已取消勾选".format(
+            getattr(drag_node, "name", "拖拽交互")
+        )
+    )
+
+
 def sync_shapekey_frame_table_mode(node, _context):
     _enforce_exclusive_sparse_frame_table(node, "use_frame_table")
+    _enforce_exclusive_drag_frame_table(node)
 
 
 class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
@@ -343,6 +371,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
             "显著降低 GPU 计算量、着色器体积与 Present 行数（重载后编译更快）。"
             "序列组来自「形态键扩展」节点的分组配置；未启用扩展或分组信息缺失时自动回退旧模型。"
             "与「顶点命中索引（稀疏查找）」互斥：勾选本项会自动取消那一项。"
+            "与「拖拽交互」也互斥：链路里有拖拽交互时本项无法勾选。"
             "需要 'numpy' 库。"
         ),
         default=False,
@@ -928,7 +957,14 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         compute_box.prop(self, "use_optimized_lookup")
         compute_box.prop(self, "merge_slot_files")
         compute_box.prop(self, "use_sparse_vertex_index")
-        compute_box.prop(self, "use_frame_table")
+        # 帧表与拖拽交互互斥：有拖拽就把它置灰（勾不上），而不是等导出时报错。
+        _frame_table_row = compute_box.row()
+        _frame_table_row.enabled = self._find_drag_drive_node() is None
+        _frame_table_row.prop(self, "use_frame_table")
+        if not _frame_table_row.enabled:
+            compute_box.label(
+                text="链路里有拖拽交互，帧表插值不可用（两者互斥）", icon='ERROR'
+            )
         if getattr(self, "use_sparse_vertex_index", False):
             # 勾了就当场说明生效与否：与导出期同策略，不给用户「以为开了」的机会。
             if getattr(self, "use_frame_table", False):

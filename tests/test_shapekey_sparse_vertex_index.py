@@ -763,6 +763,37 @@ class SparseFrameTableExclusionTests(unittest.TestCase):
         self.assertIn("def _enforce_exclusive_sparse_frame_table(node, keep: str):", source)
 
 
+class FrameTableDragExclusionTests(unittest.TestCase):
+    """帧表插值与「拖拽交互」互斥：链路里有拖拽时帧表根本勾不上。
+
+    导出期本来就有硬互斥（``direct_export_shapekey.py`` 的 ``raise``），但那是用户
+    点完导出才吃到的报错；这里把闸移到勾选当场，和稀疏索引同一套 ``update=`` 做法。
+    """
+
+    class _DragNode:
+        name = "拖拽交互"
+
+    def test_checking_the_frame_table_with_a_drag_node_bounces_back(self):
+        node = _make_shape_key_node()
+        node._find_drag_drive_node = lambda: self._DragNode()
+        node.use_frame_table = True
+        node_module.sync_shapekey_frame_table_mode(node, None)
+        self.assertFalse(node.use_frame_table)
+
+    def test_without_a_drag_node_the_frame_table_stays_checked(self):
+        node = _make_shape_key_node()
+        node._find_drag_drive_node = lambda: None
+        node.use_frame_table = True
+        node_module.sync_shapekey_frame_table_mode(node, None)
+        self.assertTrue(node.use_frame_table)
+
+    def test_the_switch_is_greyed_out_in_the_panel(self):
+        source = (REPO_ROOT / "blueprint" / "node_postprocess_shapekey.py").read_text(encoding="utf-8")
+        self.assertIn("def _enforce_exclusive_drag_frame_table(node):", source)
+        self.assertIn("_frame_table_row.enabled = self._find_drag_drive_node() is None", source)
+        self.assertIn("链路里有拖拽交互，帧表插值不可用（两者互斥）", source)
+
+
 # ============================================================================
 # 6. 直出侧：ini 资源段与 Present 绑定
 # ============================================================================

@@ -18,6 +18,7 @@ class _Stats(ct.Structure):
 
 _library = None
 _checked = False
+_load_error = ""
 _load_lock = threading.Lock()
 # CPU work needs fewer simultaneous calls than texconv's process/IO waits.
 # No inner native thread pool: eight independent file pipelines at most.
@@ -25,8 +26,9 @@ _slots = threading.BoundedSemaphore(8)
 
 
 def native_library():
-    global _library, _checked
+    global _library, _checked, _load_error
     if os.environ.get("HERTA_DDS_PNG_NATIVE", "1") == "0":
+        _load_error = "环境变量 HERTA_DDS_PNG_NATIVE=0"
         return None
     with _load_lock:
         if not _checked:
@@ -39,10 +41,19 @@ def native_library():
                 lib.herta_dds_to_png.argtypes = [ct.c_wchar_p, ct.c_wchar_p, ct.c_int, ct.POINTER(_Stats)]
                 lib.herta_dds_to_png.restype = ct.c_int
                 _library = lib
-            except (OSError, AttributeError, ValueError):
-                pass
+                _load_error = ""
+            except (OSError, AttributeError, ValueError) as error:
+                # 不再静默降级：没加速的原因必须留一行，否则用户只能拿环境变量反推。
+                _library = None
+                _load_error = str(error) or error.__class__.__name__
+                print("[DDS转PNG] 原生引擎未启用（%s），本次改用 texconv。" % _load_error)
             _checked = True
     return _library
+
+
+def native_load_error():
+    """最近一次原生引擎探测失败的原因；空串表示可用或尚未探测。"""
+    return _load_error
 
 
 def convert(source, destination):

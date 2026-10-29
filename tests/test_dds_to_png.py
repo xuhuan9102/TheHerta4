@@ -3,8 +3,10 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import types
 import unittest
+from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
@@ -841,6 +843,141 @@ class DDSToPNGTests(unittest.TestCase):
 
         self.assertNotIn("-f", captured[0])
         self.assertEqual(8, dds_to_png.png_bit_depth(dds_to_png.png_path_for(dds_path)))
+
+
+    def test_disguised_png_copy_failure_leaves_previous_png_intact(self):
+        """伪装 PNG 分支必须原子替换：失败时旧同名 PNG 一个字节都不能动、不留临时文件。
+
+        这条分支不过原生引擎、也没有产物头校验，以前直接写目标路径，写一半失败就把
+        下游引用的那张 PNG 截断了。
+        """
+        dds_path = os.path.join(self.temp_dir, "disguised.dds")
+        with open(dds_path, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        png_path = dds_to_png.png_path_for(dds_path)
+        previous = b"previous-png-body"
+        with open(png_path, "wb") as handle:
+            handle.write(previous)
+
+        with mock.patch.object(dds_to_png.shutil, "copyfile", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
+
+        with open(png_path, "rb") as handle:
+            self.assertEqual(previous, handle.read())
+        self.assertEqual([], [name for name in os.listdir(self.temp_dir) if name.endswith(".tmp")])
+
+    def test_disguised_png_is_copied_through_a_temporary_file(self):
+        """成功路径也走临时文件 + os.replace，目标一旦出现就是完整内容。"""
+        dds_path = os.path.join(self.temp_dir, "disguised.dds")
+        payload = b"\x89PNG\r\n\x1a\n" + b"payload" * 8
+        with open(dds_path, "wb") as handle:
+            handle.write(payload)
+
+        png_path = dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
+
+        with open(png_path, "rb") as handle:
+            self.assertEqual(payload, handle.read())
+        self.assertEqual([], [name for name in os.listdir(self.temp_dir) if name.endswith(".tmp")])
+
+    def test_disguised_jpeg_decoding_failure_keeps_previous_png(self):
+        """伪装 JPEG 分支同理：解码/保存失败也绝不能破坏已经存在的同名 PNG。"""
+        if importlib.util.find_spec("PIL") is None:
+            self.skipTest("未安装 Pillow，跳过伪装 JPEG 分支")
+        dds_path = os.path.join(self.temp_dir, "disguised_jpeg.dds")
+        with open(dds_path, "wb") as handle:
+            handle.write(b"\xff\xd8\xff\xe0" + b"\x00" * 32)
+        png_path = dds_to_png.png_path_for(dds_path)
+        previous = b"previous-png-body"
+        with open(png_path, "wb") as handle:
+            handle.write(previous)
+
+        with mock.patch("PIL.Image.open", side_effect=OSError("broken jpeg")):
+            with self.assertRaises(OSError):
+                dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
+
+        with open(png_path, "rb") as handle:
+            self.assertEqual(previous, handle.read())
+        self.assertEqual([], [name for name in os.listdir(self.temp_dir) if name.endswith(".tmp")])
+
+    def test_stuck_worker_times_out_instead_of_hanging_the_batch(self):
+        """单个文件卡死不能拖住整批：超时后放弃等待，批次照常收尾。"""
+        _fake_bpy.context.scene.texture_tools_props.dds_auto_convert_png_after_import = True
+        path = self._make_dds()
+        _fake_bpy.data.images = [FakeImage(path)]
+        hanging = Future()
+        with mock.patch.object(dds_to_png, "_create_png_executor") as factory:
+            factory.return_value.submit.return_value = hanging
+            self.assertTrue(dds_to_png.schedule_auto_convert())
+            dds_to_png._auto_tick()  # 提交任务，future 永远不完成
+            group = next(iter(dds_to_png._AUTO_JOB["groups"].values()))
+            self.assertIs(hanging, group["future"])
+            group["started_at"] -= dds_to_png._CONVERT_TIMEOUT_SECONDS + 1.0
+            for _ in range(4):
+                if dds_to_png._auto_tick() is None:
+                    break
+
+        status, detail = group["result"]
+        self.assertEqual("failed", status)
+        self.assertIn("超过", detail)
+        self.assertEqual(1, dds_to_png._AUTO_JOB["failed"])
+        self.assertIsNone(dds_to_png._AUTO_JOB["images"])
+
+    def test_idle_ticks_do_not_refresh_the_stall_timer(self):
+        """停滞判定不能被 tick 自身刷新：没有推进就是没有推进（否则重开永远不触发）。"""
+        _fake_bpy.context.scene.texture_tools_props.dds_auto_convert_png_after_import = True
+        path = self._make_dds()
+        _fake_bpy.data.images = [FakeImage(path)]
+        hanging = Future()
+        with mock.patch.object(dds_to_png, "_create_png_executor") as factory:
+            factory.return_value.submit.return_value = hanging
+            try:
+                self.assertTrue(dds_to_png.schedule_auto_convert())
+                stale = time.time() - 900.0
+                dds_to_png._AUTO_JOB["last_progress_at"] = stale
+                dds_to_png._auto_tick()
+                dds_to_png._auto_tick()
+                self.assertEqual(stale, dds_to_png._AUTO_JOB["last_progress_at"])
+            finally:
+                dds_to_png.stop_auto_convert()
+
+    def test_stalled_batch_can_be_scheduled_again(self):
+        """整批停滞超时后允许重新调度：以前无条件拒绝，一次卡死等于这次会话再无自动转换。"""
+        _fake_bpy.context.scene.texture_tools_props.dds_auto_convert_png_after_import = True
+        executor = mock.Mock()
+        dds_to_png._AUTO_JOB.update(
+            images=[object()], active=True, executor=executor, groups={},
+            ready=deque(), seen_images=set(), last_progress_at=time.time() - 10 ** 4,
+        )
+        path = self._make_dds()
+        _fake_bpy.data.images = [FakeImage(path)]
+        finished = Future()
+        finished.set_result(("converted", dds_to_png.png_path_for(path)))
+        with mock.patch.object(dds_to_png, "_create_png_executor") as factory:
+            factory.return_value.submit.return_value = finished
+            self.assertTrue(dds_to_png.schedule_auto_convert())
+            for _ in range(4):
+                if dds_to_png._auto_tick() is None:
+                    break
+
+        executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        self.assertEqual(1, dds_to_png._AUTO_JOB["converted"])
+        self.assertIsNone(dds_to_png._AUTO_JOB["images"])
+
+
+class DDSNativeLoadTests(unittest.TestCase):
+    def test_failed_native_load_records_reason_instead_of_swallowing_it(self):
+        """原生引擎加载失败不再静默：留下原因、只提示一次，回退路径照旧可用。"""
+        module = _load("_dds_png_native")
+        module._library = None
+        module._checked = False
+        module._load_error = ""
+        with mock.patch.object(module.ct, "CDLL", side_effect=OSError("找不到指定的模块。")):
+            with mock.patch("builtins.print") as printer:
+                self.assertIsNone(module.native_library())
+                self.assertIsNone(module.native_library())  # 第二次不再打印
+        self.assertIn("找不到指定的模块", module.native_load_error())
+        self.assertEqual(1, printer.call_count)
 
 
 if __name__ == "__main__":
