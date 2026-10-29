@@ -969,6 +969,38 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
 
         self.assertIs(resolved, original_obj)
 
+    def test_ttlmap_material_passes_gate_without_any_texture_mark(self):
+        """没有贴图标记、段里也没有 ps-t 时，TTLMap 材质本身就该让物体过材质门。
+
+        TTL 靠 TTLMap_ 材质认物（ZZMI 拆两遍绘制、EFMI 交给 EFMITTL 库），把 TTLMap
+        排除在兜底之外，这种物体在取物体这一步就被拦掉，后面的 FX/TTL 一起冻结。
+        """
+        node = _ttl_node()
+        obj = _FakeObject("LOD1.8152aba6-5850-0", {}, ["TTLMap_2009f0d6-1356-0"])
+        _fake_bpy.data.objects[obj.name] = obj
+
+        self.assertTrue(node._object_has_matching_materials(obj, OrderedDict()))
+
+    def test_ttl_lookup_skips_material_less_fork_copy_for_source_object(self):
+        """链路分叉出来的空壳副本名字排在前面时，TTL 取物体要跳过它落到源物体上。"""
+        node = _ttl_node()
+        source_name = "LOD0.a6431857-1021-0"
+        shell_name = "LOD1.aa9ffb86-13378-0"
+        source_obj = _FakeObject(source_name, {}, ["TTLMap_Body"])
+        shell_obj = _FakeObject(shell_name, {}, ["DiffuseMap_Body"])
+        shell_obj.material_slots.clear()
+        for obj in (source_obj, shell_obj):
+            _fake_bpy.data.objects[obj.name] = obj
+        node.apply_name_mapping({f"{source_name}_copy": f"{shell_name}_copy"})
+
+        resolved = node.find_object_by_mesh_name(
+            f"{shell_name}_copy",
+            object_filter=node._ttl_material_candidate_filter(),
+        )
+
+        self.assertIs(resolved, source_obj)
+        self.assertIs(node.find_object_by_mesh_name(f"{shell_name}_copy"), shell_obj)
+
     def test_htmi_does_not_fallback_to_source_candidate_when_current_object_has_no_materials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_texture = os.path.join(temp_dir, "source-candidate.png")

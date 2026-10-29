@@ -1404,11 +1404,10 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         if self._collect_ps_texture_slot_materials(obj):
             return True
 
-        # 贴图类型 → 材质前缀兜底。TTLMap 只在当前命名空间声明了它（HI3FX）时才算：
-        # 其它运行时没有这个通道，把 TTLMap_ 材质当候选会改变它们既有的物体匹配结果。
-        fallback_texture_types = ["Glowmap", "FXMap"]
-        if fx_namespace.current_profile().ttlmap_ref:
-            fallback_texture_types.append("TTLMap")
+        # 贴图类型 → 材质前缀兜底。TTLMap 对所有运行时都算：ZZMI 拆两遍绘制、EFMI 交给
+        # EFMITTL 库，两种协议都靠 TTLMap_ 材质认物。把它只留给 HI3FX，会让「没有贴图
+        # 标记、段内也没有 ps-t」的物体在这里被拦掉，后面的 FX/TTL 生成跟着一起冻结。
+        fallback_texture_types = ["Glowmap", "FXMap", "TTLMap"]
         return any(
             self.find_matching_materials(obj, texture_type)
             for texture_type in fallback_texture_types
@@ -2163,6 +2162,15 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             inline.append("{}run = CommandList{}TTL{}Draw".format(indent, chr(92), chr(92)))
         return inline
 
+    def _ttl_material_candidate_filter(self):
+        """TTL 链路取物体用的过滤器：只认身上真有 TTLMap 材质的候选。
+
+        不带过滤的解析是「先到先得」：链路分叉出来的空壳副本（没有材质）只要名字排在
+        源物体前面就会被选中，TTL / EFMITTL 随即静默跳过。交给过滤器后，解析在过滤
+        不过时会继续试下一个候选——也就是反向映射出来的源物体。
+        """
+        return lambda candidate: bool(self.find_matching_materials(candidate, "TTLMap"))
+
     def _process_ttl_sections(self, section_name, lines, all_sections, material_group_to_swapkey,
                               swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder):
         from ..utils.log_utils import LOG as _LOG
@@ -2188,7 +2196,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
         for mesh_index, mesh_name in reversed(mesh_lines_info):
             transparency_value = self._extract_transparency_value_from_mesh_name(mesh_name)
-            obj = self.find_object_by_mesh_name(mesh_name)
+            obj = self.find_object_by_mesh_name(mesh_name, object_filter=self._ttl_material_candidate_filter())
             fx_materials = self.find_matching_materials(obj, "FXMap") if obj is not None else []
             ttl_materials = self.find_matching_materials(obj, "TTLMap") if obj is not None else []
             if fx_materials and ttl_materials:
@@ -2349,7 +2357,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         mesh_lines_info = [(i, self.extract_mesh_name(line))
                            for i, line in enumerate(lines) if self.extract_mesh_name(line)]
         for mesh_index, mesh_name in reversed(mesh_lines_info):
-            obj = self.find_object_by_mesh_name(mesh_name)
+            obj = self.find_object_by_mesh_name(mesh_name, object_filter=self._ttl_material_candidate_filter())
             if obj is None:
                 continue
             ttl_materials = self.find_matching_materials(obj, "TTLMap")
