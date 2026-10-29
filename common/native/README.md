@@ -29,3 +29,20 @@ Validation:
 ```powershell
 python -m unittest discover -s tests -p test_dds_native.py
 ```
+
+## DDS to PNG
+
+`herta_dds_png_windows_x64.dll` provides ABI 1 for an in-process, lossless PNG
+conversion pipeline. The source is maintained in `v4806/herta-bc7-native`, under
+`addon_native/dds_png`; build with that repository's CMake project. The shipped
+DLL includes the Herta BC7 kernel with standard endpoint bit replication,
+bcdec's BC6H decoder and libdeflate. See `DDS_PNG_THIRD_PARTY.txt` for licenses.
+
+BC7/BC6H, common RGBA/BGRA DDS, and half/float DDS are supported. HDR becomes
+16-bit RGBA without a gamma transform. sRGB inputs get sRGB/gAMA chunks; linear
+inputs get neither. Eight file calls may run concurrently, without inner thread
+pools. PNG compression level 1 is lossless and favors conversion speed.
+`HERTA_DDS_PNG_NATIVE=0` selects the existing texconv fallback for diagnosis.
+Unknown formats, unavailable DLLs and conversion errors also fall back.
+The wrapper publishes a temporary PNG atomically. Existing PNG reuse, original
+DDS retention, Blender colorspace/alpha and main-thread relinking are unchanged.

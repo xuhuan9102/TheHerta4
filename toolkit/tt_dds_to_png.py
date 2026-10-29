@@ -7,7 +7,8 @@ PNG 后 Blender 能正常读，控制台也不再刷这些警告。
 
 三条实测得出的设计约束（数字见 tests/test_dds_to_png.py）：
 
-1. **色彩空间交给 texconv 自己判断**：普通（整型）源只给 ``-ft png``，*不给* ``-f``，
+1. **原生引擎保留源色彩语义**：8bit 整型、16bit HDR 直接写 PNG。texconv 回退时
+   普通（整型）源只给 ``-ft png``，*不给* ``-f``，
    texconv 会保留输入的 sRGB 语义（``BC7_UNORM_SRGB`` -> ``R8G8B8A8_UNORM_SRGB``，
    ``BC7_UNORM`` -> ``R8G8B8A8_UNORM``）。实测这与手工按格式指定输出逐像素完全一致
    （mean_abs_diff = 0.0）；而手工指定一旦写错，就会让 sRGB 贴图被线性解码一次，
@@ -23,16 +24,24 @@ PNG 后 Blender 能正常读，控制台也不再刷这些警告。
 """
 
 import os
+import shutil
 import struct
 import subprocess
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import bpy
 
 from .tt_dds_conversion import find_texconv
+from . import _dds_png_native
 
 
 _AUTO_INTERVAL = 0.005
+# Includes process startup and file IO waits: measured 16 beats 6/8 CPU-bound
+# limits on the production set; 32 adds no benefit. Threads are created lazily.
+_PNG_WORKERS = 16
+_MAX_RELINKS_PER_TICK = 4
 _LOG_PREFIX = "[DDS转PNG]"
 
 # 需要 16bit 输出的浮点/HDR 源格式（DXGI 格式号，取自 dxgiformat.h）：
@@ -326,11 +335,41 @@ def iter_dds_images():
 
 
 def convert_dds_to_png(texconv, dds_path):
-    """按属性检测结果选命令，用 texconv 在 dds 同目录生成同名 .png，返回 png 绝对路径。
+    """优先专用 C 流水线，未支持的格式回退 texconv，返回同目录 PNG 绝对路径。
 
     命令由 :func:`probe_dds` + :data:`_PNG_COMMAND_TABLE` 决定；``-y`` 覆盖同名旧文件。
     转换前后各打一行日志（属性 / 命中规则 / 产物色彩元数据），便于直接核对。
     """
+    # Some extracted workspace files keep a .dds name but contain JPEG/PNG.
+    # Inspect bytes, retain the original file, and preserve decoded pixel values.
+    with open(dds_path, "rb") as source:
+        signature = source.read(8)
+    if signature.startswith(b"\x89PNG\r\n\x1a\n"):
+        png_path = png_path_for(dds_path)
+        shutil.copyfile(dds_path, png_path)
+        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 PNG，直接复制容器。")
+        return png_path
+    if signature.startswith(b"\xff\xd8"):
+        from PIL import Image
+        png_path = png_path_for(dds_path)
+        with Image.open(dds_path) as image:
+            image.convert("RGB").save(png_path, format="PNG")
+        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 JPEG，按真实格式转为 PNG。")
+        return png_path
+    png_path = png_path_for(dds_path)
+    try:
+        native_stats = _dds_png_native.convert(dds_path, png_path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} C 引擎失败，回退 texconv: {exc}")
+        native_stats = None
+    if native_stats is not None:
+        print("%s %s: C 引擎 -> %sbit PNG，读取 %.1f / 解码 %.1f / 滤波 %.1f / 压缩 %.1f / 落盘 %.1f ms" % (
+            _LOG_PREFIX, os.path.basename(dds_path), native_stats["depth"],
+            native_stats["read_ms"], native_stats["decode_ms"], native_stats["filter_ms"],
+            native_stats["compress_ms"], native_stats["write_ms"]))
+        return png_path
+    if not texconv:
+        raise RuntimeError("未找到 texconv.exe")
     out_dir = os.path.dirname(dds_path)
     attrs = probe_dds(dds_path)
     rule = select_png_command(attrs)
@@ -411,8 +450,6 @@ def process_one(image, dds_path, force=False):
         return "skipped", png_path
 
     texconv = find_texconv()
-    if not texconv:
-        return "failed", "未找到 texconv.exe"
     try:
         convert_dds_to_png(texconv, dds_path)
     except Exception as exc:
@@ -427,6 +464,64 @@ def process_one(image, dds_path, force=False):
     except Exception as exc:
         return "failed", f"重连引用失败: {exc}"
     return "converted", png_path
+
+
+def _convert_file_task(texconv, dds_path, force=False):
+    """Worker-side file IO only: no bpy, image datablocks or find_texconv calls."""
+    png_path = png_path_for(dds_path)
+    if not force and os.path.exists(png_path):
+        return "skipped", png_path
+    try:
+        attrs = probe_dds(dds_path)
+        convert_dds_to_png(texconv, dds_path)
+        if attrs["is_float"] and png_bit_depth(png_path) != 16:
+            return "failed", "HDR 源未产出 16bit PNG"
+        return "converted", png_path
+    except Exception as exc:
+        return "failed", str(exc)
+
+
+def _create_png_executor():
+    return ThreadPoolExecutor(max_workers=_PNG_WORKERS, thread_name_prefix="HertaPNG")
+
+
+def stop_auto_convert():
+    """Release timer/queue ownership when the addon is disabled; workers never touch bpy."""
+    job = _AUTO_JOB
+    executor = job.get("executor")
+    job.update(images=None, active=False, current="", executor=None)
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+    for key in ("groups", "ready", "seen_images"):
+        if key in job:
+            job[key].clear()
+    try:
+        if bpy.app.timers.is_registered(_auto_tick):
+            bpy.app.timers.unregister(_auto_tick)
+    except Exception:
+        pass
+
+
+def _enqueue_targets(job, targets):
+    added = 0
+    for image, path in targets:
+        try:
+            identity = int(image.as_pointer())
+        except AttributeError:
+            identity = id(image)
+        if identity in job["seen_images"]:
+            continue
+        job["seen_images"].add(identity)
+        key = os.path.normcase(os.path.abspath(path))
+        group = job["groups"].setdefault(key, {
+            "path": path, "images": deque(), "future": None, "result": None,
+            "queued": False, "conversion_counted": False, "error_reported": False,
+        })
+        group["images"].append(image)
+        job["images"].append((image, path))
+        added += 1
+    job["total"] += added
+    return added
 
 
 def convert_all(force=False, reporter=None):
@@ -445,10 +540,6 @@ def convert_all(force=False, reporter=None):
     if not targets:
         emit("INFO", "工程里没有指向 .dds 的图片引用。")
         return {"total": 0, "converted": 0, "skipped": 0, "failed": 0}
-
-    if not find_texconv():
-        emit("ERROR", "未找到 texconv.exe。请将其放入插件目录的 Toolset 子文件夹，或手动指定路径。")
-        return {"total": len(targets), "converted": 0, "skipped": 0, "failed": len(targets)}
 
     stats = {"total": len(targets), "converted": 0, "skipped": 0, "failed": 0}
     for image, dds_path in targets:
@@ -591,36 +682,83 @@ def _get_props():
 
 
 def _auto_tick():
-    """自动转换的分帧回调：每帧只处理一张，避免长时间阻塞界面。"""
+    """Poll file futures without waiting; relink a bounded number on the main thread."""
     job = _AUTO_JOB
-    images = job["images"]
-    if images is None:
+    if job["images"] is None:
         return None
 
-    if not images:
-        print(
-            f"{_LOG_PREFIX} 自动转换完成：转换 {job['converted']} 个，"
-            f"沿用已有 PNG {job['skipped']} 个，失败 {job['failed']} 个。"
-        )
-        job["images"] = None
-        job["active"] = False
-        job["current"] = ""
-        _push_progress_ui()
-        # 汇总只在 header 上留几秒，随后自动撤掉，不长期占着视口顶部。
-        try:
-            bpy.app.timers.register(_clear_progress_header, first_interval=6.0)
-        except Exception:
-            pass
-        return None
+    if job["processed"] >= job["total"]:
+        # Another workspace may finish importing while this batch is converting.
+        # Only newly encountered image IDs join the queue; failures are not retried.
+        if not _enqueue_targets(job, iter_dds_images()):
+            print(
+                f"{_LOG_PREFIX} 自动转换完成：转换 {job['converted']} 个，"
+                f"沿用已有 PNG {job['skipped']} 个，失败 {job['failed']} 个，"
+                f"耗时 {time.time() - job['started_at']:.2f} 秒。"
+            )
+            executor = job.get("executor")
+            if executor is not None:
+                executor.shutdown(wait=False)
+            job.update(images=None, active=False, current="", executor=None)
+            job["groups"].clear()
+            job["ready"].clear()
+            job["seen_images"].clear()
+            _push_progress_ui()
+            try:
+                bpy.app.timers.register(_clear_progress_header, first_interval=6.0)
+            except Exception:
+                pass
+            return None
 
-    image, dds_path = images.pop()
-    job["current"] = os.path.basename(dds_path)
-    _push_progress_ui()  # 先亮出正在处理的那张，长转换期间也能看见当前文件
-    status, detail = process_one(image, dds_path, force=job["force"])
-    job[status] += 1
-    job["processed"] += 1
-    if status == "failed":
-        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 转换失败：{detail}")
+    for group in job["groups"].values():
+        if group["result"] is None and group["future"] is None:
+            png_path = png_path_for(group["path"])
+            if not job["force"] and os.path.exists(png_path):
+                group["result"] = ("skipped", png_path)
+            else:
+                try:
+                    if job["executor"] is None:
+                        job["executor"] = _create_png_executor()
+                    group["future"] = job["executor"].submit(
+                        _convert_file_task, job["texconv"], group["path"], job["force"])
+                except Exception as exc:
+                    group["result"] = ("failed", str(exc))
+        future = group["future"]
+        if group["result"] is None and future is not None and future.done():
+            try:
+                group["result"] = future.result()
+            except Exception as exc:
+                group["result"] = ("failed", str(exc))
+        if group["result"] is not None and group["images"] and not group["queued"]:
+            job["ready"].append(group)
+            group["queued"] = True
+
+    started = time.perf_counter()
+    relinked = 0
+    while job["ready"] and relinked < _MAX_RELINKS_PER_TICK:
+        group = job["ready"][0]
+        image = group["images"].popleft()
+        status, detail = group["result"]
+        job["current"] = os.path.basename(group["path"])
+        if status != "failed":
+            try:
+                relink_image(image, detail)
+                if status == "converted" and not job["force"]:
+                    status = "skipped" if group["conversion_counted"] else "converted"
+                    group["conversion_counted"] = True
+            except Exception as exc:
+                status, detail = "failed", f"重连引用失败: {exc}"
+        if status == "failed" and not group["error_reported"]:
+            print(f"{_LOG_PREFIX} {os.path.basename(group['path'])} 转换失败：{detail}")
+            group["error_reported"] = True
+        job[status] += 1
+        job["processed"] += 1
+        relinked += 1
+        if not group["images"]:
+            job["ready"].popleft()
+            group["queued"] = False
+        if time.perf_counter() - started >= 0.008:
+            break
     _push_progress_ui()
     return _AUTO_INTERVAL
 
@@ -639,19 +777,25 @@ def schedule_auto_convert(context=None, force=False):
 
     _AUTO_JOB.update(
         {
-            "images": targets,
+            "images": [],
+            "groups": {},
+            "ready": deque(),
+            "seen_images": set(),
+            "executor": None,
+            "texconv": find_texconv(),
             "force": force,
             "converted": 0,
             "skipped": 0,
             "failed": 0,
-            "total": len(targets),
+            "total": 0,
             "processed": 0,
             "current": "",
             "active": True,
             "started_at": time.time(),
         }
     )
-    print(f"{_LOG_PREFIX} 检测到 {len(targets)} 个 DDS 引用，开始自动转换为 PNG。")
+    _enqueue_targets(_AUTO_JOB, targets)
+    print(f"{_LOG_PREFIX} 检测到 {len(targets)} 个 DDS 引用，按唯一源文件并行转换为 PNG（最多 {_PNG_WORKERS} 个任务）。")
     _push_progress_ui()
     # 用 timer 而不是当场执行：导入算子还没返回，此时长耗时会卡住整个导入。
     bpy.app.timers.register(_auto_tick, first_interval=0.5)

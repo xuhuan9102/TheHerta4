@@ -112,11 +112,11 @@ class MeshCreateHelper:
 
             if element.SemanticName == "POSITION":
                 if len(data[0]) == 4:
-                    if not all(x[3] in (0, 1) for x in data):
+                    if not numpy.all((data[:, 3] == 0) | (data[:, 3] == 1)):
                         raise Fatal('Positions are 4D')
 
-                positions = [(x[0], x[1], x[2]) for x in data]
-                mesh.vertices.foreach_set('co', unpack_list(positions))
+                positions = numpy.ascontiguousarray(data[:, :3], dtype=numpy.float32)
+                mesh.vertices.foreach_set('co', positions.ravel())
             elif element.SemanticName.startswith("COLOR"):
                 num_loops = len(mesh.loops)
                 loop_vertex_indices = numpy.empty(num_loops, dtype=numpy.int32)
@@ -155,7 +155,7 @@ class MeshCreateHelper:
                 use_normals = True
                 if logic_name == LogicName.YYSLS:
                     print("燕云十六声法线处理")
-                    normals = [(x[0] * 2 - 1, x[1] * 2 - 1, x[2] * 2 - 1) for x in data]
+                    normals = numpy.asarray(data[:, :3]) * 2 - 1
                 elif logic_name == LogicName.EFMI and element.Format == "R32_UINT":
                     print("终末地压缩法线处理(Endfield Packed Normals) - 使用 TBNCodec")
                     raw = data
@@ -165,10 +165,10 @@ class MeshCreateHelper:
                         raw = raw[:, 0]
 
                     from ..utils.tbn_codec import TBNCodec
-                    normals = TBNCodec.decode_octahedral_r32_uint(raw).tolist()
+                    normals = TBNCodec.decode_octahedral_r32_uint(raw)
                     print("终末地压缩法线处理完成")
                 else:
-                    normals = [(x[0], x[1], x[2]) for x in data]
+                    normals = numpy.ascontiguousarray(data[:, :3], dtype=numpy.float32)
             elif element.SemanticName == "ENCODEDDATA":
                 if logic_name == LogicName.EFMI:
                     print("终末地 ENCODEDDATA 处理 - 使用 TBNCodec 解码 TBN 数据")
@@ -181,7 +181,7 @@ class MeshCreateHelper:
                         raw = raw[:, 0]
 
                     from ..utils.tbn_codec import TBNCodec
-                    normals = TBNCodec.decode_octahedral_r32_uint(raw).tolist()
+                    normals = TBNCodec.decode_octahedral_r32_uint(raw)
                     print("终末地 ENCODEDDATA 处理完成")
                 else:
                     print(f"警告: ENCODEDDATA 元素仅在 EFMI 格式中支持，当前游戏类型: {logic_name}")
@@ -305,7 +305,12 @@ class MeshCreateHelper:
 
         bpy.context.view_layer.update()
         if not bpy.app.background:
-            bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+            # A forced full-window swap per object dominates batch import time.
+            # Request redraw; Blender renders once control returns to its event loop.
+            manager = getattr(bpy.context, 'window_manager', None)
+            for window in getattr(manager, 'windows', ()):
+                for area in window.screen.areas:
+                    area.tag_redraw()
 
         TimerUtils.End("Import 3Dmigoto Raw")
         return obj

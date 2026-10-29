@@ -533,6 +533,11 @@ def register():
     print("[TheHerta4] 工具集注册完成")
 
 def unregister():
+    try:
+        from .tt_dds_to_png import stop_auto_convert
+        stop_auto_convert()
+    except Exception as error:
+        print(f"[TheHerta4] PNG 自动转换停止失败: {error}")
     # 高斯权重球：先停计时器/绘制回调再对称注销
     try:
         gb_shutdown()
