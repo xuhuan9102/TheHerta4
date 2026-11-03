@@ -1053,15 +1053,29 @@ EMITTER_SPEED_REGS = (45, 48)
 EMITTER_FIELD_REGS = (58, 59)
 
 #: 「力场字段级开关这一族存在」的标记：``IniParams[41].w``（41.x 是派生的总闸
-#: 「有没有力场」、41.y 是全局增益）。0 = 没写过 → 每个字段都按导出的 enabled 位走，
-#: 也就是旧行为。
-EMITTER_FIELD_FLAG_LANE = "w41"
+#: 「有没有力场」、41.y 是全局增益）。模板里固定有一行 ``w41 = 0``，导出每次都把它
+#: **改写成 literal 0/1**（老模板没有这一行时插在 ``y41`` 之后）：只写 1、不写 0
+#: 的话，``IniParams`` 跨 mod 粘滞（3Dmigoto 的变量表没有命名空间），上一份 mod
+#: 留下的 ``w41=1`` 会让这份没写 58/59 的导出把力场全判 OFF，而且不报错。
+#: 0 = 每个字段都按自己导出的 enabled 位走（旧行为）。
+def force_field_switchable(field_switches):
+    """任一发射器（前 :data:`EMITTER_CONTROL_MAX` 个）有字段被关 ⇒ 掩码会被读。
+
+    与 :func:`build_emitter_control` 的 ``want_field`` 同一口径（同样截到 8 个
+    发射器、每个只看前 :data:`FORCE_FIELDS_PER_SLOT` 个），保证「写了 1」与
+    「写了掩码」永远成对出现。
+    """
+    rows = list(field_switches or ())[:EMITTER_CONTROL_MAX]
+    return any(
+        any(int(v) != 1 for v in list(row or ())[:FORCE_FIELDS_PER_SLOT])
+        for row in rows
+    )
 
 #: 插入块的哨兵。已经在文本里就说明这一段插过了（``_build_main_ini`` 每次导出
 #: 只调一次，这里只是防「有人再调一遍」时插出两份）。
 EMITTER_CONTROL_MARKER = "; --- FLUID EMITTER CONTROLS BEGIN ---"
 
-#: 三个插入锚点。**两种写法都要认**：模板现在的原文已经是带前缀的
+#: 插入/改写锚点。**两种写法都要认**：模板现在的原文已经是带前缀的
 #: ``global $fluid_emit_7 = 1`` / ``w43 = $fluid_emit_7``（Probe.ini:964-971 /
 #: :205-212），但这一层在 ``prefix_variables`` 之前跑，别人也可能塞进一份不带
 #: 前缀的模板，所以 ``(?:fluid_)?`` 两边都吃。找不到就告警跳过，绝不静默改结构。
@@ -1069,6 +1083,8 @@ _EMITTER_GLOBALS_ANCHOR = re.compile(
     r"(?m)^global[ \t]+\$(?:fluid_)?emit_7[ \t]*=[ \t]*1[ \t]*\r?$")
 _EMITTER_WRITES_ANCHOR = re.compile(
     r"(?m)^[ \t]*w43[ \t]*=[ \t]*\$(?:fluid_)?emit_7[ \t]*\r?$")
+#: ``w41`` 那一行：有就改写成 literal 值（保留缩进），没有就插在 ``y41`` 之后。
+_FORCE_FLAG_LINE = re.compile(r"(?m)^([ \t]*)w41[ \t]*=[^\r\n]*")
 _FORCE_FLAG_ANCHOR = re.compile(
     r"(?m)^[ \t]*y41[ \t]*=[ \t]*\$(?:fluid_)?force_scale[ \t]*\r?$")
 
@@ -1096,7 +1112,8 @@ def build_emitter_control(speeds, field_switches=None):
       ``global $fluid_force_enable_E_K``；
     * ``write_lines``  —— ``[CommandListDrawWorld]`` 里把变量抄进 IniParams 的行
       （``x45 = $fluid_emitter_speed_0``、``x58 = $fluid_force_enable_0_0 + 2*…``）；
-    * ``flag_lines``   —— ``w41 = 1``，告诉 shader「力场字段级开关这一族存在」；
+    * ``flag_lines``   —— 已弃用，恒为空段（族标记改由 :func:`apply_emitter_controls`
+      无条件写 ``global $fluid_force_fields_switchable``，见那里的注释）；
     * ``warnings``     —— 发射器数超过 8 时的告警。
 
     **一个功能一个变量**：力场没有「发射器级」和「倍率」两套变量了 —— 面板上那个
@@ -1104,8 +1121,10 @@ def build_emitter_control(speeds, field_switches=None):
     导出数据行里的 enabled 位与这里的 ``$fluid_force_enable_E_K``。强度只有
     力场自己的 ``strength``（绝对值 m/s²），不再有倍率。
 
-    **缺省不写**：speed 全 0、开关全 1 时四个返回值都是空，导出产物与这次改动
-    之前逐字节相同（``probes\\after`` 对照靠这个）。
+    **缺省不写**：speed 全 0、开关全 1 时 ``global_lines`` / ``write_lines`` /
+    ``flag_lines`` 都是空（速度与掩码这两族不出现）；唯一总会写的是族标记
+    ``$fluid_force_fields_switchable``，由 :func:`apply_emitter_controls` 负责，
+    缺省写 0——那是「不粘滞」的代价，不是遗漏。
     """
     speeds = list(speeds or ())
     field_rows = list(field_switches or ())
@@ -1121,9 +1140,7 @@ def build_emitter_control(speeds, field_switches=None):
     field_rows = (field_rows + [None] * count)[:count]
 
     want_speed = any(float(v) > 0.0 for v in speeds)
-    want_field = any(
-        any(int(v) != 1 for v in list(row or ())[:FORCE_FIELDS_PER_SLOT])
-        for row in field_rows)
+    want_field = force_field_switchable(field_rows)
 
     global_lines, write_lines, flag_lines = [], [], []
     if want_speed:
@@ -1143,7 +1160,6 @@ def build_emitter_control(speeds, field_switches=None):
     # 见 fluid_ini_merge.build_force_field_floats 的 :852）。打包成位掩码写进
     # 一个 lane：bit k = 第 k 个力场，8 个发射器只占两个号。
     if want_field:
-        flag_lines.append(EMITTER_FIELD_FLAG_LANE + " = 1")
         write_lines.append(
             "; 每个力场的开关（位掩码：bit0..bit3 = 该发射器第 0..3 个力场）")
         for i, row in enumerate(field_rows):
@@ -1173,12 +1189,32 @@ def apply_emitter_controls(text, speeds, field_switches=None, enables=()):
     关掉的那几条的初值改成 0 —— 键位（``[KeyFluidEmitN]`` 的 ``$emit_N = 1,0``）
     与动画驱动写的都是同一个变量。
 
-    另有三处插入：``[Constants]`` 的声明、``[CommandListDrawWorld]`` 里抄进
-    IniParams 的行、以及 ``y41`` 旁边的 ``w41 = 1`` 标记。缺省（一个值都没改）
-    时 ``build_emitter_control`` 返回全空、替换也不发生，这里原样返回 ``text``。
+    另有两处插入：``[Constants]`` 的声明（含力场族标记，缺省写 0）与
+    ``[CommandListDrawWorld]`` 里抄进 IniParams 的行。一个值都没改时，速度与
+    掩码这两族不出现，只多出族标记那一条 ``global $fluid_force_fields_switchable = 0``
+    —— 它必须每次都写，理由见下面的注释（``IniParams`` 跨 mod 粘滞）。
     """
-    global_lines, write_lines, flag_lines, warnings = build_emitter_control(
+    global_lines, write_lines, _flag_lines, warnings = build_emitter_control(
         speeds, field_switches)
+
+    # 力场族标记：**每次导出都写 literal 0/1**。模板里已经有 `w41 = 0`
+    # （Probe.ini 的 x41/y41 那一块），所以这里改写；老模板没有这一行时插在
+    # y41 之后。只写 1 不写 0 的话，上一份 mod 留下的 `w41 = 1` 会让这份没写
+    # 58/59 的导出把每个力场都判 OFF（`ForceField.hlsl` 的 emitterFieldOn 先看
+    # 41.w），而且不报错——IniParams 没有命名空间，这一行必须被显式覆盖。
+    switchable = 1 if force_field_switchable(field_switches) else 0
+    flag_line = "w41 = %d" % switchable
+    if _FORCE_FLAG_LINE.search(text):
+        text = _FORCE_FLAG_LINE.sub(
+            lambda m: m.group(1) + flag_line, text, count=1)
+    else:
+        match = _FORCE_FLAG_ANCHOR.search(text)
+        if match is None:
+            warnings.append(
+                "找不到模板里的 `y41 = $force_scale`，力场族标记 w41 没生成"
+                "（旧模板的另一份 mod 可能把它留在 1，力场会被静默判 OFF）")
+        else:
+            text = _insert_after_match(text, match, [flag_line])
 
     if EMITTER_CONTROL_MARKER in text:
         return text, warnings
@@ -1215,12 +1251,6 @@ def apply_emitter_controls(text, speeds, field_switches=None, enables=()):
                 "找不到模板里的 `w43 = $emit_7`，每发射器变量的 IniParams 写入没生成")
         else:
             text = _insert_after_match(text, match, write_lines)
-    if flag_lines:
-        match = _FORCE_FLAG_ANCHOR.search(text)
-        if match is None:
-            warnings.append("找不到模板里的 `y41 = $force_scale`，力场开关标记没生成")
-        else:
-            text = _insert_after_match(text, match, flag_lines)
     return text, warnings
 
 

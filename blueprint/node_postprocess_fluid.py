@@ -1531,6 +1531,11 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 continue
             # U 轴在手性镜像下会整体翻号（见 fluid_ini_merge.build_force_field_floats
             # 的注释）。mirrored 与顶点顺序、发射方向用的是同一个判据。
+            #
+            # _frame 为 None（物体缺失 / 面号越界 / 退化三角形 / 手填 first_index）
+            # 时**按非镜像处理**：判据一个都拿不到就不动 U——非镜像模型占多数，
+            # 翻错会让水柱朝反方向，比不翻更难查。镜像模型走到这条分支时，先把
+            # 面号 / first_index 修到能解析出三角形再导出。
             _frame = self._game_frame(em)
             mirror_u = bool(_frame is not None and _frame[6])
             if idx >= fluid_ini_merge.FORCE_FIELD_SLOT_COUNT:
@@ -2043,6 +2048,23 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         ns = _namespace_id(mod_export_path)
         host_hashes = self._host_hashes(mod_export_path)
 
+        # 严格模式：目标第 3 条要求「约束不满足就在导出期报错而不是静默失败」。
+        # 门控一个都没收到 ⇒ 门控段恒为 0 ⇒ 整条流体链静默死掉，这是最难查的形态
+        # （看着没报错、游戏里什么也没发生）。
+        #
+        # 必须判在 _deploy 之前：写盘顺序是 _deploy（fluid_probe.ini + 全部 hlsl +
+        # Profiles/*.json）→ _inject_emitter_hooks（改宿主 ini）。等写完再报错，
+        # 盘上留下的是「门控段缺失、$fluid_present 恒 0」的半成品，还得用户自己回滚。
+        if self.gate_by_host_hash and not host_hashes:
+            print(
+                "[FluidProbe][ERROR] 开了「按宿主 hash 门控」却一个 hash 都没收到。"
+                "这会让 $fluid_present 恒为 0，流体在游戏里完全不生效。请任选其一："
+                "①在节点里填「宿主 ini（可选）」指向角色的 ini；"
+                "②导出时确保角色 ini 与流体同目录；"
+                "③关掉门控（流体常驻计算，多角色同屏时会互相干扰）。"
+            )
+            return
+
         try:
             written, total, dropped, retargeted = self._deploy(
                 mod_export_path, ns, host_hashes
@@ -2068,20 +2090,8 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         ))
         print("[FluidProbe] 门控 hash: {} 个{}".format(
             len(host_hashes),
-            "" if host_hashes else "（未找到宿主 hash，流体将常驻计算）",
+            "" if host_hashes else "（未找到宿主 hash；门控已关，流体常驻计算）",
         ))
-        # 严格模式：目标第 3 条要求「约束不满足就在导出期报错而不是静默失败」。
-        # 门控一个都没收到 ⇒ 门控段恒为 0 ⇒ 整条流体链静默死掉，这是最难查的形态
-        # （看着没报错、游戏里什么也没发生），所以这里直接报错并给出三条出路。
-        if self.gate_by_host_hash and not host_hashes:
-            print(
-                "[FluidProbe][ERROR] 开了「按宿主 hash 门控」却一个 hash 都没收到。"
-                "这会让 $fluid_present 恒为 0，流体在游戏里完全不生效。请任选其一："
-                "①在节点里填「宿主 ini（可选）」指向角色的 ini；"
-                "②导出时确保角色 ini 与流体同目录；"
-                "③关掉门控（流体常驻计算，多角色同屏时会互相干扰）。"
-            )
-            return
         print("[FluidProbe] IniParams 重映射: {}；着色器缓存: {}".format(
             "开 (237-243/251-255 → 29-40)" if self.remap_ini_params else "关",
             "带" if (self.include_shaders_cache and not self.remap_ini_params) else "不带",

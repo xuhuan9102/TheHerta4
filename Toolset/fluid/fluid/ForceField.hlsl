@@ -45,9 +45,13 @@ float forceFieldFalloff(float r2,float r2Max,float power){
 // (the same k the exporter uses for that field's three rows), so eight emitters
 // with four fields each still cost only two IniParams numbers.
 //
-// IniParams[41].w is the family flag: the exporter writes it only when at least
-// one field switch is off, so an export that never touched them leaves it 0 and
-// every field follows its own exported enabled bit -- exactly the old behaviour.
+// IniParams[41].w is the family flag. Probe.ini has `w41 = 0` inside the gate and
+// the exporter rewrites that line to a literal 0/1 on every export (0 unless at
+// least one field switch is off), so an export that never touched the switches
+// leaves it 0 and every field follows its own exported enabled bit -- exactly
+// the old behaviour. The 0 is written on purpose: IniParams has no namespace,
+// so a 1 left behind by another fluid mod would otherwise switch this mod's
+// fields off silently (the 58/59 masks would then be read: stale or zero).
 bool emitterFieldOn(uint id,uint k){
   if(IniParams[41].w<.5)return true;
   float4 m=(id<4u)?IniParams[58]:IniParams[59];

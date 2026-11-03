@@ -788,6 +788,37 @@ class ForceFieldPackingTests(unittest.TestCase):
             floats = merge.build_force_field_floats({0: [{"kind": name}]})
             self.assertEqual(floats[3], code, name)
 
+    def test_mirrored_workflow_negates_u_only(self):
+        """X 镜像工作流：游戏侧 right = -M(Blender right)，所以只翻 U。
+
+        依据：ResolveSurface.hlsl:63-64 的 right=up×forward 在镜像下手性翻转；
+        ForceField.hlsl:97/:105 只负责 right*x，不再取反（翻两次等于没翻）。
+        """
+        field = {
+            "enabled": True, "kind": "DIRECTIONAL",
+            "mirror_u": True,
+            "offset_u": 0.1, "offset_v": 0.2, "offset_w": 0.05,
+            "axis_u": 30.0, "axis_v": 1.0, "axis_w": 2.0,
+            "radius": 0.5, "strength": 20.0,
+        }
+        floats = merge.build_force_field_floats({0: [field]})
+        # row0 = (offset, type)：U 反号，V/W 原样
+        self.assertEqual(floats[0], -0.1)
+        self.assertEqual(floats[1], 0.2)
+        self.assertEqual(floats[2], 0.05)
+        # row1 = (axis, radius)：U 反号，V/W 原样（方向来自轴，不是 offset）
+        self.assertEqual(floats[4], -30.0)
+        self.assertEqual(floats[5], 1.0)
+        self.assertEqual(floats[6], 2.0)
+
+    def test_mirror_flag_defaults_to_false(self):
+        """没给 mirror_u 的字段必须原样写出（非镜像模型占多数，不能顺手翻）。"""
+        floats = merge.build_force_field_floats({0: [{
+            "offset_u": 0.1, "axis_u": 30.0,
+        }]})
+        self.assertEqual(floats[0], 0.1)
+        self.assertEqual(floats[4], 30.0)
+
     def test_slot_stride_is_four_fields(self):
         floats = merge.build_force_field_floats({
             0: [{"strength": 1.0}],
@@ -1210,8 +1241,10 @@ class GlobalKeyTests(unittest.TestCase):
 class EmitterControlTests(unittest.TestCase):
     """每个发射器 / 每个力场的运行期变量（开关 / 速度 / 力场字段开关）。
 
-    最关键的性质是**缺省不写**：一个值都没改时 ``apply_emitter_controls``
-    必须把 text 原样返回，导出产物才能与改动前逐字节相同。
+    最关键的性质是**速度与掩码缺省不写**：一个速度都没改、没有字段被关时，
+    这两族不出现。唯一总会写的是力场族标记 ``$fluid_force_fields_switchable``
+    （缺省 0）——``IniParams`` 无命名空间，只写 1 不写 0 会让上一份 mod 留下的
+    ``w41=1`` 把这份导出的力场全判 OFF 且不报错。
 
     2026-11-03 收敛：力场不再有「发射器级开关」和「强度倍率」两族变量 ——
     每个力场自己的「启用」写 ``$fluid_force_enable_<E>_<K>``，一个力场一个。
@@ -1227,12 +1260,16 @@ class EmitterControlTests(unittest.TestCase):
         "    y41 = $force_scale\n"
     )
 
-    def test_defaults_change_nothing(self):
+    def test_defaults_write_only_the_family_flag(self):
+        """缺省只多一行 ``w41 = 0``；速度与掩码两族都不许出现。"""
         text = self._SAMPLE
         out, warnings = merge.apply_emitter_controls(
             text, [0.0, 0.0], [[1, 1], [1]], enables=[1, 1])
-        self.assertEqual(out, text)
         self.assertEqual(warnings, [])
+        self.assertIn("    w41 = 0", out)
+        self.assertNotIn("fluid_force_enable", out)
+        self.assertNotIn("fluid_emitter_speed", out)
+        self.assertEqual(out.replace("\n    w41 = 0", "", 1), text)
 
     def test_speed_lands_in_its_own_lane(self):
         out, warnings = merge.apply_emitter_controls(
@@ -1245,9 +1282,9 @@ class EmitterControlTests(unittest.TestCase):
         self.assertNotIn("global $fluid_emitter_speed_3", out)
         # z45 = 第 2 个发射器；写在 w43 之后、与它同缩进
         self.assertIn("    z45 = $fluid_emitter_speed_2", out)
-        # 力场那一族没动，就不该出现
+        # 力场那一族没动，就不该出现（族标记写 0，不算「这一族存在」）
         self.assertNotIn("fluid_force_enable", out)
-        self.assertNotIn("w41 = 1", out)
+        self.assertIn("    w41 = 0", out)
 
     def test_field_switch_packs_into_a_mask(self):
         """两个力场：关第 1 个、留第 2 个 → 掩码 bit0=0、bit1=1。"""
@@ -1262,11 +1299,11 @@ class EmitterControlTests(unittest.TestCase):
                       out)
         self.assertNotIn("fluid_emitter_speed", out)
 
-    def test_field_switch_all_on_writes_nothing(self):
+    def test_field_switch_all_on_writes_no_mask(self):
         out, _warnings = merge.apply_emitter_controls(
             self._SAMPLE, [0.0], [[1, 1, 1, 1]])
         self.assertNotIn("fluid_force_enable", out)
-        self.assertNotIn("w41 = 1", out)
+        self.assertIn("    w41 = 0", out)
 
     def test_switch_off_rewrites_the_template_default(self):
         out, _warnings = merge.apply_emitter_controls(
@@ -1315,7 +1352,24 @@ class EmitterControlTests(unittest.TestCase):
         self.assertIn("global $fluid_force_enable_0_0 = 0", out)
         self.assertIn("global $fluid_force_enable_0_1 = 1", out)
         self.assertIn("x58 = $fluid_force_enable_0_0 + 2*$fluid_force_enable_0_1", out)
-        self.assertIn("w41 = 1", out)
+        # 族标记是改写模板里已有的那一行（模板未加前缀，导出末尾的
+        # prefix_variables 才补 fluid_），所以这里断言的是模板原名。
+        self.assertIn("    w41 = 1", out)
+        self.assertEqual(out.count("w41 = "), 1)
+
+    def test_real_template_zeroes_a_stale_family_flag(self):
+        """M3：上一份 mod 留下的 w41=1 必须被这次导出写回 0。
+
+        IniParams 无命名空间，只写 1 不写 0 时，另一份 mod 的 w41=1 会让这份
+        没写 58/59 的导出把每个力场都判 OFF，而且不报错。
+        """
+        template = _TEMPLATE_PATH.read_text(encoding="utf-8-sig")
+        stale = template.replace("    w41 = 0", "    w41 = 1")
+        self.assertIn("    w41 = 1", stale)
+        out, warnings = merge.apply_emitter_controls(
+            stale, [0.0], [[1]], enables=[1])
+        self.assertEqual(warnings, [])
+        self.assertIn("    w41 = 0", out)
 
     def test_real_template_switch_off_rewrites_prefixed_default(self):
         template = _TEMPLATE_PATH.read_text(encoding="utf-8-sig")

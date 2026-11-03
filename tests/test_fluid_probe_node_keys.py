@@ -167,6 +167,86 @@ class EmitterCapacityTests(unittest.TestCase):
         self.assertEqual(len(inst.emitters), 8)
 
 
+def _force_field(**extra):
+    cfg = dict(enabled=True, kind="DIRECTIONAL", offset_u=0.1, offset_v=0.2,
+               offset_w=0.3, axis_u=30.0, axis_v=1.0, axis_w=2.0,
+               radius=0.5, strength=20.0, falloff=2.0)
+    cfg.update(extra)
+    return types.SimpleNamespace(**cfg)
+
+
+def _data_floats(text):
+    """从生成的主 ini 里取出 ``[ResourceFluidForceField]`` 的 data 行并切成浮点。"""
+    for line in text.splitlines():
+        if line.strip().startswith("data = "):
+            return [float(v) for v in line.split("=", 1)[1].split()]
+    raise AssertionError("产物里没有 data 行：{}".format(text[:200]))
+
+
+class MirrorWorkflowTests(unittest.TestCase):
+    """U 轴镜像：只在导出层按 ``_game_frame[6]`` 取反，且只反 U。
+
+    依据：``ResolveSurface.hlsl:63-64`` 的 ``right=up×forward`` 在 X 镜像下手性
+    翻转 ⇒ ``right_game = -M(right_blender)``；``ForceField.hlsl:97/:105`` 只乘
+    right，不再取反（两处都翻等于没翻）。
+    """
+
+    def test_mirrored_emitter_negates_u_in_the_exported_row(self):
+        inst = _bare_node([_emitter(force_fields=[_force_field()])])
+        inst._game_frame = lambda em: (0, 0, 0, 0, 0, 0, True)
+        vals = _data_floats(inst._build_main_ini("FluidTest", []))
+        # row0 = (offset, type)：U 反号，V/W 原样
+        self.assertEqual(vals[0], -0.1)
+        self.assertEqual(vals[1], 0.2)
+        self.assertEqual(vals[2], 0.3)
+        # row1 = (axis, radius)：U 反号，V/W 原样
+        self.assertEqual(vals[4], -30.0)
+        self.assertEqual(vals[5], 1.0)
+        self.assertEqual(vals[6], 2.0)
+
+    def test_non_mirrored_emitter_keeps_u(self):
+        inst = _bare_node([_emitter(force_fields=[_force_field()])])
+        inst._game_frame = lambda em: (0, 0, 0, 0, 0, 0, False)
+        vals = _data_floats(inst._build_main_ini("FluidTest", []))
+        self.assertEqual(vals[0], 0.1)
+        self.assertEqual(vals[4], 30.0)
+
+    def test_unresolvable_frame_is_treated_as_non_mirrored(self):
+        """``_game_frame`` 返回 None（物体缺失/面号越界/手填 first_index）⇒ 不翻。
+
+        这是**有意**的：判据一个都拿不到就不动 U（非镜像模型占多数，翻错会让
+        水柱朝反方向）。镜像模型走到这条分支时先修面号/first_index 再导出。
+        """
+        inst = _bare_node([_emitter(force_fields=[_force_field()])])
+        inst._game_frame = lambda em: None
+        slots, warnings = inst._force_fields_by_slot()
+        self.assertEqual(warnings, [])
+        self.assertFalse(slots[0][0]["mirror_u"])
+        vals = _data_floats(inst._build_main_ini("FluidTest", []))
+        self.assertEqual(vals[0], 0.1)
+        self.assertEqual(vals[4], 30.0)
+
+
+class FamilyFlagTests(unittest.TestCase):
+    """力场族标记 ``w41``：导出里必须正好一条声明，且缺省写 0（M3 防粘滞）。"""
+
+    def test_family_flag_is_written_once_as_a_literal(self):
+        text = _bare_node([_emitter()])._build_main_ini("FluidTest", [])
+        self.assertEqual(
+            text.count("w41 = "), 1,
+            "族标记只能有一行；多余的行会互相覆盖")
+        self.assertIn("    w41 = 0", text)
+        self.assertNotIn("$fluid_force_fields_switchable", text,
+                         "族标记写 literal，不再引出一个跨 mod 粘滞的 global")
+
+    def test_disabled_field_turns_the_family_flag_on(self):
+        emitter = _emitter(force_fields=[_force_field(enabled=False)])
+        inst = _bare_node([emitter])
+        inst._game_frame = lambda em: None   # 没有真 bpy，手性判据按非镜像走
+        text = inst._build_main_ini("FluidTest", [])
+        self.assertIn("    w41 = 1", text)
+
+
 class EmitterKeyExportTests(unittest.TestCase):
     def test_first_emitter_defaults_to_numpad1(self):
         text = _bare_node([_emitter(), _emitter()])._build_main_ini("FluidTest", [])
