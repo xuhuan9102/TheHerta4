@@ -122,6 +122,8 @@ _MODULE_REGISTRY = [
     {"name": "node_postprocess_skip", "required": False},
     # 条件判断：哈希出现时选定物体所属 IB 的整段 ini 代码才生效。
     {"name": "node_postprocess_condition", "required": False},
+    # 流体探针：把 LiquidGravityProbe 的屏幕空间 PBF 流体注入导出 ini。
+    {"name": "node_postprocess_fluid", "required": False},
 ]
 
 _MODULE_AVAILABLE = {}
