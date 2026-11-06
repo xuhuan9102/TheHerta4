@@ -128,6 +128,13 @@ _OBJECT_HASH_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8}")
 #: 兜底：物体名中夹着的 8 位 hash，要求前后是分隔符（``-`` / ``_`` / ``.`` / 行尾）。
 _OBJECT_HASH_FALLBACK_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{8})(?=[-_.]|$)")
 
+#: 变量条件：变量名合法性（可带一个 ``$`` 前缀；``\`` 用作命名空间分隔）。
+_VAR_NAME_RE = re.compile(r"^\$?[A-Za-z_\\][A-Za-z0-9_\\]*$")
+#: 节点自己的变量命名空间（``cond_<8位hex>_``）：用户变量用这个前缀会被每帧复位。
+_RESERVED_VAR_RE = re.compile(r"^cond_[0-9a-fA-F]{8}_")
+#: 本节点标记里的命名空间：用于识别「其它 ns」的残留门控块。
+_COND_NS_RE = re.compile(r";\s*@@COND:([0-9a-fA-F]{8}):")
+
 
 class ConditionApplyError(RuntimeError):
     """配置表结构不允许安全改写时抛出：调用方必须报错并**拒绝写入**。
@@ -136,6 +143,10 @@ class ConditionApplyError(RuntimeError):
     尾块」里 —— 那样插进去的复位行下次导出会被整块重写掉，等于门控变量永不
     复位、部件效果永久消失。宁可拒绝也不静默放过。
     """
+
+
+class ConditionValidationError(ValueError):
+    """条件列表里有非法项（变量名 / 数值 / 算子）：调用方必须报错并拒绝写入。"""
 
 
 def _log_info(message):
@@ -173,9 +184,13 @@ def _log_error(message):
 # --------------------------------------------------------------------------- #
 
 def _ensure_newline(line, newline):
-    """保证一行以换行结尾（文件末行可能没有换行）。"""
+    """保证一行以换行结尾（文件末行可能没有换行）。
+
+    ``\\r`` 也算换行：孤立 CR 文件（老 Mac 风格）里不能再补一个 ``\\r\\n``，
+    否则会出现 ``\\r\\r\\n``。
+    """
     text = str(line or "")
-    return text if text.endswith("\n") else text + newline
+    return text if text.endswith(("\n", "\r")) else text + newline
 
 
 def _parse_hash_from_object_name(name):
@@ -474,6 +489,10 @@ def _find_sections(lines):
 #:   残留同帧上一次的 mod 贴图（「材质转资源pro」纯贴图模式段就靠这行兜底）。
 _TOP_ONLY_PATTERNS = (
     (re.compile(r"^run\s*=", re.IGNORECASE), "run"),
+    # 条件判断圈到「跳过部件」段时，段体里唯一可门控的行就是 ``handling = skip``：
+    # 把它包进 if 才能实现「条件满足才跳过，否则恢复原生绘制」。
+    # （``hash`` / ``match_first_index`` / ``match_index_count`` 由
+    # ``_MATCH_KEY_RE`` 留在顶层，不走本表。）
     (re.compile(r"^\$[A-Za-z_\\]"), "$变量"),
     (re.compile(r"^resourcezzpalette", re.IGNORECASE), "Palette 捕获"),
     (re.compile(r"^resource\\[^=]*=\s*null\s*(?:;.*)?$", re.IGNORECASE), "贴图槽置空"),
@@ -519,6 +538,10 @@ def _classify_line(stripped):
     text = str(stripped or "").strip()
     if not text:
         return "neutral"
+    # 自动追加尾块标记行必须留在最外层：它是别的节点整块重写的内容，一旦被
+    # 并进门控片段，endif 会落到标记之后、[Present] 会被插进 if 体内。
+    if SSMTNode_PostProcess_Base.is_known_auto_appended_marker(text):
+        return "top"
     if text.startswith(";"):
         # ``;MARK:...`` 是导出期段标记，必须留在最外层
         if text[:5].upper() == ";MARK":
@@ -551,6 +574,18 @@ def _find_block_end(body_lines, start):
             if depth == 0:
                 return index
     return None
+
+
+def _if_depth_of_lines(lines):
+    """统计一组行的 ``if`` / ``endif`` 净深度（正数=未闭合 if 数）。"""
+    depth = 0
+    for raw in lines or ():
+        stripped = str(raw or "").strip()
+        if _IF_START_RE.match(stripped):
+            depth += 1
+        elif _ENDIF_RE.match(stripped):
+            depth -= 1
+    return depth
 
 
 def _segment_raw(body_lines):
@@ -666,8 +701,7 @@ def _strip_condition_blocks(content, ns):
     check_begin_marker = f"{COND_MARKER_PREFIX}{ns}:check-begin@@"
     check_end_marker = f"{COND_MARKER_PREFIX}{ns}:check-end@@"
     if_line = f"if $cond_{ns}_cond_active == 1"
-    active_var = f"cond_{ns}_cond_active"
-    frame_var = f"cond_{ns}_cond_frame"
+    ns_var_prefix = f"cond_{ns}_"
 
     result = []
     in_wrap = False
@@ -691,7 +725,11 @@ def _strip_condition_blocks(content, ns):
                 continue
             if wrap_first_line:
                 wrap_first_line = False
-                if stripped == if_line:
+                # 条件列表允许改条件（单哈希 -> 哈希+变量 / 反过来），旧表达式
+                # 不再与新生成的 if 行逐字相同；begin 标记后的第一行只要是 if
+                # 就删。保留完全相等判断做兜底。否则旧 if 残留、末尾 endif 被
+                # 删掉 -> if/endif 不配对，结构损坏。
+                if stripped == if_line or stripped.startswith("if "):
                     continue
             result.append(raw_line)
             continue
@@ -712,12 +750,17 @@ def _strip_condition_blocks(content, ns):
                 and f"cond_{ns}_" in stripped
             ):
                 continue
-            if (
-                skip_content_kind == "detect"
-                and stripped.startswith("$")
-                and re.sub(r"\s+", "", stripped)
-                in (f"${active_var}=1", f"${frame_var}=1")
-            ):
+            if skip_content_kind == "detect" and stripped.startswith("$"):
+                compact = re.sub(r"\s+", "", stripped)
+                # 多哈希条件：第 2 条起用 $cond_<ns>_h1_frame 等；按 ns 前缀
+                # 统一识别，否则后几个槽位的置位行剥不掉。
+                if (
+                    compact.startswith(f"${ns_var_prefix}")
+                    and compact.endswith("=1")
+                ):
+                    continue
+            if skip_content_kind == "autoclose" and stripped == "endif":
+                # 自动补齐的 endif 紧随 autoclose 标记；下一轮重新统计后再补。
                 continue
             skip_content_kind = None
 
@@ -736,26 +779,334 @@ def _strip_condition_blocks(content, ns):
                 skip_content_kind = "post"
             elif suffix == "detect@@":
                 skip_content_kind = "detect"
+            elif suffix == "autoclose@@":
+                skip_content_kind = "autoclose"
             continue
         result.append(raw_line)
 
     return "".join(result)
 
 
-def _wrap_target_sections(lines, ns, target_names, newline):
+def _foreign_condition_namespaces(content, ns):
+    """收集「不属于当前 ns」的 ``; @@COND:<8hex>:`` 标记计数。
+
+    节点改名后旧 ns 的块再也剥不掉，这里只负责发现并提示；不自动删除。
+    返回 ``{ns小写: 出现次数}``（当前 ns 不计）。
+    """
+    counts = {}
+    current = str(ns or "").strip().lower()
+    for match in _COND_NS_RE.finditer(str(content or "")):
+        value = match.group(1).lower()
+        if value == current:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _strip_foreign_namespaces(content, namespaces):
+    """按 ns 循环调用 :func:`_strip_condition_blocks`，只删指定 ns 的块。
+
+    返回 ``(updated, removed)``；``removed[ns]`` 为该 ns 被删掉的标记行数。
+    当前 ns 不在这里处理。
+    """
+    text = str(content or "")
+    removed = {}
+    normalized = sorted(
+        {
+            str(value or "").strip().lower()
+            for value in (namespaces or ())
+            if str(value or "").strip()
+        }
+    )
+    for value in normalized:
+        marker = f"{COND_MARKER_PREFIX}{value}:"
+        count = text.count(marker)
+        if count <= 0:
+            continue
+        updated = _strip_condition_blocks(text, value)
+        if updated != text:
+            removed[value] = count
+            text = updated
+    return text, removed
+
+
+def _read_ini_text(path):
+    """读 ini，返回 ``(text, has_bom)``（utf-8-sig 解码，BOM 原样记下）。"""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return raw.decode("utf-8-sig"), raw.startswith(b"\xef\xbb\xbf")
+
+
+def _write_ini_text(path, text, has_bom):
+    """按原 BOM 状态写回 ini。"""
+    with open(
+        path,
+        "w",
+        encoding="utf-8-sig" if has_bom else "utf-8",
+        newline="",
+    ) as handle:
+        handle.write(text)
+
+# --------------------------------------------------------------------------- #
+# 条件列表：归一化 / 校验 / 表达式
+# --------------------------------------------------------------------------- #
+
+def _condition_field(item, name, default=""):
+    """从 dict 或 PropertyGroup item 取字段（缺失返回默认值）。"""
+    if isinstance(item, dict):
+        value = item.get(name, default)
+    else:
+        value = getattr(item, name, default)
+    return default if value is None else value
+
+
+def _normalize_condition(item):
+    """把一条条件归一化成 dict（不校验合法性，见 :func:`_validate_conditions`）。"""
+    if isinstance(item, dict):
+        kind = item.get("condition_type", item.get("type", "HASH"))
+    else:
+        kind = getattr(item, "condition_type", "HASH")
+    kind = str(kind or "HASH").strip().upper()
+    if kind not in ("HASH", "VARIABLE"):
+        kind = "HASH"
+
+    hash_value = _condition_field(item, "hash_value", "")
+    if not hash_value and isinstance(item, dict):
+        # 兼容直接传 {"hash": ...} 的调用方。
+        hash_value = item.get("hash", "")
+
+    return {
+        "type": kind,
+        "hash_value": str(hash_value or "").strip(),
+        "check_hash": str(_condition_field(item, "check_hash", "") or "").strip(),
+        "index_count": str(_condition_field(item, "index_count", "") or "").strip(),
+        "variable_name": str(_condition_field(item, "variable_name", "") or "").strip(),
+        "comparison_op": str(_condition_field(item, "comparison_op", "==")).strip(),
+        "compare_value": str(_condition_field(item, "compare_value", "1") or ""),
+    }
+
+
+def _variable_name_error(value):
+    """变量名非法时返回原因文本；合法返回 ""（面板与导出共用）。"""
+    name = str(value or "").strip()
+    if not name:
+        return "变量名为空"
+    if not _VAR_NAME_RE.match(name):
+        return (
+            f"变量名「{name}」含非法字符"
+            "（只允许 ASCII 字母/数字/下划线/反斜杠，可带 $ 前缀）"
+        )
+    bare = name[1:] if name.startswith("$") else name
+    if _RESERVED_VAR_RE.match(bare):
+        return (
+            f"变量名「{name}」占用了节点保留前缀 cond_<8位hex>_"
+            "（该命名空间每帧会被复位）"
+        )
+    return ""
+
+
+def _compare_value_error(value):
+    """比较值非法时返回原因文本；合法返回 ""。"""
+    text = str(value or "").strip()
+    if not text:
+        return "比较值为空"
+    if "\n" in text or "\r" in text:
+        return "比较值含换行"
+    if ";" in text:
+        return "比较值含分号（会截断 ini 行）"
+    return ""
+
+
+def _validate_conditions(items):
+    """校验并归一化条件列表，返回 ``(normalized, error)``；非法时 error 非空。
+
+    只做两种自动修正：去首尾空白、变量名补 ``$``；其余非法输入一律拒绝，
+    不自动清洗（清洗会让用户看到「功能没生效」而不是「名字写错了」）。
+    """
+    normalized = [_normalize_condition(item) for item in (items or [])]
+    for index, cond in enumerate(normalized, 1):
+        if cond["type"] == "HASH":
+            effective = cond["hash_value"] or cond["check_hash"]
+            if not effective:
+                return normalized, (
+                    f"第 {index} 条条件：哈希值为空"
+                    "（「哈希值」与「备用哈希值」都为空）"
+                )
+            if "\n" in effective or "\r" in effective or ";" in effective:
+                return normalized, f"第 {index} 条条件：哈希值含换行或分号"
+            continue
+
+        name = cond["variable_name"]
+        name_error = _variable_name_error(name)
+        if name_error:
+            return normalized, f"第 {index} 条条件：{name_error}"
+        if cond["comparison_op"] not in ("==", "!="):
+            return normalized, (
+                f"第 {index} 条条件：算子「{cond['comparison_op']}」不支持"
+                "（只支持 == / !=）"
+            )
+        value_error = _compare_value_error(cond["compare_value"])
+        if value_error:
+            return normalized, f"第 {index} 条条件：{value_error}"
+        if not name.startswith("$"):
+            cond["variable_name"] = f"${name}"
+    return normalized, ""
+
+
+def _effective_conditions(node):
+    """读取节点当前生效的条件：列表优先；列表为空时兼容旧的三个哈希属性。
+
+    列表为空且旧哈希非空 -> 临时合成一条 HASH 条件（**不写回**属性），
+    这样旧 .blend 打开零改动、单哈希导出仍走完全相同的代码路径。
+    """
+    items = list(getattr(node, "condition_list", []) or [])
+    if items:
+        return [_normalize_condition(item) for item in items]
+
+    legacy_hash = str(getattr(node, "condition_hash", "") or "").strip()
+    legacy_check = str(getattr(node, "check_hash", "") or "").strip()
+    if not (legacy_hash or legacy_check):
+        return []
+    return [
+        {
+            "type": "HASH",
+            "hash_value": legacy_hash,
+            "check_hash": legacy_check,
+            "index_count": str(getattr(node, "condition_index_count", "") or "").strip(),
+            "variable_name": "",
+            "comparison_op": "==",
+            "compare_value": "1",
+        }
+    ]
+
+
+def _slot_prefix(slot):
+    """第 ``slot`` 条哈希条件的变量前缀：第 1 条 ``cond``，之后 ``h1`` / ``h2``。"""
+    return "cond" if slot == 0 else f"h{slot}"
+
+
+def _plan_hash_slots(conditions):
+    """给哈希条件分配 latch 槽位，返回 ``(slots, slot_of)``。
+
+    ``(hash, index_count)`` 相同的重复条件合并成一条（重复检测段会在同段插
+    两次置位，脏；日志点名第几条）。``slots`` 里每项含 ``slot`` / ``hash`` /
+    ``index_count`` / ``condition_index``；``slot_of`` 是条件下标 -> 槽位。
+    """
+    slots = []
+    slot_of = {}
+    seen = {}
+    for index, cond in enumerate(conditions):
+        if cond["type"] != "HASH":
+            continue
+        hash_value = cond["hash_value"] or cond["check_hash"]
+        raw_index = cond["index_count"]
+        sanitized = _safe_index_count(raw_index)
+        if raw_index and sanitized is None:
+            _log_warning(
+                f"条件判断：第 {index + 1} 条条件的 IndexCount「{raw_index}」"
+                "不是正整数，已忽略"
+            )
+        index_text = str(sanitized) if sanitized else ""
+        key = (hash_value.casefold(), index_text)
+        if key in seen:
+            slot_of[index] = seen[key]
+            first = slots[seen[key]]["condition_index"] + 1
+            _log_warning(
+                f"条件判断：第 {index + 1} 条哈希条件与第 {first} 条重复"
+                f"（hash = {hash_value}），已按一条导出"
+            )
+            continue
+        slot = len(slots)
+        slots.append(
+            {
+                "slot": slot,
+                "hash": hash_value,
+                "index_count": index_text,
+                "condition_index": index,
+            }
+        )
+        seen[key] = slot
+        slot_of[index] = slot
+    return slots, slot_of
+
+
+def _condition_expression(ns, conditions, slot_of):
+    """把条件列表拼成一条 if 表达式（``&&`` 连接，不嵌套、单条不加括号）。"""
+    clauses = []
+    emitted = set()
+    for index, cond in enumerate(conditions):
+        if cond["type"] == "HASH":
+            slot = slot_of[index]
+            if slot in emitted:
+                # 重复哈希条件已在槽位规划时合并，只出现一次。
+                continue
+            emitted.add(slot)
+            clauses.append(f"$cond_{ns}_{_slot_prefix(slot)}_active == 1")
+            continue
+        clauses.append(
+            f"{cond['variable_name']} {cond['comparison_op']} {cond['compare_value']}"
+        )
+    return " && ".join(clauses)
+
+
+def _detect_sets_for_slots(detect_section_names, slot_count):
+    """把「检测段名」参数展开成每个哈希槽位一份集合。
+
+    兼容三种写法：
+
+    - ``None`` / 字符串集合（旧调用）：只作用于第 1 个槽位；
+    - ``list[set]``（execute 按每个哈希条件查一次）：按槽位取，缺的补空集；
+    - ``dict[slot] = set``。
+    """
+    if slot_count <= 0:
+        return []
+    if detect_section_names is None:
+        return [set() for _ in range(slot_count)]
+    if isinstance(detect_section_names, dict):
+        return [
+            {str(name).strip() for name in (detect_section_names.get(slot) or ()) if str(name).strip()}
+            for slot in range(slot_count)
+        ]
+    if (
+        isinstance(detect_section_names, (list, tuple))
+        and detect_section_names
+        and all(isinstance(value, (set, frozenset)) for value in detect_section_names)
+    ):
+        result = [
+            {str(name).strip() for name in value if str(name).strip()}
+            for value in detect_section_names
+        ]
+        while len(result) < slot_count:
+            result.append(set())
+        return result[:slot_count]
+    base = {
+        str(name).strip()
+        for name in (detect_section_names or ())
+        if str(name).strip()
+    }
+    return [set(base) if slot == 0 else set() for slot in range(slot_count)]
+
+
+def _wrap_target_sections(lines, ns, target_names, newline, condition_expr=None):
     """按「逐行 / 逐块分类」把目标段内可门控的内容包进门控 if。
 
     每个目标段只处理自己的段体（段头与段根的 ``hash`` 等匹配键之后的全部
     行），按 :func:`_segment_body` 切出的片段生成门控块：
 
-    ``; @@COND:<ns>:begin@@`` / ``    if $cond_<ns>_cond_active == 1`` /
+    ``; @@COND:<ns>:begin@@`` / ``    if <条件表达式>`` /
     原行（缩进不变） / ``    endif`` / ``; @@COND:<ns>:end@@``
+
+    ``condition_expr`` 为 ``None`` 时生成与旧版逐字节相同的单哈希 if 行
+    ``    if $cond_<ns>_cond_active == 1``；多条件时由
+    :func:`_condition_expression` 传入 ``&&`` 连接的一行表达式。
 
     必须保持顶层的行（``run`` / ``vs-t0`` / ``$变量`` / ``ResourceZZPalette``
     / 未识别行）原样留在门控 if 之外；一个段可以产生多对 begin/end。
 
-    返回 ``(new_lines, wrapped, skipped)``：``wrapped`` 为真正产生门控块的
-    段数，``skipped`` 为「没有可门控内容」的目标段数。
+    返回 ``(new_lines, wrapped, skipped, auto_closed, stray_endif, auto_close_count)``：
+    ``wrapped`` 为真正产生门控块的段数，``skipped`` 为「没有可门控内容」的
+    目标段数；``auto_closed`` / ``stray_endif`` 为段名列表（段内 if 未闭合 /
+    有多余 endif），``auto_close_count`` 为补上的 endif 总数。
     """
     sections = _find_sections(lines)
     folded_targets = {
@@ -766,9 +1117,16 @@ def _wrap_target_sections(lines, ns, target_names, newline):
     replacements = []
     wrapped = 0
     skipped = 0
+    auto_closed = []
+    stray_endif = []
+    auto_close_count = 0
 
     begin_line = f"{COND_MARKER_PREFIX}{ns}:begin@@{newline}"
-    if_line = f"    if $cond_{ns}_cond_active == 1{newline}"
+    if condition_expr is None:
+        # 单哈希条件基线：与改动前完全相同的 f-string，保证导出字节不变。
+        if_line = f"    if $cond_{ns}_cond_active == 1{newline}"
+    else:
+        if_line = f"    if {condition_expr}{newline}"
     endif_line = f"    endif{newline}"
     end_line = f"{COND_MARKER_PREFIX}{ns}:end@@{newline}"
 
@@ -777,54 +1135,85 @@ def _wrap_target_sections(lines, ns, target_names, newline):
             continue
         body = list(lines[body_start:body_end])
         segments = _segment_body(body)
-        if not any(kind == "gate" for kind, _chunk in segments):
-            skipped += 1
-            continue
-
-        new_body = []
-        for kind, chunk in segments:
-            if kind != "gate":
+        has_gate = any(kind == "gate" for kind, _chunk in segments)
+        if has_gate:
+            new_body = []
+            for kind, chunk in segments:
+                if kind != "gate":
+                    new_body.extend(chunk)
+                    continue
+                chunk = list(chunk)
+                # 门控块的 if 行要另起一行，末行必须先有换行
+                chunk[-1] = _ensure_newline(chunk[-1], newline)
+                new_body.append(begin_line)
+                new_body.append(if_line)
                 new_body.extend(chunk)
-                continue
-            chunk = list(chunk)
-            # 门控块的 if 行要另起一行，末行必须先有换行
-            chunk[-1] = _ensure_newline(chunk[-1], newline)
-            new_body.append(begin_line)
-            new_body.append(if_line)
-            new_body.extend(chunk)
-            new_body.append(endif_line)
-            new_body.append(end_line)
+                new_body.append(endif_line)
+                new_body.append(end_line)
+            wrapped += 1
+        else:
+            # 没有可门控内容也要做 if 深度检查：缺 endif 的段不能静默放过。
+            new_body = list(body)
+            skipped += 1
 
-        replacements.append((body_start, body_end, new_body))
-        wrapped += 1
+        # 段内原有 if 可能没闭合：在段体末尾补受控 endif，避免门控把后一个
+        # 段头 / [Present] 吞进来。多出的 endif 只记 stray，不改写。
+        depth = _if_depth_of_lines(new_body)
+        if depth > 0 and new_body:
+            new_body[-1] = _ensure_newline(new_body[-1], newline)
+            new_body.append(f"{COND_MARKER_PREFIX}{ns}:autoclose@@{newline}")
+            new_body.extend(f"    endif{newline}" for _ in range(depth))
+            auto_closed.append(name)
+            auto_close_count += depth
+        elif depth < 0:
+            stray_endif.append(name)
+
+        if new_body != body:
+            replacements.append((body_start, body_end, new_body))
 
     # 从后往前替换，避免前面的替换改变后面的索引。
     for body_start, body_end, new_body in reversed(replacements):
         lines[body_start:body_end] = new_body
-    return lines, wrapped, skipped
+    return lines, wrapped, skipped, auto_closed, stray_endif, auto_close_count
 
 
-def _ensure_constants_global(lines, ns, newline):
-    """在 ``[Constants]`` 段首插入两个全局变量声明（锁存值 + 本帧标志）。
+def _ensure_constants_global(lines, ns, newline, slots=1):
+    """在 ``[Constants]`` 段首插入全局变量声明（每个哈希槽位一对）。
+
+    第 1 个槽位沿用 ``cond_<ns>_cond_active/frame``（基线字节不变）；
+    第 2 个起用 ``cond_<ns>_h1_active/frame``、``_h2_...``。
 
     没有 ``[Constants]`` 段时新建一个（放在第一个段头之前），否则游戏里
     该变量没有声明，检测段给未声明的全局变量赋值会出问题。
     返回 ``(new_lines, inserted)``。
     """
     marker_line = f"{COND_MARKER_PREFIX}{ns}:global@@{newline}"
-    global_line = (
-        f"global $cond_{ns}_cond_active{newline}"
-        f"global $cond_{ns}_cond_frame{newline}"
-    )
+    declarations = []
+    for slot in range(max(1, int(slots))):
+        prefix = _slot_prefix(slot)
+        declarations.append(f"global $cond_{ns}_{prefix}_active{newline}")
+        declarations.append(f"global $cond_{ns}_{prefix}_frame{newline}")
+    global_line = "".join(declarations)
 
     sections = _find_sections(lines)
+    tail_index = _auto_appended_tail_index(lines)
     for name, header_index, body_start, body_end in sections:
         if str(name or "").strip().casefold() == "constants":
+            if tail_index is not None and header_index >= tail_index:
+                # 唯一的 [Constants] 在自动追加尾块里：写进去下次会被尾块节点
+                # 整块重写掉。跳过它，在尾块之前另建一个稳定的 [Constants]。
+                continue
             lines[header_index] = _ensure_newline(lines[header_index], newline)
-            lines[body_start:body_start] = [marker_line, global_line]
+            insert_at = _clamp_insert_before_tail(lines, body_start)
+            lines[insert_at:insert_at] = [marker_line, global_line]
             return lines, True
 
-    insert_at = sections[0][1] if sections else len(lines)
+    if tail_index is not None and sections and sections[0][1] >= tail_index:
+        # 第一个段头也在尾块里：唯一安全落点是尾块标记之前。
+        insert_at = tail_index
+    else:
+        insert_at = sections[0][1] if sections else len(lines)
+    insert_at = _clamp_insert_before_tail(lines, insert_at)
     if insert_at > 0:
         lines[insert_at - 1] = _ensure_newline(lines[insert_at - 1], newline)
     block = [f"[Constants]{newline}", marker_line, global_line, newline]
@@ -832,14 +1221,17 @@ def _ensure_constants_global(lines, ns, newline):
     return lines, True
 
 
-def _ensure_check_section(lines, ns, detect_hash, index_count, newline):
+def _ensure_check_section(lines, ns, detect_hash, index_count, newline, slot=0):
     """插入（或保留）``[TextureOverrideCheckHash_cond_<ns>]`` 检测段。
 
-    检测段在 ``[Constants]`` 段末尾之后；没有 Constants 时放在第一个段头
-    之前。已存在同名段时不重复插入（它的内容在剥离阶段已整块删掉）。
+    第 1 个槽位用旧段名 ``..._cond_<ns>``；第 2 个起加 ``_h1`` / ``_h2``
+    后缀。检测段在 ``[Constants]`` 段末尾之后；没有 Constants 时放在第一个
+    段头之前。已存在同名段时不重复插入（它的内容在剥离阶段已整块删掉）。
     返回 ``(new_lines, inserted)``。
     """
-    target_name = f"textureoverridecheckhash_cond_{ns}"
+    suffix = "" if slot == 0 else f"_h{slot}"
+    prefix = _slot_prefix(slot)
+    target_name = f"textureoverridecheckhash_cond_{ns}{suffix}"
     sections = _find_sections(lines)
     for name, header_index, body_start, body_end in sections:
         if str(name or "").strip().casefold() == target_name:
@@ -854,14 +1246,26 @@ def _ensure_check_section(lines, ns, detect_hash, index_count, newline):
     if insert_at is None:
         insert_at = sections[0][1] if sections else len(lines)
 
+    # 已经有本节点的检测段块时，新块必须整块接在最后一个 check-end 之后。
+    # 否则（多哈希时）新块会插进上一个块的 check-begin 与段头之间：剥离状态
+    # 机在第一个 check-end 就收尾，后面的段头残留、begin marker 反被吃掉。
+    check_end_marker = f"{COND_MARKER_PREFIX}{ns}:check-end@@"
+    last_check_end = None
+    for index, raw_line in enumerate(lines):
+        if str(raw_line or "").strip() == check_end_marker:
+            last_check_end = index
+    if last_check_end is not None:
+        insert_at = last_check_end + 1
+    insert_at = _clamp_insert_before_tail(lines, insert_at)
+
     block = [
         f"{COND_MARKER_PREFIX}{ns}:check-begin@@{newline}",
-        f"[TextureOverrideCheckHash_cond_{ns}]{newline}",
+        f"[TextureOverrideCheckHash_cond_{ns}{suffix}]{newline}",
         f"hash = {detect_hash}{newline}",
     ]
     if index_count:
         block.append(f"match_index_count = {index_count}{newline}")
-    block.append(f"$cond_{ns}_cond_frame = 1{newline}")
+    block.append(f"$cond_{ns}_{prefix}_frame = 1{newline}")
     block.append(f"{COND_MARKER_PREFIX}{ns}:check-end@@{newline}")
 
     if insert_at > 0:
@@ -894,7 +1298,7 @@ def _section_body_insert_index(lines, body_start, body_end):
     return last_key if has_key else index
 
 
-def _insert_detect_blocks(lines, ns, detect_section_names, newline):
+def _insert_detect_blocks(lines, ns, detect_section_names, newline, slot=0):
     """在「检测 hash 自己的段」段体最前面无条件置位条件变量（幂等）。
 
     实机日志证据：独立检测段 ``[TextureOverrideCheckHash_cond_<ns>]`` 的
@@ -906,7 +1310,7 @@ def _insert_detect_blocks(lines, ns, detect_section_names, newline):
     插入内容（两行，带 ``detect`` 标记，剥离时整对删除）::
 
         ; @@COND:<ns>:detect@@
-        $cond_<ns>_cond_frame = 1
+        $cond_<ns>_<slot>_frame = 1
 
     位置：段头 + 段根匹配键之后、段体里第一个门控 ``if`` 之前，并保证在顶层
     （``$变量`` 只能在顶层赋值，否则会被加载期优化器静态折叠）。
@@ -924,7 +1328,7 @@ def _insert_detect_blocks(lines, ns, detect_section_names, newline):
         return lines, 0
 
     marker_line = f"{COND_MARKER_PREFIX}{ns}:detect@@{newline}"
-    set_line = f"$cond_{ns}_cond_frame = 1{newline}"
+    set_line = f"$cond_{ns}_{_slot_prefix(slot)}_frame = 1{newline}"
 
     replacements = []
     for name, header_index, body_start, body_end in _find_sections(lines):
@@ -954,26 +1358,55 @@ def _auto_appended_tail_index(lines):
     return None
 
 
+def _clamp_insert_before_tail(lines, insert_at):
+    """把插入点夹到自动追加尾块之前；尾块内容不归本节点改写。"""
+    tail_index = _auto_appended_tail_index(lines)
+    if tail_index is not None and insert_at > tail_index:
+        return tail_index
+    return insert_at
+
+
+def _innermost_unclosed_if_index(lines, insert_at):
+    """返回 ``insert_at`` 之前仍未闭合的最内层 ``if`` 行索引；没有返回 ``None``。
+
+    插入点若落在未闭合的 ``if`` 体内，插进去的 ``[Present]`` / 复位行 / global /
+    检测段会改变 if/endif 配对。调用方据此把插入点回退到该 ``if`` 行之前。
+    """
+    stack = []
+    limit = max(0, min(int(insert_at or 0), len(lines or [])))
+    for index in range(limit):
+        stripped = str(lines[index] or "").strip()
+        if _IF_START_RE.match(stripped):
+            stack.append(index)
+        elif _ENDIF_RE.match(stripped):
+            if stack:
+                stack.pop()
+    return stack[-1] if stack else None
+
+
 def _present_insert_index(lines):
     """给新建的 ``[Present]`` 段选插入点（返回行索引，永远落在尾块之外）。
 
     优先接在最后一个段之后；一旦越过自动追加尾块的起始行，就收敛到尾块之前 ——
     段头一旦落在尾块标记之后，新的 ``[Present]`` 会连带复位行一起被下次导出重写掉。
+    落点若在未闭合的 ``if`` 体内，再回退到该 ``if`` 行之前（否则 ``[Present]``
+    会把门控块劈开）。
     """
     sections = _find_sections(lines)
     candidate = sections[-1][3] if sections else 0
-    tail_index = _auto_appended_tail_index(lines)
-    if tail_index is None:
-        return candidate
-    return min(candidate, tail_index)
+    candidate = _clamp_insert_before_tail(lines, candidate)
+    unclosed = _innermost_unclosed_if_index(lines, candidate)
+    if unclosed is not None:
+        candidate = unclosed
+    return candidate
 
 
-def _ensure_present_reset(lines, ns, newline):
-    """在 ``[Present]`` 段末尾插入「锁存 + 清零」两行（幂等）。
+def _ensure_present_reset(lines, ns, newline, slots=1):
+    """在 ``[Present]`` 段末尾插入「锁存 + 清零」两行（每个哈希槽位一对，幂等）。
 
-    每帧末先 ``post $cond_<ns>_cond_active = $cond_<ns>_cond_frame`` 把本帧
-    检测结果锁存给下一帧使用，再 ``post $cond_<ns>_cond_frame = 0`` 清零。
-    门控一律用 ``cond_active``（帧内恒定），避免检测段与目标段 draw 顺序不同
+    每帧末先 ``post $cond_<ns>_<slot>_active = $cond_<ns>_<slot>_frame`` 把本帧
+    检测结果锁存给下一帧使用，再 ``post ..._frame = 0`` 清零。
+    门控一律用 ``active``（帧内恒定），避免检测段与目标段 draw 顺序不同
     造成的半生效；代价是失效滞后 1 帧，视觉不可感知。
 
     这两行是**必要条件**：没有它们门控变量永不复位，部件效果会永久消失。所以
@@ -985,10 +1418,14 @@ def _ensure_present_reset(lines, ns, newline):
     ``created``（新建段）／``tail_blocked``（无安全位置、未改写）。
     """
     marker_line = f"{COND_MARKER_PREFIX}{ns}:present@@{newline}"
-    post_line = (
-        f"post $cond_{ns}_cond_active = $cond_{ns}_cond_frame{newline}"
-        f"post $cond_{ns}_cond_frame = 0{newline}"
-    )
+    posts = []
+    for slot in range(max(1, int(slots))):
+        prefix = _slot_prefix(slot)
+        posts.append(
+            f"post $cond_{ns}_{prefix}_active = $cond_{ns}_{prefix}_frame{newline}"
+        )
+        posts.append(f"post $cond_{ns}_{prefix}_frame = 0{newline}")
+    post_line = "".join(posts)
 
     tail_index = _auto_appended_tail_index(lines)
     for name, header_index, body_start, body_end in _find_sections(lines):
@@ -1006,6 +1443,10 @@ def _ensure_present_reset(lines, ns, newline):
         if tail_index is not None and insert_at > tail_index:
             # 段体末尾落在尾块之后时收敛到尾块之前，保证连跑两次落点一致。
             insert_at = tail_index
+        unclosed = _innermost_unclosed_if_index(lines, insert_at)
+        if unclosed is not None:
+            # 落点在未闭合 if 体内：插进去会把 if/endif 劈开，回退到 if 行之前。
+            insert_at = unclosed
         lines[header_index] = _ensure_newline(lines[header_index], newline)
         lines[insert_at:insert_at] = [marker_line, post_line]
         return lines, "existing"
@@ -1017,24 +1458,42 @@ def _ensure_present_reset(lines, ns, newline):
     return lines, "created"
 
 
-def _apply_condition(content, ns, target_names, detect_hash, index_count="", detect_section_names=None):
+def _apply_condition(content, ns, target_names, detect_hash, index_count="", detect_section_names=None,
+                     conditions=None):
     """对配置表文本应用一次条件判断改写（幂等）。
 
     ``target_names`` 为导出期段登记反查出的目标段名集合（精确匹配）；
     ``detect_section_names`` 为「检测 hash 自己对应的段名」集合：非空时置位块
     写进这些段（段内置位，避免重复 hash 冲突），为空 / 在文本里一个都没找到
-    时回退独立检测段。
+    时回退独立检测段。多哈希条件时也可以按槽位传 ``list[set]``。
 
-    返回 ``(updated_text, stats)``，``stats`` 含 ``wrapped`` / ``skipped`` /
-    ``check`` / ``detect`` / ``global_var`` / ``present`` 六个字段
-    （``check`` 表示生成了独立检测段，``detect`` 表示段内置位的段数，
-    ``present`` 为 ``existing`` / ``created``）。
+    ``conditions`` 为归一化前的条件列表（dict 或 PropertyGroup item 均可）；
+    为 ``None`` 时按旧参数 ``detect_hash`` / ``index_count`` 合成一条 HASH
+    条件，保证旧调用路径行为与字节完全不变。
 
-    配置表结构不允许安全改写（唯一的 ``[Present]`` 落在自动追加尾块里）时抛
-    :class:`ConditionApplyError`：调用方必须报错并**放弃写入**，不许静默放过。
+    组合语义固定为「与」：所有条件合并成一条 if，用 `` && `` 连接，不嵌套。
+    只有至少一条哈希条件时才生成 ``[Constants]`` global、检测段 / 段内置位、
+    ``[Present]`` 复位；只有变量条件时三者都不生成，也不新建 ``[Present]``。
+
+    返回 ``(updated_text, stats)``，``stats`` 在原有 ``wrapped`` / ``skipped`` /
+    ``check`` / ``detect`` / ``global_var`` / ``present`` 六键之外新增
+    ``hash_count`` / ``variable_count`` / ``auto_closed`` / ``stray_endif`` /
+    ``auto_close_count``。
+
+    条件非法时抛 :class:`ConditionValidationError`；配置表结构不允许安全改写
+    （唯一的 ``[Present]`` 落在自动追加尾块里）时抛 :class:`ConditionApplyError`：
+    调用方必须报错并**放弃写入**，不许静默放过。
     """
     text = str(content or "")
-    newline = "\r\n" if "\r\n" in text else "\n"
+    # 保留原文件的换行风格；孤立 \r（老 Mac）也识别，避免补成 \r\r\n。
+    if "\r\n" in text:
+        newline = "\r\n"
+    elif "\n" in text:
+        newline = "\n"
+    elif "\r" in text:
+        newline = "\r"
+    else:
+        newline = "\n"
     stripped_text = _strip_condition_blocks(text, ns)
 
     stats = {
@@ -1044,6 +1503,11 @@ def _apply_condition(content, ns, target_names, detect_hash, index_count="", det
         "detect": 0,
         "global_var": False,
         "present": False,
+        "hash_count": 0,
+        "variable_count": 0,
+        "auto_closed": [],
+        "stray_endif": [],
+        "auto_close_count": 0,
     }
     names = []
     for name in target_names or ():
@@ -1053,23 +1517,89 @@ def _apply_condition(content, ns, target_names, detect_hash, index_count="", det
     if not names:
         return stripped_text, stats
 
+    if conditions is None:
+        if not str(detect_hash or "").strip():
+            # 没有任何条件：不门控，只保留剥离结果（旧行为：由调用方先跳过）。
+            return stripped_text, stats
+        conditions = [
+            {
+                "type": "HASH",
+                "hash_value": str(detect_hash or "").strip(),
+                "check_hash": "",
+                "index_count": str(index_count or ""),
+                "variable_name": "",
+                "comparison_op": "==",
+                "compare_value": "1",
+            }
+        ]
+
+    normalized, condition_error = _validate_conditions(conditions)
+    if condition_error:
+        raise ConditionValidationError(condition_error)
+    stats["hash_count"] = sum(1 for cond in normalized if cond["type"] == "HASH")
+    stats["variable_count"] = len(normalized) - stats["hash_count"]
+    if not normalized:
+        return stripped_text, stats
+
+    hash_slots, slot_of = _plan_hash_slots(normalized)
+    if len(hash_slots) == 1 and stats["variable_count"] == 0:
+        # 单哈希基线：走 _wrap_target_sections 里与旧版完全相同的 f-string。
+        condition_expr = None
+    else:
+        condition_expr = _condition_expression(ns, normalized, slot_of)
+
     lines = stripped_text.splitlines(keepends=True)
-    lines, wrapped, skipped = _wrap_target_sections(lines, ns, names, newline)
+    (
+        lines,
+        wrapped,
+        skipped,
+        auto_closed,
+        stray_endif,
+        auto_close_count,
+    ) = _wrap_target_sections(lines, ns, names, newline, condition_expr)
     stats["wrapped"] = wrapped
     stats["skipped"] = skipped
+    stats["auto_closed"] = auto_closed
+    stats["stray_endif"] = stray_endif
+    stats["auto_close_count"] = auto_close_count
     if wrapped <= 0:
         # 没有真正门控的段：不插入检测段 / 变量 / 复位行，只保留剥离结果。
         return "".join(lines), stats
 
-    lines, stats["global_var"] = _ensure_constants_global(lines, ns, newline)
-    # 检测方式：检测 hash 已被本 mod 接管 -> 在它自己的段里无条件置位；
-    # 否则（登记里没有它的段）才回退独立检测段（此时没有同 hash 竞争）。
-    lines, stats["detect"] = _insert_detect_blocks(lines, ns, detect_section_names, newline)
-    if stats["detect"] > 0:
-        stats["check"] = False
-    else:
-        lines, stats["check"] = _ensure_check_section(lines, ns, detect_hash, index_count, newline)
-    lines, present_status = _ensure_present_reset(lines, ns, newline)
+    if not hash_slots:
+        # 只有变量条件：没有哈希就没有检测对象，不生成 [Constants] global、
+        # 检测段、[Present] 复位，也不新建 [Present]。
+        stats["present"] = "skipped"
+        return "".join(lines), stats
+
+    lines, stats["global_var"] = _ensure_constants_global(
+        lines, ns, newline, len(hash_slots)
+    )
+    # 检测方式：每个哈希条件各自判断「hash 是否已被本 mod 接管」。
+    detect_sets = _detect_sets_for_slots(detect_section_names, len(hash_slots))
+    detect_total = 0
+    check_created = False
+    for slot_info in hash_slots:
+        slot = slot_info["slot"]
+        lines, inserted = _insert_detect_blocks(
+            lines, ns, detect_sets[slot], newline, slot
+        )
+        detect_total += inserted
+        if inserted <= 0:
+            lines, created = _ensure_check_section(
+                lines,
+                ns,
+                slot_info["hash"],
+                slot_info["index_count"],
+                newline,
+                slot,
+            )
+            check_created = check_created or bool(created)
+    stats["detect"] = detect_total
+    stats["check"] = check_created
+    lines, present_status = _ensure_present_reset(
+        lines, ns, newline, len(hash_slots)
+    )
     if present_status == "tail_blocked":
         raise ConditionApplyError(
             "唯一的 [Present] 段落在「自动追加块」内部（标记行之后）：写进去的每帧"
@@ -1079,13 +1609,94 @@ def _apply_condition(content, ns, target_names, detect_hash, index_count="", det
     stats["present"] = present_status
     return "".join(lines), stats
 
-
 # --------------------------------------------------------------------------- #
 # 节点数据
 # --------------------------------------------------------------------------- #
 
+class SSMT_ConditionItem(bpy.types.PropertyGroup):
+    """条件列表里的一条：哈希条件或变量条件（按 ``condition_type`` 区分）。"""
+
+    condition_type: bpy.props.EnumProperty(  # type: ignore
+        name="条件类型",
+        description="哈希：按画面里是否出现该哈希门控；变量：按 ini 变量比较结果门控",
+        items=[
+            ('HASH', '哈希', '哈希在游戏画面中出现时生效'),
+            ('VARIABLE', '变量', '变量比较成立时生效'),
+        ],
+        default='HASH',
+    )
+    hash_value: bpy.props.StringProperty(  # type: ignore
+        name="哈希值",
+        description="哈希条件：该哈希在游戏画面中出现时，选定物体的其余代码才生效",
+        default="",
+    )
+    check_hash: bpy.props.StringProperty(  # type: ignore
+        name="备用哈希值",
+        description="哈希条件：哈希值为空时使用",
+        default="",
+    )
+    index_count: bpy.props.StringProperty(  # type: ignore
+        name="IndexCount",
+        description="哈希条件：可选，限制检测到的绘制区间（留空则不限制）",
+        default="",
+    )
+    variable_name: bpy.props.StringProperty(  # type: ignore
+        name="变量名",
+        description="变量条件：ini 变量名，可带 $（导出时自动补）",
+        default="",
+    )
+    comparison_op: bpy.props.EnumProperty(  # type: ignore
+        name="比较运算符",
+        description="变量条件：只支持 == / !=",
+        items=[
+            ('==', '==', '等于'),
+            ('!=', '!=', '不等于'),
+        ],
+        default='==',
+    )
+    compare_value: bpy.props.StringProperty(  # type: ignore
+        name="比较值",
+        description="变量条件：要比较的数值/标识符",
+        default="1",
+    )
+
+
 class SSMT_ConditionObjectItem(bpy.types.PropertyGroup):
     object_name: bpy.props.StringProperty(name="物体名称", default="")  # type: ignore
+
+
+class SSMT_UL_POSTPROCESS_CONDITIONS(bpy.types.UIList):
+    """条件列表（哈希 / 变量混排；行内可改类型、上下移、删除）。"""
+
+    bl_idname = "SSMT_UL_POSTPROCESS_CONDITIONS"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type not in {'DEFAULT', 'COMPACT'}:
+            return
+        row = layout.row(align=True)
+        row.prop(item, "condition_type", text="")
+        if item.condition_type == 'VARIABLE':
+            name_icon = 'VIEWZOOM' if str(item.variable_name or "").strip() else 'ERROR'
+            row.prop(item, "variable_name", text="", icon=name_icon)
+            row.prop(item, "comparison_op", text="")
+            row.prop(item, "compare_value", text="")
+        else:
+            hash_icon = 'VIEWZOOM' if (
+                str(item.hash_value or "").strip() or str(item.check_hash or "").strip()
+            ) else 'ERROR'
+            row.prop(item, "hash_value", text="", icon=hash_icon)
+            row.prop(item, "index_count", text="ic")
+
+        node_name = getattr(data, "name", "")
+        op_up = row.operator("ssmt.postprocess_condition_move_up", text="", icon='TRIA_UP')
+        op_up.node_name = node_name
+        op_up.index = index
+        op_down = row.operator("ssmt.postprocess_condition_move_down", text="", icon='TRIA_DOWN')
+        op_down.node_name = node_name
+        op_down.index = index
+        op_remove = row.operator("ssmt.postprocess_condition_remove", text="", icon='X')
+        op_remove.node_name = node_name
+        op_remove.index = index
 
 
 class SSMT_UL_CONDITION_OBJECTS(bpy.types.UIList):
@@ -1106,12 +1717,23 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
     bl_label = NODE_LABEL
     bl_description = (
         "选定物体所属 IB 的全部导出段（段名来自导出期结构化登记，含 VB / 贴图段）"
-        "只在指定哈希出现于游戏画面时生效；哈希不出现时整段不执行（游戏恢复原生绘制）"
+        "只在条件列表全部满足时生效；条件不满足时整段不执行（游戏恢复原生绘制）"
     )
 
     condition_objects: bpy.props.CollectionProperty(type=SSMT_ConditionObjectItem)  # type: ignore
     active_condition_object: bpy.props.IntProperty(default=0)  # type: ignore
 
+    #: 条件列表（哈希 + 变量，组合语义固定「与」）。
+    condition_list: bpy.props.CollectionProperty(type=SSMT_ConditionItem)  # type: ignore
+    active_condition: bpy.props.IntProperty(default=0)  # type: ignore
+    #: 首次导出时自动写入的命名空间；固定后节点改名也不再换 ns（旧标记还能剥）。
+    condition_namespace: bpy.props.StringProperty(  # type: ignore
+        name="条件命名空间（自动）",
+        description="首次导出时自动写入；固定后改名也不会换命名空间",
+        default="",
+    )
+
+    # 旧配置：保留声明与存档，列表为空时兼容读取（不写回），可显式迁移。
     condition_hash: bpy.props.StringProperty(  # type: ignore
         name="哈希值",
         description="该哈希在游戏画面中出现时，选定物体的其余代码才生效",
@@ -1129,9 +1751,9 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
     )
 
     def draw_buttons(self, context, layout):
-        layout.label(text="哈希出现时，选定物体相关的导出段才生效", icon='CON_TRANSLIKE')
+        layout.label(text="条件全部满足时，选定物体相关的导出段才生效", icon='CON_TRANSLIKE')
         layout.label(text="目标段来自导出期结构化登记（含 VB / 贴图段）", icon='BOOKMARKS')
-        layout.label(text="哈希不出现时整段不执行（等同删除代码）", icon='INFO')
+        layout.label(text="条件不满足时整段不执行（等同删除代码）", icon='INFO')
 
         box = layout.box()
         box.label(text=f"生效物体 ({len(self.condition_objects)})", icon='OBJECT_DATA')
@@ -1149,28 +1771,124 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
         row.operator(
             "ssmt.condition_parts_add_selected", text="添加选中物体", icon='ADD'
         ).node_name = self.name
-        op_remove = row.operator("ssmt.condition_parts_remove", text="移除", icon='REMOVE')
-        op_remove.node_name = self.name
-        op_remove.index = int(self.active_condition_object)
+        op_remove_object = row.operator("ssmt.condition_parts_remove", text="移除", icon='REMOVE')
+        op_remove_object.node_name = self.name
+        op_remove_object.index = int(self.active_condition_object)
         row.operator("ssmt.condition_parts_clear", text="清空", icon='TRASH').node_name = self.name
 
-        hash_box = layout.box()
-        hash_box.label(text="检测哈希（在游戏画面中出现时才生效）", icon='FILTER')
-        hash_box.prop(self, "condition_hash")
-        hash_box.prop(self, "check_hash")
-        hash_box.prop(self, "condition_index_count")
-        hash_box.operator(
-            "ssmt.condition_resolve_hash", text="从物体解析哈希", icon='VIEWZOOM'
+        condition_box = layout.box()
+        condition_box.label(
+            text=f"条件列表 ({len(self.condition_list)}) · 组合方式：与（全部满足）",
+            icon='FILTER',
+        )
+        if self.condition_list:
+            condition_box.template_list(
+                "SSMT_UL_POSTPROCESS_CONDITIONS", "",
+                self, "condition_list",
+                self, "active_condition",
+                rows=max(2, min(len(self.condition_list), 6)),
+            )
+        else:
+            condition_box.label(text="条件列表为空", icon='INFO')
+
+        buttons = condition_box.row(align=True)
+        op_add_hash = buttons.operator(
+            "ssmt.postprocess_condition_add", text="+ 哈希条件", icon='ADD'
+        )
+        op_add_hash.node_name = self.name
+        op_add_hash.condition_type = 'HASH'
+        op_add_var = buttons.operator(
+            "ssmt.postprocess_condition_add", text="+ 变量条件", icon='ADD'
+        )
+        op_add_var.node_name = self.name
+        op_add_var.condition_type = 'VARIABLE'
+        op_remove_condition = buttons.operator(
+            "ssmt.postprocess_condition_remove", text="删除", icon='REMOVE'
+        )
+        op_remove_condition.node_name = self.name
+        op_remove_condition.index = -1
+        op_move_up = buttons.operator(
+            "ssmt.postprocess_condition_move_up", text="上移", icon='TRIA_UP'
+        )
+        op_move_up.node_name = self.name
+        op_move_up.index = -1
+        op_move_down = buttons.operator(
+            "ssmt.postprocess_condition_move_down", text="下移", icon='TRIA_DOWN'
+        )
+        op_move_down.node_name = self.name
+        op_move_down.index = -1
+        condition_box.label(
+            text=f"命名空间：{getattr(self, 'condition_namespace', '') or '（首次导出时自动生成）'}"
+        )
+        condition_box.operator(
+            "ssmt.postprocess_condition_cleanup_stale",
+            text="清理其它命名空间残留",
+            icon='TRASH',
         ).node_name = self.name
+
+        if self.condition_list:
+            index = max(0, min(int(self.active_condition), len(self.condition_list) - 1))
+            item = self.condition_list[index]
+            detail = condition_box.box()
+            detail.label(text=f"选中条件 #{index + 1}")
+            detail.prop(item, "condition_type")
+            if item.condition_type == 'VARIABLE':
+                detail.prop(item, "variable_name")
+                detail.prop(item, "comparison_op")
+                detail.prop(item, "compare_value")
+                error = _variable_name_error(item.variable_name) or _compare_value_error(
+                    item.compare_value
+                )
+                if error:
+                    detail.label(text=f"第 {index + 1} 行：{error}", icon='ERROR')
+            else:
+                detail.prop(item, "hash_value")
+                detail.prop(item, "check_hash")
+                detail.prop(item, "index_count")
+                if not (
+                    str(item.hash_value or "").strip()
+                    or str(item.check_hash or "").strip()
+                ):
+                    detail.label(text=f"第 {index + 1} 行：哈希值为空", icon='ERROR')
+
+        legacy_box = layout.box()
+        legacy_box.label(text="旧配置（兼容，只读）", icon='LOCKED')
+        legacy_box.label(text=f"哈希值：{self.condition_hash or '（空）'}")
+        legacy_box.label(text=f"备用哈希值：{self.check_hash or '（空）'}")
+        legacy_box.label(text=f"IndexCount：{self.condition_index_count or '（空）'}")
+        legacy_has_value = bool(
+            str(self.condition_hash or "").strip()
+            or str(self.check_hash or "").strip()
+        )
+        if legacy_has_value and not self.condition_list:
+            legacy_box.label(text="当前按 1 条哈希条件导出", icon='INFO')
+        elif legacy_has_value and self.condition_list:
+            legacy_box.label(text="条件列表非空：旧配置不参与导出", icon='INFO')
+        if legacy_has_value:
+            legacy_box.operator(
+                "ssmt.postprocess_condition_migrate_legacy",
+                text="迁移到条件列表",
+                icon='FORWARD',
+            ).node_name = self.name
 
     # ------------------------------------------------------------------
     # 导出
     # ------------------------------------------------------------------
 
     def _namespace(self):
-        """由节点名派生稳定的 8 位十六进制命名空间。"""
+        """返回稳定命名空间：已固定的 ``condition_namespace`` 优先，否则 md5(name)。"""
+        stored = str(getattr(self, "condition_namespace", "") or "").strip()
+        if stored:
+            return stored
         digest = hashlib.md5(str(self.name or "").encode("utf-8")).hexdigest()
         return digest[:8]
+
+    def _ensure_namespace(self):
+        """execute 专用：首次导出时把派生 ns 写回节点（draw 里不写）。"""
+        ns = self._namespace()
+        if not str(getattr(self, "condition_namespace", "") or "").strip():
+            self.condition_namespace = ns
+        return ns
 
     def _selected_object_names(self):
         """收集节点上选定的物体名（去空、去重、保持顺序）。"""
@@ -1197,17 +1915,28 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
             _log_info("条件判断：节点未选择任何物体，跳过")
             return True
 
-        detect_hash = str(self.condition_hash or "").strip() or str(self.check_hash or "").strip()
-        if not detect_hash:
-            _log_warning("条件判断：未填写哈希值（「哈希值」与「备用哈希值」都为空），跳过")
+        # 条件列表优先；列表为空时兼容旧三属性（临时合成一条哈希条件，不写回）。
+        conditions, condition_error = _validate_conditions(_effective_conditions(self))
+        if condition_error:
+            _log_error(f"条件判断：{condition_error} -> {target_ini}")
+            return False
+        if not conditions:
+            # 老工程行为兼容：列表空且旧哈希也空时仍按改动前的 warning 口径，
+            # 文案保留「哈希值」字样（B1202）。
+            _log_warning(
+                "条件判断：未填写哈希值（「哈希值」与「备用哈希值」都为空，"
+                "条件列表也为空），跳过"
+            )
             return True
 
-        raw_index_count = str(self.condition_index_count or "").strip()
-        index_count = _safe_index_count(raw_index_count)
-        if raw_index_count and index_count is None:
-            _log_warning(f"条件判断：IndexCount「{raw_index_count}」不是正整数，已忽略")
+        hash_count = sum(1 for cond in conditions if cond["type"] == "HASH")
+        variable_count = len(conditions) - hash_count
+        detect_hash = ""
+        if hash_count:
+            first_hash = next(cond for cond in conditions if cond["type"] == "HASH")
+            detect_hash = first_hash["hash_value"] or first_hash["check_hash"]
 
-        ns = self._namespace()
+        ns = self._ensure_namespace()
         try:
             with open(target_ini, "rb") as handle:
                 raw_bytes = handle.read()
@@ -1221,6 +1950,22 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
         except UnicodeDecodeError as exc:
             _log_error(f"条件判断：配置表不是 UTF-8，跳过 {target_ini}: {exc}")
             return False
+
+        # 其它 ns 的残留块：只提示、不自动删（可能是树上另一个条件判断节点）。
+        foreign_namespaces = _foreign_condition_namespaces(content, ns)
+        if foreign_namespaces:
+            detail = "、".join(
+                f"{name}({count} 处)"
+                for name, count in sorted(foreign_namespaces.items())
+            )
+            _log_warning(
+                f"条件判断：发现其它条件命名空间的门控块：{detail}。"
+                "如果是本节点改名前的残留，用面板「清理其它命名空间残留」；"
+                "如果树上有另一个条件判断节点，忽略"
+            )
+
+        # 用于区分 wrapped<=0 的改写原因：剥掉了旧门控，还是只补了未闭合 if。
+        had_condition_markers = f"{COND_MARKER_PREFIX}{ns}:" in content
 
         # ---- 结构化定位层：本次导出的蓝图模型 -> draw_ib -> 导出期登记的段名 ----
         model = None
@@ -1258,16 +2003,25 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
                 f"{os.path.basename(target_ini)}，分文件未改动"
             )
 
+        # 每个哈希条件各自查「检测 hash 是否已被本 mod 接管」；变量条件不查。
+        detect_sections = [
+            _collect_detect_section_names(
+                cond["hash_value"] or cond["check_hash"], target_ini
+            )
+            for cond in conditions
+            if cond["type"] == "HASH"
+        ]
         try:
             updated, stats = _apply_condition(
                 content,
                 ns,
                 target_names,
                 detect_hash,
-                index_count,
-                _collect_detect_section_names(detect_hash, target_ini),
+                "",
+                detect_sections or None,
+                conditions,
             )
-        except ConditionApplyError as exc:
+        except (ConditionApplyError, ConditionValidationError) as exc:
             _log_error(f"条件判断：{exc} -> {target_ini}")
             return False
         written = updated != content
@@ -1285,38 +2039,110 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
                 _log_error(f"条件判断：写入配置表失败 {target_ini}: {exc}")
                 return False
 
-        if stats.get("wrapped", 0) <= 0:
-            _log_info(
-                f"条件判断：目标段没有可门控的内容（IB: {', '.join(sorted(draw_ibs))}；"
-                f"登记段 {len(target_names)} 个）"
-                f"{'；已清除本节点旧标记' if written else ''} -> {target_ini}"
+        # if 深度告警先于 wrapped<=0 早退：没有可门控内容的段也要提示。
+        if stats.get("auto_closed"):
+            sections_text = "、".join(stats["auto_closed"])
+            _log_warning(
+                f"条件判断：段 {sections_text} 内 if 未闭合，已自动补 "
+                f"{stats.get('auto_close_count', 0)} 个 endif，请检查原 ini"
             )
+        if stats.get("stray_endif"):
+            sections_text = "、".join(stats["stray_endif"])
+            _log_warning(
+                f"条件判断：段 {sections_text} 内有游离 endif（未修改文本，请检查原 ini）"
+            )
+
+        if stats.get("wrapped", 0) <= 0:
+            if written:
+                # 文件确实被改写了，但这次判定一个段都没包住：不能只记 info，
+                # 否则用户会以为门控还在。
+                if had_condition_markers:
+                    message = (
+                        "条件判断：这次判定没有包住任何段，但文件里原有的门控已被剥掉"
+                        f"（IB: {', '.join(sorted(draw_ibs))}；"
+                        f"登记段 {len(target_names)} 个） -> {target_ini}"
+                    )
+                else:
+                    message = (
+                        "条件判断：这次判定没有包住任何段（文件已按当前设置改写，"
+                        f"如补齐未闭合 if；IB: {', '.join(sorted(draw_ibs))}；"
+                        f"登记段 {len(target_names)} 个） -> {target_ini}"
+                    )
+                _log_warning(message)
+                try:
+                    from . import export_progress
+                    stage_text = (
+                        "已剥离旧门控" if had_condition_markers else "已按当前设置改写"
+                    )
+                    export_progress.report_stage(
+                        f"条件判断：没有包住任何段，{stage_text} -> "
+                        f"{os.path.basename(target_ini)}"
+                    )
+                except Exception:
+                    pass
+            else:
+                # 没改写文件但一个段也没包住：段体全是顶层行（run / $变量 /
+                # 未识别行）。用户只看 info 会以为条件判断根本没跑，这里升成
+                # warning 并列出目标段，方便从日志定位为什么没生成。
+                preview_names = sorted(target_names)[:3]
+                preview_text = "、".join(preview_names)
+                if len(target_names) > len(preview_names):
+                    preview_text += f" 等 {len(target_names)} 个"
+                _log_warning(
+                    "条件判断：目标段没有可门控的内容，未生成任何条件段"
+                    f"（IB: {', '.join(sorted(draw_ibs))}；"
+                    f"登记段 {len(target_names)} 个：{preview_text}） -> {target_ini}"
+                )
+                try:
+                    from . import export_progress
+                    export_progress.report_stage(
+                        "条件判断：目标段没有可门控的内容，未生成任何条件段"
+                        f"（登记段 {len(target_names)} 个） -> "
+                        f"{os.path.basename(target_ini)}"
+                    )
+                except Exception:
+                    pass
             return True
 
         present_text = ""
         if stats.get("present") == "created":
-            present_text = "；配置表原本没有 [Present] 段，已新建并写入两行每帧复位"
+            present_text = "；配置表原本没有 [Present] 段，已新建并写入每帧复位"
             _log_info(
                 f"条件判断：配置表没有 [Present] 段，已在 {target_ini} 里新建该段并写入"
-                "锁存 + 清零两行（缺这两行门控变量永不复位，部件效果会永久消失）"
+                "锁存 + 清零行（缺这些行门控变量永不复位，部件效果会永久消失）"
             )
-        elif stats.get("present") != "existing":
+        elif stats.get("present") not in ("existing", "skipped"):
             present_text = "；未能写入每帧复位行"
             _log_warning(
                 f"条件判断：未能写入每帧复位行（present={stats.get('present')}），"
                 "门控变量不会自动复位，请检查配置表结构"
             )
 
-        if stats.get("detect", 0) > 0:
+        if stats.get("detect", 0) > 0 and stats.get("check"):
+            detect_text = (
+                f"段内置位 {stats['detect']} 处 + 独立检测段"
+                f"（{stats.get('hash_count', 0)} 条哈希条件）"
+            )
+        elif stats.get("detect", 0) > 0:
             detect_text = (
                 f"段内置位 {stats['detect']} 处"
                 f"（检测 hash {detect_hash} 已被本 mod 接管，无重复 hash 冲突）"
             )
+        elif stats.get("check"):
+            detect_text = (
+                f"独立检测段（{stats.get('hash_count', 0)} 条哈希条件，"
+                f"首个哈希 {detect_hash} 未被本 mod 接管）"
+            )
         else:
-            detect_text = f"独立检测段（检测 hash {detect_hash} 未被本 mod 接管）"
+            detect_text = "无哈希条件（只按变量条件门控）"
 
+        condition_text = (
+            f"条件 {stats.get('hash_count', 0) + stats.get('variable_count', 0)} 条"
+            f"（哈希 {stats.get('hash_count', 0)} / 变量 {stats.get('variable_count', 0)}）"
+        )
         _log_info(
-            f"条件判断：门控 {stats['wrapped']} 个段（跳过 {stats['skipped']} 个无内容段），"
+            f"条件判断：{condition_text}，门控 {stats['wrapped']} 个段"
+            f"（跳过 {stats['skipped']} 个无内容段），"
             f"检测方式：{detect_text}；"
             f"IB {len(draw_ibs)} 个（{', '.join(sorted(draw_ibs))}）/ "
             f"登记段 {len(target_names)} 个 / 物体 {len(object_names)} 个"
@@ -1326,9 +2152,8 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
         try:
             from . import export_progress
             export_progress.report_stage(
-                f"条件判断：{len(draw_ibs)} 个IB / {stats['wrapped']} 个段 / "
-                f"{len(object_names)} 个物体 / "
-                f"{'段内置位 ' + str(stats['detect']) + ' 处' if stats.get('detect', 0) > 0 else '独立检测段'}"
+                f"条件判断：{condition_text} / {len(draw_ibs)} 个IB / "
+                f"{stats['wrapped']} 个段 / {len(object_names)} 个物体"
             )
         except Exception:
             pass
@@ -1439,7 +2264,7 @@ class SSMT_OT_PostProcess_ClearConditionObjects(bpy.types.Operator):
 class SSMT_OT_PostProcess_ResolveConditionHash(bpy.types.Operator):
     bl_idname = "ssmt.condition_resolve_hash"
     bl_label = "从物体解析哈希"
-    bl_description = "从选中物体（或列表里的物体）名称解析 8 位哈希，填入「哈希值」"
+    bl_description = "从选中物体（或列表里的物体）名称解析 8 位哈希，填入当前哈希条件"
     bl_options = {'REGISTER', 'UNDO'}
 
     node_name: bpy.props.StringProperty()  # type: ignore
@@ -1456,11 +2281,23 @@ class SSMT_OT_PostProcess_ResolveConditionHash(bpy.types.Operator):
         for item in node.condition_objects:
             candidates.append(str(getattr(item, "object_name", "") or ""))
 
+        # 优先写进当前选中的哈希条件；没有条件列表时兼容写旧属性。
+        target_item = None
+        conditions = list(getattr(node, "condition_list", []) or [])
+        active_index = int(getattr(node, "active_condition", 0) or 0)
+        if 0 <= active_index < len(conditions):
+            item = conditions[active_index]
+            if str(getattr(item, "condition_type", "HASH") or "HASH") == 'HASH':
+                target_item = item
+
         for name in candidates:
             hash_val = _parse_hash_from_object_name(name)
             if not hash_val:
                 continue
-            node.condition_hash = hash_val
+            if target_item is not None:
+                target_item.hash_value = hash_val
+            else:
+                node.condition_hash = hash_val
             self.report({'INFO'}, f"已解析哈希: {hash_val}（来自「{name}」）")
             return {'FINISHED'}
 
@@ -1468,14 +2305,264 @@ class SSMT_OT_PostProcess_ResolveConditionHash(bpy.types.Operator):
         return {'CANCELLED'}
 
 
+# --------------------------------------------------------------------------- #
+# 算子：条件列表增删 / 上下移 / 旧配置迁移
+# --------------------------------------------------------------------------- #
+
+class SSMT_OT_PostProcess_AddCondition(bpy.types.Operator):
+    bl_idname = "ssmt.postprocess_condition_add"
+    bl_label = "添加条件"
+    bl_description = "往条件列表末尾添加一条哈希条件或变量条件"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty()  # type: ignore
+    condition_type: bpy.props.StringProperty(default="HASH")  # type: ignore
+
+    def execute(self, context):
+        node = _resolve_condition_node(context, self.node_name)
+        if node is None:
+            self.report({'ERROR'}, "请选择条件判断节点")
+            return {'CANCELLED'}
+
+        kind = str(self.condition_type or "HASH").strip().upper()
+        if kind not in ("HASH", "VARIABLE"):
+            kind = "HASH"
+        item = node.condition_list.add()
+        item.condition_type = kind
+        item.hash_value = ""
+        item.check_hash = ""
+        item.index_count = ""
+        item.variable_name = "$MyVar" if kind == "VARIABLE" else ""
+        item.comparison_op = '=='
+        item.compare_value = "1"
+        node.active_condition = len(node.condition_list) - 1
+        return {'FINISHED'}
+
+
+class SSMT_OT_PostProcess_RemoveCondition(bpy.types.Operator):
+    bl_idname = "ssmt.postprocess_condition_remove"
+    bl_label = "删除条件"
+    bl_description = "从条件列表中删除指定项（index < 0 时删当前选中项）"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty()  # type: ignore
+    index: bpy.props.IntProperty(default=-1)  # type: ignore
+
+    def execute(self, context):
+        node = _resolve_condition_node(context, self.node_name)
+        if node is None:
+            self.report({'ERROR'}, "请选择条件判断节点")
+            return {'CANCELLED'}
+
+        index = self.index
+        if index < 0:
+            index = int(getattr(node, "active_condition", 0) or 0)
+        if not (0 <= index < len(node.condition_list)):
+            self.report({'WARNING'}, "列表中没有这一项")
+            return {'CANCELLED'}
+
+        node.condition_list.remove(index)
+        node.active_condition = max(
+            0, min(index, len(node.condition_list) - 1)
+        )
+        return {'FINISHED'}
+
+
+def _move_condition(node, direction, requested_index):
+    """把条件上/下移一格；``requested_index < 0`` 时用当前选中项。"""
+    count = len(node.condition_list)
+    index = requested_index
+    if index < 0:
+        index = int(getattr(node, "active_condition", 0) or 0)
+    target = index + direction
+    if not (0 <= index < count and 0 <= target < count):
+        return False
+    move = getattr(node.condition_list, "move", None)
+    if callable(move):
+        move(index, target)
+    else:
+        item = node.condition_list[index]
+        del node.condition_list[index]
+        node.condition_list.insert(target, item)
+    node.active_condition = target
+    return True
+
+
+class SSMT_OT_PostProcess_MoveConditionUp(bpy.types.Operator):
+    bl_idname = "ssmt.postprocess_condition_move_up"
+    bl_label = "上移条件"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty()  # type: ignore
+    index: bpy.props.IntProperty(default=-1)  # type: ignore
+
+    def execute(self, context):
+        node = _resolve_condition_node(context, self.node_name)
+        if node is None:
+            self.report({'ERROR'}, "请选择条件判断节点")
+            return {'CANCELLED'}
+        if not _move_condition(node, -1, self.index):
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class SSMT_OT_PostProcess_MoveConditionDown(bpy.types.Operator):
+    bl_idname = "ssmt.postprocess_condition_move_down"
+    bl_label = "下移条件"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty()  # type: ignore
+    index: bpy.props.IntProperty(default=-1)  # type: ignore
+
+    def execute(self, context):
+        node = _resolve_condition_node(context, self.node_name)
+        if node is None:
+            self.report({'ERROR'}, "请选择条件判断节点")
+            return {'CANCELLED'}
+        if not _move_condition(node, 1, self.index):
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class SSMT_OT_PostProcess_MigrateLegacyConditions(bpy.types.Operator):
+    bl_idname = "ssmt.postprocess_condition_migrate_legacy"
+    bl_label = "迁移到条件列表"
+    bl_description = "把旧哈希三属性迁移成一条哈希条件，并清空旧属性"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty()  # type: ignore
+
+    def execute(self, context):
+        node = _resolve_condition_node(context, self.node_name)
+        if node is None:
+            self.report({'ERROR'}, "请选择条件判断节点")
+            return {'CANCELLED'}
+
+        legacy_hash = str(getattr(node, "condition_hash", "") or "").strip()
+        legacy_check = str(getattr(node, "check_hash", "") or "").strip()
+        legacy_index = str(getattr(node, "condition_index_count", "") or "").strip()
+        if not (legacy_hash or legacy_check):
+            self.report({'WARNING'}, "旧配置为空，无需迁移")
+            return {'CANCELLED'}
+
+        item = node.condition_list.add()
+        item.condition_type = 'HASH'
+        item.hash_value = legacy_hash
+        item.check_hash = legacy_check
+        item.index_count = legacy_index
+        item.variable_name = ""
+        item.comparison_op = '=='
+        item.compare_value = "1"
+        node.condition_hash = ""
+        node.check_hash = ""
+        node.condition_index_count = ""
+        node.active_condition = len(node.condition_list) - 1
+        return {'FINISHED'}
+
+
+class SSMT_OT_PostProcess_CleanupStaleConditions(bpy.types.Operator):
+    bl_idname = "ssmt.postprocess_condition_cleanup_stale"
+    bl_label = "清理其它命名空间残留"
+    bl_description = (
+        "删除配置表里其它条件命名空间（本节点改名前的旧 ns）的门控块；"
+        "树上有其它条件判断节点时不要用"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty()  # type: ignore
+    target_ini: bpy.props.StringProperty(default="")  # type: ignore
+    namespace_list: bpy.props.StringProperty(default="")  # type: ignore
+
+    def invoke(self, context, event):
+        node = _resolve_condition_node(context, self.node_name)
+        if node is None:
+            self.report({'ERROR'}, "请选择条件判断节点")
+            return {'CANCELLED'}
+        try:
+            from .node_postprocess_comment_cleanup import (
+                _read_mod_export_path,
+                SSMTNode_PostProcess_CommentCleanup,
+            )
+
+            target_ini, error_message = (
+                SSMTNode_PostProcess_CommentCleanup._find_target_ini_file(
+                    _read_mod_export_path()
+                )
+            )
+        except Exception as exc:
+            self.report({'ERROR'}, f"定位配置表失败: {exc}")
+            return {'CANCELLED'}
+        if not target_ini:
+            self.report({'WARNING'}, error_message or "未找到目标配置表")
+            return {'CANCELLED'}
+        try:
+            content, _has_bom = _read_ini_text(target_ini)
+        except (OSError, UnicodeError) as exc:
+            self.report({'ERROR'}, f"读取配置表失败: {exc}")
+            return {'CANCELLED'}
+
+        foreign = _foreign_condition_namespaces(content, node._namespace())
+        if not foreign:
+            self.report({'INFO'}, "没有发现其它命名空间的门控块")
+            return {'CANCELLED'}
+        self.target_ini = target_ini
+        self.namespace_list = ",".join(sorted(foreign))
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="将删除以下命名空间的门控块：")
+        layout.label(text=self.namespace_list)
+        layout.label(text="树上有其它条件判断节点时不要用！", icon='ERROR')
+
+    def execute(self, context):
+        target_ini = str(self.target_ini or "").strip()
+        namespaces = [
+            value.strip()
+            for value in str(self.namespace_list or "").split(",")
+            if value.strip()
+        ]
+        if not target_ini or not os.path.isfile(target_ini):
+            self.report({'ERROR'}, "目标配置表不存在，请重新执行")
+            return {'CANCELLED'}
+        if not namespaces:
+            self.report({'INFO'}, "没有需要清理的命名空间")
+            return {'CANCELLED'}
+        try:
+            content, has_bom = _read_ini_text(target_ini)
+        except (OSError, UnicodeError) as exc:
+            self.report({'ERROR'}, f"读取配置表失败: {exc}")
+            return {'CANCELLED'}
+        updated, removed = _strip_foreign_namespaces(content, namespaces)
+        if updated == content:
+            self.report({'INFO'}, "没有可清理的残留")
+            return {'CANCELLED'}
+        try:
+            _write_ini_text(target_ini, updated, has_bom)
+        except (OSError, UnicodeError) as exc:
+            self.report({'ERROR'}, f"写入配置表失败: {exc}")
+            return {'CANCELLED'}
+        total = sum(removed.values())
+        self.report({'INFO'}, f"已清理 {len(removed)} 个命名空间、{total} 处标记")
+        return {'FINISHED'}
+
+
 classes = (
+    SSMT_ConditionItem,
     SSMT_ConditionObjectItem,
+    SSMT_UL_POSTPROCESS_CONDITIONS,
     SSMT_UL_CONDITION_OBJECTS,
     SSMTNode_PostProcess_Condition,
     SSMT_OT_PostProcess_AddConditionObject,
     SSMT_OT_PostProcess_RemoveConditionObject,
     SSMT_OT_PostProcess_ClearConditionObjects,
     SSMT_OT_PostProcess_ResolveConditionHash,
+    SSMT_OT_PostProcess_AddCondition,
+    SSMT_OT_PostProcess_RemoveCondition,
+    SSMT_OT_PostProcess_MoveConditionUp,
+    SSMT_OT_PostProcess_MoveConditionDown,
+    SSMT_OT_PostProcess_MigrateLegacyConditions,
+    SSMT_OT_PostProcess_CleanupStaleConditions,
 )
 
 
