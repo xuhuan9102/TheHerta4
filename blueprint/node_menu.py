@@ -1458,6 +1458,7 @@ class SSMT_MT_NodeMenu_PostProcess_Creative(bpy.types.Menu):
         _add_node_entry(layout, "RabbitFX贴图后处理", 'LIGHT', "SSMTNode_PostProcess_Glow")
         _add_node_entry(layout, "RabbitFX贴图后处理pro", 'LIGHT', "SSMTNode_PostProcess_RabbitFXPro")
         _add_node_entry(layout, "PS绑定+IB限定", 'SHADERFX', "SSMTNode_PostProcess_PSBinding")
+        _add_node_entry(layout, "模型流光描边", 'LIGHT', "SSMTNode_PostProcess_FlowLight")
 
 
 class SSMT_OT_AlignNodes(bpy.types.Operator):

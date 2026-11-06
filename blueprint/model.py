@@ -47,6 +47,8 @@ _SINGLE_INSTANCE_POSTPROCESS_LABELS = {
     "SSMTNode_PostProcess_CombinedPanel": "切换＆滑块面板",
     "SSMTNode_PostProcess_TextAppend": "文本追加",
     "SSMTNode_PostProcess_UVOffset": "UV偏移",
+    # 流光描边按 <tag> 生成全局资源/段名，同一个 tag 在同一导出链里只能有一份。
+    "SSMTNode_PostProcess_FlowLight": "模型流光描边",
 }
 
 _KNOWN_NODE_TYPES = {
