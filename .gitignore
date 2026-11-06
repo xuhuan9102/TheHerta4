@@ -55,4 +55,15 @@ _verify/
 # 需要留档某一份时用 git add -f 单独强加）
 notes/
 
+# _latecopy/：流体 late-composite 阶段的一次性基线副本（仓库 Composite.ini + K: 的 TTLib.ini +
+# 2026-11-03 真实导出件拼出来再打补丁；全仓零引用、运行期不读，2026-11-06 已按 B 档清掉，
+# 只留这条规则防止同类副本再被 git add -A 带回来）
+_latecopy/
+# runtime/blender-icons.txt：Blender 图标清单，node_postprocess_fluid.py:182-199 写、
+# register() 每次启动重写，全仓零处读取
+runtime/blender-icons.txt
+# runtime/flow_light_diagnosis/：流光调试期的诊断快照（Ghidra/反汇编导出、部署记录、改动前源码副本）。
+# 全仓零引用、运行期不读；2026-11-06 主人拍板删净（含 __pycache__），留规则防止再被 git add -A 带回来。
+runtime/flow_light_diagnosis/
+
 Microsoft/
