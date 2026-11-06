@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import os
 import sys
 import tempfile
@@ -6,6 +8,7 @@ import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 def _install_module(name, **attrs):
@@ -79,6 +82,19 @@ spec.loader.exec_module(module)
 
 NODE = module.SSMTNode_PostProcess_UIPanel
 
+# 节点会 `from ..common.global_config import GlobalConfig` 取工作空间名；
+# 测试里给一个固定值 "character"，让多 ini 的选表分支可被真实地走到。
+_install_module(f"{PKG}.common").__path__ = []
+
+
+class _FakeGlobalConfig:
+    @classmethod
+    def get_workspace_name(cls):
+        return "character"
+
+
+_install_module(f"{PKG}.common.global_config", GlobalConfig=_FakeGlobalConfig)
+
 
 def _make_node(panel_folder, panel_name="UIPanel", merge_constants=True):
     node = NODE.__new__(NODE)
@@ -138,7 +154,7 @@ def _write_panel_folder(root: Path) -> Path:
     (panel_dir / "res" / "__glass_panel.png").write_bytes(b"png-bytes")
     (panel_dir / "res" / "draw_2d.hlsl").write_text("shader", encoding="utf-8")
     (panel_dir / "res" / "draw_2d_fx.hlsl").write_text("shader-fx", encoding="utf-8")
-    (panel_dir / "ui_config_c209c22b_123.txt").write_text(PANEL_INI, encoding="utf-8")
+    (panel_dir / "ui_config_c209c22b_1782784000000.txt").write_text(PANEL_INI, encoding="utf-8")
     return panel_dir
 
 
@@ -196,7 +212,7 @@ class NodePostprocessUIPanelTests(unittest.TestCase):
     def test_panel_config_accepts_utf8_bom_but_rejects_invalid_utf8(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             panel_dir = Path(temp_dir)
-            config_path = panel_dir / "ui_config_test_1234567890.txt"
+            config_path = panel_dir / "ui_config_test_1782784000000.txt"
             config_path.write_bytes(b"\xef\xbb\xbf[Present]\nvalue = 1\n")
             node = _make_node(str(panel_dir))
 
@@ -524,20 +540,117 @@ $active = 1
             else:
                 bpy_module.path = old_path
 
-    def test_latest_config_falls_back_to_file_mtime(self):
-        # 文件名没有时间戳时，退回用文件修改时间取最新
+    def test_config_without_time_in_name_is_ignored_with_log(self):
+        # 文件名不含时间（无法判断新旧）的候选不参与选择，但要在日志里点名
         with tempfile.TemporaryDirectory() as temp_dir:
             panel_dir = Path(temp_dir)
-            older = panel_dir / "ui_config_old.txt"
-            newer = panel_dir / "ui_config_new.txt"
-            older.write_text(PANEL_INI, encoding="utf-8")
-            newer.write_text(PANEL_INI, encoding="utf-8")
-            os.utime(older, (1700000000, 1700000000))
-            os.utime(newer, (1780000000, 1780000000))
+            stamped = panel_dir / "ui_config_c209c22b_1782783295046.txt"
+            stamped.write_text(PANEL_INI, encoding="utf-8")
+            copy = panel_dir / "ui_config_副本.txt"
+            copy.write_text(PANEL_INI, encoding="utf-8")
+            os.utime(copy, (9999999999, 9999999999))
 
             node = _make_node(str(panel_dir))
-            found = node._find_panel_ini_path()
-            self.assertEqual(found, str(newer))
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                found = node._find_panel_ini_path()
+            self.assertEqual(found, str(stamped))
+            self.assertIn("已忽略", stdout.getvalue())
+            self.assertIn("ui_config_副本.txt", stdout.getvalue())
+
+    def test_config_without_time_only_raises(self):
+        # 只有不含时间的配置时停手报错，不猜
+        with tempfile.TemporaryDirectory() as temp_dir:
+            panel_dir = Path(temp_dir)
+            (panel_dir / "ui_config_副本.txt").write_text(PANEL_INI, encoding="utf-8")
+            node = _make_node(str(panel_dir))
+            with self.assertRaisesRegex(ValueError, "没有可判断新旧"):
+                node._find_panel_ini_path()
+
+    def test_millisecond_and_date_names_compare_on_real_time(self):
+        # 毫秒 id 与日期名换算到同一时间轴：更新的日期名要赢过更旧的毫秒名
+        with tempfile.TemporaryDirectory() as temp_dir:
+            panel_dir = Path(temp_dir)
+            older_ms = panel_dir / "ui_config_a4bb34f9_1788725039616.txt"   # 2026-09-07
+            newer_date = panel_dir / "ui_config_30abbad1_20260911_123645.ini"  # 2026-09-11
+            older_ms.write_text(PANEL_INI, encoding="utf-8")
+            newer_date.write_text(PANEL_INI, encoding="utf-8")
+            os.utime(older_ms, (9999999999, 9999999999))  # mtime 不能左右结果
+
+            node = _make_node(str(panel_dir))
+            self.assertEqual(node._find_panel_ini_path(), str(newer_date))
+
+    def test_time_tie_prefers_later_mtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            panel_dir = Path(temp_dir)
+            first = panel_dir / "ui_config_aaaaaaa1_1782784000000.txt"
+            second = panel_dir / "ui_config_bbbbbbb2_1782784000000.txt"
+            first.write_text(PANEL_INI, encoding="utf-8")
+            second.write_text(PANEL_INI, encoding="utf-8")
+            os.utime(first, (1700000000, 1700000000))
+            os.utime(second, (1780000000, 1780000000))
+
+            node = _make_node(str(panel_dir))
+            self.assertEqual(node._find_panel_ini_path(), str(second))
+
+    def test_workspace_prefixed_ini_files_all_get_the_panel(self):
+        # WWMI：同一工作空间的 <工作空间名>_<draw_ib>.ini 有多份，必须逐份写入且重跑字节不变
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            panel_dir = _write_panel_folder(root)
+            mod_dir = root / "mod"
+            mod_dir.mkdir()
+            targets = [
+                mod_dir / "character_abc-120-0.ini",
+                mod_dir / "character_def-40-0.ini",
+                mod_dir / "character_ghi-88-0.ini",
+            ]
+            other = mod_dir / "OtherMod.ini"
+            for path in targets:
+                path.write_text(TARGET_INI, encoding="utf-8")
+            other.write_text(TARGET_INI, encoding="utf-8")
+
+            node = _make_node(str(panel_dir))
+            self.assertEqual(node._find_target_ini_files(str(mod_dir)), ([str(p) for p in targets], ""))
+
+            stamps = []
+            for _ in range(2):
+                node.execute_postprocess(str(mod_dir))
+                texts = [p.read_text(encoding="utf-8") for p in targets]
+                stamps.append(texts)
+                for text in texts:
+                    self.assertEqual(text.count("; --- AUTO-APPENDED UI PANEL UIPanel ---"), 1)
+                    self.assertEqual(text.count("[Present]"), 2)
+            self.assertEqual(stamps[0], stamps[1])          # 重跑字节不变
+            self.assertEqual(len(set(stamps[0])), 1)        # 三份各写各的、内容一致
+            self.assertNotIn("AUTO-APPENDED UI PANEL", other.read_text(encoding="utf-8"))
+
+    def test_exact_workspace_ini_wins_over_prefix_siblings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mod_dir = Path(temp_dir)
+            exact = mod_dir / "character.ini"
+            sibling = mod_dir / "character_abc-120-0.ini"
+            exact.write_text(TARGET_INI, encoding="utf-8")
+            sibling.write_text(TARGET_INI, encoding="utf-8")
+            node = _make_node(str(Path(temp_dir)))
+            self.assertEqual(node._find_target_ini_files(str(mod_dir)), ([str(exact)], ""))
+
+    def test_multiple_unmatched_ini_files_raise(self):
+        # 多份 ini 且没有一份匹配工作空间名：停手报错并列清单
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            panel_dir = _write_panel_folder(root)
+            mod_dir = root / "mod"
+            mod_dir.mkdir()
+            (mod_dir / "OtherMod.ini").write_text(TARGET_INI, encoding="utf-8")
+            (mod_dir / "Mod.ini").write_text(TARGET_INI, encoding="utf-8")
+
+            node = _make_node(str(panel_dir))
+            targets, error = node._find_target_ini_files(str(mod_dir))
+            self.assertEqual(targets, [])
+            self.assertIn("Mod.ini, OtherMod.ini", error)
+            with self.assertRaisesRegex(ValueError, "Mod.ini, OtherMod.ini"):
+                node.execute_postprocess(str(mod_dir))
 
     def test_ui_config_files_take_priority_over_other_txt(self):
         # 即使其他 txt 更新，也优先在 ui_config_* 里取最新
@@ -640,7 +753,7 @@ $active = 1
                 "res/draw_2d.hlsl": b"shader",
                 "res/draw_2d_fx.hlsl": b"shader-fx",
             })
-            (panel_dir / "ui_config_c209c22b_123.txt").write_text(PANEL_INI, encoding="utf-8")
+            (panel_dir / "ui_config_c209c22b_1782785000000.txt").write_text(PANEL_INI, encoding="utf-8")
             mod_dir = _make_mod_dir(root)
 
             node = _make_node(str(panel_dir))
@@ -678,7 +791,7 @@ $active = 1
             panel_dir = root / "panel"
             (panel_dir / "res").mkdir(parents=True)
             panel_text = real_ini.read_text(encoding="utf-8", errors="replace")
-            (panel_dir / "ui_config_c209c22b_1.txt").write_text(panel_text, encoding="utf-8")
+            (panel_dir / "ui_config_c209c22b_1782784000000.txt").write_text(panel_text, encoding="utf-8")
             # 真实 INI 引用的资源
             for name in ("__glass_panel.png", "__joystick_handle.png",
                          "__collision_post_marker.png", "__fx_white.png",

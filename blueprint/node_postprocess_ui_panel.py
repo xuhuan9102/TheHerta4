@@ -1,4 +1,5 @@
 import bpy
+import datetime
 import os
 import glob
 import hashlib
@@ -307,16 +308,55 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
     # 导出执行
     # ------------------------------------------------------------------
 
-    # 网页导出的配置命名：ui_config_<hash>_<毫秒时间戳>.txt，按末尾时间戳判断新旧
-    _UI_CONFIG_TIMESTAMP_PATTERN = re.compile(
-        r'_(\d{10,})(?=\.(?:txt|ini)$)', re.IGNORECASE
+    # 网页导出的配置命名有两种：ui_config_<hash>_<毫秒时间戳> 与
+    # ui_config_<hash>_<YYYYMMDD>_<HHMMSS>；手工放置的日期名（YYYY-MM-DD）也认。
+    # 三种写法都换算成同一条时间轴（epoch 秒）再比较。
+    _UI_CONFIG_MS_PATTERN = re.compile(
+        r'_(\d{13})(?=\.(?:txt|ini|zip)$)', re.IGNORECASE
+    )
+    _UI_CONFIG_COMPACT_DATETIME_PATTERN = re.compile(
+        r'_(\d{8})_(\d{6})(?=\.(?:txt|ini|zip)$)', re.IGNORECASE
+    )
+    _UI_CONFIG_DATE_PATTERN = re.compile(
+        r'_(\d{4})-(\d{1,2})-(\d{1,2})(?=\.(?:txt|ini|zip)$)', re.IGNORECASE
     )
 
+    @classmethod
+    def _parse_config_time(cls, path_or_name):
+        """解析配置表/压缩包名里的真实时间，返回 epoch 秒；解析不出返回 None。
+
+        认三种写法：末尾 `_` + 13 位毫秒时间戳、`YYYYMMDD_HHMMSS`、
+        `YYYY-MM-DD`。其余（`ui_config_副本.txt`、`ui_config_20261005.txt`
+        这类）返回 None——由调用方决定忽略还是告警。
+        """
+        if not path_or_name:
+            return None
+        base = os.path.basename(str(path_or_name))
+        match = cls._UI_CONFIG_MS_PATTERN.search(base)
+        if match:
+            return float(match.group(1)) / 1000.0
+        match = cls._UI_CONFIG_COMPACT_DATETIME_PATTERN.search(base)
+        if match:
+            try:
+                return datetime.datetime.strptime(
+                    match.group(1) + match.group(2), "%Y%m%d%H%M%S").timestamp()
+            except ValueError:
+                return None
+        match = cls._UI_CONFIG_DATE_PATTERN.search(base)
+        if match:
+            try:
+                return datetime.datetime(
+                    int(match.group(1)), int(match.group(2)), int(match.group(3))).timestamp()
+            except ValueError:
+                return None
+        return None
+
     def _find_panel_ini_path(self) -> str:
-        """在面板目录中查找日期最新的一份面板配置文件。
+        """在面板目录中查找时间最新的一份面板配置文件。
 
         仅匹配网页导出的 ui_config_*.txt/.ini（目录里可能有其他文件，严格限前缀）。
-        候选文件按文件名自带的时间戳取最新；没有时间戳的文件退回用修改时间比较。
+        候选按文件名自带的真实时间取最新（毫秒 id 与日期写法换算到同一时间轴）；
+        文件名不含时间的候选不参与选择，但会在日志里点名。
         """
         folder = self._get_panel_folder()
         if not folder or not os.path.isdir(folder):
@@ -328,22 +368,35 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
         if not candidates:
             raise ValueError(f"面板目录中未找到 INI 配置文件: {folder}")
 
-        def sort_key(path):
-            match = self._UI_CONFIG_TIMESTAMP_PATTERN.search(os.path.basename(path))
-            if match:
-                return (1, float(match.group(1)))
+        ranked = []
+        ignored = []
+        for path in candidates:
+            stamp = self._parse_config_time(path)
+            if stamp is None:
+                ignored.append(os.path.basename(path))
+                continue
             try:
-                return (0, os.path.getmtime(path))
+                mtime = os.path.getmtime(path)
             except OSError:
-                return (0, 0.0)
+                mtime = 0.0
+            ranked.append((stamp, mtime, path))
+        if ignored:
+            print(f"  [UI面板注入] 已忽略（文件名不含时间，无法判断新旧）: "
+                  f"{', '.join(sorted(ignored))}")
+        if not ranked:
+            raise ValueError(
+                f"面板目录中没有可判断新旧的 INI 配置文件（已忽略: {', '.join(sorted(ignored))}）")
 
-        return max(candidates, key=sort_key)
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        best = ranked[-1]
+        tied = [item for item in ranked if item[0] == best[0]]
+        if len(tied) > 1:
+            print(f"  [UI面板注入] 警告: {len(tied)} 份配置时间相同，取修改时间较晚的: "
+                  f"{os.path.basename(best[2])}")
+        return best[2]
 
-    # 网页导出的资源压缩包命名：ui_assets_<毫秒时间戳>.zip，按文件名时间戳判断新旧；
-    # 目录里可能有其他文件，压缩包与配置文件一样严格限前缀
-    _UI_ASSETS_TIMESTAMP_PATTERN = re.compile(
-        r'_(\d{10,})(?=\.zip$)', re.IGNORECASE
-    )
+    # 网页导出的资源压缩包命名：ui_assets_<毫秒时间戳>.zip / ui_assets_<YYYYMMDD>_<HHMMSS>.zip，
+    # 目录里可能有其他文件，压缩包与配置文件一样严格限前缀；时间解析复用 _parse_config_time。
     # 压缩包内的配置文件条目只读取不解压，不作为模组资源写出
     _UI_CONFIG_ENTRY_PATTERN = re.compile(r'^ui_config_.*\.(?:txt|ini)$', re.IGNORECASE)
 
@@ -357,10 +410,11 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
             return folder
 
     def _find_ui_assets_zip_path(self) -> str:
-        """在面板目录中查找日期最新的资源压缩包。
+        """在面板目录中查找时间最新的资源压缩包。
 
-        仅匹配网页导出的 ui_assets_*.zip（目录里可能有其他文件，严格限前缀）；
-        优先按文件名自带的时间戳取最新，没有时间戳的退回用修改时间比较。
+        仅匹配网页导出的 ui_assets_*.zip（目录里可能有其他文件，严格限前缀）。
+        名字里能解析出时间的按真实时间比（毫秒 id 与日期写法同一时间轴），
+        解析不出的（手动改名）排在后面、按修改时间比。
         """
         folder = self._get_panel_folder()
         if not folder or not os.path.isdir(folder):
@@ -370,23 +424,24 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
             return ""
 
         def sort_key(path):
-            match = self._UI_ASSETS_TIMESTAMP_PATTERN.search(os.path.basename(path))
-            if match:
-                return (1, float(match.group(1)))
+            stamp = self._parse_config_time(path)
             try:
-                return (0, os.path.getmtime(path))
+                mtime = os.path.getmtime(path)
             except OSError:
-                return (0, 0.0)
+                mtime = 0.0
+            if stamp is not None:
+                return (1, stamp, mtime)
+            return (0, mtime, mtime)
 
         return max(candidates, key=sort_key)
 
     def _load_panel_config_text(self, zip_path: str):
         """读取面板配置文本，返回 (文本内容, 来源描述)。
 
-        松散配置与压缩包内配置条目都按文件名时间戳取最新——资源检查与注入
-        必须基于「实际最新的配置表」，避免旧版松散配置（可能引用已被新版
+        松散配置与压缩包内配置条目都按文件名里的真实时间取最新——资源检查与
+        注入必须基于「实际最新的配置表」，避免旧版松散配置（可能引用已被新版
         移除的资源，如 draw_2d_fx.hlsl）与新资源压缩包错配而误报缺文件。
-        无时间戳的松散配置视为用户手动放置的明确意图，优先级最高。
+        文件名不含时间的松散配置不参与比较（`_find_panel_ini_path` 会点名忽略）。
         目录与压缩包都没有配置时读取失败。
         """
         folder = self._get_panel_folder()
@@ -419,20 +474,14 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
 
     @classmethod
     def _config_timestamp(cls, path_or_name):
-        """返回 (1, 时间戳) 或 None。
-
-        文件名末尾 `_<10位以上数字>.txt/.ini` 视为网页导出时间戳；
-        其余形式（如 `_123.txt`）视为无时间戳（用户手动放置）。
-        """
-        if not path_or_name:
-            return None
-        match = cls._UI_CONFIG_TIMESTAMP_PATTERN.search(os.path.basename(str(path_or_name)))
-        if match:
-            return (1, float(match.group(1)))
-        return None
+        """返回配置表名里的真实时间（epoch 秒），解析不出返回 None。"""
+        return cls._parse_config_time(path_or_name)
 
     def _find_latest_config_entry_in_zip(self, zip_path: str) -> str:
-        """在压缩包内查找日期最新的 ui_config_*.txt/.ini 条目（严格限前缀）。"""
+        """在压缩包内查找时间最新的 ui_config_*.txt/.ini 条目（严格限前缀）。
+
+        名字不含时间的条目点名忽略，不参与「新旧」判断。
+        """
         with zipfile.ZipFile(zip_path, 'r') as zfile:
             entry_names = [
                 str(name).replace('\\', '/')
@@ -450,13 +499,21 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
         if not candidates:
             return ""
 
-        def sort_key(name):
-            match = self._UI_CONFIG_TIMESTAMP_PATTERN.search(base_name(name))
-            if match:
-                return (1, float(match.group(1)))
-            return (0, 0.0)
-
-        return max(candidates, key=sort_key)
+        ranked = []
+        ignored = []
+        for name in candidates:
+            stamp = self._parse_config_time(base_name(name))
+            if stamp is None:
+                ignored.append(base_name(name))
+                continue
+            ranked.append((stamp, name))
+        if ignored:
+            print(f"  [UI面板注入] 已忽略压缩包内条目（文件名不含时间，无法判断新旧）: "
+                  f"{', '.join(sorted(ignored))}")
+        if not ranked:
+            return ""
+        ranked.sort(key=lambda item: item[0])
+        return ranked[-1][1]
 
     @staticmethod
     def _normalize_reference_path(path) -> str:
@@ -531,7 +588,11 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
             rebuilt_lines.append("")
         for section_name, section_lines in target_sections.items():
             rebuilt_lines.append(f"[{section_name}]")
-            rebuilt_lines.extend(section_lines)
+            body = list(section_lines)
+            # 去掉段尾空行再加一个分隔空行：重跑时不会一次多长一行空行（字节幂等）
+            while body and not body[-1].strip():
+                body.pop()
+            rebuilt_lines.extend(body)
             rebuilt_lines.append("")
 
         new_block = self._build_appended_block(panel_sections, append_order)
@@ -557,14 +618,62 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
         with open(target_ini_file, 'w', encoding='utf-8') as f:
             f.write(final_text)
 
+    @staticmethod
+    def _find_target_ini_files(mod_export_path):
+        """按导出流程的工作空间名选择要写入的目标 INI（可能多份）。
+
+        导出器统一把配置表写成 `<工作空间名>.ini`（zzmi.py:8442、
+        efmi.py:3428 等）；WWMI 每个 draw_ib 一份 `<工作空间名>_<draw_ib>.ini`
+        （wwmi_export.py:758），这些分文件属于同一个工作空间，必须全部写入。
+        判定顺序：严格同名 → 忽略大小写同名 → `<工作空间名>_` 前缀全部
+        → 目录里唯一 .ini → 都没有才报错并列出候选，不静默挑一个。
+
+        返回 (路径列表, 错误说明)；成功时错误说明为空串。
+        """
+        ini_files = sorted(glob.glob(os.path.join(mod_export_path, "*.ini")))
+        if not ini_files:
+            return [], "导出目录中未找到任何.ini文件"
+
+        workspace_name = ""
+        try:
+            from ..common.global_config import GlobalConfig
+            workspace_name = str(GlobalConfig.get_workspace_name() or "").strip()
+        except Exception:
+            workspace_name = ""
+
+        if workspace_name:
+            stems = {
+                path: os.path.splitext(os.path.basename(path))[0]
+                for path in ini_files
+            }
+            exact = [path for path in ini_files if stems[path] == workspace_name]
+            if exact:
+                return exact, ""
+            folded = workspace_name.casefold()
+            ignore_case = [path for path in ini_files if stems[path].casefold() == folded]
+            if ignore_case:
+                return ignore_case, ""
+            prefixed = [
+                path for path in ini_files
+                if os.path.basename(path).startswith(f"{workspace_name}_")
+            ]
+            if prefixed:
+                return prefixed, ""
+
+        if len(ini_files) == 1:
+            return ini_files, ""
+
+        names = ", ".join(os.path.basename(p) for p in ini_files)
+        return [], (
+            f"导出目录中存在多个INI文件，无法确定应写入哪一个"
+            f"（工作空间: {workspace_name or '未知'}）: {names}")
+
     def execute_postprocess(self, mod_export_path):
         print(f"UI面板注入后处理节点开始执行，Mod导出路径: {mod_export_path}")
 
-        ini_files = glob.glob(os.path.join(mod_export_path, "*.ini"))
-        if not ini_files:
-            print("路径中未找到任何.ini文件")
-            return
-        target_ini_file = ini_files[0]
+        target_ini_files, target_ini_error = self._find_target_ini_files(mod_export_path)
+        if not target_ini_files:
+            raise ValueError(target_ini_error)
 
         zip_path = self._find_ui_assets_zip_path()
         panel_text, config_source = self._load_panel_config_text(zip_path)
@@ -582,18 +691,18 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
         else:
             self._copy_referenced_files(panel_sections, self._get_panel_folder(), mod_export_path)
 
-        self._apply_panel_to_ini_file(target_ini_file, panel_sections)
+        for target_ini_file in target_ini_files:
+            self._apply_panel_to_ini_file(target_ini_file, panel_sections)
 
-
-        print(f"UI面板配置已追加到: {os.path.basename(target_ini_file)} "
+        target_names = ", ".join(os.path.basename(p) for p in target_ini_files)
+        print(f"UI面板配置已追加到 {len(target_ini_files)} 份配置表: {target_names} "
               f"(来源: {config_source}, 段数: {len(panel_sections)})")
 
     def refresh_exported_ui_panel_section(self, mod_export_path):
         """Refresh only the exported UI panel block without re-exporting the Mod."""
-        ini_files = glob.glob(os.path.join(mod_export_path, "*.ini"))
-        if not ini_files:
-            return False, "导出目录中未找到任何.ini文件"
-        target_ini_file = ini_files[0]
+        target_ini_files, target_ini_error = self._find_target_ini_files(mod_export_path)
+        if not target_ini_files:
+            return False, target_ini_error
 
         try:
             zip_path = self._find_ui_assets_zip_path()
@@ -610,12 +719,14 @@ class SSMTNode_PostProcess_UIPanel(SSMTNode_PostProcess_Base):
             return False, str(exc)
 
         try:
-            self._apply_panel_to_ini_file(target_ini_file, panel_sections)
+            for target_ini_file in target_ini_files:
+                self._apply_panel_to_ini_file(target_ini_file, panel_sections)
         except Exception as exc:
             return False, f"写入UI面板段失败: {exc}"
 
+        target_names = ", ".join(os.path.basename(p) for p in target_ini_files)
         return True, (
-            f"已刷新 {os.path.basename(target_ini_file)} 中的UI面板段 "
+            f"已刷新 {len(target_ini_files)} 份配置表中的UI面板段: {target_names} "
             f"(来源: {config_source}, 段数: {len(panel_sections)})"
         )
 
