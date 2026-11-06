@@ -23,6 +23,8 @@ float random01(uint seed,uint channel){return float(mixBits(seed+channel*0x9e377
 // Floor splashes weaken progressively below the default strength.
 float lowStrengthFloorSplash(CollisionEvent e){
  float strength=smoothstep(.28,1.69,slotDrive((uint)e.slot.x));
+ // nhd-pick: 该事件出生时发射器是开的吗——只读 bool，不再回头查槽（槽号会变）
+ if(e.slot.y<.5)strength=0;
  float floorWeight=smoothstep(.35,.8,e.normalRadius.y);
  return lerp(1,lerp(.25,1,strength),floorWeight);
 }
@@ -58,6 +60,9 @@ bool puddleDepthUnavailableAtBorder(uint s,float3 relativePosition){
  // Match screenSurface's 0.2 percent viewport exclusion margin.
  return abs(c.x)>=c.w*.996 || abs(c.y)>=c.w*.996;
 }
+// nhd-pick: 次生总开关。x61 = 有效位、y61 = 值（都是 0 = 没写过 = 开）。
+// 为什么不用「0 = 关」：那样没写过与关掉无法区分（重力/吸收各踩过一次）。
+bool splashEnabled(){return IniParams[61].x>.5 ? (IniParams[61].y>.5) : true;}
 uint childCount(CollisionEvent e){
  float expected=lerp(.25,2,impactCoherence(e))*lowStrengthFloorSplash(e);
  uint whole=(uint)floor(expected);
@@ -180,7 +185,11 @@ void main(uint3 id:SV_DispatchThreadID){
    // Retained droplets must survive slow creep; detached ones keep the usual rules.
    bool retained=p.densityBirth.w>3.5;
    float lifetime=puddle?PUDDLE_LIFETIME:(retained?ADHESION_LIFETIME:.42);
-   if(p.positionAge.w>lifetime||(!attached&&(p.densityBirth.x>2||(!retained&&length(velocity)<.12)))||length(to)>6||to.y< -4||!all(isfinite(to))||!all(isfinite(velocity)))p.velocityAlive.w=0;
+   // nhd-pick: 「关闭即清空」时，子滴/水洼/附着跟着主槽一起死（同一 bit0）。
+   // IniParams[60].x 的解析与 FluidSolver 的 EMITFLAGS 同式：0 视为默认全开。
+   uint emitFlags=IniParams[60].x>1e-6?(uint)IniParams[60].x:3u;
+   bool emitOff=((emitFlags&1u)!=0u)&&!slotEmitOn(owner);
+   if(emitOff||p.positionAge.w>lifetime||(!attached&&(p.densityBirth.x>2||(!retained&&length(velocity)<.12)))||length(to)>6||to.y< -4||!all(isfinite(to))||!all(isfinite(velocity)))p.velocityAlive.w=0;
   }
  }
 #endif
@@ -210,7 +219,7 @@ void main(uint3 id:SV_DispatchThreadID){
  }
  // Return transferred slots to the airborne emitter immediately. Overflow
  // replaces the oldest floor contacts, preserving room for new incoming liquid.
- if(p.velocityAlive.w>.5 && floorPuddle(p.densityBirth.w))p.velocityAlive.w=0;
+ if(splashEnabled() && p.velocityAlive.w>.5 && floorPuddle(p.densityBirth.w))p.velocityAlive.w=0;
  if(p.velocityAlive.w<.5){
   uint slot;InterlockedAdd(freeCounter[0],1,slot);
   float pulseSuppression=1-saturate((pulse[2].x-1)/.85);
@@ -218,7 +227,9 @@ void main(uint3 id:SV_DispatchThreadID){
   uint pulseCount=(uint)pulse[2].z;
   // Nozzle spray takes the first free particles, in slot order, each slot
   // as many as its own strength sprays; impact children take the rest.
-  bool spraying=IniParams[237].x>.5 && pulse[3].w>.5 && pulse[5].x>.75;
+  // nhd-pick: 喷口雾化默认关（x64=1 才开）——主人要「只有碰撞才产生次生」
+  bool nozzleSpray=IniParams[64].x>.5;
+  bool spraying=nozzleSpray && IniParams[237].x>.5 && pulse[3].w>.5 && pulse[5].x>.75;
   uint emitterCount=0,sprayOwner=0,sprayChild=0;
   [unroll]for(uint s=0;s<SLOT_COUNT;s++){
    bool tk=slotTrickle(s);
@@ -227,15 +238,18 @@ void main(uint3 id:SV_DispatchThreadID){
    if(!slotSeen(s)||(tk?!(tkAge<.225):!spraying))continue;
    float sup=tk?12:pulseSuppression;
    float lowRate=120*peripheralSpray(.5*(1-smoothstep(.28,1.69,1.1275)),slotDrive(s))*sup;
-   uint sprayCount=(tk?0:pulseCount)+(uint)clamp(floor(dt*lowRate+lowJitter),0,tk?40:8);
+   uint sprayCount=nozzleSpray?((tk?0:pulseCount)+(uint)clamp(floor(dt*lowRate+lowJitter),0,tk?40:8)):0u;
    if(slot>=emitterCount&&slot<emitterCount+sprayCount){sprayOwner=s;sprayChild=slot-emitterCount;}
    emitterCount+=sprayCount;
   }
+  // nhd-pick: 次生总开关关掉时，**在产生次生的入口**就不取事件（不是生完再杀）。
   uint eventId=0,child=slot>=emitterCount?slot-emitterCount:0;
+  if(splashEnabled()){
   [loop]for(;eventId<min(eventCounter[0],EVENT_CAPACITY);eventId++){
    uint count=childCount(events[eventId]);if(child<count)break;child-=count;
   }
-  if(slot>=emitterCount && eventId<min(eventCounter[0],EVENT_CAPACITY)){
+  }
+  if(splashEnabled() && events[eventId].slot.y>.5 && slot>=emitterCount && eventId<min(eventCounter[0],EVENT_CAPACITY)){
    CollisionEvent e=events[eventId];float3 n=e.normalRadius.xyz;
    uint owner=(uint)e.slot.x;
    uint seed=(uint)e.incoming.w&0xffffu,count=childCount(e),channel=child*13;

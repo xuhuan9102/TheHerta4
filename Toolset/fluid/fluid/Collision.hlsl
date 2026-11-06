@@ -38,8 +38,10 @@ static const float SWEPT_MAX_SPEED = .5;
 bool collideFluid(uint slot,float3 from,float3 to,float3 velocity,float radius,out float3 contactPoint,out float3 normal){
  contactPoint=to;normal=float3(0,1,0);
  float3 emitter=currentEmitterRelative(slot);
- [loop]for(uint k=1;k<=4;k++){
-  float3 p=lerp(from,to,float(k)/4),s=0,n=float3(0,1,0);
+ // 步长自适应：固定 4 步在 3 m/s 时段长 12.5 mm > 半径 5 mm，会整段跨过表面。
+ uint steps=clamp((uint)ceil(length(to-from)/max(radius*.5,1e-6)),1u,8u);
+ [loop]for(uint k=1;k<=steps;k++){
+  float3 p=lerp(from,to,float(k)/float(steps)),s=0,n=float3(0,1,0);
   if(dot(p-emitter,p-emitter)<EMITTER_EXCLUSION_RADIUS*EMITTER_EXCLUSION_RADIUS)continue;
   if(screenSurface(slot,p,s,n)){
    float gap=dot(p-s,n);

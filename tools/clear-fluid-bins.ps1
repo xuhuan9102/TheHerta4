@@ -24,9 +24,14 @@
     【匹配规则】
 
     按入口名通配，不区分大小写：basename 以 `<入口名>.` 开头且以 `.bin` 结尾。
-    入口名：FluidPredict / FluidDensity / FluidCorrect / FluidFinalize / FluidState /
-    FluidComposite / FluidCompositeSampled。
+    默认入口名（13 个）：
+      FluidPredict / FluidDensity / FluidCorrect / FluidFinalize / FluidState /
+      FluidComposite / FluidCompositeSampled /
+      AssignSlots / FluidSurface / FluidSmoothH / FluidSmoothV / SplashSpawn / SplashUpdate。
+    后 6 个来自 2026-11-03 的「最小必删 14 个 bin」名单（BLANK.md §4.3）：它们依赖
+    ForceField.hlsl / Slots.hlsl / FluidSolver.hlsl 等被 include 的头，旧脚本没覆盖。
     注意 `FluidComposite.` **不**前缀匹配 `FluidCompositeSampled.`，所以 Sampled 单列一条。
+    可用 `-EntryNames` 覆盖默认表（例如只清某一族）。
     例：`FluidPredict.cs_5_0.bin`、`FluidCompositeSampled.cs_5_0.bin`。
 
     【用法示例】
@@ -45,21 +50,35 @@
 
 param(
     [string]$ModDir,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string[]]$EntryNames
 )
 
-# 受影响入口名。匹配时统一追加 '.' 作为前缀：`FluidComposite.` 只命中
+# 默认受影响入口名。匹配时统一追加 '.' 作为前缀：`FluidComposite.` 只命中
 # FluidComposite.*.bin，所以 Sampled 变体必须单列一条（它的文件名是
 # FluidCompositeSampled.*.bin，不以 'FluidComposite.' 开头）。
-$EntryNames = @(
+# 后 6 个（AssignSlots/FluidSurface/FluidSmoothH/FluidSmoothV/SplashSpawn/SplashUpdate）
+# 来自 2026-11-03「最小必删 14 个 bin」名单，旧版 7 个入口覆盖不到。
+$DefaultEntryNames = @(
     'FluidPredict',
     'FluidDensity',
     'FluidCorrect',
     'FluidFinalize',
     'FluidState',
     'FluidComposite',
-    'FluidCompositeSampled'
+    'FluidCompositeSampled',
+    'AssignSlots',
+    'FluidSurface',
+    'FluidSmoothH',
+    'FluidSmoothV',
+    'SplashSpawn',
+    'SplashUpdate'
 )
+
+# -EntryNames 为空时用默认表；显式传入则只清传入的入口。
+if ($null -eq $EntryNames -or $EntryNames.Count -eq 0) {
+    $EntryNames = $DefaultEntryNames
+}
 
 function Test-IsFluidEntryBin {
     # basename 以 '<入口名>.' 开头、以 '.bin' 结尾，忽略大小写。

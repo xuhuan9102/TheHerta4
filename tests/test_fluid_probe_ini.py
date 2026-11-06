@@ -1258,17 +1258,19 @@ class EmitterControlTests(unittest.TestCase):
         "[CommandListDrawWorld]\n"
         "    w43 = $emit_7\n"
         "    y41 = $force_scale\n"
+        "    $initialized = 1\n"
     )
 
     def test_defaults_write_only_the_family_flag(self):
-        """缺省只多一行 ``w41 = 0``；速度与掩码两族都不许出现。"""
+        """没有发射器时只多一行 ``w41 = 0``；有发射器时还会多「面板值声明」与开场赋值。"""
         text = self._SAMPLE
         out, warnings = merge.apply_emitter_controls(
-            text, [0.0, 0.0], [[1, 1], [1]], enables=[1, 1])
+            text, [0.0, 0.0], [[1, 1], [1]], enables=[])
         self.assertEqual(warnings, [])
         self.assertIn("    w41 = 0", out)
         self.assertNotIn("fluid_force_enable", out)
         self.assertNotIn("fluid_emitter_speed", out)
+        self.assertNotIn("fluid_emit_seeded", out)
         self.assertEqual(out.replace("\n    w41 = 0", "", 1), text)
 
     def test_speed_lands_in_its_own_lane(self):
@@ -1305,11 +1307,101 @@ class EmitterControlTests(unittest.TestCase):
         self.assertNotIn("fluid_force_enable", out)
         self.assertIn("    w41 = 0", out)
 
+    def test_lifetime_lands_in_51_52(self):
+        """每发射器寿命：第 3 个设 3.0 → z51；0 的两个跟着写 0（= 沿用 1.1）。"""
+        out, warnings = merge.apply_emitter_controls(
+            self._SAMPLE, [0.0, 0.0, 0.0], lifetimes=[0.0, 0.0, 3.0])
+        self.assertEqual(warnings, [])
+        self.assertIn("global $fluid_emitter_lifetime_0 = 0", out)
+        self.assertIn("global $fluid_emitter_lifetime_2 = 3", out)
+        self.assertIn("    z51 = $fluid_emitter_lifetime_2", out)
+        # 第 5 个发射器落在 52.x 那一组
+        out5, _w = merge.apply_emitter_controls(
+            self._SAMPLE, [0.0] * 5, lifetimes=[0.0, 0.0, 0.0, 0.0, 2.5])
+        self.assertIn("    x52 = $fluid_emitter_lifetime_4", out5)
+
+    def test_lifetime_default_writes_nothing(self):
+        """寿命全 0 = 沿用 1.1 s：不许写出任何寿命行。
+
+        注意 ``w41 = 0`` 是**力场开关族的复位行**，每次导出都要写（IniParams 没有
+        命名空间，别的 mod 可能留下 1），所以这里不能要求逐字节相同；只要求
+        "寿命一族一行都不写"。
+        """
+        text = self._SAMPLE
+        out, warnings = merge.apply_emitter_controls(
+            text, [0.0, 0.0], lifetimes=[0.0, 0.0])
+        self.assertEqual(warnings, [])
+        self.assertNotIn("fluid_emitter_lifetime", out)
+        self.assertNotIn("51 = $fluid_emitter_lifetime", out)
+        self.assertIn("w41 = 0", out)          # 族复位行是有意的
+
+    def test_lifetime_11_is_the_default_and_writes_nothing(self):
+        """面板默认就是 1.1 s：全填 1.1 与「不填」等价，一行都不许写。"""
+        text = self._SAMPLE
+        out, warnings = merge.apply_emitter_controls(
+            text, [0.0, 0.0], lifetimes=[1.1, 1.1])
+        self.assertEqual(warnings, [])
+        self.assertNotIn("fluid_emitter_lifetime", out)
+        # 混合：1.1 归一成 0（shader 的 0 → 回落 1.1），3.0 照写
+        out2, _w = merge.apply_emitter_controls(
+            self._SAMPLE, [0.0, 0.0], lifetimes=[1.1, 3.0])
+        self.assertIn("global $fluid_emitter_lifetime_0 = 0", out2)
+        self.assertIn("global $fluid_emitter_lifetime_1 = 3", out2)
+        self.assertIn("    y51 = $fluid_emitter_lifetime_1", out2)
+        # 除这条复位行外，其余与输入一致
+        self.assertEqual(out.replace("    w41 = 0\n", ""), text)
+
+    def test_template_has_the_gravity_sentinel(self):
+        """模板里 `z47 = 1` 必须出现在 `x47 = $fluid_gravity_scale` 之后不远处。
+
+        中间允许有注释行（哨兵为什么要写需要解释），但不许有别的赋值把顺序打乱。
+        """
+        template = _TEMPLATE_PATH.read_text(encoding="utf-8-sig")
+        lines = template.splitlines()
+        idx = lines.index("x47 = $fluid_gravity_scale")
+        window = [ln.strip() for ln in lines[idx + 1:idx + 8]]
+        self.assertIn("z47 = 1", window)
+        # 窗口里在 z47 之前不许出现别的 x/y/z/w 赋值
+        before = window[:window.index("z47 = 1")]
+        assigns = [ln for ln in before
+                   if ln[:1] in "xyzw" and ln[1:2].isdigit() and "=" in ln]
+        self.assertEqual(assigns, [])
+
     def test_switch_off_rewrites_the_template_default(self):
+        """开关值 = 面板（开 1 / 关 0），并在开场赋一次（不用 persist，理由见文档）。"""
         out, _warnings = merge.apply_emitter_controls(
             self._SAMPLE, [], [], enables=[1, 0])
-        self.assertIn("global $emit_1 = 0", out)
-        self.assertIn("global $emit_0 = 1", out)
+        self.assertIn("global $fluid_emit_0 = 1", out)
+        self.assertIn("global $fluid_emit_1 = 0", out)
+        self.assertIn("global $fluid_emit_seeded = 0", out)
+        self.assertIn("if !$fluid_emit_seeded", out)
+        self.assertIn("$fluid_emit_1 = 0", out)
+        self.assertIn("$fluid_emit_seeded = 1", out)
+
+    def test_emitters_beyond_the_panel_keep_template_default(self):
+        """面板只有 2 个发射器：0/1 写成面板值，**2..7 必须显式写 0**。
+
+        模板里 `$fluid_emit_3..7 = 1` 的默认值本身就是行为——槽里记的 id 一旦
+        越界到 3..7，那个槽就拿到永久通行证（幽灵发射器）。所以未使用的 id
+        必须显式写 0，不能靠「没用到就不写」。
+        """
+        out, _w = merge.apply_emitter_controls(
+            _TEMPLATE_PATH.read_text(encoding="utf-8-sig"), [], [], enables=[1, 1])
+        self.assertIn("global $fluid_emit_0 = 1", out)
+        self.assertIn("global $fluid_emit_1 = 1", out)
+        text = out.replace("$emit_7", "$fluid_emit_7")
+        for ghost in range(2, 8):
+            self.assertIn("global $fluid_emit_%d = 0" % ghost, text)
+
+
+class EmitterControlExtraTests(unittest.TestCase):
+    """`apply_emitter_controls` 的补充契约（原先被错放在 ExcludeListTests 里，方法体未动）。"""
+    """碰撞/可见性「排除列表」：空列表零影响；有项时生成掩码段。"""
+
+
+
+
+
 
     def test_missing_anchor_warns_instead_of_silently_dropping(self):
         text = "[Constants]\nglobal $emit_7 = 1\n"
@@ -1389,3 +1481,31 @@ class EmitterControlTests(unittest.TestCase):
         self.assertNotIn("global $fluid_force_enable_0 =", out)
         self.assertNotIn("IniParams[49]", out)
         self.assertNotIn("IniParams[56]", out)
+
+
+class EmitGateSourceTests(unittest.TestCase):
+    """源码级断言：两门共用同一个 `emitOn`；次生读的是**出生时快照**的开关。"""
+
+    _FLUID = Path(__file__).resolve().parent.parent / "Toolset" / "fluid" / "fluid"
+
+    def test_slot_emit_on_is_called_once_and_shared(self):
+        # RED-BY: FluidSolver 里删掉 `bool emitOn=slotEmitOn(slot);`、改回两处各调一次
+        text = (self._FLUID / "FluidSolver.hlsl").read_text(encoding="utf-8-sig")
+        self.assertEqual(text.count("slotEmitOn("), 2,
+                         "一处共用的 emitOn + 事件快照，共 2 次")
+        lines = text.splitlines()
+        emitting = [ln for ln in lines if "bool emitting=" in ln]
+        self.assertEqual(len(emitting), 1)
+        self.assertIn("emitOn", emitting[0])
+        shared = [ln for ln in lines if "bool emitOn=" in ln]
+        self.assertEqual(len(shared), 1, "只许算一次，两门共用")
+        snapshot = [ln for ln in lines if "e.slot=float4(slot" in ln]
+        self.assertEqual(len(snapshot), 1)
+        self.assertIn("slotEmitOn(slot)?1.0:0.0", snapshot[0])
+
+    def test_splash_reads_the_birth_flag_not_the_slot(self):
+        # RED-BY: Splash 生成门改回直接读 slotEmitOn(slot)
+        text = (self._FLUID / "Splash.hlsl").read_text(encoding="utf-8-sig")
+        gate = [ln for ln in text.splitlines() if "events[eventId].slot.y>.5" in ln]
+        self.assertEqual(len(gate), 1, "次生门必须读事件里的出生时开关快照")
+        self.assertNotIn("slotEmitOn", gate[0])

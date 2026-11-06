@@ -8,9 +8,8 @@
 覆盖：
 1. **发射器上限 8**：已经 8 个时 ``ssmt.fluid_emitter_add`` 返回 ``CANCELLED``，
    report 里带「上限 8」（第 9 个没有槽位也没有 ``$fluid_emit_8`` 可拨）；
-2. **导出键位**：第 1 个发射器留空 → 产物自动出一条
-   ``[KeyFluidEmit0] key = no_alt no_ctrl no_shift VK_NUMPAD1``；
-   第 2 个起留空 → 不出 ``[KeyFluidEmit1]``（不绑）。
+2. **导出键位**：留空 = 不绑 —— 产物里**一条 `[KeyFluidEmitN]` 都没有**，
+   也不再自动补 `VK_NUMPAD1`（2026-11-05 撤掉那条默认）；显式填了才出段。
 
 纯文本层面的键位表（``GLOBAL_KEY_SECTIONS`` / ``GLOBAL_KEY_DEFAULTS``）在
 ``test_fluid_probe_ini.py`` 里，那份不 import bpy。
@@ -248,14 +247,13 @@ class FamilyFlagTests(unittest.TestCase):
 
 
 class EmitterKeyExportTests(unittest.TestCase):
-    def test_first_emitter_defaults_to_numpad1(self):
+    def test_empty_key_binds_nothing(self):
+        """留空 = 不绑键：一个 ``[KeyFluidEmitN]`` 段都不许有，也不许自作主张给 NUMPAD1。"""
         text = _bare_node([_emitter(), _emitter()])._build_main_ini("FluidTest", [])
-        self.assertIn("[KeyFluidEmit0]", text)
-        self.assertIn("key = no_alt no_ctrl no_shift VK_NUMPAD1", text)
-        # 第 2 个留空 = 不绑，不许凭空多一段抢键
+        self.assertNotIn("[KeyFluidEmit0]", text)
         self.assertNotIn("[KeyFluidEmit1]", text)
-        # 模板里的 KeyToggle 已删，VK_NUMPAD1 只该出现这一次（发射器 0 的绑定）
-        self.assertEqual(text.count("VK_NUMPAD1"), 1)
+        self.assertNotIn("VK_NUMPAD1", text)
+        self.assertNotIn("$fluid_emit_0 = 1,0", text)
 
     def test_explicit_key_on_the_second_emitter_is_kept(self):
         text = _bare_node([_emitter(), _emitter(key="VK_F1")])._build_main_ini(
@@ -272,3 +270,182 @@ class EmitterKeyExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+class SplashEnableExportTests(unittest.TestCase):
+    """次生总开关：默认开不写任何行；关掉写 x61=1 / y61=0，紧跟 x47 之后。"""
+
+    def test_default_on_writes_nothing(self):
+        # RED-BY: node 里把 splash_enable 的默认改成 False（或无条件写 x61/y61）
+        text = _bare_node([_emitter()])._build_main_ini("FluidTest", [])
+        self.assertNotIn("x61", text)
+        self.assertNotIn("y61", text)
+
+    def test_off_writes_valid_bit_and_value_after_x47(self):
+        # RED-BY: 删掉 node 里写 x61/y61 的那段 re.sub
+        inst = _bare_node([_emitter()])
+        inst.splash_enable = False
+        text = inst._build_main_ini("FluidTest", [])
+        self.assertIn("x61 = 1", text)
+        self.assertIn("y61 = 0", text)
+        anchor = text.index("x47 = $fluid_gravity_scale")
+        self.assertGreater(text.index("x61 = 1"), anchor)
+        self.assertGreater(text.index("y61 = 0"), anchor)
+
+
+class IconSafetyTests(unittest.TestCase):
+    """图标安全：非法 icon 只影响那一行，绝不抛异常把面板带死。"""
+
+    class _L(object):
+        def __init__(self, valid=('INFO',)):
+            self.calls = []
+            self.valid = set(valid)
+
+        def label(self, text='', icon=None):
+            self.calls.append((text, icon))
+            if icon is not None and icon not in self.valid:
+                raise TypeError('enum "%s" not found' % icon)
+
+    def test_illegal_icon_falls_back_to_text(self):
+        # RED-BY: node 里 _safe_label 去掉 except TypeError 的第二次 label
+        lay = self._L()
+        node._safe_label(lay, 'hello', 'NOT_AN_ICON_ENUM')
+        self.assertEqual(len(lay.calls), 2)
+        self.assertIsNone(lay.calls[-1][1])
+        self.assertIn('NOT_AN_ICON_ENUM', lay.calls[-1][0])
+
+    def test_legal_icon_passes_once(self):
+        # RED-BY: _safe_label 无条件去掉 icon（合法图标也会丢）
+        lay = self._L()
+        node._safe_label(lay, 'hi', 'INFO')
+        self.assertEqual(lay.calls, [('hi', 'INFO')])
+
+    def test_enum_icons_returns_none_without_bpy(self):
+        # RED-BY: _enum_icons 的 except 改成 raise
+        had = hasattr(node.bpy.types, 'UILayout')
+        saved = getattr(node.bpy.types, 'UILayout', None)
+        node.bpy.types.UILayout = types.SimpleNamespace()
+        try:
+            self.assertIsNone(node._enum_icons())
+        finally:
+            if had:
+                node.bpy.types.UILayout = saved
+            else:
+                delattr(node.bpy.types, 'UILayout')
+
+    def test_validate_icons_flags_unknown_and_falls_back(self):
+        # RED-BY: validate_icons 不再把非法名字写进 _ICON_FALLBACK
+        saved_icons = dict(node.ICONS)
+        saved_dump = node._dump_icon_list
+        had_layout = hasattr(node.bpy.types, 'UILayout')
+        saved_layout = getattr(node.bpy.types, 'UILayout', None)
+        node.ICONS['bogus'] = 'NOT_A_REAL_ICON'
+        node._dump_icon_list = lambda valid: None      # 别在仓库里落盘
+        node.bpy.types.UILayout = types.SimpleNamespace(
+            bl_rna=types.SimpleNamespace(
+                functions={'prop': types.SimpleNamespace(
+                    parameters={'icon': types.SimpleNamespace(
+                        enum_items=[types.SimpleNamespace(identifier='INFO')])})}))
+        try:
+            bad = node.validate_icons()
+            self.assertIn('NOT_A_REAL_ICON', bad)
+            self.assertEqual(node._ICON_FALLBACK.get('NOT_A_REAL_ICON'), 'INFO')
+        finally:
+            node.ICONS.clear()
+            node.ICONS.update(saved_icons)
+            node._dump_icon_list = saved_dump
+            if had_layout:
+                node.bpy.types.UILayout = saved_layout
+            else:
+                delattr(node.bpy.types, 'UILayout')
+            node._ICON_FALLBACK.clear()
+            node._ICON_WARNINGS.clear()
+
+
+class EmitterDrawIsolationTests(unittest.TestCase):
+    """单条坏发射器只影响它自己：`_draw_emitter_safe` 的三条分支。"""
+
+    class _Box(object):
+        def __init__(self):
+            self.labels = []
+            self.columns = 0
+
+        def label(self, text='', icon='', **kw):
+            self.labels.append((text, icon))
+
+        def column(self, align=False):
+            self.columns += 1
+            return self
+
+    @staticmethod
+    def _good():
+        return types.SimpleNamespace(name='e0', object_name='Body', poly_index=1,
+                                     key='', enable=True, speed=0.0, lifetime=1.1,
+                                     force_fields=[])
+
+    def test_bad_emitter_never_calls_the_drawer(self):
+        # RED-BY: _draw_emitter_safe 去掉 _emitter_state 判断、直接调 drawer
+        box = self._Box()
+        calls = []
+        ok = node._draw_emitter_safe(
+            box, types.SimpleNamespace(name='e'), 0, lambda sub, e, i: calls.append(i))
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])
+        self.assertTrue(any('无效' in t for t, _i in box.labels))
+
+    def test_good_emitter_draws_once(self):
+        # RED-BY: _draw_emitter_safe 里把 drawer 调两次（或漏调）
+        box = self._Box()
+        calls = []
+        ok = node._draw_emitter_safe(box, self._good(), 3, lambda sub, e, i: calls.append(i))
+        self.assertTrue(ok)
+        self.assertEqual(calls, [3])
+
+    def test_drawer_exception_is_contained(self):
+        # RED-BY: _draw_emitter_safe 去掉 try/except
+        box = self._Box()
+
+        def boom(sub, e, i):
+            raise RuntimeError('boom')
+
+        ok = node._draw_emitter_safe(box, self._good(), 1, boom)
+        self.assertFalse(ok)
+        self.assertTrue(any('画不出来' in t for t, _i in box.labels))
+
+
+class EmitterStateTests(unittest.TestCase):
+    """面板发射器详情的状态判定（纯函数）：缺属性的老条目只警示、不抛。"""
+
+    def test_legacy_emitter_missing_fields(self):
+        # RED-BY: _emitter_state 去掉 missing 检查，直接返回 True
+        ok, label = node._emitter_state(types.SimpleNamespace(name='e'))
+        self.assertFalse(ok)
+        self.assertIn('缺', label)
+
+    def test_full_emitter_is_ok(self):
+        # RED-BY: _emitter_state 恒返回 False
+        e = types.SimpleNamespace(name='e0', object_name='Body', poly_index=1,
+                                  key='', enable=True, speed=0.0, lifetime=1.1,
+                                  force_fields=[types.SimpleNamespace(enabled=True)])
+        ok, label = node._emitter_state(e)
+        self.assertTrue(ok)
+        self.assertIn('Body', label)
+        self.assertIn('1', label)
+
+
+class StageProbeExportTests(unittest.TestCase):
+    """阶段染色探针：默认关不写 x63；开着写 x63 = 1，且在 x47 之后。"""
+
+    def test_default_off_writes_nothing(self):
+        # RED-BY: node 里无条件写 x63 = 1
+        text = _bare_node([_emitter()])._build_main_ini("FluidTest", [])
+        self.assertNotIn("x63", text)
+
+    def test_on_writes_one_after_x47(self):
+        # RED-BY: 删掉 node 里写 x63 的那段 re.sub
+        inst = _bare_node([_emitter()])
+        inst.stage_probe = True
+        text = inst._build_main_ini("FluidTest", [])
+        self.assertIn("x63 = 1", text)
+        self.assertGreater(text.index("x63 = 1"),
+                           text.index("x47 = $fluid_gravity_scale"))
+
+

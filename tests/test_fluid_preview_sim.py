@@ -1,4 +1,4 @@
-﻿"""``fluid_preview_sim`` 的数值健壮性回归。
+"""``fluid_preview_sim`` 的数值健壮性回归。
 
 背景（真实事故）：给发射器加一个半径 0.2 m、强度 3.0 的径向力场后，第 11 帧
 有 217 个粒子变成 ``nan``，并且一路传染。根本原因不在力场，而在邻居求解里那句
@@ -65,13 +65,18 @@ class TestCoincidentParticles:
 
 
 class TestForceField:
+    #: 力场现在按 owner 过滤（与 ForceField.hlsl 同口径）：没有 owner 的字段会被跳过，
+    #: 所以这些用例显式带上 owner=0 并传 owners，别让它们退化成「恒定但空转」。
+    _OWNER0 = np.zeros(4, dtype=np.int32)
+
     def test_radial_at_exact_center_is_finite(self):
         points = np.zeros((4, 3), dtype=np.float64)
         fields = [{
             'kind': 'RADIAL', 'center': [0.0, 0.0, 0.0], 'axis': [0.0, 0.0, 1.0],
             'radius': 0.2, 'strength': 3.0, 'falloff': 2.0, 'enabled': True,
+            'owner': 0,
         }]
-        accel = S.force_field_accel(points, fields, 1.0)
+        accel = S.force_field_accel(points, fields, 1.0, self._OWNER0)
         assert np.isfinite(accel).all()
 
     def test_vortex_on_axis_is_finite(self):
@@ -79,8 +84,10 @@ class TestForceField:
         fields = [{
             'kind': 'VORTEX', 'center': [0.0, 0.0, 0.0], 'axis': [0.0, 0.0, 1.0],
             'radius': 0.2, 'strength': 3.0, 'falloff': 2.0, 'enabled': True,
+            'owner': 0,
         }]
-        assert np.isfinite(S.force_field_accel(points, fields, 1.0)).all()
+        owners = np.zeros(2, dtype=np.int32)
+        assert np.isfinite(S.force_field_accel(points, fields, 1.0, owners)).all()
 
     def test_falloff_is_zero_outside_radius(self):
         assert S.force_field_falloff(0.04, 0.04, 2.0) == 0.0
@@ -91,10 +98,15 @@ class TestForceField:
         assert S.force_field_falloff(0.01, 0.04, 2.0) == pytest.approx(0.5625)
 
     def test_strong_radial_field_keeps_positions_finite(self):
-        """端到端：强径向力场下模拟出来的位置不能出现 NaN。"""
+        """端到端：强径向力场下模拟出来的位置不能出现 NaN。
+
+        字段带 ``owner``：预览按 owner 过滤后，没 owner 的字段会被跳过，
+        这条用例就会退化成「没有力场也有限」——那就不是在测力场了。
+        """
         field = [{
             'kind': 'RADIAL', 'center': [0.05, 0.0, 0.95], 'axis': [0.0, 0.0, -1.0],
             'radius': 0.2, 'strength': 3.0, 'falloff': 2.0, 'enabled': True,
+            'owner': 0,
         }]
         sim = S.Simulator(256, [_emitter()], ground_z=0.0, force_fields=field)
         for _ in range(20):

@@ -121,6 +121,128 @@ EMPTY_INDEX = {"schema_version": 1, "owners": {}}
 #: gate 段名前缀（用于辨识，不影响解析）。
 GATE_PREFIX = "TextureOverrideFluidGate_"
 
+# ---------------------------------------------------------------------------
+# 图标：集中定义 + 自检 + 安全 label
+# ---------------------------------------------------------------------------
+#: 本文件用到的图标集中在这里，**写错只改一处**；名字都取自 Blender 2.8+ 的
+#: `UILayout.bl_rna.functions['prop'].parameters['icon'].enum_items`。
+ICONS = {
+    # 2026-11-05 事实：`FORBIDDEN` 在主人那台 Blender 的 `UILayout.label` icon 枚举里
+    # **不存在**（面板原话「⚠ 非法图标（已回落 INFO）：FORBIDDEN」），曾让「全局外观」
+    # 之后的整块面板停画。`CANCEL` 是语义最近的合法替代（禁止/取消）。
+    "forbidden": "CANCEL",
+    "error": "ERROR",
+    "info": "INFO",
+    "add": "ADD",
+    "remove": "REMOVE",
+    "refresh": "FILE_REFRESH",
+    "keyingset": "KEYINGSET",
+    "physics": "PHYSICS",
+    "color": "COLOR",
+    "cursor": "CURSOR",
+    "empty_axis": "EMPTY_AXIS",
+    "orient": "ORIENTATION_GLOBAL",
+    "mesh": "MESH_DATA",
+    "force": "FORCE_FORCE",
+    "linenumbers": "LINENUMBERS_ON",
+    "action": "ACTION",
+    "x": "X",
+}
+#: 别名保留（调用点不必改），值只允许是合法图标。
+ICON_FORBIDDEN = ICONS["forbidden"]      # = 'CANCEL'
+ICON_ERROR = ICONS["error"]
+ICON_INFO = ICONS["info"]
+
+#: 启动自检发现的非法图标 → 回落值。`_safe_label` 会用它替换。
+_ICON_FALLBACK = {}
+#: 启动自检结论（非空时面板顶部画一行，主人一眼能看到）。
+_ICON_WARNINGS = []
+
+
+def _enum_icons():
+    """当前 Blender 支持的图标名集合；取不到返回 ``None``（无 bpy/老版本）。"""
+    try:
+        fn = bpy.types.UILayout.bl_rna.functions['prop']
+        return {i.identifier for i in fn.parameters['icon'].enum_items}
+    except Exception:
+        return None
+
+
+def _module_icon_literals():
+    """扫本文件源码里所有 ``icon='X'`` 的字面量（不依赖枚举，纯文本）。"""
+    import inspect
+    import sys as _sys
+    try:
+        src = inspect.getsource(_sys.modules[__name__])
+    except Exception:
+        return set()
+    return set(re.findall(r"icon\s*=\s*['\"]([A-Za-z0-9_]+)['\"]", src))
+
+
+def _icons_dump_path():
+    """图标清单落盘路径：``<addon 根>/runtime/blender-icons.txt``（纯拼装，可单测）。"""
+    return os.path.join(_addon_root(), "runtime", "blender-icons.txt")
+
+
+def _dump_icon_list(valid):
+    """把当前 Blender 的合法图标名落盘，供下次离线对表。写失败只 print，不抛。"""
+    path = _icons_dump_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("# blender %s\n" % getattr(bpy.app, "version_string", "?"))
+            for name in sorted(valid):
+                fh.write(name + "\n")
+    except Exception as exc:                          # noqa: BLE001
+        print("[FluidProbe][WARN] 图标清单落盘失败: %s" % exc)
+        return None
+    return path
+
+
+def validate_icons():
+    """把源码里用到的图标与当前枚举对一遍；非法的记进 ``_ICON_FALLBACK``。
+
+    返回非法名字集合（空集 = 全部合法 / 无法枚举）。启动时调用一次。
+    ``_ICON_FALLBACK`` 的回落值是 ``INFO``（一定存在）。
+    """
+    _ICON_FALLBACK.clear()
+    _ICON_WARNINGS.clear()
+    valid = _enum_icons()
+    if not valid:
+        return set()
+    # 枚举拿得到就把整张合法表落盘，下次离线对表不必再猜（写失败只 print）。
+    _dump_icon_list(valid)
+    used = _module_icon_literals() | set(ICONS.values())
+    bad = {name for name in used if name not in valid}
+    for name in bad:
+        _ICON_FALLBACK[name] = "INFO"
+    if bad:
+        _ICON_WARNINGS.append(
+            "非法图标（已回落 INFO）：%s" % ", ".join(sorted(bad)))
+    return bad
+
+
+def _safe_icon(icon):
+    """把非法图标换成回落值；合法/未知枚举时原样返回。"""
+    if not icon:
+        return icon
+    return _ICON_FALLBACK.get(icon, icon)
+
+
+def _safe_label(layout, text, icon=None):
+    """``layout.label`` 的安全版：图标非法/不存在时**不带 icon** 再画一次。
+
+    主人点名要的：非法 icon 只会让这一行变成「文本里带图标名」，绝不会让
+    `draw()` 抛异常、把后面的块整段吃掉。
+    """
+    icon = _safe_icon(icon)
+    if icon:
+        try:
+            return layout.label(text=text, icon=icon)
+        except TypeError:
+            pass
+    return layout.label(text=text if not icon else "%s [图标 %s 非法]" % (text, icon))
+
 #: ``[Resource\SurfaceProfiles]`` 的容量：``Probe.ini:308-311`` 声明
 #: ``RWStructuredBuffer / stride=16 / array=20480``，而 ``LoadProfilesJSON.hlsl:55``
 #: 用 ``row = id * PROFILE_ROWS``（``PROFILE_ROWS=5``，见 ``fluid/ParticleConfig.hlsl``），
@@ -440,6 +562,21 @@ class SSMTFluidEmitter(bpy.types.PropertyGroup):
                     '$fluid_launch_speed（0.514 m/s，面板上不再单独暴露）；'
                     '>0 = 这个发射器单独用这个速度。动画驱动可以在 [Present] 里逐帧写它。',
     )
+    #: nhd-pick: 每发射器寿命。**0 = 沿用内部兜底 1.1 s**，0 秒不是合法值
+    #: （`FluidSolver.hlsl` 的 `cycle=floor(STEP.y/lifetime)` 拿它当除数）。
+    #: 取值一律 `float(x) if x and x > 0 else 0.0`，**不写 `x or 1.1`**（0 会被吃掉）。
+    #: nhd-pick: 每发射器寿命。面板默认 **1.1 s = 不填**（沿用内部兜底），
+    #: 0 也按不填处理；0 秒不是合法值（`FluidSolver.hlsl` 的
+    #: `cycle=floor(STEP.y/lifetime)` 拿它当除数）。写盘规则见
+    #: `fluid_ini_merge.build_emitter_control` 的 `want_life`。
+    lifetime: bpy.props.FloatProperty(
+        name='生命周期 (s)',
+        default=1.1, min=0.0, max=5.0, precision=3,
+        description='= $fluid_emitter_lifetime_N（N = 发射器序号）。1.1 s = 不填'
+                    '（沿用内部兜底），0 也按不填处理；填别的数 = 该发射器粒子活这么久。'
+                    '0 秒不是合法值（cycle=floor(STEP.y/lifetime) 会除零）。'
+                    '动画驱动可逐帧写。',
+    )
 
 
 def _addon_root():
@@ -474,33 +611,126 @@ def _namespace_id(mod_export_path):
 _collect_hashes = fluid_ini_merge.collect_gate_hashes
 
 
+#: 面板绘制一条发射器详情时**必须**存在的属性。老 .blend 里残留的
+#: ``SimpleNamespace``/半成品条目可能缺其中几个，缺一个就按「数据无效」处理。
+_EMITTER_PANEL_ATTRS = ("name", "object_name", "poly_index", "key",
+                        "enable", "speed", "lifetime", "force_fields")
+
+
+def _draw_emitter_safe(box, e, idx, drawer):
+    """按 :func:`_emitter_state` 决定「画警示」还是「调用 drawer」。
+
+    抽出来是为了可测：``box``/``drawer`` 都能用假对象，无 bpy 也能断言
+    「坏条目一次都不调 drawer」「drawer 抛异常不外泄、只画警示」。
+    返回是否真的画了详情。
+    """
+    ok, label = _emitter_state(e)
+    if not ok:
+        box.label(text=label, icon='ERROR')
+        return False
+    sub = box.column(align=True)
+    try:
+        drawer(sub, e, idx)
+    except Exception:                                # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        sub.label(text='⚠ 发射器 %d 画不出来（数据异常）' % idx, icon='ERROR')
+        return False
+    return True
+
+
+def _emitter_state(e):
+    """一条发射器在面板上该画什么（纯函数，可单测）。
+
+    返回 ``(ok, label)``：``ok=False`` 表示这条数据画不了（缺属性/被删），
+    draw 只画 ``label`` 一行警示，绝不把整块面板带走。
+    """
+    if e is None:
+        return False, "⚠ 发射器数据无效（老版本残留）"
+    try:
+        missing = [a for a in _EMITTER_PANEL_ATTRS if not hasattr(e, a)]
+        if missing:
+            return False, "⚠ 发射器数据无效（缺 %s）" % "、".join(missing[:3])
+        name = str(getattr(e, "name", "") or "").strip() or "（未命名）"
+        obj_name = str(getattr(e, "object_name", "") or "").strip() or "（未绑物体）"
+        fields = getattr(e, "force_fields", ()) or ()
+        return True, "%s → %s，%d 个力场" % (name, obj_name, len(fields))
+    except Exception:
+        return False, "⚠ 发射器数据无效（老版本残留）"
+
+
+
+
+
+
 def _emitter_key_entries(emitters):
     """``[(槽号, 键位串)]``，喂给 ``apply_global_keys(emitter_keys=)`` 与 ``apply_emitter_keys``。
 
     策略只在这里定，不动 ``apply_emitter_keys`` 的契约（它认「空串 = 不绑」，
     测试直接依赖这一点）：
 
-    * 第 1 个发射器（``index == 0``）留空 → ``VK_NUMPAD1``。总开关改成角色门控
-      硬关之后这个键空了出来，给第一个发射器当专属开关最顺手；
-    * 第 2 个起留空 → 保持空串（不绑）。都默认同一个键的话，按一下好几个
-      发射器一起翻，等于没有单独开关。
+    * **留空 = 不绑键**。不生成 ``[KeyFluidEmitN]`` 段，产物里一条 key 都没有；
+    * 用户显式填的键位原样传下去（``apply_emitter_keys`` 会做
+      ``no_alt no_ctrl no_shift`` 补全）。
 
-    用户显式填的键位原样传下去（``apply_emitter_keys`` 会做
-    ``no_alt no_ctrl no_shift`` 补全）。
+    2026-11-05 撤掉了旧的「第 1 个发射器留空 → ``VK_NUMPAD1``」默认：
+    主人一个键都没填，产物里却出现 ``[KeyFluidEmit0] key = VK_NUMPAD1``，
+    按一下会意外关掉第一个发射器。「默认帮用户绑一个键」不是我们能替他做的决定。
     """
     entries = []
     for i, em in enumerate(emitters):
         spec = str(getattr(em, "key", "") or "").strip()
-        if not spec and i == 0:
-            spec = "VK_NUMPAD1"
         entries.append((i, spec))
     return entries
+
+
 
 
 class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
     bl_idname = 'SSMTNode_PostProcess_FluidProbe'
     bl_label = '流体探针'
     bl_description = '部署独立的 LiquidGravityProbe 前置：屏幕空间 PBF 流体 + 角色门控'
+
+    #: 碰撞/可见性「排除列表」：每项一个物体（或手填 hash:first_index:count）。
+    #: 面板上的「选择槽」：选好物体后点「添加」才进列表（列表只存引用，
+    #: hash/first_index/count 在**导出时**对着宿主 ini 展开）。
+    #: 「关了就别留尾」：默认全开 = 不写 `x60`，产物与旧版逐字节相同。
+    hard_off_emit: bpy.props.BoolProperty(
+        name='关闭立即清空该槽', default=True,
+        description='= $fluid_emit_flags（IniParams[60].x 的 bit0）。开着时某个发射器'
+                    '一关，它的主粒子/子滴/水洼下一帧就清空（没有 2.4 秒的尾巴）；'
+                    '重开时从零开始。关掉 = 旧行为（等粒子自己走完寿命）。')
+    tail_emission: bpy.props.BoolProperty(
+        name='尾流', default=True,
+        description='= $fluid_emit_flags 的 bit1。开着时散射/缠流阶段会额外出 1/5 的细尾流；'
+                    '关掉就只有一支主流。')
+    #: 次生总开关（默认开；关掉时写 x61=1/y61=0，见 _build_main_ini）。
+    splash_enable: bpy.props.BoolProperty(
+        name='飞溅与水洼', default=True,
+        description='= $fluid_splash_enable（IniParams[61].x 有效位 / .y 值）。'
+                    '关掉后只剩主粒子水柱，不再有飞溅与水洼；默认开 = 不写变量，产物不变。')
+    nozzle_spray: bpy.props.BoolProperty(
+        name='喷口雾化', default=False,
+        description='关（默认）= 只有碰撞才产生次生；开 = 喷口处也会雾化出小粒子（写 x64 = 1）。')
+    splash_min_frames: bpy.props.IntProperty(
+        name='出生后不溅(帧)', default=10, min=0, max=120,
+        description='粒子出生后多少帧内不产生飞溅（按 assumed_fps 换算成秒）。'
+                    '例：10 帧 ÷ 120fps = 0.083 s。')
+    assumed_fps: bpy.props.FloatProperty(
+        name='换算用帧率(fps)', default=120.0, min=1.0, max=480.0, precision=1,
+        description='把「出生后不溅(帧)」换算成秒时用的帧率。'
+                    '导出写 x62 = 帧数 ÷ 这个值、y62 = 1。')
+    splash_min_age: bpy.props.FloatProperty(
+        name='出生后不溅(秒，覆盖帧数)', default=0.0, min=0.0, max=0.5, precision=3,
+        description='= $fluid_splash_min_age（IniParams[62].x 值 / .y 有效位）。'
+                    '填了 >0 就直接用这个秒数；填 0 则按「出生后不溅(帧)」÷ fps 计算。'
+                    '导出时总是写 x62/y62，ini 里能看到实际值。')
+    #: 分阶段染色探针（默认关）：开着时导出写 `x63 = 1`，shader 按阶段纯色直出。
+    stage_probe: bpy.props.BoolProperty(
+        name='阶段染色探针', default=False,
+        description='调试用：导出写 x63 = 1，按阶段直出色块（红=出生帧、绿=主粒子、'
+                    '蓝=其它次生、黄=碰撞事件次生、紫=水洼、青=附着）。'
+                    '默认关 ⇒ 不写 x63 ⇒ 与不带探针的产物完全相同。')
 
     #: 是否重映射 IniParams 号段（237-243/251-255 → 29-40）
     remap_ini_params: bpy.props.BoolProperty(
@@ -587,9 +817,12 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
     tint_g: bpy.props.FloatProperty(name='液体G ($liquid_tint_g)', default=0.75, min=0.0, max=1.0)
     tint_b: bpy.props.FloatProperty(name='液体B ($liquid_tint_b)', default=0.03, min=0.0, max=1.0)
     absorb_m: bpy.props.FloatProperty(
-        name='吸收深度(m)', default=0.015, min=0.0001, max=0.2, precision=5,
+        name='吸收深度(m)', default=0.015, min=0.0, max=0.2, precision=5,
         description='Probe.ini:20 的 $liquid_absorb_mm。这里填米；导出时乘 1000 '
-                    '写进那个以毫米命名的变量（它的 /1000 正好抵掉）。',
+                    '写进那个以毫米命名的变量（它的 /1000 正好抵掉）。'
+                    '0 = 完全不透明（shader 内部按 2e-5 m 夹取：'
+                    'FluidComposite.hlsl:160 depthMeters=max(look.w,2e-5)，'
+                    ':178 opaqueK 随深度变小而趋 1）。',
     )
     wet_darken: bpy.props.FloatProperty(
         name='湿润变暗 ($liquid_wet_darken)', default=0.85, min=0.0, max=2.0,
@@ -680,7 +913,157 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
     emitters: bpy.props.CollectionProperty(type=SSMTFluidEmitter)
     emitter_index: bpy.props.IntProperty(default=0)
 
+    def _draw_emitter(self, sub, e, idx):
+        """画一条发射器的详情（原样从 `_draw_buttons_impl` 搬出，只改缩进）。
+
+        搬出来的理由：面板里任何一条坏数据抛异常都会带走它之后的所有块；
+        抽成方法后 `draw_buttons` 能逐条 try/except，坏一条只影响它自己。
+        """
+        sub.prop(e, 'name')
+
+        sub.separator()
+        sub.label(text='① 绑在哪个面', icon='MESH_DATA')
+        sub.prop(e, 'object_name')
+        r = sub.row(align=True)
+        r.prop(e, 'poly_index')
+        r.operator('ssmt.fluid_emitter_pick_face', text='取选中面')
+        if e.poly_index < 0:
+            sub.label(text='还没绑面：点「取选中面」或直接填面序号', icon='ERROR')
+
+        sub.separator()
+        sub.label(text='② 开关与行为', icon='KEYINGSET')
+        sub.prop(e, 'key', text='单独开关')
+        sub.label(text='留空＝不绑键，按了也不会有反应', icon='INFO')
+        row = sub.row(align=True)
+        row.prop(e, 'enable')
+        row.label(text='发射器 %d 开关 → $fluid_emit_%d（1 开 / 0 关）'
+                       % (idx, idx))
+        sub.label(text='   键位、这里、动画驱动写的是同一个 $fluid_emit_%d' % idx,
+                  icon='INFO')
+        r = sub.row(align=True)
+        r.prop(e, 'trick', text='缠流', toggle=True)
+        r.prop(e, 'vis', text='常驻显示', toggle=True)
+        if e.trick:
+            sub.prop(e, 'trick_sp')
+            r = sub.row(align=True)
+            r.prop(e, 'tlen')
+            r.prop(e, 'bend_delay')
+            r.prop(e, 'bend_str')
+        elif e.vis:
+            sub.label(text='部件一被画出来就喷（角色不在场时不喷）', icon='INFO')
+        else:
+            sub.label(text='由角色门控决定：角色被画出来就喷', icon='INFO')
+
+        sub.separator()
+        sub.label(text='③ 喷口在三角形内的位置', icon='CURSOR')
+        r = sub.row(align=True)
+        r.prop(e, 'bx')
+        r.prop(e, 'by')
+        r.prop(e, 'bz')
+
+        sub.separator()
+        sub.label(text='④ 喷射方向', icon='ORIENTATION_GLOBAL')
+        r = sub.row(align=True)
+        r.prop(e, 'tilt')
+        r.prop(e, 'yaw')
+        r.prop(e, 'roll')
+
+        sub.separator()
+        sub.label(text='⑤ 外观', icon='COLOR')
+        r = sub.row(align=True)
+        r.prop(e, 'width')
+        r.prop(e, 'level')
+        sub.prop(e, 'absorption')
+        r = sub.row(align=True)
+        r.prop(e, 'custom_color')
+        if e.custom_color:
+            rr = sub.row(align=True)
+            rr.prop(e, 'tint_r')
+            rr.prop(e, 'tint_g')
+            rr.prop(e, 'tint_b')
+
+        sub.separator()
+        # 发射速度：唯一可编辑入口就在这一行。变量名与「0 = 沿用全局」写在
+        # 同一行的 label 与属性 description 里，不再另开只读块显示第二份数值。
+        r = sub.row(align=True)
+        r.label(text='发射速度 %d (m/s)' % idx)
+        r.prop(e, 'speed', text='')
+        sub.label(text='   → $fluid_emitter_speed_%d；0 = 沿用内部兜底 %.4g m/s'
+                       % (idx, float(getattr(self, 'launch_speed', 0.514))),
+                  icon='INFO')
+        r = sub.row(align=True)
+        r.label(text='生命周期 %d (s)' % idx)
+        r.prop(e, 'lifetime', text='')
+        sub.label(text='   → $fluid_emitter_lifetime_%d；1.1 = 默认' % idx,
+                  icon='INFO')
+
+        sub.separator()
+        sub.label(text='⑥ 位置微调（沿喷口局部轴，单位米）', icon='EMPTY_AXIS')
+        r = sub.row(align=True)
+        r.prop(e, 'ox')
+        r.prop(e, 'oy')
+        r.prop(e, 'oz')
+
+        sub.separator()
+        ff = sub.box()
+        row = ff.row(align=True)
+        row.label(text='⑦ 力场（相对发射器，跟着它动）', icon='FORCE_FORCE')
+        row.operator('ssmt.fluid_force_field_add', text='', icon='ADD')
+        row.operator('ssmt.fluid_force_field_remove', text='', icon='REMOVE')
+        if len(e.force_fields):
+            ff.template_list(
+                'SSMT_UL_fluid_force_fields', '',
+                e, 'force_fields',
+                e, 'force_field_index',
+                rows=2,
+            )
+            # 一个力场一个子框：勾选框用的是**这个力场自己的** `enabled`
+            # （写 $fluid_force_enable_<E>_<K>），3 个力场就是 3 个独立的勾。
+            # 2026-11-03 修：上一版把勾画在表头行末尾、且 text=''，
+            # 看起来像整组共用一个开关。
+            for k, f in enumerate(e.force_fields):
+                fb = ff.box()
+                head = fb.row(align=True)
+                head.label(text='力场 %d' % k, icon='FORCE_FORCE')
+                head.prop(f, 'enabled', text='启用')
+                head.label(text='→ $fluid_force_enable_%d_%d' % (idx, k))
+                r = fb.row(align=True)
+                r.prop(f, 'kind', text='')
+                r = fb.row(align=True)
+                r.prop(f, 'radius')
+                r.prop(f, 'strength')
+                r.prop(f, 'falloff')
+                r = fb.row(align=True)
+                r.prop(f, 'offset_u')
+                r.prop(f, 'offset_v')
+                r.prop(f, 'offset_w')
+                r = fb.row(align=True)
+                r.prop(f, 'axis_u')
+                r.prop(f, 'axis_v')
+                r.prop(f, 'axis_w')
+                fb.label(text='   偏移与轴：U=右 V=上 W=前；强度单位 m/s²',
+                         icon='INFO')
+        else:
+            ff.label(text='未加力场：这一项零开销', icon='INFO')
+
     def draw_buttons(self, context, layout):
+        # 面板崩一次的成本远高于这层壳：任何一条坏数据（老 .blend 残留）都不许
+        # 把整棵节点树的绘制带走。异常一律留痕（traceback 进控制台）+ 面板红字。
+        try:
+            self._draw_buttons_impl(context, layout)
+        except Exception as exc:                      # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            layout.label(text='⚠ 流体探针面板绘制出错：%s' % exc, icon='ERROR')
+            layout.label(text='   其余节点不受影响；请检查残留的旧数据或反馈日志')
+
+    def _draw_buttons_impl(self, context, layout):
+        # 启动自检发现非法图标时，第一行就告诉主人是哪个名字（回落到 INFO 之后画出来）。
+        for message in _ICON_WARNINGS:
+            try:
+                layout.label(text='⚠ ' + message, icon='ERROR')
+            except Exception:
+                layout.label(text='⚠ ' + message)
         col = layout.column(align=True)
         col.prop(self, 'remap_ini_params')
         row = col.row(align=True)
@@ -712,6 +1095,13 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         # 全局力场倍率（$force_scale → IniParams[41].y）：乘在所有力场的强度上。
         # 它是**全局**的东西，所以画在全局外观里，不进每个发射器的力场组。
         box.prop(self, 'force_scale', text='力场总增益（全局，乘在所有力场强度上）')
+        # 排除列表：按物体选（导出时解析成 hash + first_index + count），手填行是逃生口。
+        col = box.column(align=True)
+        row = col.row(align=True)
+        col.prop(self, 'hard_off_emit')
+        col.prop(self, 'tail_emission')
+        col.prop(self, 'splash_enable')
+        col.prop(self, 'stage_probe')
 
         layout.separator()
         box = layout.box()
@@ -756,128 +1146,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             idx = min(self.emitter_index, len(self.emitters) - 1)
             if idx >= 0:
                 e = self.emitters[idx]
-                sub = box.column(align=True)
-                sub.prop(e, 'name')
-
-                sub.separator()
-                sub.label(text='① 绑在哪个面', icon='MESH_DATA')
-                sub.prop(e, 'object_name')
-                r = sub.row(align=True)
-                r.prop(e, 'poly_index')
-                r.operator('ssmt.fluid_emitter_pick_face', text='取选中面')
-                if e.poly_index < 0:
-                    sub.label(text='还没绑面：点「取选中面」或直接填面序号', icon='ERROR')
-
-                sub.separator()
-                sub.label(text='② 开关与行为', icon='KEYINGSET')
-                sub.prop(e, 'key', text='单独开关')
-                sub.label(text='留空 = 跟着 NUMPAD1 总开关走', icon='INFO')
-                row = sub.row(align=True)
-                row.prop(e, 'enable')
-                row.label(text='发射器 %d 开关 → $fluid_emit_%d（1 开 / 0 关）'
-                               % (idx, idx))
-                sub.label(text='   键位、这里、动画驱动写的是同一个 $fluid_emit_%d' % idx,
-                          icon='INFO')
-                r = sub.row(align=True)
-                r.prop(e, 'trick', text='缠流', toggle=True)
-                r.prop(e, 'vis', text='常驻显示', toggle=True)
-                if e.trick:
-                    sub.prop(e, 'trick_sp')
-                    r = sub.row(align=True)
-                    r.prop(e, 'tlen')
-                    r.prop(e, 'bend_delay')
-                    r.prop(e, 'bend_str')
-                elif e.vis:
-                    sub.label(text='部件一被画出来就喷，NUMPAD1 管不到它', icon='INFO')
-                else:
-                    sub.label(text='由 NUMPAD1 总开关和喷射键控制', icon='INFO')
-
-                sub.separator()
-                sub.label(text='③ 喷口在三角形内的位置', icon='CURSOR')
-                r = sub.row(align=True)
-                r.prop(e, 'bx')
-                r.prop(e, 'by')
-                r.prop(e, 'bz')
-
-                sub.separator()
-                sub.label(text='④ 喷射方向', icon='ORIENTATION_GLOBAL')
-                r = sub.row(align=True)
-                r.prop(e, 'tilt')
-                r.prop(e, 'yaw')
-                r.prop(e, 'roll')
-
-                sub.separator()
-                sub.label(text='⑤ 外观', icon='COLOR')
-                r = sub.row(align=True)
-                r.prop(e, 'width')
-                r.prop(e, 'level')
-                sub.prop(e, 'absorption')
-                r = sub.row(align=True)
-                r.prop(e, 'custom_color')
-                if e.custom_color:
-                    rr = sub.row(align=True)
-                    rr.prop(e, 'tint_r')
-                    rr.prop(e, 'tint_g')
-                    rr.prop(e, 'tint_b')
-
-                sub.separator()
-                # 发射速度：唯一可编辑入口就在这一行。变量名与「0 = 沿用全局」写在
-                # 同一行的 label 与属性 description 里，不再另开只读块显示第二份数值。
-                r = sub.row(align=True)
-                r.label(text='发射速度 %d (m/s)' % idx)
-                r.prop(e, 'speed', text='')
-                sub.label(text='   → $fluid_emitter_speed_%d；0 = 沿用内部兜底 %.4g m/s'
-                               % (idx, float(getattr(self, 'launch_speed', 0.514))),
-                          icon='INFO')
-
-                sub.separator()
-                sub.label(text='⑥ 位置微调（沿喷口局部轴，单位米）', icon='EMPTY_AXIS')
-                r = sub.row(align=True)
-                r.prop(e, 'ox')
-                r.prop(e, 'oy')
-                r.prop(e, 'oz')
-
-                sub.separator()
-                ff = sub.box()
-                row = ff.row(align=True)
-                row.label(text='⑦ 力场（相对发射器，跟着它动）', icon='FORCE_FORCE')
-                row.operator('ssmt.fluid_force_field_add', text='', icon='ADD')
-                row.operator('ssmt.fluid_force_field_remove', text='', icon='REMOVE')
-                if len(e.force_fields):
-                    ff.template_list(
-                        'SSMT_UL_fluid_force_fields', '',
-                        e, 'force_fields',
-                        e, 'force_field_index',
-                        rows=2,
-                    )
-                    # 一个力场一个子框：勾选框用的是**这个力场自己的** `enabled`
-                    # （写 $fluid_force_enable_<E>_<K>），3 个力场就是 3 个独立的勾。
-                    # 2026-11-03 修：上一版把勾画在表头行末尾、且 text=''，
-                    # 看起来像整组共用一个开关。
-                    for k, f in enumerate(e.force_fields):
-                        fb = ff.box()
-                        head = fb.row(align=True)
-                        head.label(text='力场 %d' % k, icon='FORCE_FORCE')
-                        head.prop(f, 'enabled', text='启用')
-                        head.label(text='→ $fluid_force_enable_%d_%d' % (idx, k))
-                        r = fb.row(align=True)
-                        r.prop(f, 'kind', text='')
-                        r = fb.row(align=True)
-                        r.prop(f, 'radius')
-                        r.prop(f, 'strength')
-                        r.prop(f, 'falloff')
-                        r = fb.row(align=True)
-                        r.prop(f, 'offset_u')
-                        r.prop(f, 'offset_v')
-                        r.prop(f, 'offset_w')
-                        r = fb.row(align=True)
-                        r.prop(f, 'axis_u')
-                        r.prop(f, 'axis_v')
-                        r.prop(f, 'axis_w')
-                        fb.label(text='   偏移与轴：U=右 V=上 W=前；强度单位 m/s²',
-                                 icon='INFO')
-                else:
-                    ff.label(text='未加力场：这一项零开销', icon='INFO')
+                _draw_emitter_safe(box, e, idx, self._draw_emitter)
 
         layout.separator()
         box = layout.box()
@@ -1490,9 +1759,56 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                  for f in (getattr(em, "force_fields", ()) or ())]
                 for em in self.emitters
             ],
+            # nhd-pick: 寿命**原样传**（默认 1.1、用户填 0 都传原值）。「不填」的
+            # 归一是 `build_emitter_control` 的事（0 与 1.1 归一成 0、不写产物）；
+            # 这里**不能**写 `value or 1.1`（0 会被吃掉，用户就没法表达「不填」）。
+            lifetimes=[float(getattr(em, "lifetime", 1.1) or 0.0)
+                       for em in self.emitters],
         )
         for message in control_warnings:
             print("[FluidProbe][WARN] " + message)
+        # 排除列表已整块移除（2026-11-06）：全部物体无条件参与碰撞/遮挡。
+        # 「关了就别留尾」：两个开关全默认时不写 x60（产物与旧版逐字节相同）。
+        text, flag_warnings = fluid_ini_merge.apply_emit_flags(
+            text,
+            hard_off=bool(getattr(self, "hard_off_emit", True)),
+            tail=bool(getattr(self, "tail_emission", True)),
+        )
+        for message in flag_warnings:
+            print("[FluidProbe][WARN] " + message)
+        # 次生总开关：默认开 = **不写任何行**（产物不变）；关掉时写有效位 + 值，
+        # 避免「0 = 未设置」与「0 = 关」混淆（重力/吸收各踩过一次）。
+        if not bool(getattr(self, "splash_enable", True)):
+            text = re.sub(
+                r"(?m)^([ \t]*)x47[ \t]*=[ \t]*\$fluid_gravity_scale[ \t]*$",
+                lambda m: (m.group(0) + "\n" + m.group(1) + "x61 = 1\n"
+                           + m.group(1) + "y61 = 0"),
+                text, count=1)
+        # 出生后不溅的时长：**总是写** x62（值）+ y62（有效位）。
+        # 填了秒数（>0）就直接用；否则按「帧数 ÷ fps」换算（例：10 帧 ÷ 120fps = 0.083 s）。
+        _min_age = float(getattr(self, "splash_min_age", 0.0) or 0.0)
+        if _min_age <= 1e-6:
+            _frames = float(getattr(self, "splash_min_frames", 10) or 10)
+            _fps = float(getattr(self, "assumed_fps", 120.0) or 120.0)
+            _min_age = _frames / max(_fps, 1e-3)
+        if bool(getattr(self, 'nozzle_spray', False)):
+            text = re.sub(
+                r"(?m)^([ \t]*)x47[ \t]*=[ \t]*\$fluid_gravity_scale[ \t]*$",
+                lambda m: (m.group(0) + "\n" + m.group(1) + "x64 = 1"),
+                text, count=1)
+        if True:
+            text = re.sub(
+                r"(?m)^([ \t]*)x47[ \t]*=[ \t]*\$fluid_gravity_scale[ \t]*$",
+                lambda m: (m.group(0) + "\n" + m.group(1) + "x62 = "
+                           + fluid_ini_merge._fmt_float(_min_age) + "\n"
+                           + m.group(1) + "y62 = 1"),
+                text, count=1)
+        # 阶段染色探针：默认关 ⇒ **不写 x63**（产物与不带探针完全相同）；开着写 x63 = 1。
+        if bool(getattr(self, "stage_probe", False)):
+            text = re.sub(
+                r"(?m)^([ \t]*)x47[ \t]*=[ \t]*\$fluid_gravity_scale[ \t]*$",
+                lambda m: m.group(0) + "\n" + m.group(1) + "x63 = 1",
+                text, count=1)
         # 所有 $var 加 fluid_ 前缀放在**最后**：前面的步骤（$slot_count 替换、
         # apply_force_fields 的开关拨动）都按模板原名工作，改完再统一改名，
         # 这样两边引用一定同步，不会出现「赋值改了、读取没改」的错配。
@@ -1514,6 +1830,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             text,
         )
         return fluid_ini_merge.prefix_variables(text)
+
 
     def _force_fields_by_slot(self):
         """按发射器序号收集力场，返回 ``({槽号: [字段字典, ...]}, 告警列表)``。
@@ -2047,6 +2364,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
 
         ns = _namespace_id(mod_export_path)
         host_hashes = self._host_hashes(mod_export_path)
+        # 排除列表要按宿主 ini 的 mesh 注释解析物体 → 记下导出目录，
 
         # 严格模式：目标第 3 条要求「约束不满足就在导出期报错而不是静默失败」。
         # 门控一个都没收到 ⇒ 门控段恒为 0 ⇒ 整条流体链静默死掉，这是最难查的形态
@@ -2116,6 +2434,14 @@ def _active_fluid_node(context):
         if isinstance(n, SSMTNode_PostProcess_FluidProbe):
             return n
     return None
+
+
+
+
+
+
+
+
 
 
 class SSMT_OT_FluidEmitterAdd(bpy.types.Operator):
@@ -2391,19 +2717,25 @@ class SSMT_UL_fluid_force_fields(bpy.types.UIList):
 
     def draw_item(self, context, layout, data, item, icon, active_data,
                   active_propname, index):
-        kind = {'DIRECTIONAL': '定向', 'RADIAL': '径向',
-                'VORTEX': '涡旋'}.get(item.kind, item.kind)
-        if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            layout.label(
-                text='%d  %s  %.3f m %s %.1f m/s²' % (
-                    index, kind, item.radius,
-                    '' if item.enabled else '(关) ', item.strength,
-                ),
-                icon='FORCE_FORCE' if item.enabled else 'X',
-            )
-        else:
-            layout.alignment = 'CENTER'
-            layout.label(text='%d' % index)
+        # 坏条目（老版本残留/缺属性）只画一行警示，绝不让 UIList 抛异常
+        # —— UIList 抛异常会把整个节点面板的绘制带死。
+        try:
+            kind = {'DIRECTIONAL': '定向', 'RADIAL': '径向',
+                    'VORTEX': '涡旋'}.get(item.kind, item.kind)
+            enabled = bool(item.enabled)
+            if self.layout_type in {'DEFAULT', 'COMPACT'}:
+                layout.label(
+                    text='%d  %s  %.3f m %s %.1f m/s²' % (
+                        index, kind, item.radius,
+                        '' if enabled else '(关) ', item.strength,
+                    ),
+                    icon='FORCE_FORCE' if enabled else 'X',
+                )
+            else:
+                layout.alignment = 'CENTER'
+                layout.label(text='%d' % index)
+        except Exception:
+            layout.label(text='%d  ⚠ 数据无效（老版本残留）' % index, icon='ERROR')
 
 
 #: 预览集合名。用完可以整组删掉，不污染用户的场景结构。
@@ -3147,8 +3479,7 @@ classes = (
     SSMTFluidForceField,
     SSMTFluidEmitter,
     SSMTNode_PostProcess_FluidProbe,
-    SSMT_OT_FluidEmitterAdd,
-    SSMT_OT_FluidEmitterPickFace,
+    SSMT_OT_FluidEmitterAdd,    SSMT_OT_FluidEmitterPickFace,
     SSMT_OT_FluidEmitterRemove,
     SSMT_OT_FluidEmitterClear,
     SSMT_UL_fluid_emitters,
@@ -3163,17 +3494,17 @@ classes = (
 )
 
 
-def _scene_ground_z(exclude_names=()):
+def _scene_ground_z(skip_names=()):
     """场景里最低的网格顶点 z，排除预览标记与粒子对象。
 
     用户的原话是「地面高度应该就等于发射器高度」——但发射器常常在手上，
     用水柱落到手的高度会让它悬在半空几厘米。真正的地面是场景里那块地板
     （或者角色的脚底），也就是**所有网格里最低的那个顶点**。
     """
-    exclude = set(exclude_names or ())
+    skip = set(skip_names or ())
     lowest = None
     for obj in bpy.data.objects:
-        if obj.type != 'MESH' or obj.name in exclude:
+        if obj.type != 'MESH' or obj.name in skip:
             continue
         # 预览标记（FluidEm*）与粒子网格本身不该参与判断
         if obj.name.startswith(('FluidEm', 'SSMT_Fluid')):
@@ -3261,9 +3592,15 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
     # 没有 right/up，既算不出 U/V/W 偏移，也分不清「轴」和「方向」。
     #
     # 这样处理之后，预览与游戏用的是同一套公式、同一套基、同一份参数，
-    # 只是数值在 CPU 上算。两边唯一的差别是浮点顺序，不是模型。
+    # 只是数值在 CPU 上算。归属（owner）写进每个 field，模拟侧按它过滤
+    # （来源: ForceField.hlsl:87-89）；剩下的差异见
+    # fluid_preview_sim.force_field_accel 的 docstring（掩码族 / 叶形段 / 出生那一拍 / 浮点）。
     force_fields = []
-    for e in node.emitters:
+    # `i` 必须和**发射器在 sim 里的 slot** 同一个来源：上面 :3249 写的是
+    # `'slot': i`（同一个 `enumerate(node.emitters)` 下标），sim 的 `_spawn_one`
+    # 把它读进 `self.slot`。预览按 `owner` 过滤力场时比的就是这两个值。
+    # 来源: ForceField.hlsl:87-89 按发射器 id 取那一行块（fieldBase = id*4）。
+    for i, e in enumerate(node.emitters):
         fields = list(getattr(e, 'force_fields', ()) or ())
         if not fields:
             continue
@@ -3279,6 +3616,7 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
             axis = (right * float(f.axis_u)
                     + up * float(f.axis_v) + forward * float(f.axis_w))
             force_fields.append({
+                'owner': i,
                 'kind': f.kind,
                 'center': [center.x, center.y, center.z],
                 'axis': [axis.x, axis.y, axis.z],
@@ -3310,7 +3648,7 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
             obj = bpy.data.objects.get(nm)
             if obj:
                 skip.add(obj.name)
-        ground = _scene_ground_z(exclude_names=sorted(skip))
+        ground = _scene_ground_z(skip_names=sorted(skip))
         if ground is None:
             ground = float(getattr(node, 'ground_height', 0.0))
     else:
@@ -3663,6 +4001,13 @@ def _auto_sim_tick():
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    # 图标自检：Blender 的 icon 枚举在各版本间会增删，写错一个名字就是
+    # `UILayout.label(): enum "XXX" not found` —— 那会让整个节点面板停在出错的那一行。
+    # 这里把本文件里**所有** `icon='X'` 的字面量与当前 Blender 的枚举对一遍，
+    # 非法的打印出来、记进 `_ICON_FALLBACK`（`_safe_label` 自动回落），并在面板顶部提示。
+    bad = validate_icons()
+    if bad:
+        print("[FluidProbe][WARN] 非法图标: %s（已回落 INFO）" % ", ".join(sorted(bad)))
     if _on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
     if not bpy.app.timers.is_registered(_auto_sim_tick):

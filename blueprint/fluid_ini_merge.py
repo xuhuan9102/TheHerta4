@@ -1051,6 +1051,10 @@ EMITTER_SPEED_REGS = (45, 48)
 #: ini 侧用 `$a + 2*$b + 4*$c + 8*$d` 拼出 0..15，shader 侧 `(mask>>k)&1`。
 #: 这样一个号段就能装下 8×4=32 个开关，而变量名仍然是「一个力场一个」。
 EMITTER_FIELD_REGS = (58, 59)
+#: 每发射器寿命（秒）：51 = 发射器 0-3、52 = 4-7，值 0 = 沿用内部兜底 1.1
+#: （`ParticleConfig.hlsl` 的 `FLUID_LIFETIME_DEFAULT`）。0 秒**不是**合法值：
+#: `FluidSolver.hlsl` 拿 lifetime 做除数。
+EMITTER_LIFETIME_REGS = (51, 52)
 
 #: 「力场字段级开关这一族存在」的标记：``IniParams[41].w``（41.x 是派生的总闸
 #: 「有没有力场」、41.y 是全局增益）。模板里固定有一行 ``w41 = 0``，导出每次都把它
@@ -1080,13 +1084,21 @@ EMITTER_CONTROL_MARKER = "; --- FLUID EMITTER CONTROLS BEGIN ---"
 #: :205-212），但这一层在 ``prefix_variables`` 之前跑，别人也可能塞进一份不带
 #: 前缀的模板，所以 ``(?:fluid_)?`` 两边都吃。找不到就告警跳过，绝不静默改结构。
 _EMITTER_GLOBALS_ANCHOR = re.compile(
-    r"(?m)^global[ \t]+\$(?:fluid_)?emit_7[ \t]*=[ \t]*1[ \t]*\r?$")
+    r"(?m)^global[ \t]+(?:persist[ \t]+)?\$(?:fluid_)?emit_7[ \t]*="
+    r"[^\r\n]*$")
 _EMITTER_WRITES_ANCHOR = re.compile(
     r"(?m)^[ \t]*w43[ \t]*=[ \t]*\$(?:fluid_)?emit_7[ \t]*\r?$")
 #: ``w41`` 那一行：有就改写成 literal 值（保留缩进），没有就插在 ``y41`` 之后。
 _FORCE_FLAG_LINE = re.compile(r"(?m)^([ \t]*)w41[ \t]*=[^\r\n]*")
 _FORCE_FLAG_ANCHOR = re.compile(
     r"(?m)^[ \t]*y41[ \t]*=[ \t]*\$(?:fluid_)?force_scale[ \t]*\r?$")
+#: 每发射器开关的声明行：`global [persist] $[fluid_]emit_N = <值>`。
+#: 导出时把存在的发射器改成 `global …`（值 = 面板），其余号不动。**不用 persist**：它的跨启动记忆会盖掉面板值。
+_EMIT_PERSIST_RE = re.compile(
+    r"(?m)^([ \t]*)global[ \t]+(?:persist[ \t]+)?\$(?:fluid_)?emit_(\d+)"
+    r"[ \t]*=[^\r\n]*$")
+#: 初始化块末尾那一行（开场赋一次面板值插在它前面）。
+_SEED_ANCHOR = re.compile(r"(?m)^([ \t]*)\$initialized[ \t]*=[ \t]*1[ \t]*\r?$")
 
 
 def _control_lane(regs, index):
@@ -1103,8 +1115,8 @@ def _insert_after_match(text, match, new_lines):
     return text[:match.end()] + insert + text[match.end():]
 
 
-def build_emitter_control(speeds, field_switches=None):
-    """``(每发射器速度, 每个力场自己的开关)`` → 四段文本。
+def build_emitter_control(speeds, field_switches=None, lifetimes=None):
+    """``(每发射器速度, 每个力场自己的开关, 每发射器寿命)`` → 四段文本。
 
     返回 ``(global_lines, write_lines, flag_lines, warnings)``：
 
@@ -1128,7 +1140,8 @@ def build_emitter_control(speeds, field_switches=None):
     """
     speeds = list(speeds or ())
     field_rows = list(field_switches or ())
-    count = max(len(speeds), len(field_rows))
+    lifetimes = list(lifetimes or ())
+    count = max(len(speeds), len(field_rows), len(lifetimes))
     warnings = []
     if count > EMITTER_CONTROL_MAX:
         warnings.append(
@@ -1138,8 +1151,15 @@ def build_emitter_control(speeds, field_switches=None):
         count = EMITTER_CONTROL_MAX
     speeds = (speeds + [0.0] * count)[:count]
     field_rows = (field_rows + [None] * count)[:count]
+    lifetimes = (lifetimes + [0.0] * count)[:count]
 
+    # nhd-pick: 寿命的「不填」有两个等价写法 —— <=0，或者面板默认的 1.1。
+    # 面板的默认值就是 1.1（主人口径：不填就是原来的行为，不要「默认 3 秒」这种语义），
+    # 所以 1.1 绝不能写进产物；统一归一成 0（shader 的 0 → 回落 1.1）。
+    lifetimes = [0.0 if (float(v) <= 0.0 or abs(float(v) - 1.1) <= 1e-6)
+                 else float(v) for v in lifetimes]
     want_speed = any(float(v) > 0.0 for v in speeds)
+    want_life = any(float(v) > 0.0 for v in lifetimes)
     want_field = force_field_switchable(field_rows)
 
     global_lines, write_lines, flag_lines = [], [], []
@@ -1152,6 +1172,17 @@ def build_emitter_control(speeds, field_switches=None):
                 "global $fluid_emitter_speed_%d = %s" % (i, _fmt_float(float(value))))
             write_lines.append(
                 "%s = $fluid_emitter_speed_%d" % (_control_lane(EMITTER_SPEED_REGS, i), i))
+    if want_life:
+        for i, value in enumerate(lifetimes):
+            global_lines.append(
+                "; 发射器 %d 生命周期 (s)，0 = 沿用内部兜底 1.1（不填 / 填 1.1 都不写）"
+                " → $fluid_emitter_lifetime_%d" % (i, i))
+            global_lines.append(
+                "global $fluid_emitter_lifetime_%d = %s"
+                % (i, _fmt_float(float(value))))
+            write_lines.append(
+                "%s = $fluid_emitter_lifetime_%d"
+                % (_control_lane(EMITTER_LIFETIME_REGS, i), i))
 
     # ---- 力场：一个发射器可以有多个力场，每个力场一个开关变量 ------------------
     # ``field_rows[i]`` 是第 i 个发射器每个力场的 0/1 列表，下标 = 面板上
@@ -1181,7 +1212,8 @@ def build_emitter_control(speeds, field_switches=None):
     return global_lines, write_lines, flag_lines, warnings
 
 
-def apply_emitter_controls(text, speeds, field_switches=None, enables=()):
+def apply_emitter_controls(text, speeds, field_switches=None, enables=(),
+                          lifetimes=None):
     """把每发射器的控制变量写进模板，返回 ``(text, warnings)``。
 
     ``enables`` 是每个发射器的手动开关（1 = 开、0 = 关）。开关**本身**的变量
@@ -1195,7 +1227,7 @@ def apply_emitter_controls(text, speeds, field_switches=None, enables=()):
     —— 它必须每次都写，理由见下面的注释（``IniParams`` 跨 mod 粘滞）。
     """
     global_lines, write_lines, _flag_lines, warnings = build_emitter_control(
-        speeds, field_switches)
+        speeds, field_switches, lifetimes)
 
     # 力场族标记：**每次导出都写 literal 0/1**。模板里已经有 `w41 = 0`
     # （Probe.ini 的 x41/y41 那一块），所以这里改写；老模板没有这一行时插在
@@ -1218,24 +1250,48 @@ def apply_emitter_controls(text, speeds, field_switches=None, enables=()):
 
     if EMITTER_CONTROL_MARKER in text:
         return text, warnings
-    if global_lines:
-        global_lines = [EMITTER_CONTROL_MARKER] + global_lines
 
-    for i, value in enumerate(list(enables or ())[:EMITTER_CONTROL_MAX]):
-        if int(value) == 1:
-            continue
-        # 模板现在的原文是 `global $fluid_emit_N = 1`；不带前缀的老模板也要认。
-        replaced = False
-        for pattern in ("global $fluid_emit_%d = 1", "global $emit_%d = 1"):
-            old = pattern % i
-            if old in text:
-                text = text.replace(old, old[:-1] + "0", 1)
-                replaced = True
-                break
-        if not replaced:
-            warnings.append(
-                "找不到模板里的 `global $emit_%d = 1`（或带 fluid_ 前缀的同一行）："
-                "发射器 %d 的开关初值没能写成 0" % (i, i))
+    # ---- 每发射器开关：`global` + 开场只赋一次（不用 persist，理由见下） ----------------------
+    # 3Dmigoto 把 persist 变量的最后运行值记进 d3dx_user.ini，下次加载**覆盖** ini
+    # 初值。主人的口径是「每次进游戏的起点 = 面板值」，所以在初始化块里再用
+    # `$fluid_emit_seeded` 这个一次性标志把面板值盖回去；本场内的按键切换
+    # 仍会一直生效到退出（seeded 置 1 之后不再写）。
+    enables_list = [1 if int(v) == 1 else 0
+                    for v in list(enables or ())[:EMITTER_CONTROL_MAX]]
+    if enables_list:
+        if global_lines:
+            global_lines = [EMITTER_CONTROL_MARKER] + global_lines
+        else:
+            global_lines = [EMITTER_CONTROL_MARKER]
+        global_lines.append("; 开场赋一次面板值用的标志（0 = 还没赋过）")
+        global_lines.append("global $fluid_emit_seeded = 0")
+
+        def _persist_line(match):
+            index = int(match.group(2))
+            if index >= len(enables_list):
+                # 不存在的发射器：**必须显式写 0**。模板里 `$fluid_emit_3..7 = 1`
+                # 是「永久通行证」——槽里记的 id 越界到 3..7 时，那个槽会一直开着
+                # （幽灵发射器，2026-11-05 查了很久）。靠「没用到就不写」不行。
+                return "%sglobal $fluid_emit_%d = 0" % (match.group(1), index)
+            return "%sglobal $fluid_emit_%d = %d" % (
+                match.group(1), index, enables_list[index])
+
+        text, count = _EMIT_PERSIST_RE.subn(_persist_line, text)
+        if count <= 0:
+            warnings.append("找不到模板里的 `global $emit_N = 1`，开关没能改成面板值")
+        match = _SEED_ANCHOR.search(text)
+        if match is None:
+            warnings.append("找不到模板里的 `$initialized = 1`，开场赋值没生成")
+        else:
+            indent = match.group(1)
+            seed = ["%sif !$fluid_emit_seeded" % indent]
+            for i, value in enumerate(enables_list):
+                seed.append("%s    $fluid_emit_%d = %d" % (indent, i, value))
+            seed.append("%s    $fluid_emit_seeded = 1" % indent)
+            seed.append("%sendif" % indent)
+            text = _insert_after_match(text, match, [""] + seed)
+    elif global_lines:
+        global_lines = [EMITTER_CONTROL_MARKER] + global_lines
 
     if global_lines:
         match = _EMITTER_GLOBALS_ANCHOR.search(text)
@@ -1252,6 +1308,23 @@ def apply_emitter_controls(text, speeds, field_switches=None, enables=()):
         else:
             text = _insert_after_match(text, match, write_lines)
     return text, warnings
+
+
+# ---------------------------------------------------------------------------
+# 碰撞/可见性「排除列表」（按 draw 的 IB 哈希）
+# ---------------------------------------------------------------------------
+#: 列表里的每一项 = 一次 draw 的 IB 哈希。空列表**什么都不生成**（导出逐字节不变）。
+#: 号段：`x53` = 掩码生效（shader 读它决定要不要采样，见 `fluid/ExcludeMaskRead.hlsl`）。
+#: 每项一个开关变量 `$fluid_exclude_N`（由 ini 的 if 消费，shader 不需要）。
+_HASH_RE = re.compile(r"^[0-9a-fA-F]{8,16}$")
+
+
+def _section(name, body):
+    return "[%s]\n%s\n" % (name, "\n".join(body))
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1490,3 +1563,32 @@ def apply_viscosity(text, viscosity):
         lambda m: "global $%s = %s" % (m.group(1), _fmt_float(viscosity)),
         text,
     )
+
+
+EMIT_FLAGS_LANE = "x60"
+
+
+def apply_emit_flags(text, hard_off=True, tail=True):
+    """按面板写 ``x60`` 位掩码：bit0 = 关掉即清空该槽，bit1 = 尾流。
+
+    两者**默认都是开**：都保持默认时不写任何行（产物与旧版逐字节相同）；
+    一旦有一个关掉，就写 ``x60 = <mask>``，由 ``FluidSolver.hlsl`` 的
+    ``EMITFLAGS`` 解码（``IniParams[60].x``，0 视为默认 3）。
+
+    返回 ``(text, warnings)``。
+    """
+    warnings = []
+    mask = (1 if hard_off else 0) | (2 if tail else 0)
+    if mask == 3:
+        return text, warnings
+    anchor = r"(?m)^([ \t]*)x47[ \t]*=[ \t]*\$fluid_gravity_scale[ \t]*"
+    if not re.search(anchor, text):
+        warnings.append("找不到 `x47 = $fluid_gravity_scale`，x60 未写")
+        return text, warnings
+    text = re.sub(
+        anchor,
+        lambda m: m.group(0) + "\n" + m.group(1) + "x60 = %d" % mask,
+        text,
+        count=1,
+    )
+    return text, warnings

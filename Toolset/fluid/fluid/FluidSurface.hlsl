@@ -47,7 +47,9 @@ bool streamNeighbor(uint index,float3 root,float age,float3 center,out float3 po
  FluidParticle q=particles[index];
  position=root+q.positionAge.xyz;
  return q.velocityAlive.w>.5&&all(isfinite(q.positionAge))
-  &&abs(q.positionAge.w-age)<3*PRIMARY_LIFETIME/BASE_PRIMARY_COUNT
+  // nhd-pick: the age window follows the emitter's own lifetime, same lane as the
+ // solver's schedule (PRIMARY_LIFETIME is only the 0/unwritten fallback now).
+ &&abs(q.positionAge.w-age)<3*slotLifetime(primarySlot(index))/BASE_PRIMARY_COUNT
   &&renderGuides[index].longLane.w>=-2&&distance(position,center)<BRIDGE_MAX;
 }
 Varying main(uint id:SV_VertexID){
@@ -125,6 +127,24 @@ Varying main(uint id:SV_VertexID){
  o.world=world;o.center=center;o.axisScale=axisScale;o.radiusFade=float2(radius,fade);
  o.mode=valid?(puddle?MODE_DISC:MODE_ELLIPSOID):MODE_NONE;
  o.liquid=slotLiquid(owner);
+ // FLUID_STAGEPROBE: x63 开关（默认关）。**单通道**编码类别号：r = id*1e5，
+ // 合成端用 r/alpha/1e5 解出「按厚度加权的类别均值」，再取整 —— 这样两类叠加
+ // 不会出现「红+蓝=品红」，只会归到占多数的那一类。
+ if(IniParams[63].x>.5){
+  // 类别码要看**真实取值**：Splash 里 w=2 空中子滴、w=3 水洼转移、w=4 地面水洼
+  // （`floorPuddle(w)` 只认 4）。早先把 `w>=2` 全算成「碰撞次生」⇒ 水洼转移的粒子
+  // 被画成黄点，水洼池每帧补位就闪——这就是「黄点一直闪」。
+  float _id;
+  if(!primary){
+   if(floorPuddle(p.densityBirth.w) || p.densityBirth.w>2.5)_id=5;   // 紫=地面水洼（w=4 / w=3 转移）
+   else if(p.predictedLambda.w>1.5)_id=6;                            // 青=附着
+   else if(p.densityBirth.w>=1.5)_id=4;                              // 黄=空中碰撞次生（w=2）
+   else _id=3;                                                       // 蓝=喷口雾化
+  }else{
+   _id=(p.positionAge.w<0.02)?1:2;                                   // 红=出生帧 / 橙=主粒子其它
+  }
+  o.liquid=float4(_id*1e5,0,0,max(o.liquid.w,1e-5));
+ }
  // Airborne splashes and a stream that has broken up stay separate drops,
  // which FluidSmooth leaves nearly unfiltered.
  o.tag=owner;

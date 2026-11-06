@@ -156,6 +156,20 @@ float4 main(ScreenVarying i):SV_Target{
  // ground turns brown. Each character's liquid brings its own absorption
  // (Slots.hlsl slotLiquid); where several overlap they mix by thickness.
  float4 mixed=fluidColor.Load(int3(pixel,0));
+ // FLUID_STAGEPROBE: 单通道类别号（r = id*1e5，alpha = 权重）⇒ 加权均值后取整。
+ // x63 关（默认）时永不进入。
+ if(IniParams[63].x>.5 && mixed.a>1e-6){
+  float _cid=mixed.r/mixed.a/1e5;
+  if(_cid>0.5){
+   int k=(int)round(_cid);
+   if(k==1)return float4(6,0,0,1);      // 红：出生帧
+   if(k==2)return float4(6,3,0,1);      // 橙：主粒子其它
+   if(k==3)return float4(0,0,6,1);      // 蓝：喷口雾化
+   if(k==4)return float4(6,6,0,1);      // 黄：碰撞事件次生
+   if(k==5)return float4(6,0,6,1);      // 紫：水洼
+   if(k==6)return float4(0,6,6,1);      // 青：附着
+  }
+ }
  float mixedDepth=fluidAbsorptionDepth.Load(int3(pixel,0));
  float depthMeters=max(look.w,.00002);
  float3 absorb=-log(max(saturate(look.rgb),.02))/depthMeters;

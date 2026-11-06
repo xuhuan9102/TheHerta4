@@ -33,8 +33,12 @@ static const uint N=PRIMARY_COUNT;
 static const float PI=3.14159265359;
 static const float3 G=float3(0,-9.81,0);
 // nhd-pick: IniParams[47].x scales gravity (1 = reference 9.81 m/s^2).
-// 负值 = 反重力（火焰/蒸汽往上飘）
-#define GSCALE (abs(IniParams[47].x)>1e-6?IniParams[47].x:1.0)
+// 负值 = 反重力（火焰/蒸汽往上飘）。
+// nhd-pick: .z is the sentinel (Probe.ini writes z47 = 1 with x47). Without it,
+// a panel value of 0 and "an old mod never wrote 47.x" are indistinguishable --
+// both read 0 -- so 0 silently fell back to full gravity. With the sentinel the
+// value is used verbatim: 0 = no gravity at all, negatives = anti-gravity.
+#define GSCALE (IniParams[47].z>.5 ? IniParams[47].x : 1.0)
 float poly6(float r2){float h2=H*H;if(r2>=h2)return 0;float q=1-r2/h2;return 315.0/(64*PI*H*H*H)*q*q*q;}
 float3 gradient(float3 d){float r=length(d);if(r<1e-7||r>=H)return 0;float q=1-r/H;return -45.0/(PI*H*H*H*H)*q*q*d/r;}
 float laplacian(float r){return r<H?45.0/(PI*H*H*H*H*H)*(1-r/H):0;}
@@ -96,7 +100,8 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
  uint slot=primarySlot(i),inSlot=i%PRIMARY_PER_SLOT,segment=slot*PRIMARY_PER_SLOT,fs=slot*4;
 #ifdef PHASE_PREDICT
  // Stratified, irregular births: fixed timestamps never stretch the age of live fluid.
- float lifetime=PRIMARY_LIFETIME;
+ // nhd-pick: per-emitter lifetime ($fluid_emitter_lifetime_N); 0 keeps 1.1 s.
+ float lifetime=slotLifetime(slot);
  float cycle=floor(STEP.y/lifetime);
  uint emissionSlot=inSlot%BASE_PRIMARY_COUNT;
  bool reserve=inSlot>=BASE_PRIMARY_COUNT;
@@ -111,7 +116,10 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
  // This same rule covers first activation, reactivation, and teleport recovery.
  bool trickle=slotTrickle(slot);
  bool visOn=slotVisOn(slot);
- bool emitting=(trickle?(IniParams[241].y>.5 && slotSeen(slot)):(visOn?slotVisActive(slot):(IniParams[237].x>.5 && pulse[3].w>.5 && slotSeen(slot))))&&slotEmitOn(slot);
+ // nhd-pick: 出生门与死亡门**共用同一个值**（2026-11-05：两处各调一次 slotEmitOn，
+ // 出生读到越界 id 的 1、死亡读到有效 id 的 0 ⇒ 一帧生一帧死 = 闪）。只算一次。
+ bool emitOn=slotEmitOn(slot);
+ bool emitting=(trickle?(IniParams[241].y>.5 && slotSeen(slot)):(visOn?slotVisActive(slot):(IniParams[237].x>.5 && pulse[3].w>.5 && slotSeen(slot))))&&emitOn;
  float drive=slotDrive(slot);
  bool initialized=p.densityBirth.w>.5;
  bool birth=emitting && age>=0 && age<DT;
@@ -125,7 +133,13 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
  if(!birth){
   age=p.positionAge.w+DT;
   float trickleLife=slots[slot*SLOT_ROWS+15].x;
-  if(age>=((trickle&&trickleLife>0)?trickleLife:lifetime) || teleport || !slotLive(slot))p.velocityAlive.w=0;
+ // nhd-pick: 「关了就别留尾」的两个开关（位掩码 IniParams[60].x；0 = 默认全开）。
+ // bit0 = 关闭即清空该槽（默认 1），bit1 = 允许尾流 tailEmission（默认 1）。
+ // 导出只在「与默认不同」时写这个 lane，所以默认档产物与旧版逐字节相同，
+ // 这里 0 就按 1|2 解析。
+ #define EMITFLAGS (IniParams[60].x>1e-6 ? (uint)IniParams[60].x : 3u)
+ if(age>=((trickle&&trickleLife>0)?trickleLife:lifetime) || teleport || !slotLive(slot)
+    || (((EMITFLAGS&1u)!=0u) && !emitOn))p.velocityAlive.w=0;
  }
  // Root-relative storage is only a floating origin. Old fluid never receives emitter velocity.
  float frameTime=STEP.y+(STEP.z<.5?DT:0);
@@ -146,7 +160,8 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
   // nhd-pick: a per-emitter speed ($fluid_emitter_speed_N, IniParams[45]/[48])
   // wins over the global one; 0 or an unwritten lane keeps the global path.
   {float ls=fluidLaunchSpeedOf(IniParams[46]);
-   float es=emitterSpeed(slotEmitterId(slot));
+   // 越界 id 不许回落到 slot 号（会读到别人的速度 lane）。
+   float es=slotEmitterValid(slot)?emitterSpeed(slotEmitterId(slot)):0;
    if(es>0)nozzle.speed=es;else if(ls>0)nozzle.speed=ls;}
   // The centerline stays down. Pressure widens a symmetric fore/aft sheet.
   float3 axis=-up;
@@ -201,7 +216,8 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
    branchTag=scatterBlend>.65?-3:(scatterBlend>.05?0:(burstTime<scatterStart?2:3));
    nozzle.speed*=lerp(1,.75+.75*hash1(i*31.3+t*23.7),scatterBlend*(1-smoothstep(0,.45,saturate((pulse[2].x-1)/.85))));
   }
-  bool tailEmission=trickle || (!visOn && pulse[5].x<.75);
+  // nhd-pick: bit1 关掉时不要尾流（`TAIL_ON` 见上面 EMITFLAGS）。
+  bool tailEmission=((EMITFLAGS&2u)!=0u) && (trickle || (!visOn && pulse[5].x<.75));
   if(tailEmission){
    nozzle.sheetAmount=0;frozenMode=-1;branchTag=2;
    birthSheetFrame[i]=float4(slitLong,frozenMode);
@@ -465,7 +481,11 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
   float3 contact,normal;
   if(collideFluid(slot,p.positionAge.xyz,p.predictedLambda.xyz,velocity,fluidRadiusOf(IniParams[44]),contact,normal)){
    float impact=max(0,-dot(velocity,normal));
-   if(impact>.15 || adhesionChance(velocity,normal)>.001){
+   // nhd-pick: 出生后 minAge 秒内不产生飞溅（x62=值、y62=有效位；未写回落 0.05 s）。
+   // 用秒而不是帧：帧率与子步数都不影响「刚诞生那几帧不溅」。
+   float splashMinAge=(IniParams[62].y>.5)?IniParams[62].x:0.167;
+   if(p.positionAge.w<splashMinAge)impact=0;
+   if(impact>.15 || (impact>0 && adhesionChance(velocity,normal)>.001)){
     // Impact coherence comes from nearby parcels on the same moving path,
     // not from the selected strength. Dispersed rain therefore splashes less.
     float alignedSupport=0;
@@ -485,7 +505,7 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
      uint seed=asuint(p.densityBirth.y)^(i*747796405u)^asuint(STEP.y);
      // Pack 16 random bits + 8 coherence bits in an exactly representable float.
      uint packed=(seed&0xffffu)|((uint)round(coherence*255)<<16);
-     e.incoming=float4(velocity,float(packed));e.slot=float4(slot,0,0,0);collisionEvents[eventId]=e;}
+     e.incoming=float4(velocity,float(packed));e.slot=float4(slot,slotEmitOn(slot)?1.0:0.0,0,0);collisionEvents[eventId]=e;}
    }
    p.velocityAlive.w=0;p.predictedLambda.xyz=contact;
   }

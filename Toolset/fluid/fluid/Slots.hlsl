@@ -51,7 +51,14 @@ uint slotEmitterId(uint s){
 // out in arrival order, so slot 2 can carry emitter 0 and gating by slot would
 // switch the wrong stream. Every gate starts at 1, so a mod that binds no keys
 // behaves exactly as it did before the gates existed.
+// id 有效 = 原始 float 落在 [0, $fluid_slot_count)（IniParams[253].z）。
+// 用 float 比较，不做 (uint) 强转：负数/NaN 会变成巨大值再 `&3` 撞到 lane 3。
+bool slotEmitterValid(uint s){
+ float raw=slots[s*SLOT_ROWS+4].y;
+ return raw>=0.0 && raw<IniParams[253].z;
+}
 bool slotEmitOn(uint s){
+ if(!slotEmitterValid(s))return false;
  uint id=slotEmitterId(s);
  float4 g=(id<4u)?IniParams[42]:IniParams[43];
  return g[id&3u]>0.5;
@@ -63,6 +70,16 @@ float emitterSpeed(uint id){
  float4 v=(id<4u)?IniParams[45]:IniParams[48];
  float s=v[id&3u];
  return s>0?s:0;
+}
+// Per-emitter stream lifetime in seconds: 51 packs emitters 0-3 and 52 packs 4-7
+// ($fluid_emitter_lifetime_N). 0 / an unwritten lane keeps FLUID_LIFETIME_DEFAULT
+// (1.1 s), exactly like the old compiled constant; 0 s is never a legal value
+// because FluidSolver divides the emission schedule by it.
+float slotLifetime(uint s){
+ if(!slotEmitterValid(s))return FLUID_LIFETIME_DEFAULT;
+ uint id=slotEmitterId(s);
+ float4 v=(id<4u)?IniParams[51]:IniParams[52];
+ return fluidLifetimeOf(float4(v[id&3u],0,0,0));
 }
 bool slotLive(uint s){return slots[s*SLOT_ROWS+SLOT_ROOT].w>.5;}
 float3 slotRoot(uint s){return slots[s*SLOT_ROWS+SLOT_ROOT].xyz;}

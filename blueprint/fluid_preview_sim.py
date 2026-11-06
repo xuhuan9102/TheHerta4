@@ -61,7 +61,12 @@ def _nu():
 
 
 def set_physics(gravity_scale=None, viscosity=None):
-    """设置重力倍率与粘度覆盖值（0 或 None = 用默认）。"""
+    """设置重力倍率与粘度覆盖值。
+
+    ``None`` = 不改（保持上一次的值）；``0`` = **真的零重力**（与修后的游戏
+    ``GSCALE`` 同义：0 是合法值，不是「用默认」—— 这一行以前写错了）。
+    粘度同理：``<=0`` 表示沿用 profile 里的值（那个 0 语义是有意的）。
+    """
     global _GRAVITY_SCALE, _VISCOSITY_OVERRIDE
     if gravity_scale is not None:
         _GRAVITY_SCALE = float(gravity_scale)   # 允许负值：负 = 反重力（火焰上飘）
@@ -496,22 +501,42 @@ def force_field_falloff(r2, r2_max, power):
     return t ** max(float(power), 1.0)
 
 
-def force_field_accel(points, fields, scale=1.0):
-    """``ForceField.hlsl:39-83`` 的向量化版本，返回 ``(N, 3)`` 加速度。
+def force_field_accel(points, fields, scale=1.0, owners=None):
+    """``ForceField.hlsl:39-127`` 的向量化版本，返回 ``(N, 3)`` 加速度。
 
     逐项对齐着色器：
 
+    * **归属**：每个力场带 ``owner``（发射器下标），只有 ``owners[粒子] == field['owner']``
+      的粒子才吃它。来源: ``ForceField.hlsl:87-89``
+      ``float owner=slotAnchor(slot,4).y; uint fieldSlot=(owner>=0&&owner<SLOTS?owner:slot);
+      uint base=fieldSlot*FORCE_FIELDS_PER_SLOT;`` —— 即"按发射器 id 取那一行块"。
+      预览里"粒子→发射器"就是 ``self.slot``（``node:3249`` 的 ``'slot': i`` → 本文件
+      ``_spawn_one`` 的 ``self.slot[idx] = e['slot']``）。
     * 中心 = 发射器原点 + right·U + up·V + forward·W（基与导出同一套）
     * 衰减 = ``(1 - r²/R²)^power``，`r ≥ R` 直接跳过
     * 定向 → 沿 axis；径向 → 背离中心（负强度即向内）；涡旋 → 绕轴切向
     * 最后整体乘全局增益（对应 ``IniParams[41].y``）
 
-    与 GPU 的唯一差别是浮点精度和遍历顺序；公式本身一致，所以预览里水被
-    力场推成什么样，游戏里就是什么样。
+    ``owners=None`` = 不做归属过滤（**只给"改之前"的复现与单测用**；Simulator 永远传
+    ``self.slot[idx]``）。
+
+    与 GPU 剩下的差异（都是可指的，不是"只有浮点精度"）：
+
+    1. **每力场开关掩码未实现**：``ForceField.hlsl:51-60 emitterFieldOn(id,k)`` 读
+       ``IniParams[41].w``（族开关）+ ``IniParams[58]/[59]``（每发射器一个 lane 的位掩码），
+       预览没有这两级。当前导出写 ``w41 = 0``（``probes/after3/three_onefield.ini:766``）
+       ⇒ shader 里 ``if(IniParams[41].w<.5)return true;`` 短接，掩码不参与，所以**今天无影响**；
+       一旦有人把 ``w41`` 打开，预览会多施力。
+    2. **叶形段**：``FluidSolver.hlsl:309-311`` 在闭式解上补一次常加速度，预览
+       ``:929`` 那一支直接跳过（``pred[guided] = p[guided]``）。
+    3. **出生那一拍**：游戏出生分支里一次都不调 ``forceFieldAccel``（第一次调用在
+       ``FluidSolver.hlsl:276``），预览对所有粒子一视同仁。
+    4. 浮点精度与遍历顺序。
     """
     total = np.zeros_like(points, dtype=np.float64)
     if not fields or abs(float(scale)) < 1e-12:
         return total
+    owner_of = None if owners is None else np.asarray(owners)
     for f in fields:
         if not f.get('enabled', True):
             continue
@@ -521,6 +546,11 @@ def force_field_accel(points, fields, scale=1.0):
         radius = float(f.get('radius', 0.0))
         if radius <= 1e-9:
             continue
+        if owner_of is not None:
+            # 缺 'owner' 的旧 dict 一律不施力（**跳过**，不是"不过滤"）：
+            # 宁可少推，也不要把别的发射器的水推歪。
+            if f.get('owner') is None:
+                continue
         center = np.asarray(f['center'], dtype=np.float64)
         axis = np.asarray(f['axis'], dtype=np.float64)
         axis_len = float(np.linalg.norm(axis))
@@ -533,6 +563,9 @@ def force_field_accel(points, fields, scale=1.0):
         r2 = np.einsum('ij,ij->i', d, d)
         r2_max = radius * radius
         mask = r2 < r2_max
+        if owner_of is not None:
+            # 来源: ForceField.hlsl:87-89 —— 只吃"本发射器那一行块"
+            mask = mask & (owner_of == int(f['owner']))
         if not mask.any():
             continue
         w = np.array([force_field_falloff(float(x), r2_max, f.get('falloff', 2.0))
@@ -582,6 +615,13 @@ class Simulator(object):
         self.radius = float(radius)
         self.emitters = list(emitters)
         self.force_fields = list(force_fields or ())
+        # 缺 `owner` 的力场一律不施力（见 force_field_accel 的过滤），这里把条数记下来，
+        # 免得"力场静默失效"。node:3265-3289 现在一定写 owner，这个计数正常是 0。
+        self.force_field_unscoped = sum(1 for f in self.force_fields
+                                        if f.get('owner') is None)
+        if self.force_field_unscoped:
+            print("[FluidSim][WARN] %d 个力场没有 owner（旧数据？），预览里它们不会施力"
+                  % self.force_field_unscoped)
         self.force_scale = float(force_scale)
         self.ground_z = ground_z
         self.ground_normal = (
@@ -923,8 +963,11 @@ class Simulator(object):
         # 自然把这部分冲量带进速度，不需要再单独加一次。
         accel = _gravity()[None, :] * scale[:, None]
         if self.force_fields:
+            # 归属按**发射器下标**：`self.slot[idx]` 是 node:3249 写下的 `'slot': i`，
+            # 不是 3Dmigoto 的运行期槽号。来源: ForceField.hlsl:87-89 按 owner 取行块。
             accel = accel + force_field_accel(p, self.force_fields,
-                                              self.force_scale).astype(np.float32)
+                                              self.force_scale,
+                                              owners=self.slot[idx]).astype(np.float32)
         pred = p + v * dt + accel * (dt * dt)
         pred[guided] = p[guided]     # 叶形段已由解析轨迹定位置，别再积分一次
 
