@@ -16,6 +16,7 @@ def _material_lookup_scope(method):
 import os
 import glob
 import hashlib
+import math
 import re
 from collections import OrderedDict
 import shutil
@@ -47,6 +48,23 @@ _TTL_CALL_LINE = "run = CommandList{}TTL{}Draw".format(chr(92), chr(92))
 # 必须写在 if 条件块之外：TTLib 的 CommandListFrameReset 每帧把 $V 重置为 1.0，
 # 只有绘制前重新赋值才生效；不需要提亮的段落手动删掉这一行即可。
 _TTL_DEFAULT_BRIGHTNESS = "1.5"
+# ── TTL 层级（A 的生成端）与层权重（C）──────────────────────────────────
+# 显式层号/权重通过物体名后缀指定，互不依赖、顺序无关（Body_TTL层1_TTL权重0.6 也合法）。
+# 层号是绝对序号：0 是默认单层原路径，合法范围 0..4（5 层），层数见 _TTL_LAYER_COUNT。
+# 层号非法/越界一律抛 ValueError（不夹到上限、不回退第 0 层，导出失败）；
+# 权重非法/越界只告警并回退 1.0。
+_TTL_LAYER_MAX_INDEX = 4
+_TTL_LAYER_COUNT = _TTL_LAYER_MAX_INDEX + 1
+_TTL_LAYER_SUFFIX_RE = re.compile(r'_TTL层([^\s_]*)', re.IGNORECASE)
+_TTL_WEIGHT_SUFFIX_RE = re.compile(r'_TTL权重([^\s_]*)', re.IGNORECASE)
+# 自动层号优先由实际网格的局部表面内外关系决定；缺少有效面时，按包围盒 8 角
+# 到骨架世界原点的水平最远距离 r（米）做全局排序 + 相邻聚类：相邻差 <= gap 归同一层，
+# 超过 gap 才进下一层。真机模组量过：TTL 物体 r 落在 0.10–1.0m，场景包围盒
+# （地板/布景）不可靠，所以不用角色高度归一化。
+# 0.005m（5mm）这个聚类阈值只在这里定义，别在别处复制。
+_TTL_AUTO_LAYER_GAP = 0.005
+# 超过这个半径视为包围盒/骨架数据异常（正常 TTL 物体到不了 3m）。
+_TTL_AUTO_LAYER_MAX_RADIUS = 3.0
 # ── EFMI 半透明（EFMITTL）──────────────────────────────────────────────
 # 末地 EFMI 没有 ZZMI/TTLib 那种「把这一笔改写成第二遍绘制」的 TTL；它的半透明由
 # 一个共享库接管**这一次**绘制：调用方只交出场参数（索引数 / 起始索引，可选 alpha
@@ -936,6 +954,12 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         material_name = str(getattr(material, "name", "") or "").strip()
         if not material_name:
             material_name = "Texture"
+        # TTLMap 材质名里的逐张透明度（TTLMap_0.75_衣服）只是参数，不是贴图身份：
+        # 算 stem 前剥掉，导出文件名 / Resource 名与 TTLMap_衣服 完全一致，
+        # 改数值不会多出一份贴图，也不会破坏按内容去重。
+        material_name = SSMTNode_PostProcess_MaterialBase._ttl_strip_alpha_token_from_material_name(
+            material_name
+        )
         stem = re.sub(r'[\r\n\[\]=<>:"/\\|?*\s]+', "_", material_name).strip()
         stem = SSMTNode_PostProcess_MaterialBase._replace_non_ascii_runs(stem)
         return stem.strip("._") or "Texture"
@@ -1579,6 +1603,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if not os.path.exists(source_path): return None
             os.makedirs(target_folder, exist_ok=True)
 
+            # stem 只从材质名派生，而 _material_resource_stem 已经剥掉 TTLMap 的
+            # 透明度 token：TTLMap_0.75_衣服 与 TTLMap_衣服 落到同一个 png / DDS 名。
             stem = SSMTNode_PostProcess_MaterialBase._material_resource_stem(material)
             _, file_extension = os.path.splitext(os.path.basename(source_path))
 
@@ -1790,7 +1816,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                                 texture_folder, all_sections,
                                 object_to_diffuse_swapkey, material_group_to_swapkey,
                                 swap_key_prefix, next_swap_key_num, used_swap_keys,
-                                resource_name_provider=None):
+                                resource_name_provider=None, alpha_line_provider=None):
         generated_lines = []
         # 细分进度：本批次要处理 len(matching_materials) 张贴图（下面每张都会进
         # ``create_resource_entry`` 上报一次），先累加进显示用的 total。
@@ -1877,6 +1903,13 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         if match:
                             generated_lines.append(f"    {brightness_param_name} = {match.group(1)}")
                     generated_lines.append(f"    {new_line}")
+                    # 逐张 alpha 必须写在各自的切档分支里，和贴图引用同一个 if：参数在
+                    # Draw 前最后一次赋值生效，写到块级只会让后一个分支的值覆盖前一个
+                    # （切档时透明度看起来"没反应"）。单材质没有分支，不走这里。
+                    if alpha_line_provider is not None:
+                        alpha_line = alpha_line_provider(material)
+                        if alpha_line:
+                            generated_lines.append(f"    {alpha_line}")
                     generated_lines.append("endif")
             generated_lines.append("")
 
@@ -2195,7 +2228,6 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 mesh_cond[i] = [if_idx for if_idx, _ in if_stack]
 
         for mesh_index, mesh_name in reversed(mesh_lines_info):
-            transparency_value = self._extract_transparency_value_from_mesh_name(mesh_name)
             obj = self.find_object_by_mesh_name(mesh_name, object_filter=self._ttl_material_candidate_filter())
             fx_materials = self.find_matching_materials(obj, "FXMap") if obj is not None else []
             ttl_materials = self.find_matching_materials(obj, "TTLMap") if obj is not None else []
@@ -2228,19 +2260,65 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 _LOG.info(f"      TTL: 跳过 '{mesh_name}'（块内无 drawindexed）")
                 continue
 
+            # 层号/权重是物体级属性：先解析物体名后缀，再让该物体所有 TTLMap 共用。
+            # 手写 `_TTL层N` 优先；没写才用导出前预扫描的表面关系/半径回退结果。
+            layer_index, layer_weight = self._ttl_layer_settings_for_mesh(mesh_name, obj)
+            auto_layer_comment = None
+            if not self._ttl_has_manual_layer(mesh_name, obj):
+                if not getattr(self, "_ttl_auto_layer_prepared", False):
+                    # 直接调用 process_texture_override_section 的测试/调用方没有
+                    # 走 execute_postprocess 的预扫描，这里补一次。
+                    self._ttl_prepare_auto_layers(all_sections)
+                assignment = getattr(self, "_ttl_auto_layer_assignments", {}).get(id(obj))
+                if assignment is None:
+                    # 预扫描没覆盖到（例如只处理了部分 section）：单物体兜底，
+                    # 能算出 r 就按第 0 层，算不出就落 0 并记清单。
+                    radius, reason = self._ttl_auto_radius_for_object(obj)
+                    if radius is None:
+                        layer_index = 0
+                        self._ttl_record_auto_skip(
+                            getattr(obj, "name", "") or mesh_name, reason, 0
+                        )
+                    else:
+                        layer_index = 0
+                        auto_layer_comment = self._ttl_auto_comment(0, radius, None)
+                else:
+                    layer_index, auto_layer_comment, _computed = assignment
+
             # 参数紧贴调用写、落在同一个分支里：TTLib 每笔 Draw 结尾会把 alpha /
             # mask_channel / mask_invert / 遮罩 / _1.._3 全部复位，所以下一个块必须
             # 自己重新交一遍，参数也就不能提到块外。
             param_lines = []
+            # 逐张透明度：材质名带合法 token 且是多材质时，alpha 交给每张自己的切档分支
+            # 去写（块级那条会盖掉分支里的值）。alpha 只看材质名 token，没有就是 1.0；
+            # 物体名的 _透明N 不参与（带 TTLMap 的物体不会再生成透明段）。
+            per_texture_alpha = any(self._ttl_material_has_alpha_token(m) for m in ttl_materials)
+            alpha_line_provider = None
+            if per_texture_alpha and len(ttl_materials) > 1:
+                def alpha_line_provider(material):
+                    alpha_text = self._ttl_alpha_for_material(material)
+                    alpha_text = self._ttl_apply_weight(alpha_text, layer_weight)
+                    alpha_var = self._ttl_ensure_alpha_variable(alpha_text, all_sections)
+                    return "${}TTL{}alpha = {}".format(chr(92), chr(92), alpha_var)
             ttl_ref_lines, next_swap_key_num = self.generate_material_lines(
                 ttl_materials, r"Resource\TTL\TransparencyTex", "TTLMap", obj, texture_folder, all_sections,
-                {}, material_group_to_swapkey, swap_key_prefix, next_swap_key_num, used_swap_keys)
+                {}, material_group_to_swapkey, swap_key_prefix, next_swap_key_num, used_swap_keys,
+                alpha_line_provider=alpha_line_provider)
             param_lines.extend(ttl_ref_lines)
             param_lines.append("${}TTL{}mask_channel = 3".format(chr(92), chr(92)))
             param_lines.append("${}TTL{}mask_invert = 1".format(chr(92), chr(92)))
-            alpha_value = transparency_value if transparency_value else "1.0"
-            alpha_var = self._ttl_ensure_alpha_variable(alpha_value, all_sections)
-            param_lines.append("${}TTL{}alpha = {}".format(chr(92), chr(92), alpha_var))
+            if alpha_line_provider is None:
+                alpha_value = self._ttl_alpha_for_material(ttl_materials[0])
+                alpha_value = self._ttl_apply_weight(alpha_value, layer_weight)
+                alpha_var = self._ttl_ensure_alpha_variable(alpha_value, all_sections)
+                param_lines.append("${}TTL{}alpha = {}".format(chr(92), chr(92), alpha_var))
+            # 自动层注释紧挨 layer_index 上一行；自动判到 0 也写注释（区分手动 0 /
+            # 算不出落 0）。layer_index 行**每一段都写**（含 0）：TTLib 的
+            # `$layer_index` 是共享变量，只在本段 Draw 结束时复位；显式写 0 让每段
+            # 自包含，不依赖上一段有没有跑到复位。
+            if auto_layer_comment:
+                param_lines.append(auto_layer_comment)
+            param_lines.append("${}TTL{}layer_index = {}".format(chr(92), chr(92), layer_index))
             param_lines.append("${}TTL{}V = {}".format(chr(92), chr(92), _TTL_DEFAULT_BRIGHTNESS))
 
             # 就地替换：块位置、mesh 注释、贴图绑定、if 结构都不动，只把这一笔绘制
@@ -2256,6 +2334,442 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             return str(float(str(alpha_value)))
         except (TypeError, ValueError):
             return str(alpha_value)
+
+    @classmethod
+    def _ttl_layer_token_from_name(cls, name):
+        """物体名后缀 ``_TTL层N`` → ``(layer_index, warning)``。
+
+        没有后缀返回 ``(None, None)``；有后缀时必须是 ``0.._TTL_LAYER_MAX_INDEX``
+        的整数，否则抛 ``ValueError``（不夹到上限、不回退第 0 层）。合法时返回
+        ``(该整数, None)``——第二个元素仅为兼容旧签名保留，层号不再产生告警文本。
+        """
+        raw_name = str(name or "")
+        match = _TTL_LAYER_SUFFIX_RE.search(raw_name)
+        if not match:
+            return None, None
+        token = match.group(1).strip()
+
+        def _invalid(reason):
+            return ValueError(
+                f"TTL 层级：物体名 '{raw_name}' 的后缀 '_TTL层{token}' {reason}；"
+                f"写的值是 '{token}'，合法范围是 0..{_TTL_LAYER_MAX_INDEX} 的整数；"
+                f"请改成 0..{_TTL_LAYER_MAX_INDEX} 或删掉后缀"
+            )
+
+        if not re.fullmatch(r'[+-]?\d+', token):
+            raise _invalid("不是整数")
+        value = int(token)
+        if not 0 <= value <= _TTL_LAYER_MAX_INDEX:
+            raise _invalid("超出范围")
+        return value, None
+
+    @classmethod
+    def _ttl_weight_token_from_name(cls, name):
+        """物体名后缀 ``_TTL权重W`` → ``(weight, warning)``。
+
+        没有后缀返回 ``(None, None)``；合法 ``0..1`` 小数（逗号也当小数点）返回
+        float，非法/越界返回 1.0 并带一条告警文本。
+        """
+        raw_name = str(name or "")
+        match = _TTL_WEIGHT_SUFFIX_RE.search(raw_name)
+        if not match:
+            return None, None
+        token = match.group(1).strip()
+
+        def _ignored_warning(reason):
+            return (
+                f"TTL 层权重：物体名 '{raw_name}' 的后缀 '_TTL权重{token}' {reason}，"
+                "要求 0~1 的小数；已按 1.0 处理"
+            )
+
+        if not re.fullmatch(r'[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)', token):
+            return 1.0, _ignored_warning("不是数字")
+        try:
+            value = float(token.replace(",", "."))
+        except (TypeError, ValueError):
+            return 1.0, _ignored_warning("不是数字")
+        if not 0.0 <= value <= 1.0:
+            return 1.0, _ignored_warning("超出范围")
+        return value, None
+
+    def _ttl_layer_settings_for_mesh(self, mesh_name, obj=None):
+        """一个物体的 ``(layer_index, weight)``：以物体名为准，缺省 ``(0, 1.0)``。
+
+        层与权重是**物体级**属性：一个物体多张 TTLMap 材质共用同一组值。先看 mesh
+        锚点名（导出产物里就是物体名），没有再退回 ``obj.name``；两边都有时以 mesh
+        锚点为准。层号非法/越界抛 ``ValueError``，不在这里捕获（导出失败）；权重的
+        告警在这里统一写一次日志。
+        """
+        from ..utils.log_utils import LOG as _LOG
+
+        names = [str(mesh_name or "")]
+        obj_name = str(getattr(obj, "name", "") or "")
+        if obj_name and obj_name not in names:
+            names.append(obj_name)
+
+        layer_index, weight = 0, 1.0
+        found_layer = found_weight = False
+        warnings = []
+        for name in names:
+            if not name:
+                continue
+            if not found_layer:
+                # 层号解析失败会抛 ValueError，由调用点冒泡（导出失败）。
+                parsed, _warning = self._ttl_layer_token_from_name(name)
+                if parsed is not None:
+                    layer_index, found_layer = parsed, True
+            if not found_weight:
+                parsed, warning = self._ttl_weight_token_from_name(name)
+                if parsed is not None:
+                    weight, found_weight = parsed, True
+                    if warning:
+                        warnings.append(warning)
+            if found_layer and found_weight:
+                break
+        for warning in warnings:
+            _LOG.warning(f"      TTL: {warning}")
+        return layer_index, weight
+
+    @classmethod
+    def _ttl_has_manual_layer(cls, mesh_name, obj=None):
+        """物体名（mesh 锚点优先）是否显式写了 ``_TTL层N``。
+
+        手动后缀优先于自动判定；层 0 也算显式指定（不会再去自动聚类）。
+        非法后缀照旧从 ``_ttl_layer_token_from_name`` 抛 ``ValueError``。
+        """
+        names = [str(mesh_name or "")]
+        obj_name = str(getattr(obj, "name", "") or "")
+        if obj_name and obj_name not in names:
+            names.append(obj_name)
+        return any(
+            cls._ttl_layer_token_from_name(name)[0] is not None
+            for name in names
+            if name
+        )
+
+    @classmethod
+    def _ttl_auto_cluster_layers(cls, entries):
+        """全局排序 + 相邻聚类：``[(r, name), ...]`` → ``[(name, layer, gap, capped)]``。
+
+        先按 ``(r, name)`` 升序保证确定性；层号从 0 起，相邻 r 差
+        ``<= _TTL_AUTO_LAYER_GAP`` 归同一层，否则下一层。超过
+        ``_TTL_LAYER_MAX_INDEX`` 的簇落回上限层并标记 ``capped``（调用方负责
+        WARN/清单）。返回值与排序后的输入一一对应。
+        """
+        ordered = sorted((float(radius), str(name or "")) for radius, name in entries)
+        result = []
+        cluster = 0
+        previous = None
+        for radius, name in ordered:
+            if previous is None:
+                gap = None
+            else:
+                # 先消掉浮点尾差：0.105-0.10 必须算 0.005（边界归同一层）。
+                gap = round(radius - previous, 9)
+                if gap > _TTL_AUTO_LAYER_GAP:
+                    cluster += 1
+            layer = min(cluster, _TTL_LAYER_MAX_INDEX)
+            result.append((name, layer, gap, cluster > _TTL_LAYER_MAX_INDEX))
+            previous = radius
+        return result
+
+    @staticmethod
+    def _ttl_auto_comment(layer_index, radius, gap):
+        """自动层注释：首个物体 ``gap=-``，其余带与上一个物体的 r 差。"""
+        if gap is None:
+            return f"; auto-layer: {layer_index} (r={radius:.3f}m, gap=-)"
+        return (
+            f"; auto-layer: {layer_index} (r={radius:.3f}m, "
+            f"gap={gap:.3f} from prev)"
+        )
+
+    @staticmethod
+    def _ttl_world_xy(matrix_world, corner):
+        """bound_box 局部角点 → 世界 XY。
+
+        不用 mathutils：Blender 的 ``Matrix`` 与测试里的 list-of-lists 都支持
+        ``matrix[i][j]`` 索引，纯算术即可，fake-bpy 环境也能跑。
+        """
+        x, y, z = float(corner[0]), float(corner[1]), float(corner[2])
+        return (
+            float(matrix_world[0][0]) * x
+            + float(matrix_world[0][1]) * y
+            + float(matrix_world[0][2]) * z
+            + float(matrix_world[0][3]),
+            float(matrix_world[1][0]) * x
+            + float(matrix_world[1][1]) * y
+            + float(matrix_world[1][2]) * z
+            + float(matrix_world[1][3]),
+        )
+
+    def _ttl_auto_radius_for_object(self, obj):
+        """包围盒 8 角到骨架世界原点的最大水平距离 ``r``（米）。
+
+        返回 ``(radius, None)`` 或 ``(None, reason)``；不写日志、不记清单，
+        由 ``_ttl_prepare_auto_layers`` 统一处理。
+        """
+        if obj is None:
+            return None, "找不到物体"
+        try:
+            bound_box = obj.bound_box
+        except AttributeError:
+            bound_box = None
+        try:
+            corners = list(bound_box) if bound_box is not None else []
+        except (TypeError, ValueError):
+            corners = []
+        if len(corners) < 8:
+            return None, "没有可用的 bound_box（需要 8 个角点）"
+        try:
+            matrix_world = obj.matrix_world
+        except AttributeError:
+            matrix_world = None
+        if matrix_world is None:
+            return None, "没有 world 变换矩阵"
+
+        # 竖直轴取骨架对象的世界原点；没有骨架就用世界原点。
+        try:
+            armature = obj.find_armature()
+        except (AttributeError, RuntimeError):
+            armature = None
+        ax = ay = 0.0
+        if armature is not None:
+            try:
+                arm_matrix = armature.matrix_world
+                ax = float(arm_matrix[0][3])
+                ay = float(arm_matrix[1][3])
+            except (AttributeError, TypeError, ValueError, IndexError):
+                # 骨架存在但矩阵不可读：当成没有骨架（世界原点），不阻断导出。
+                ax = ay = 0.0
+
+        try:
+            radius = max(
+                math.hypot(world_x - ax, world_y - ay)
+                for world_x, world_y in (
+                    self._ttl_world_xy(matrix_world, corner) for corner in corners
+                )
+            )
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None, "包围盒坐标无法换算到世界空间"
+        if not math.isfinite(radius) or radius < 0.0 or radius > _TTL_AUTO_LAYER_MAX_RADIUS:
+            return None, (
+                f"r={radius:.3f}m 超出可信范围 "
+                f"0~{_TTL_AUTO_LAYER_MAX_RADIUS:.1f}m"
+            )
+        return radius, None
+
+    def _ttl_record_auto_skip(self, name, reason, fallback_layer):
+        """自动层异常：WARN + 物体名进 ``_ttl_auto_layer_skipped``（去重）。"""
+        from ..utils.log_utils import LOG as _LOG
+
+        display = str(name or "")
+        skipped = getattr(self, "_ttl_auto_layer_skipped", None)
+        if skipped is None:
+            skipped = []
+            self._ttl_auto_layer_skipped = skipped
+        if display and display not in skipped:
+            skipped.append(display)
+        _LOG.warning(
+            f"      TTL 自动层级：物体 '{display}' {reason}；"
+            f"已按第 {fallback_layer} 层处理"
+        )
+
+    def _ttl_prepare_auto_layers(self, sections):
+        """导出前预扫描：优先检测实际表面内外关系，结果按 ``id(obj)`` 缓存。
+
+        只收「有 TTLMap 材质、且没有 `_TTL层N`」的物体；同一物体出现在多个
+        section 只算一次（按 id 去重）。手动物体不参与推断。有效网格按局部
+        表面约束分层，互不叠放的结构复用层号；无有效网格才做半径聚类。算不出 r 的
+        物体记 ``(0, None, False)``（层号仍写 0，但没有自动注释），超过 5 层的
+        记 ``(4, 注释, True)`` 并进 ``_ttl_auto_layer_skipped``。
+        """
+        assignments = {}
+        self._ttl_auto_layer_assignments = assignments
+        self._ttl_auto_layer_prepared = True
+
+        candidates = OrderedDict()
+        for section_lines in (sections or {}).values():
+            if not isinstance(section_lines, (list, tuple)):
+                continue
+            for line in section_lines:
+                mesh_name = self.extract_mesh_name(line)
+                if not mesh_name:
+                    continue
+                obj = self.find_object_by_mesh_name(
+                    mesh_name, object_filter=self._ttl_material_candidate_filter()
+                )
+                if obj is None:
+                    continue
+                key = id(obj)
+                record = candidates.get(key)
+                if record is None:
+                    record = [obj, []]
+                    candidates[key] = record
+                if mesh_name not in record[1]:
+                    record[1].append(mesh_name)
+
+        entries = []
+        for key, (obj, mesh_names) in candidates.items():
+            if any(self._ttl_has_manual_layer(mesh_name, obj) for mesh_name in mesh_names):
+                continue
+            name = str(getattr(obj, "name", "") or mesh_names[0])
+            radius, reason = self._ttl_auto_radius_for_object(obj)
+            if radius is None:
+                assignments[key] = (0, None, False)
+                self._ttl_record_auto_skip(name, reason, 0)
+                continue
+            entries.append((radius, name, key))
+
+        surface_objects = [
+            (name, candidates[key][0]) for _radius, name, key in entries
+            if getattr(getattr(candidates[key][0], "data", None), "vertices", None) is not None
+        ]
+        surface_layers, surface_issues = {}, {}
+        if surface_objects:
+            from .ttl_surface_layers import infer_surface_layers
+            surface_layers, surface_issues = infer_surface_layers(surface_objects)
+        fallback_entries = []
+        for radius, name, key in entries:
+            if name not in surface_layers:
+                fallback_entries.append((radius, name, key))
+                continue
+            raw_layer = surface_layers[name]
+            layer = min(raw_layer, _TTL_LAYER_MAX_INDEX)
+            for issue in surface_issues.get(name, ()):
+                self._ttl_record_auto_skip(name, issue, layer)
+            if raw_layer > _TTL_LAYER_MAX_INDEX:
+                self._ttl_record_auto_skip(name, f"表面层号超过 {_TTL_LAYER_MAX_INDEX}", layer)
+            assignments[key] = (layer, f"; auto-layer: {layer} (surface; r={radius:.3f}m)", True)
+
+        entries = sorted(fallback_entries, key=lambda item: (item[0], item[1]))
+        clustered = self._ttl_auto_cluster_layers(
+            [(radius, name) for radius, name, _key in entries]
+        )
+        for (radius, name, key), (_name, layer, gap, capped) in zip(entries, clustered):
+            if capped:
+                self._ttl_record_auto_skip(
+                    name,
+                    f"聚类层号超过 {_TTL_LAYER_MAX_INDEX}",
+                    _TTL_LAYER_MAX_INDEX,
+                )
+            assignments[key] = (
+                layer,
+                self._ttl_auto_comment(layer, radius, gap),
+                True,
+            )
+
+    @classmethod
+    def _ttl_apply_weight(cls, alpha_text, weight):
+        """层权重 C：``alpha × W``，W 为 1.0 时原样返回（保证默认产物逐字节不变）。"""
+        try:
+            if float(weight) == 1.0:
+                return alpha_text
+            weighted = float(str(alpha_text)) * float(weight)
+        except (TypeError, ValueError):
+            return alpha_text
+        return cls._ttl_normalize_alpha(round(weighted, 6))
+
+    @classmethod
+    def _ttl_alpha_token_from_material_name(cls, material_name):
+        """从 ``TTLMap_<数值>_<原贴图名>`` 材质名里取这一张的 TTL 透明度。
+
+        返回 ``(alpha_text, warning)``：
+
+        - ``alpha_text`` 是 ``str(float(...))`` 形式（和 [Constants] 里写的值一致），
+          没有数值 token / token 不合法时为 None；
+        - ``warning`` 是给日志的单行中文提示，合法或「本来就不是数值」时为 None。
+
+        只有**数值形态**的第二段才算想写数值，三种写法：小数（``0.75`` / ``0,5``，
+        逗号当小数点）、0/1 特例（``1`` / ``1.0`` / ``0``）、以及 ``%`` 结尾（写错，
+        按「百分比不支持」告警）。其余一律当普通材质名，**不告警也不剥**——
+        ``TTLMap_2009f0d6-1356-0`` 这种 UUID / 贴图编号、``TTLMap_12345``、
+        ``TTLMap_abc_衣服``、``TTLMap_0.75x`` 都不会被误判成参数。
+        """
+        name = str(material_name or "").strip()
+        prefix = "TTLMap_"
+        if name[:len(prefix)].lower() != prefix.lower():
+            return None, None
+
+        token, _separator, _tail = name[len(prefix):].partition("_")
+        if not token:
+            return None, None
+
+        is_decimal = re.fullmatch(r'[+-]?\d+[.,]\d+', token) is not None
+        is_unit = re.fullmatch(r'[+-]?(?:0|1)(?:[.,]0+)?', token) is not None
+        is_percent = token.endswith("%")
+        if not (is_decimal or is_unit or is_percent):
+            # 普通材质名（TTLMap_衣服 / TTLMap_2009f0d6-1356-0），不是想写数字。
+            return None, None
+
+        def _ignored_warning(reason):
+            return (
+                f"TTL 透明度：材质名 '{name}' 的第二段 '{token}' {reason}，"
+                f"要求 0~1 的小数；已忽略，按原行为"
+            )
+
+        if is_percent:
+            return None, _ignored_warning("写成了百分比")
+
+        alpha_text = token.replace(",", ".")
+        try:
+            value = float(alpha_text)
+        except (TypeError, ValueError):
+            return None, _ignored_warning("不是数字")
+
+        if not 0.0 <= value <= 1.0:
+            return None, _ignored_warning("超出 0~1 范围")
+
+        return cls._ttl_normalize_alpha(alpha_text), None
+
+    @classmethod
+    def _ttl_strip_alpha_token_from_material_name(cls, name):
+        """去掉 TTLMap 材质名里**合法**的透明度 token 及其后的下划线。
+
+        ``TTLMap_0.75_衣服`` -> ``TTLMap_衣服``。只对 ``TTLMap_`` 前缀生效，
+        token 不合法 / 不存在（含 ``TTLMap_0.75`` 这种没有原名的写法）时原样返回。
+        """
+        raw_name = str(name or "")
+        stripped = raw_name.strip()
+        prefix = "TTLMap_"
+        if stripped[:len(prefix)].lower() != prefix.lower():
+            return name
+
+        token, separator, tail = stripped[len(prefix):].partition("_")
+        if not token or not separator or not tail:
+            return name
+
+        alpha_text, _warning = cls._ttl_alpha_token_from_material_name(stripped)
+        if alpha_text is None:
+            return name
+        # 前缀按原样保留（大小写不动），只摘掉 token 与紧随的下划线。
+        return f"{stripped[:len(prefix)]}{tail}"
+
+    @classmethod
+    def _ttl_alpha_for_material(cls, material):
+        """这一张 TTLMap 材质的 TTL 透明度文本：材质名 token，没有就 1.0。
+
+        非法 token（越界 / 百分比等）忽略并告警，按 ``"1.0"`` 处理。物体名的
+        ``_透明N`` 不参与：TTL 与透明代码是二选一的两条链路，带 TTLMap 材质的物体
+        走 TTL 段，透明段整段不生成（见 ``process_texture_override_section``
+        里 phase2 的透明段循环）。
+        """
+        material_name = str(getattr(material, "name", "") or "").strip()
+        alpha_text, warning = cls._ttl_alpha_token_from_material_name(material_name)
+        if warning:
+            from ..utils.log_utils import LOG as _LOG
+
+            _LOG.warning(f"      TTL: {warning}")
+        if alpha_text is not None:
+            return alpha_text
+        return "1.0"
+
+    @classmethod
+    def _ttl_material_has_alpha_token(cls, material):
+        """材质名里有没有**合法**的逐张透明度 token（下游据此决定走哪条分支）。"""
+        alpha_text, _warning = cls._ttl_alpha_token_from_material_name(
+            str(getattr(material, "name", "") or "")
+        )
+        return alpha_text is not None
 
     @classmethod
     def _ttl_alpha_var_name(cls, alpha_value):
@@ -2368,6 +2882,19 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 _LOG.warning(f"      EFMI TTL: 跳过 '{mesh_name}'（同一物体不能同时启用 FX 与 TTL）")
                 continue
 
+            # 层号/权重只在 ZZMI 的 TTLib 多槽层 + $TTLAlpha 链路上兑现；EFMI 的
+            # EFMITTL 没有这两个概念。写了后缀就明确告警一次（而不是静默忽略），
+            # 产物本身不写 layer_index、也不乘权重。
+            layer_index, layer_weight = self._ttl_layer_settings_for_mesh(mesh_name, obj)
+            if (layer_index > 0 or layer_weight != 1.0) and not getattr(
+                self, "_ttl_layer_efmi_warned", False
+            ):
+                _LOG.warning(
+                    f"      EFMI TTL: '{mesh_name}' 写了 _TTL层/_TTL权重，"
+                    "但层号与层权重在 EFMI/EFMITTL 链路上不生效；本次忽略"
+                )
+                self._ttl_layer_efmi_warned = True
+
             block_end = len(lines)
             for i in range(mesh_index + 1, len(lines)):
                 if self.extract_mesh_name(lines[i]):
@@ -2393,16 +2920,35 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 continue
             count, first = draw_args
 
+            # 逐张透明度：材质名带合法 token 且是多材质时，alpha 交给每张自己的切档分支
+            # 去写（块级那条会在 Draw 前覆盖分支里的值）。
+            per_texture_alpha = any(self._ttl_material_has_alpha_token(m) for m in ttl_materials)
+            alpha_line_provider = None
+            if per_texture_alpha and len(ttl_materials) > 1:
+                def alpha_line_provider(material):
+                    alpha_text = self._ttl_alpha_for_material(material)
+                    return "$\\EFMITTL\\alpha = {}".format(self._ttl_normalize_alpha(alpha_text))
             mask_lines, next_swap_key_num = self.generate_material_lines(
                 ttl_materials, _EFMITTL_MASK_PARAM, "TTLMap", obj, texture_folder, all_sections,
-                {}, material_group_to_swapkey, swap_key_prefix, next_swap_key_num, used_swap_keys)
+                {}, material_group_to_swapkey, swap_key_prefix, next_swap_key_num, used_swap_keys,
+                alpha_line_provider=alpha_line_provider)
             # 材质没有贴图时 generate_material_lines 只回一行注释（多材质还会回一对
             # if/endif），所以「有没有遮罩」按是否真的写出了 = ref 行来判断。
             has_mask = any("= ref " in str(line) for line in mask_lines)
-            alpha_value = self._extract_transparency_value_from_mesh_name(mesh_name)
-            if not has_mask and not alpha_value:
+            if alpha_line_provider is not None:
+                # 已经写在每个切档分支里，块级不能再写一条。
+                alpha_value = None
+            elif per_texture_alpha:
+                # 单材质带合法 token：写材质 token（这已经是 alpha 的唯一来源）。
+                alpha_value = self._ttl_alpha_for_material(ttl_materials[0])
+            else:
+                # 没有 token 就不写 alpha：库按「有遮罩 ⇒ 1，让遮罩决定」处理。
+                # 物体名的 _透明N 不参与——带 TTLMap 的物体走 TTL 段，透明代码那条
+                # 链路整段不再生成，这个值也就没有来源。
+                alpha_value = None
+            if not has_mask and alpha_value is None:
                 _LOG.info(
-                    f"      EFMI TTL: 跳过 '{mesh_name}'（TTLMap 材质没有贴图，也没有 _透明 数值）"
+                    f"      EFMI TTL: 跳过 '{mesh_name}'（TTLMap 材质没有贴图，没有遮罩可绑）"
                 )
                 continue
 
@@ -2411,7 +2957,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 ttl_lines.extend(mask_lines)
                 ttl_lines.append(_EFMITTL_MASK_CHANNEL_LINE)
                 ttl_lines.append(_EFMITTL_MASK_INVERT_LINE)
-            if alpha_value:
+            if alpha_value is not None:
                 # 不写 alpha 时库按「有遮罩 ⇒ 1，让遮罩决定」处理；写了就是整体乘一层。
                 ttl_lines.append("$\\EFMITTL\\alpha = {}".format(self._ttl_normalize_alpha(alpha_value)))
             ttl_lines.append("$\\EFMITTL\\count = {}".format(count))
@@ -2484,6 +3030,10 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         object_to_diffuse_swapkey = {}
 
         mesh_lines_info_phase1 = [(i, self.extract_mesh_name(line)) for i, line in enumerate(lines) if self.extract_mesh_name(line)]
+
+        # HIMI/HI3FX 的 TTLMap 只产出资源别名，没有逐张 alpha 变量可写；材质名里写了
+        # 数值 token 也落不了地，整段只提示一次，免得每个 mesh 都刷一遍。
+        ttl_alpha_unsupported_warned = False
 
         for insert_index, mesh_name in reversed(mesh_lines_info_phase1):
             obj = self.find_object_by_mesh_name(mesh_name, object_filter=material_candidate_filter)
@@ -2632,7 +3182,30 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                     # （见 blueprint/fx_namespace.py）。
                     if texture_type == 'Glowmap': generated_glowmap = True
                     if texture_type == 'FXMap': generated_fxmap = True
-                    if texture_type == 'TTLMap': generated_ttlmap = True
+                    if texture_type == 'TTLMap':
+                        generated_ttlmap = True
+                        # 层号/权重只在 ZZMI 的 TTLib 多槽层 + $TTLAlpha 链路上兑现；
+                        # HIMI/HI3FX 的 TTLMap 只是第二个遮罩通道，写了后缀就告警一次并忽略。
+                        layer_index, layer_weight = self._ttl_layer_settings_for_mesh(mesh_name, obj)
+                        if (layer_index > 0 or layer_weight != 1.0) and not getattr(
+                            self, "_ttl_layer_himi_warned", False
+                        ):
+                            _LOG.warning(
+                                f"      HIMI/HI3FX TTLMap: '{mesh_name}' 写了 _TTL层/_TTL权重，"
+                                "但层号与层权重在本链路上不生效；本次忽略"
+                            )
+                            self._ttl_layer_himi_warned = True
+                        # HIMI/HI3FX 的 TTLMap 只有资源别名这一个用途（第二个遮罩通道），
+                        # 没有 alpha 变量可以写，所以材质名里的数值 token 在这里不兑现。
+                        if (
+                            not ttl_alpha_unsupported_warned
+                            and any(self._ttl_material_has_alpha_token(m) for m in matching_materials)
+                        ):
+                            _LOG.warning(
+                                "      HIMI/HI3FX TTLMap：不支持材质名里的逐张透明度"
+                                "（TTLMap 只有资源别名，改浓淡只能改贴图 alpha）"
+                            )
+                            ttl_alpha_unsupported_warned = True
                     generated_lines, next_swap_key_num = self.generate_material_lines(
                         matching_materials, param_name, texture_type, obj, texture_folder, all_sections,
                         object_to_diffuse_swapkey, material_group_to_swapkey,
@@ -2729,6 +3302,12 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         for mesh_index, mesh_name in reversed(mesh_lines_info_phase2):
             transparency_shader_name, transparency_value = self.extract_transparency_info_from_mesh_name(mesh_name)
             if transparency_shader_name:
+                # 两条链路二选一：物体身上有 TTLMap 材质就走 TTL，透明段压根不生成
+                #（不是覆盖，是少写一段用不到的）。判据与 find_matching_materials 的
+                # TTLMap 前缀口径一致；解析不到物体就当没有 TTLMap。
+                transparency_obj = self.find_object_by_mesh_name(mesh_name)
+                if transparency_obj is not None and self.find_matching_materials(transparency_obj, "TTLMap"):
+                    continue
                 # TTL 接管过的块不再搬：混合已经由 TTL 库的绘制自己做，搬进透明段
                 # 等于把这一笔又画一遍。就地替换后块里留着的是库调用本身。
                 taken_over = False
@@ -2988,6 +3567,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
         # 每次导出重新计贴图进度（多个材质转资源节点各自从 1 开始，文本自带节点前缀）
         self._reset_texture_progress()
+        # 自动层号算不出的物体名清单，供导出报告读取；每次导出重新收集。
+        self._ttl_auto_layer_skipped = []
 
         total_found = 0
         total_matched = 0
@@ -3006,6 +3587,11 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             preamble_lines, sections = self._parse_ini_content(content)
 
             sections['_config_path'] = mod_export_path
+            # 自动层号的全局排序 + 聚类必须在本 ini 的所有 section 处理前算好；
+            # 同一物体在多个 section 只算一次。
+            self._ttl_auto_layer_assignments = {}
+            self._ttl_auto_layer_prepared = False
+            self._ttl_prepare_auto_layers(sections)
             self._prewarm_material_sources(sections)
 
             transparency_sections_to_add = OrderedDict()

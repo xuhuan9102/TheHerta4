@@ -1595,7 +1595,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         self.assertTrue(complex_name.endswith("0.75"))
 
     def test_ttl_transparent_with_zzmi_materials_inlined_in_same_section(self):
-        """TTL：_透明0.75 + 四前缀材质不再另建段，原位把绘制换成 TTL 参数行"""
+        """TTL：TTLMap 材质带数值 + 四前缀材质不再另建段，原位把绘制换成 TTL 参数行"""
         with tempfile.TemporaryDirectory() as temp_dir:
             BS = chr(92)
             material_paths = {
@@ -1605,14 +1605,14 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                     ("LightMap", "light.png"), ("MaterialMap", "material.png"),
                 ]
             }
-            mesh_name = "LOD0.241deac5-56376-0.中文中文_透明0.75_copy"
+            mesh_name = "LOD0.241deac5-56376-0.中文中文_copy"
             ttl_path = _write_png(temp_dir, "ttl.png")
             obj = _FakeObject(mesh_name, {}, [
                 ("DiffuseMap_衣服", material_paths["DiffuseMap"]),
                 ("NormalMap_腿", material_paths["NormalMap"]),
                 ("LightMap_袖子", material_paths["LightMap"]),
                 ("MaterialMap_身体", material_paths["MaterialMap"]),
-                ("TTLMap_遮罩", ttl_path),
+                ("TTLMap_0.75_遮罩", ttl_path),
             ])
             _fake_bpy.data.objects[obj.name] = obj
 
@@ -1656,12 +1656,13 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             mask_channel_line = f"${BS}TTL{BS}mask_channel = 3"
             mask_line = f"${BS}TTL{BS}mask_invert = 1"
             alpha_line = f"${BS}TTL{BS}alpha = $TTLAlpha0_75"
+            layer_line = f"${BS}TTL{BS}layer_index = 0"
             brightness_line = f"${BS}TTL{BS}V = 1.5"
             index_count_line = f"${BS}TTL{BS}_1 = 56376"
             first_index_line = f"${BS}TTL{BS}_2 = 0"
             base_vertex_line = f"${BS}TTL{BS}_3 = 3"
-            self.assertEqual(block[-9:], [
-                ttl_ref_line, mask_channel_line, mask_line, alpha_line, brightness_line,
+            self.assertEqual(block[-10:], [
+                ttl_ref_line, mask_channel_line, mask_line, alpha_line, layer_line, brightness_line,
                 index_count_line, first_index_line, base_vertex_line, TTL_DRAW_RUN,
             ])
 
@@ -1670,7 +1671,8 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             normal_token = node._latin_token_for_text("腿")
             light_token = node._latin_token_for_text("袖子")
             material_token = node._latin_token_for_text("身体")
-            self.assertEqual(block[:-9], [
+            ttl_ref_index = block.index(ttl_ref_line)
+            self.assertEqual(block[:ttl_ref_index], [
                 f"Resource{BS}ZZMI{BS}Diffuse = ref Resource_DiffuseMap_{diffuse_token}",
                 f"Resource{BS}ZZMI{BS}NormalMap = ref Resource_NormalMap_{normal_token}",
                 f"Resource{BS}ZZMI{BS}LightMap = ref Resource_LightMap_{light_token}",
@@ -1689,10 +1691,10 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             BS = chr(92)
             diffuse_path = _write_png(temp_dir, "diffuse.png")
-            mesh_name = "LOD0.241deac5-56376-0.中文中文_透明0.75_copy"
+            mesh_name = "LOD0.241deac5-56376-0.中文中文_copy"
             ttl_path = _write_png(temp_dir, "ttl.png")
             obj = _FakeObject(mesh_name, {}, [
-                ("DiffuseMap_衣服", diffuse_path), ("TTLMap_遮罩", ttl_path),
+                ("DiffuseMap_衣服", diffuse_path), ("TTLMap_0.75_遮罩", ttl_path),
             ])
             _fake_bpy.data.objects[obj.name] = obj
 
@@ -1730,6 +1732,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                 f"${BS}TTL{BS}mask_channel = 3",
                 f"${BS}TTL{BS}mask_invert = 1",
                 f"${BS}TTL{BS}alpha = $TTLAlpha0_75",
+                f"${BS}TTL{BS}layer_index = 0",
                 f"${BS}TTL{BS}V = 1.5",
                 f"${BS}TTL{BS}_1 = 56376",
                 f"${BS}TTL{BS}_2 = 0",
@@ -1737,28 +1740,28 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                 f"run = CommandList{BS}TTL{BS}Draw",
             ]
             # 参数行落在同一个 if 分支里，缩进跟原绘制行一致
-            self.assertEqual(block[-9:], ["  " + line for line in expected])
+            self.assertEqual(block[-10:], ["  " + line for line in expected])
             anchor = _anchor_index(lines, mesh_name)
             if_index = lines.index("if $swapkey0 == 0 && $swapkey1 == 0")
             endif_index = lines.index("endif")
             self.assertLess(if_index, anchor)
             self.assertLess(anchor, endif_index)
-            for line in block[-9:]:
+            for line in block[-10:]:
                 self.assertLess(anchor, lines.index(line))
                 self.assertLess(lines.index(line), endif_index)
             # 旧形态的接管注释不再产生
             self.assertEqual([line for line in lines if line.strip().startswith(TTL_TAKEN_PREFIX)], [])
 
     def test_ttl_transparent_plus_fxmap_writes_ttl_ref(self):
-        """TTL：_透明0.5 且有 TTLMap 材质时，原位写 TransparencyTex 引用并生成资源段"""
+        """TTL：TTLMap 材质名带数值时，原位写 TransparencyTex 引用并生成资源段"""
         with tempfile.TemporaryDirectory() as temp_dir:
             BS = chr(92)
             diffuse_path = _write_png(temp_dir, "diffuse.png")
             ttlmap_path = _write_png(temp_dir, "ttlmap.png")
-            mesh_name = "Body_透明0.5"
+            mesh_name = "Body"
             obj = _FakeObject(mesh_name, {}, [
                 ("DiffuseMap_衣服", diffuse_path),
-                ("TTLMap_遮罩", ttlmap_path),
+                ("TTLMap_0.5_遮罩", ttlmap_path),
             ])
             _fake_bpy.data.objects[obj.name] = obj
 
@@ -1844,7 +1847,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertEqual([line for line in lines if "mask_invert" in line], [legacy_key, mask_key])
 
     def test_ttl_fxmap_only_writes_alpha_1(self):
-        """TTL：仅有 TTLMap 材质（无透明后缀）时 alpha 固定 1.0，参数行原位内联"""
+        """TTL：仅有 TTLMap 材质、材质名不带数值时 alpha 固定 1.0，参数行原位内联"""
         with tempfile.TemporaryDirectory() as temp_dir:
             BS = chr(92)
             ttlmap_path = _write_png(temp_dir, "ttlmap.png")
@@ -1877,6 +1880,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                 f"${BS}TTL{BS}mask_channel = 3",
                 f"${BS}TTL{BS}mask_invert = 1",
                 f"${BS}TTL{BS}alpha = $TTLAlpha1_0",
+                f"${BS}TTL{BS}layer_index = 0",
                 f"${BS}TTL{BS}V = 1.5",
                 f"${BS}TTL{BS}_1 = 3",
                 f"${BS}TTL{BS}_2 = 0",
@@ -1980,14 +1984,14 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertIn(f"[Resource_TTLMap_B]", sections)
 
     def test_ttl_shared_if_only_transparent_gets_inline_block(self):
-        """TTL：共用 if 里只有 _透明 那块被替换，普通网格的绘制留在原处"""
+        """TTL：共用 if 里只有带 TTLMap 材质那块被替换，普通网格的绘制留在原处"""
         with tempfile.TemporaryDirectory() as temp_dir:
             BS = chr(92)
             diffuse_path = _write_png(temp_dir, "diffuse.png")
             ttl_path = _write_png(temp_dir, "ttl.png")
-            transparent_mesh = "Body_透明0.5"
+            transparent_mesh = "Body_TTL"
             transparent_obj = _FakeObject(transparent_mesh, {}, [
-                ("DiffuseMap_衣服", diffuse_path), ("TTLMap_遮罩", ttl_path),
+                ("DiffuseMap_衣服", diffuse_path), ("TTLMap_0.5_遮罩", ttl_path),
             ])
             normal_obj = _FakeObject("Body", {}, [("DiffuseMap_衣服", diffuse_path)])
             _fake_bpy.data.objects[transparent_obj.name] = transparent_obj
@@ -2026,11 +2030,12 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertEqual(shared.count(f"  [mesh:{transparent_mesh}]"), 1)
 
             block = _inline_block(shared, transparent_mesh)
-            self.assertEqual(block[-9:], [
+            self.assertEqual(block[-10:], [
                 f"  Resource{BS}TTL{BS}TransparencyTex = ref Resource_TTLMap_Rkydfsmefl",
                 f"  ${BS}TTL{BS}mask_channel = 3",
                 f"  ${BS}TTL{BS}mask_invert = 1",
                 f"  ${BS}TTL{BS}alpha = $TTLAlpha0_5",
+                f"  ${BS}TTL{BS}layer_index = 0",
                 f"  ${BS}TTL{BS}V = 1.5",
                 f"  ${BS}TTL{BS}_1 = 200",
                 f"  ${BS}TTL{BS}_2 = 100",
@@ -2044,11 +2049,11 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             BS = chr(92)
             diffuse_path = _write_png(temp_dir, "diffuse.png")
             ttl_path = _write_png(temp_dir, "ttl.png")
-            mesh_a = "BodyA_透明0.75"
-            mesh_b = "BodyB_透明0.75"
+            mesh_a = "BodyA"
+            mesh_b = "BodyB"
             for name in (mesh_a, mesh_b):
                 _fake_bpy.data.objects[name] = _FakeObject(name, {}, [
-                    ("DiffuseMap_衣服", diffuse_path), ("TTLMap_遮罩", ttl_path),
+                    ("DiffuseMap_衣服", diffuse_path), ("TTLMap_0.75_遮罩", ttl_path),
                 ])
             section_name = "[TextureOverride_Shared]"
             header = [
@@ -2073,6 +2078,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             lines = sections[section_name]
             self.assertEqual(lines[:len(header)], header)
             alpha_line = f"${BS}TTL{BS}alpha = $TTLAlpha0_75"
+            layer_line = f"${BS}TTL{BS}layer_index = 0"
             self.assertEqual(lines.count(alpha_line), 2)
             # 同一段两块各自独立取参
             block_a = _inline_block(lines, mesh_a)
@@ -2145,7 +2151,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertEqual(lines[:len(header)], header)
             block = _inline_block(lines, mesh_name)
             # 这个网格只有 TTLMap 材质：块里就是那 9 行，没有可重绑的不透明贴图
-            self.assertEqual(len(block), 9)
+            self.assertEqual(len(block), 10)
             self.assertEqual(block[0], f"Resource{BS}TTL{BS}TransparencyTex = ref Resource_TTLMap_Rkydfsmefl")
             self.assertIn(f"${BS}TTL{BS}_1 = 56376", block)
             self.assertEqual([line for line in lines if line.strip() == "else"], [])
@@ -2632,7 +2638,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertIn(f"Resource{BS}RabbitFX{BS}Glowmap = ref Resource_Glowmap_", joined)
 
     def test_debug_disable_fx_ttl_skips_ttl_generation(self):
-        """调试开关：开启后不生成 TTL（TTLMap）段落，但透明代码仍独立生成"""
+        """调试开关：开启后不生成 TTL（TTLMap）段落；有 TTLMap 材质的物体也不再生成透明段。"""
         sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "ZZMI"
         with tempfile.TemporaryDirectory() as temp_dir:
             BS = chr(92)
@@ -2678,10 +2684,10 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertNotIn("$" + BS + "TTL" + BS + "alpha", joined)
             self.assertNotIn("$" + BS + "TTL" + BS + "mask_invert", joined)
             self.assertFalse(any(key.startswith("[TextureOverrideBody_") for key in sections))
-            # 透明代码与 FX/TTL 独立，仍正常生成
-            self.assertEqual(len(transparency_sections), 1)
-            transparency_lines = next(iter(transparency_sections.values()))
-            self.assertIn("blend_factor[0] = 0.5", transparency_lines)
+            # 两条链路二选一：物体有 TTLMap 材质就走 TTL；调试开关关掉 TTL 后，
+            # 透明段也不生成（不是退回透明代码），原绘制留在原处。
+            self.assertEqual(len(transparency_sections), 0)
+            self.assertIn("drawindexed = 100, 5, 0", "\n".join(sections["[TextureOverride_Body]"]))
 
     def test_previous_transparency_tail_is_replaced_without_losing_auto_appended_tail(self):
         node = node_postprocess_material.SSMTNode_PostProcess_Material()
@@ -2870,7 +2876,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertIn(f"${BS}EFMITTL{BS}mask_channel = 3", body)
             self.assertIn(f"${BS}EFMITTL{BS}mask_invert = 1", body)
             self.assertIn("[Resource_TTLMap_Body]", sections)
-            # 没有 _透明 数值就不写 alpha：库按「有遮罩 ⇒ 1，交给遮罩决定」处理。
+            # 材质名不带数值就不写 alpha：库按「有遮罩 ⇒ 1，交给遮罩决定」处理。
             self.assertNotIn(f"${BS}EFMITTL{BS}alpha", body)
             # 参数行必须排在库调用之前，顺序错了库就读不到。
             self.assertLess(body.index(f"${BS}EFMITTL{BS}count"), body.index(f"run = CommandList{BS}EFMITTL{BS}Draw"))
@@ -3073,6 +3079,451 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         self.assertIn(sentinel_alias, joined)
         self.assertIn(sentinel_run, joined)
         self.assertIn("drawindexed = 100, 5, 0", joined)
+
+
+class TtlAlphaMaterialTokenTests(unittest.TestCase):
+    """TTLMap_<0~1 小数>_<原贴图名>：逐张贴图透明度的解析、剥离与默认值。"""
+
+    material_cls = node_postprocess_material.SSMTNode_PostProcess_Material
+
+    def _token(self, name):
+        return self.material_cls._ttl_alpha_token_from_material_name(name)
+
+    def test_parses_decimal_token(self):
+        self.assertEqual(self._token("TTLMap_0.75_衣服"), ("0.75", None))
+
+    def test_parses_comma_as_decimal_point(self):
+        self.assertEqual(self._token("TTLMap_0,5_衣服"), ("0.5", None))
+
+    def test_parses_integer_bounds(self):
+        self.assertEqual(self._token("TTLMap_1_衣服"), ("1.0", None))
+        self.assertEqual(self._token("TTLMap_0_衣服"), ("0.0", None))
+        self.assertEqual(self._token("TTLMap_1.0_衣服"), ("1.0", None))
+        self.assertEqual(self._token("TTLMap_0,0_衣服"), ("0.0", None))
+
+    def test_out_of_range_token_warns(self):
+        alpha_text, warning = self._token("TTLMap_1.5_衣服")
+        self.assertIsNone(alpha_text)
+        self.assertIn("1.5", warning)
+        self.assertIn("0~1", warning)
+        self.assertIn("已忽略，按原行为", warning)
+
+    def test_negative_token_warns(self):
+        alpha_text, warning = self._token("TTLMap_-0.2_衣服")
+        self.assertIsNone(alpha_text)
+        self.assertIn("-0.2", warning)
+
+    def test_percent_token_warns(self):
+        alpha_text, warning = self._token("TTLMap_75%_衣服")
+        self.assertIsNone(alpha_text)
+        self.assertIn("75%", warning)
+
+    def test_plain_name_is_not_a_token(self):
+        """不是数值形态的第二段就是普通材质名，不告警、不剥。"""
+        self.assertEqual(self._token("TTLMap_abc_衣服"), (None, None))
+        self.assertEqual(self._token("TTLMap_衣服"), (None, None))
+        self.assertEqual(self._token("TTLMap__衣服"), (None, None))
+
+    def test_uuid_and_number_like_names_are_not_tokens(self):
+        """数字开头但不是数值形态（UUID / 贴图编号）不能被误判成参数。"""
+        self.assertEqual(self._token("TTLMap_2009f0d6-1356-0"), (None, None))
+        self.assertEqual(self._token("TTLMap_12345_衣服"), (None, None))
+        self.assertEqual(self._token("TTLMap_0.75x_衣服"), (None, None))
+        strip = self.material_cls._ttl_strip_alpha_token_from_material_name
+        self.assertEqual(strip("TTLMap_2009f0d6-1356-0"), "TTLMap_2009f0d6-1356-0")
+        self.assertEqual(strip("TTLMap_12345_衣服"), "TTLMap_12345_衣服")
+        self.assertEqual(strip("TTLMap_0.75x_衣服"), "TTLMap_0.75x_衣服")
+
+    def test_other_prefix_is_ignored(self):
+        self.assertEqual(self._token("DiffuseMap_0.75_衣服"), (None, None))
+        self.assertEqual(self._token(""), (None, None))
+        self.assertEqual(self._token(None), (None, None))
+
+    def test_strip_only_for_ttlmap_and_only_valid_token(self):
+        strip = self.material_cls._ttl_strip_alpha_token_from_material_name
+        self.assertEqual(strip("TTLMap_0.75_衣服"), "TTLMap_衣服")
+        self.assertEqual(strip("TTLMap_0,5_衣服"), "TTLMap_衣服")
+        # 不合法 token 原样返回（数值不合法不改变资源名，导出不会因此丢图）
+        self.assertEqual(strip("TTLMap_1.5_衣服"), "TTLMap_1.5_衣服")
+        self.assertEqual(strip("TTLMap_abc_衣服"), "TTLMap_abc_衣服")
+        self.assertEqual(strip("TTLMap_衣服"), "TTLMap_衣服")
+        # 非 TTLMap 前缀一律不动
+        self.assertEqual(strip("DiffuseMap_0.75_衣服"), "DiffuseMap_0.75_衣服")
+
+    def test_stem_ignores_alpha_token(self):
+        with_token = self.material_cls._material_resource_stem(_FakeMaterial("TTLMap_0.75_衣服"))
+        without_token = self.material_cls._material_resource_stem(_FakeMaterial("TTLMap_衣服"))
+        self.assertEqual(with_token, without_token)
+
+    def test_stem_unchanged_for_names_without_token(self):
+        """不含 token 的名字必须与改前逐字符相同（硬编码旧行为）。"""
+        cloth_token = self.material_cls._latin_token_for_text("衣服")
+        self.assertEqual(
+            self.material_cls._material_resource_stem(_FakeMaterial("DiffuseMap_衣服02")),
+            f"DiffuseMap_{cloth_token}02",
+        )
+        self.assertEqual(
+            self.material_cls._material_resource_stem(_FakeMaterial("TTLMap_abc_衣服")),
+            f"TTLMap_abc_{cloth_token}",
+        )
+
+    def test_alpha_for_material_token_or_default(self):
+        alpha_for = self.material_cls._ttl_alpha_for_material
+        # TTL 只认这张材质自己的 token；物体名 `_透明N` 是另一条链路，不参与
+        self.assertEqual(alpha_for(_FakeMaterial("TTLMap_0.75_衣服")), "0.75")
+        self.assertEqual(alpha_for(_FakeMaterial("TTLMap_衣服")), "1.0")
+
+    def test_alpha_for_material_warns_on_invalid_token(self):
+        log_module = sys.modules[f"{PKG}.utils.log_utils"]
+        with mock.patch.object(log_module.LOG, "warning") as warning_mock:
+            alpha = self.material_cls._ttl_alpha_for_material(
+                _FakeMaterial("TTLMap_1.5_衣服")
+            )
+        self.assertEqual(alpha, "1.0")
+        self.assertTrue(warning_mock.called)
+
+    def test_has_alpha_token(self):
+        has_token = self.material_cls._ttl_material_has_alpha_token
+        self.assertTrue(has_token(_FakeMaterial("TTLMap_0.75_衣服")))
+        self.assertFalse(has_token(_FakeMaterial("TTLMap_衣服")))
+        self.assertFalse(has_token(_FakeMaterial("TTLMap_1.5_衣服")))
+
+
+class TtlAlphaPerTextureExportTests(unittest.TestCase):
+    """``TTLMap_<0~1 数值>_<名字>`` 的数值落到段生成：逐张 alpha / HIMI 如实不支持。
+
+    解析层（token 取值、剥 token、默认值）由 ``TtlAlphaMaterialTokenTests`` 覆盖；
+    这里只看产物：哪个分支写哪条 alpha、``[Constants]`` 里有哪些常量、贴图 Resource
+    名有没有被数值影响。
+    """
+
+    BS = chr(92)
+
+    def setUp(self):
+        _fake_bpy.data.objects.clear()
+        node_postprocess_material.clear_name_mapping_cache()
+        _prefix_cache_state["props"] = {}
+        self._set_logic("ZZMI")
+
+    def tearDown(self):
+        _fake_bpy.data.objects.clear()
+        self._set_logic("ZZMI")
+
+    @staticmethod
+    def _set_logic(logic_name):
+        sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = logic_name
+
+    # ---- 夹具 ----
+
+    def _add_object(self, temp_dir, object_name, material_specs):
+        """``[(材质名, 贴图文件名), ...]`` → 物体；同一个文件名只造一份占位贴图。"""
+        paths = {}
+        materials = []
+        for material_name, filename in material_specs:
+            if filename not in paths:
+                paths[filename] = _write_png(temp_dir, filename)
+            materials.append((material_name, paths[filename]))
+        obj = _FakeObject(object_name, {}, materials)
+        _fake_bpy.data.objects[obj.name] = obj
+        return obj
+
+    def _zzmi_sections(self, temp_dir, mesh_names, section_name="[TextureOverride_Body]"):
+        body = []
+        for mesh_name in mesh_names:
+            body.append(f"[mesh:{mesh_name}]")
+            body.append("drawindexed = 6, 3, 0")
+        sections = OrderedDict([
+            (section_name, [
+                "hash = 12345678",
+                "match_first_index = 0",
+                "ib = Resource_Body_Index",
+            ] + body),
+            ("_config_path", temp_dir),
+        ])
+        return sections, section_name
+
+    def _efmi_sections(self, temp_dir, object_name, material_specs,
+                       draw_args="12,INSTANCE_COUNT,34,0,FIRST_INSTANCE"):
+        """EFMI 合并绘制回调段（带 ps-t0 DiffuseMap 槽），返回段与段名。"""
+        paths = {}
+        materials = []
+        for material_name, filename in material_specs:
+            if filename not in paths:
+                paths[filename] = _write_png(temp_dir, filename)
+            materials.append((material_name, paths[filename]))
+        obj = _FakeObject(
+            object_name,
+            {"ps-t0": {"mark_name": "DiffuseMap", "mark_type": "Slot", "mark_slot": "ps-t0"}},
+            materials,
+        )
+        _fake_bpy.data.objects[obj.name] = obj
+        callback_name = "CommandList_Draw_LOD0.drawhash_12_56"
+        sections = OrderedDict([
+            (f"[{callback_name}]", [
+                f"run = CommandList{self.BS}EFMIv1{self.BS}OverrideTextures",
+                "ib = Resource_LOD0.drawhash_12_56_Index",
+                "ps-t0 = Resource-old-DiffuseMap",
+                f"; [mesh:{object_name}] [vertex_count:77]",
+                f"drawindexedinstanced = {draw_args}",
+            ]),
+            ("_config_path", temp_dir),
+        ])
+        return sections, f"[{callback_name}]"
+
+    def _run_efmi(self, sections, section_name):
+        node = _ttl_node()
+        node.debug_disable_fx_ttl = False
+        with mock.patch.object(
+            node_postprocess_material.SSMTNode_PostProcess_Material,
+            "_efmi_ttl_library_present", return_value=True,
+        ):
+            _run_process(node, sections, section_name)
+        return node
+
+    def _run_process_capture(self, sections, section_name):
+        """跑一次后处理并返回透明段字典（``_run_process`` 会把它丢掉）。"""
+        transparency_sections = OrderedDict()
+        node = _ttl_node()
+        node.process_texture_override_section(
+            section_name, sections,
+            material_group_to_swapkey={},
+            swap_key_prefix="$swapkey",
+            next_swap_key_num=150,
+            used_swap_keys=set(),
+            transparency_sections_to_add=transparency_sections,
+        )
+        return node, transparency_sections
+
+    def _ttl_alpha_line(self, variable):
+        return f"${self.BS}TTL{self.BS}alpha = {variable}"
+
+    @staticmethod
+    def _alpha_lines(block):
+        """块里的 ``alpha = `` 行（去缩进，便于逐字比较）。"""
+        return [str(line).strip() for line in block if "alpha = " in str(line)]
+
+    def test_single_material_token_writes_constant_and_keeps_texture_name(self):
+        """单材质 token：块级 alpha 用常量，贴图 Resource 名与不带数值时逐字相同。"""
+        BS = self.BS
+        mask_token = node_postprocess_material.SSMTNode_PostProcess_Material._latin_token_for_text("遮罩")
+        expected_ref = f"Resource{BS}TTL{BS}TransparencyTex = ref Resource_TTLMap_{mask_token}"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body"
+            self._add_object(temp_dir, mesh_name, [("TTLMap_0.75_遮罩", "ttl-token.png")])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            _run_process(_ttl_node(), sections, section_name)
+
+            block = _inline_block(sections[section_name], mesh_name)
+            self.assertEqual(self._alpha_lines(block), [self._ttl_alpha_line("$TTLAlpha0_75")])
+            self.assertIn("global $TTLAlpha0_75 = 0.75", sections["[Constants]"])
+            self.assertIn(expected_ref, block)
+
+            # 同一张遮罩、材质名不带数值：Resource 名必须一字不差（数值只是参数）
+            plain_mesh = "BodyPlain"
+            self._add_object(temp_dir, plain_mesh, [("TTLMap_遮罩", "ttl-plain.png")])
+            plain_sections, plain_section_name = self._zzmi_sections(
+                temp_dir, [plain_mesh], "[TextureOverride_BodyPlain]"
+            )
+            _run_process(_ttl_node(), plain_sections, plain_section_name)
+            plain_block = _inline_block(plain_sections[plain_section_name], plain_mesh)
+            self.assertIn(expected_ref, plain_block)
+
+    def test_ttlmap_object_generates_ttl_only_not_transparency(self):
+        """二选一：物体有 TTLMap 材质 → 只出 TTL 段，``_透明N`` 那条不生成。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body_透明0.6"
+            self._add_object(temp_dir, mesh_name, [("TTLMap_0.4_x", "ttl.png")])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            _node, transparency_sections = self._run_process_capture(sections, section_name)
+
+            block = _inline_block(sections[section_name], mesh_name)
+            self.assertEqual(self._alpha_lines(block), [self._ttl_alpha_line("$TTLAlpha0_4")])
+            constants = "\n".join(sections["[Constants]"])
+            self.assertIn("global $TTLAlpha0_4 = 0.4", constants)
+            self.assertNotIn("TTLAlpha0_6", constants)
+            self.assertEqual(transparency_sections, {})
+            joined = _dump_sections(sections)
+            self.assertNotIn("CustomShaderTransparencyCloth", joined)
+            self.assertNotIn("blend_factor", joined)
+
+    def test_ttlmap_object_without_token_uses_default_alpha(self):
+        """二选一：有 TTLMap 材质但材质名不带数值 → TTL 段走默认 1.0，透明段不生成。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body_透明0.6"
+            self._add_object(temp_dir, mesh_name, [("TTLMap_遮罩", "ttl.png")])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            _node, transparency_sections = self._run_process_capture(sections, section_name)
+
+            block = _inline_block(sections[section_name], mesh_name)
+            self.assertEqual(self._alpha_lines(block), [self._ttl_alpha_line("$TTLAlpha1_0")])
+            constants = "\n".join(sections["[Constants]"])
+            self.assertIn("global $TTLAlpha1_0 = 1.0", constants)
+            self.assertNotIn("TTLAlpha0_6", constants)
+            self.assertEqual(transparency_sections, {})
+
+    def test_transparency_generated_only_when_no_ttlmap(self):
+        """二选一：物体没有 TTLMap 材质、只有 ``_透明N`` → 只出透明段，TTL 段不写。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body_透明0.6"
+            self._add_object(temp_dir, mesh_name, [("DiffuseMap_衣服", "diffuse.png")])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            _node, transparency_sections = self._run_process_capture(sections, section_name)
+
+            self.assertEqual(len(transparency_sections), 1)
+            body = "\n".join(next(iter(transparency_sections.values())))
+            self.assertIn("blend_factor[0] = 0.6", body)
+            self.assertNotIn("blend_factor[0] = 1.0", body)
+            joined = _dump_sections(sections)
+            self.assertNotIn("CommandList" + self.BS + "TTL" + self.BS + "Draw", joined)
+            self.assertNotIn("$" + self.BS + "TTL" + self.BS + "alpha", joined)
+
+    def test_two_meshes_in_one_section_take_their_own_tokens(self):
+        """同段两个 mesh 各带一张 TTLMap：两块各引用自己的常量，常量两条都在。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_a, mesh_b = "BodyA", "BodyB"
+            self._add_object(temp_dir, mesh_a, [("TTLMap_0.75_A", "a.png")])
+            self._add_object(temp_dir, mesh_b, [("TTLMap_0.4_B", "b.png")])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_a, mesh_b])
+            _run_process(_ttl_node(), sections, section_name)
+
+            lines = sections[section_name]
+            self.assertEqual(
+                self._alpha_lines(_inline_block(lines, mesh_a)),
+                [self._ttl_alpha_line("$TTLAlpha0_75")],
+            )
+            self.assertEqual(
+                self._alpha_lines(_inline_block(lines, mesh_b)),
+                [self._ttl_alpha_line("$TTLAlpha0_4")],
+            )
+            constants = sections["[Constants]"]
+            self.assertIn("global $TTLAlpha0_75 = 0.75", constants)
+            self.assertIn("global $TTLAlpha0_4 = 0.4", constants)
+
+    def test_two_ttlmap_materials_write_alpha_in_each_switch_branch(self):
+        """一个物体两张 TTLMap：alpha 各写在自己的 ``if $swapkey... ==`` 分支里。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body"
+            self._add_object(temp_dir, mesh_name, [
+                ("TTLMap_0.75_A", "a.png"),
+                ("TTLMap_0.4_B", "b.png"),
+            ])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            _run_process(_ttl_node(), sections, section_name)
+
+            block = _inline_block(sections[section_name], mesh_name)
+            stripped = [str(line).strip() for line in block]
+            alpha_indexes = [index for index, line in enumerate(stripped) if "alpha = " in line]
+            self.assertEqual(
+                [stripped[index] for index in alpha_indexes],
+                [self._ttl_alpha_line("$TTLAlpha0_75"), self._ttl_alpha_line("$TTLAlpha0_4")],
+                "\n".join(stripped),
+            )
+
+            spans = []
+            open_stack = []
+            for index, line in enumerate(stripped):
+                if line.startswith("if "):
+                    open_stack.append(index)
+                elif line == "endif" and open_stack:
+                    spans.append((open_stack.pop(), index))
+            self.assertEqual(len(spans), 2, "\n".join(stripped))
+
+            def span_of(position):
+                for span in spans:
+                    if span[0] < position < span[1]:
+                        return span
+                return None
+
+            span_first = span_of(alpha_indexes[0])
+            span_second = span_of(alpha_indexes[1])
+            self.assertIsNotNone(span_first, "第一条 alpha 不在任何 if 分支里")
+            self.assertIsNotNone(span_second, "第二条 alpha 不在任何 if 分支里")
+            self.assertNotEqual(span_first, span_second, "两条 alpha 落进了同一个分支")
+            # alpha 与它自己那一档的遮罩引用同处一个分支
+            ref_a = next(index for index, line in enumerate(stripped) if "Resource_TTLMap_A" in line)
+            ref_b = next(index for index, line in enumerate(stripped) if "Resource_TTLMap_B" in line)
+            self.assertEqual(span_of(ref_a), span_first)
+            self.assertEqual(span_of(ref_b), span_second)
+            # 块里只有这两条 alpha，没有第三条块级的
+            self.assertEqual(len(alpha_indexes), 2)
+            constants = sections["[Constants]"]
+            self.assertIn("global $TTLAlpha0_75 = 0.75", constants)
+            self.assertIn("global $TTLAlpha0_4 = 0.4", constants)
+
+    def test_out_of_range_token_warns_and_falls_back(self):
+        """越界 token：告警被调用（参数含 1.5），产物回退 1.0，[Constants] 不含 1_5。"""
+        log_module = sys.modules[f"{PKG}.utils.log_utils"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body"
+            self._add_object(temp_dir, mesh_name, [("TTLMap_1.5_x", "ttl.png")])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            with mock.patch.object(log_module.LOG, "warning") as warning_mock:
+                _run_process(_ttl_node(), sections, section_name)
+
+            block = _inline_block(sections[section_name], mesh_name)
+            self.assertEqual(self._alpha_lines(block), [self._ttl_alpha_line("$TTLAlpha1_0")])
+            constants = "\n".join(sections["[Constants]"])
+            self.assertIn("global $TTLAlpha1_0 = 1.0", constants)
+            self.assertNotIn("1_5", constants)
+            self.assertTrue(warning_mock.called)
+            self.assertIn("1.5", str(warning_mock.call_args))
+
+    def test_multiple_materials_without_token_keep_single_block_alpha(self):
+        """多材质但都没 token：与改前一致——只有一条块级 alpha。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body"
+            self._add_object(temp_dir, mesh_name, [
+                ("TTLMap_A", "a.png"),
+                ("TTLMap_B", "b.png"),
+            ])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            _run_process(_ttl_node(), sections, section_name)
+
+            block = _inline_block(sections[section_name], mesh_name)
+            self.assertEqual(self._alpha_lines(block), [self._ttl_alpha_line("$TTLAlpha1_0")])
+            self.assertIn("global $TTLAlpha1_0 = 1.0", sections["[Constants]"])
+
+    def test_efmi_material_token_writes_alpha(self):
+        """EFMI：材质带 token 时写 ``$\\EFMITTL\\alpha``（alpha 只来自材质名，物体名不参与）。"""
+        BS = self.BS
+        with tempfile.TemporaryDirectory() as temp_dir:
+            object_name = "LOD0.drawhash-12-56.Body"
+            sections, section_name = self._efmi_sections(
+                temp_dir, object_name,
+                [("DiffuseMap_Body", "diffuse.png"), ("TTLMap_0.5_Body", "ttl.png")],
+            )
+            self._set_logic("EFMI")
+            self._run_efmi(sections, section_name)
+
+            body = "\n".join(str(line) for line in sections[section_name])
+            self.assertIn(f"${BS}EFMITTL{BS}alpha = 0.5", body)
+            self.assertIn(f"Resource{BS}EFMITTL{BS}Mask = ref Resource_TTLMap_Body", body)
+            self.assertIn(f"run = CommandList{BS}EFMITTL{BS}Draw", body)
+            self.assertNotIn("drawindexedinstanced", body)
+            # 只有一条块级 alpha（单材质）
+            self.assertEqual(body.count(f"${BS}EFMITTL{BS}alpha = "), 1)
+
+    def test_himi_reports_ttlmap_alpha_token_as_unsupported(self):
+        """HIMI/HI3FX：TTLMap 只有资源别名，token 落不了地 —— 告警且不凭空造变量。"""
+        BS = self.BS
+        log_module = sys.modules[f"{PKG}.utils.log_utils"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "Body"
+            self._add_object(temp_dir, mesh_name, [("TTLMap_0.75_x", "ttl.png")])
+            sections, section_name = self._zzmi_sections(temp_dir, [mesh_name])
+            self._set_logic("HIMI")
+            with mock.patch.object(log_module.LOG, "warning") as warning_mock:
+                _run_process(_ttl_node(), sections, section_name)
+
+            dumped = _dump_sections(sections)
+            self.assertIn(f"Resource{BS}HI3FX{BS}TTLMap = ref Resource_TTLMap_x", dumped)
+            self.assertNotIn("$TTLAlpha", dumped)
+            self.assertTrue(warning_mock.called)
+            messages = "\n".join(
+                str(call.args[0]) if call.args else "" for call in warning_mock.call_args_list
+            )
+            self.assertIn("不支持", messages)
+            self.assertIn("HIMI/HI3FX", messages)
 
 
 if __name__ == "__main__":

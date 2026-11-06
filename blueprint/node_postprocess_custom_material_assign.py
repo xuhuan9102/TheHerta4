@@ -2136,7 +2136,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                                 texture_folder, all_sections,
                                 object_to_diffuse_swapkey, material_group_to_swapkey,
                                 swap_key_prefix, next_swap_key_num, used_swap_keys,
-                                resource_name_provider=None):
+                                resource_name_provider=None, alpha_line_provider=None):
         """最终生成入口的防线：禁用切换组时绝不生成备用资源/INI 条件块。"""
         matching_materials = self._limit_disabled_switch_materials(matching_materials)
         return super().generate_material_lines(
@@ -2144,6 +2144,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             texture_folder, all_sections, object_to_diffuse_swapkey,
             material_group_to_swapkey, swap_key_prefix, next_swap_key_num,
             used_swap_keys, resource_name_provider=resource_name_provider,
+            alpha_line_provider=alpha_line_provider,
         )
 
     def _find_workspace_slot_materials(self, obj, slot_info):

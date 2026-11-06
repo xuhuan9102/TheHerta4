@@ -151,6 +151,21 @@ def _bare_node(emitters):
     return inst
 
 
+class TTLOrderExportTests(unittest.TestCase):
+    def test_export_keeps_the_shared_ttl_namespace_and_local_scene_target(self):
+        for namespace in ("Fluid_A", "Fluid_B"):
+            text = _bare_node([_emitter()])._build_main_ini(namespace, [])
+            commands = [line.strip() for line in
+                        merge.parse_sections(text)["CommandListDrawWorld"]]
+            target = r"Resource\TTL\FluidOrderTarget = ref ResourceSceneColor"
+            call = r"run = CommandList\TTL\ApplyBeforeFluid"
+            self.assertIn(target, commands)
+            self.assertIn(call, commands)
+            self.assertLess(commands.index(target), commands.index(call))
+            self.assertLess(commands.index(call), commands.index(
+                "ResourceFluidLighting = copy ResourceSceneColor"))
+
+
 class EmitterCapacityTests(unittest.TestCase):
     def test_capacity_matches_the_slot_count(self):
         self.assertEqual(merge.EMITTER_CAPACITY, 8)
