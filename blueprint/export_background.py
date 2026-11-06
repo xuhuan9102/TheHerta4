@@ -28,6 +28,8 @@ import tempfile
 import time
 import traceback
 
+from pathlib import Path
+
 from ..common.global_config import GlobalConfig
 try:  # 纯文件装载的测试宿主可能没有贴图计划模块：退化为旧「先落盘再删除」流程
     from ..common.texture_export_plan import TextureExportPlan
@@ -645,6 +647,64 @@ def _collect_ini_variable_warnings(output_dir: str) -> list:
         return []
 
 
+def _collect_mod_pipeline_warnings(output_dir: str) -> list:
+    """跑 ``tools/mod-pipeline.ps1`` 的 verify，把 FAIL 行收集成告警。
+
+    这是导出收尾的自检：脚本不存在、PowerShell 起不来、超时或退出码非 0
+    都**只进 warnings，不影响导出**——任何异常都在这里吞掉并返回空列表。
+    """
+    if not output_dir:
+        return []
+    try:
+        script_path = Path(__file__).resolve().parents[1] / "tools" / "mod-pipeline.ps1"
+        if not script_path.is_file():
+            return []
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", str(script_path),
+                "verify",
+                "-ModDir", str(output_dir),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        warnings = []
+        for line in (completed.stdout or "").splitlines():
+            if line.startswith("FAIL ["):
+                warnings.append(f"mod-pipeline: {line.strip()}")
+        if completed.returncode == 3:
+            warnings.append("mod-pipeline: verify crashed (exit 3)")
+        elif completed.returncode != 0 and not warnings:
+            warnings.append(f"mod-pipeline: verify exit {completed.returncode}")
+        return warnings
+    except Exception:
+        return []
+
+
+def _collect_export_warnings(output_dir: str) -> list:
+    """导出收尾统一收集告警：ini 变量校验 + mod-pipeline verify。
+
+    两边各自兜底：任一边抛异常只丢它自己的告警，**导出结果与成功状态不变**。
+    """
+    warnings = []
+    try:
+        warnings.extend(_collect_ini_variable_warnings(output_dir))
+    except Exception:
+        pass
+    try:
+        warnings.extend(_collect_mod_pipeline_warnings(output_dir))
+    except Exception:
+        pass
+    return warnings
+
+
 def _configure_worker_parallel() -> None:
     """后台 worker 里的「嵌套并行」策略。
 
@@ -885,7 +945,7 @@ def _run_worker(manifest_path: str) -> None:
                 except Exception as plan_error:
                     LOG.warning(f"贴图计划落盘失败（不影响导出）: {plan_error}")
 
-            result["warnings"] = _collect_ini_variable_warnings(output_dir)
+            result["warnings"] = _collect_export_warnings(output_dir)
             done_steps = export_progress.finish_steps()  # 收尾算最后一步（并补满）
             result["status"] = "success"
             result["error"] = ""
@@ -915,7 +975,7 @@ def _run_worker(manifest_path: str) -> None:
             if TextureExportPlan is not None:
                 TextureExportPlan.finalize(output_dir)
             result.update(status="success", error="", rounds=1,
-                          warnings=_collect_ini_variable_warnings(output_dir))
+                          warnings=_collect_export_warnings(output_dir))
             done_steps = export_progress.finish_steps()
             _write_stage(stage_path, "完成", done_steps,
                          export_progress.step_total(), "NTMI ModImp 后台导出完成")
@@ -992,7 +1052,7 @@ def _run_worker(manifest_path: str) -> None:
                 except Exception as plan_error:
                     LOG.warning(f"贴图计划落盘失败（不影响导出）: {plan_error}")
 
-            result["warnings"] = _collect_ini_variable_warnings(output_dir)
+            result["warnings"] = _collect_export_warnings(output_dir)
             done_steps = export_progress.finish_steps()  # 收尾算最后一步（并补满）
             result["status"] = "success"
             result["error"] = ""
