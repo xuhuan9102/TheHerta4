@@ -5223,6 +5223,10 @@ class DragCollisionTests(unittest.TestCase):
             self.assertFalse((p / "sampleColliderCellsCoarse.buf").exists())
             self.assertFalse((p / "sampleColliderSDF.buf").exists())
             self.assertIn("collision_grid", comp)
+            self.assertIn("collision_surface", comp)
+            self.assertTrue((p / "sampleColliderSweepOrder.buf").exists())
+            self.assertTrue((p / "sampleColliderCloth.buf").exists())
+            self.assertTrue((p / "sampleColliderAdjacency.buf").exists())
             self.assertNotIn("collision_sdf", comp)
             # 点云交错布局：每点 2×float4 = 8 float
             pts = np.fromfile(p / "sampleColliderPoints.buf", dtype=np.float32)
@@ -5352,10 +5356,19 @@ class DragCollisionTests(unittest.TestCase):
                 Path(td) / "Meshes" / "sampleColliderVertexL0.buf",
                 dtype=np.float32,
             ).reshape(-1, 4)
+            live_indices = np.fromfile(
+                Path(td) / "Meshes" / "sampleColliderTriGridVerts.buf",
+                dtype=np.uint32,
+            )
+            cloth = np.fromfile(Path(td) / "Meshes" / "sampleColliderCloth.buf", dtype=np.uint32)
+            adjacency = np.fromfile(Path(td) / "Meshes" / "sampleColliderAdjacency.buf", dtype=np.uint32)
 
         self.assertEqual(l0.shape, (12, 4))
         self.assertTrue(bool(np.all(l0[:6] == 0.0)))
         self.assertTrue(bool(np.all(l0[7::2, 3] == 1.0)))
+        np.testing.assert_array_equal(live_indices, [3, 4, 5])
+        np.testing.assert_array_equal(cloth, [3, 4, 5])
+        np.testing.assert_array_equal(adjacency[:2], [6, 1])
 
     def test_write_collision_resources_skips_when_no_collider_hits(self):
         import tempfile

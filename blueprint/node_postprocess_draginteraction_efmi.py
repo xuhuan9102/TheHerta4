@@ -91,6 +91,19 @@ EFMI_SECTION_PREFIXES = (
     "[ResourceEFMIDrag",
 )
 
+# ---------------------------------------------------------------------------
+# 碰撞能力：EFMI 分支明确不支持（设计决定，不是漏实现）
+# ---------------------------------------------------------------------------
+# ZZMI 的碰撞链（ColliderTriGrid / CollisionSolve / 远侧方向性约束）不迁移到
+# EFMI。这里给出唯一的、可被调用方查询的早退点；任何未来想接碰撞的代码必须
+# 先改这个常量并补完整测试，不允许静默复用 ZZMI 的碰撞资源名。
+EFMI_COLLISION_SUPPORTED = False
+
+
+def efmi_collision_supported() -> bool:
+    """EFMI 碰撞能力查询：恒 False（早退点；设计决定，非漏实现）。"""
+    return EFMI_COLLISION_SUPPORTED
+
 # 公共 auto-appended 尾块标记（INI 格式契约，与其余后处理节点共用字面量，
 # 这里仅作字面量复制以便独立解析，不 import 任何后处理模块）
 _AUTO_APPENDED_MARKERS = (
@@ -2344,8 +2357,24 @@ class DragInteractionEFMIExporter:
     # 主流程
     # =======================================================================
 
+    def _collision_entry_point(self) -> bool:
+        """EFMI 碰撞入口：恒 False（早退）。
+
+        这是设计决定，不是漏实现：EFMI 只迁移拖拽/手型/形态键驱动，不迁移 ZZMI
+        的碰撞体烘焙与求解。保留这个入口是为了让「想接碰撞」的人在唯一位置看到
+        明确的 False，而不是在导出流程里找不到碰撞代码、误以为是漏了。
+        """
+        return efmi_collision_supported()
+
     def execute(self, mod_export_path):
         print(f"[EFMIDrag] 开始执行 EFMI 分支, 输出路径: {mod_export_path}")
+        # 碰撞：EFMI 分支明确不支持（设计决定，非漏实现）。用户误开节点碰撞时
+        # 给一条清楚的 INFO，而不是静默生成一个没有碰撞的模组。
+        if not self._collision_entry_point() and getattr(self.node, "collision_enabled", False):
+            print(
+                "[EFMIDrag][INFO] 碰撞系统：EFMI 分支明确不支持（设计决定，非漏实现），"
+                "本次导出不生成碰撞资源"
+            )
         if not NUMPY_AVAILABLE:
             print("[EFMIDrag][ERROR] 需要 numpy，已跳过")
             return

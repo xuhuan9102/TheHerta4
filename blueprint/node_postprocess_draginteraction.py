@@ -14,6 +14,7 @@ except ImportError:
 
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 from . import deform_chain
+from .drag_collision import bake_sweep_order, bake_cloth_adjacency, surface_shader_sections
 from .variable_registry import normalize_variable_name
 from ..common.object_prefix_helper import ObjectPrefixHelper, coerce_index
 from ..common.mod_path_compat import (
@@ -156,6 +157,7 @@ SHADER_FILES = (
     "rzm_jiggle_interaction.hlsl",
     "rzm_vis_publish.hlsl",
 )
+SHADER_COLLISION_FILES = ("rzm_drag_collision_bounds.hlsl", "rzm_drag_collision_surface.hlsl")
 # 形态键驱动 / 变量同步着色器不随基础组无条件复制：前者仅在“启用形态键联动”
 # （F1）时拷贝，后者在“启用变量联动”（F4）时拷贝——避免段族已发射但文件未落盘
 # 的 3Dmigoto 加载期缺失（漏拷 = 悬空引用，见 phase2/n1 §5.3）。
@@ -2411,6 +2413,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         """
         toolset = self._get_toolset_dir()
         files = list(SHADER_FILES)
+        if self._collision_enabled_for_component():
+            files += list(SHADER_COLLISION_FILES)
         if self._feature_skd():
             files += list(SHADER_DRIVE_FILES)
         if self._feature_var() and self._drag_drive_var_sync_bindings():
@@ -3660,6 +3664,47 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             owned |= (ids == np.uint32(zone_id))
         return np.any(owned & (weights > 1e-4), axis=1)
 
+    @staticmethod
+    def _collider_shape(points):
+        """碰撞体在 vb0 local 绑定空间的圆柱近似（PCA 主轴 + 轴向范围 + 最大径向半径）。
+
+        用于运行时「远侧方向性约束」（rzm_jiggle_interaction.hlsl::ClampFarSideBarrier）。
+        只对细长碰撞体（主轴特征值明显大于次轴，例如圆柱/大腿）返回；球/方块等
+        各向同性碰撞体返回 None ⇒ 不启用方向性约束，行为退回原碰撞求解。
+
+        返回 dict 或 None。中心 = 顶点均值；轴 = 最大特征值对应的单位特征向量；
+        axis_min/axis_max = 顶点在轴上的投影范围；radius = 到轴的最大径向距离。
+        """
+        pts = np.asarray(points, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[0] < 8 or pts.shape[1] != 3:
+            return None
+        center = pts.mean(axis=0)
+        delta = pts - center
+        cov = (delta.T @ delta) / max(len(pts) - 1, 1)
+        try:
+            vals, vecs = np.linalg.eigh(cov)
+        except np.linalg.LinAlgError:
+            return None
+        order = np.argsort(vals)
+        major = float(vals[order[2]])
+        minor = float(vals[order[1]])
+        if major <= 1e-12 or major < 1.25 * max(minor, 1e-12):
+            return None
+        axis = np.asarray(vecs[:, order[2]], dtype=np.float64)
+        n = float(np.linalg.norm(axis))
+        if n <= 1e-9:
+            return None
+        axis = axis / n
+        proj = delta @ axis
+        radial = delta - proj[:, None] * axis
+        return {
+            "center": center,
+            "axis": axis,
+            "axis_min": float(proj.min()),
+            "axis_max": float(proj.max()),
+            "radius": float(np.linalg.norm(radial, axis=1).max()),
+        }
+
     def _write_collision_resources(self, mod_export_path, sections, comp, ns):
         """烘焙碰撞检测资源：ColliderPoints / ColliderVertexL0。
 
@@ -3725,6 +3770,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         collider_idx = np.flatnonzero(collider_mask)
         points = np.asarray(positions, dtype=np.float32)[collider_idx]
         point_normals = normals[collider_idx]
+        # 远侧方向性约束用的圆柱近似：必须在面内采样/抽稀之前，用原始碰撞体顶点算。
+        comp["collision_shape"] = self._collider_shape(points)
 
         # 面内采样：纯顶点采样在面内留下最近邻距 0.028 量级的空洞（远大于
         # 丝袜-大腿 0.001 的真实间隙），单点切平面/球约束跟不上弧面曲率。
@@ -3828,8 +3875,18 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             g_tris.tofile(os.path.join(out_dir, f"{stem}ColliderTriGridTris.buf"))
             # 网格三角形 → 顶点缓冲索引（每个三角形 3 个 uint32，与 Tris 逐条对应）：
             # 权重重映射要用它反查三角形三个顶点在 Blend 里的权重
-            g_vidx.astype(np.uint32).tofile(
+            (g_vidx + vertex_base).astype(np.uint32).tofile(
                 os.path.join(out_dir, f"{stem}ColliderTriGridVerts.buf"))
+            order, leaves = bake_sweep_order(g_tris)
+            contact_rows = l0.reshape(-1, 2, 4)[:, 1, 3] > 0.5
+            cloth, adjacency = bake_cloth_adjacency(
+                np.asarray(triangles, dtype=np.int64) + vertex_base, contact_rows
+            )
+            if leaves and len(cloth):
+                order.tofile(os.path.join(out_dir, f"{stem}ColliderSweepOrder.buf"))
+                cloth.tofile(os.path.join(out_dir, f"{stem}ColliderCloth.buf"))
+                adjacency.tofile(os.path.join(out_dir, f"{stem}ColliderAdjacency.buf"))
+                comp["collision_surface"] = {"leaves": leaves, "face_count": len(cloth)}
 
         print(
             f"[DragInteraction] Collision: {comp['comp_name']} "
@@ -4853,6 +4910,19 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                     "type = Buffer", "format = R32_UINT",
                     f"filename = {res_dir}/{stem}ColliderTriGridVerts.buf",
                 ]
+                surface = comp.get("collision_surface")
+                if surface:
+                    for tag, filename in (("Order", "ColliderSweepOrder"), ("Cloth", "ColliderCloth"),
+                                          ("Adjacency", "ColliderAdjacency")):
+                        comp_resources[f"[ResourceDragCollision{tag}_{cn}_{ns}]"] = [
+                            "type = Buffer", "format = R32_UINT", f"filename = {res_dir}/{stem}{filename}.buf",
+                        ]
+                    comp_resources[f"[ResourceDragCollisionBounds_{cn}_{ns}]"] = [
+                        "type = RWBuffer", "format = R32G32B32A32_FLOAT", f"array = {int(surface['leaves']) * 4}",
+                    ]
+                    comp_resources[f"[ResourceDragCollisionFaceLimits_{cn}_{ns}]"] = [
+                        "type = RWBuffer", "format = R32_FLOAT", f"array = {int(surface['face_count'])}",
+                    ]
                 # 沿腿轴滑动状态（逐顶点累积的轴向位移；用户 m05361 的「上下滑动控制丝袜长度」）
                 # shader 按 i*2 索引（每顶点 2 个 float4：位移 + 上一帧轴向分量）
                 comp_resources[f"[ResourceDragJiggleSlideState_{cn}_{ns}]"] = [
@@ -5144,7 +5214,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             # （0.5 = 节点侧 maxOffset 上限）。非 0 = 覆盖两者（调试用）。
             "w119 = 0",
         ])
-        # 碰撞检测参数（防穿模）：仅在模式三/拉扯模式生效。槽位 101–104 在拖拽着色器族内空闲。
+        # 碰撞检测参数（防穿模）：仅在模式三/拉扯模式生效。115 选择整面求解，0 兼容旧资源。
         # 显式写全（含关闭时的 x101 = 0），遵守「读了必设」残留纪律。
         collision_grid = comp.get("collision_grid")
         if collision_grid:
@@ -5167,6 +5237,33 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"w101 = {safety}",
                 f"x104 = {drag_mode_var}",
             ])
+            # 远侧方向性约束的碰撞体形状：只在碰撞开启时发射；碰撞关不写、shader 不读。
+            # 槽位 112-114 在拖拽着色器族内空闲（101-111、119 已占用）。
+            shape = comp.get("collision_shape")
+            if shape:
+                c = np.asarray(shape["center"], dtype=np.float64).reshape(3)
+                a = np.asarray(shape["axis"], dtype=np.float64).reshape(3)
+                lines.extend([
+                    f"x112 = {self._fmt(float(c[0]))}",
+                    f"y112 = {self._fmt(float(c[1]))}",
+                    f"z112 = {self._fmt(float(c[2]))}",
+                    "w112 = 0",
+                    f"x113 = {self._fmt(float(a[0]))}",
+                    f"y113 = {self._fmt(float(a[1]))}",
+                    f"z113 = {self._fmt(float(a[2]))}",
+                    f"w113 = {self._fmt(float(shape['axis_min']))}",
+                    f"x114 = {self._fmt(float(shape['axis_max']))}",
+                    f"y114 = {self._fmt(float(shape['radius']))}",
+                    "z114 = 1",
+                    "w114 = 0",
+                ])
+            else:
+                # 形状退化（球/方块/顶点太少）：显式写 0，shader 的 [114].z 门控会跳过。
+                lines.extend([
+                    "x112 = 0", "y112 = 0", "z112 = 0", "w112 = 0",
+                    "x113 = 0", "y113 = 0", "z113 = 0", "w113 = 0",
+                    "x114 = 0", "y114 = 0", "z114 = 0", "w114 = 0",
+                ])
             # 槽位 107：每个顶点绑定的约束三角形数（0 = 未烘焙，走点云回退）。
             # 槽位 108/109：动态三角形网格（origin + cell / dims + cell_count）。
             # 运行时按顶点当前位置现查邻域三角形，约束 =「到表面的带符号距离不许
@@ -5257,6 +5354,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                             f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s1"
                         )
                         lines.append("\tendif")
+        surface = comp.get("collision_surface") if collision_grid else None
+        lines.append(f"x115 = {1 if surface else 0}")
         lines.extend([
             "",
             f"ResourceDragJiggleTempVB0_{cn}_{ns} = vb0",
@@ -5265,6 +5364,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             "",
             f"Dispatch = {dispatch_n}, 1, 1",
             "",
+        ])
+        if surface:
+            sections.update(surface_shader_sections(f"{cn}_{ns}", int(surface["leaves"]),
+                                                   int(surface["face_count"]), dispatch_n, RES_SHADER_DIR))
+            lines.extend(f"run = CustomShaderDragCollision{stage}{cn}_{ns}"
+                         for stage in ("Leaves", "Roots", "Surface", "Apply"))
+        lines.extend([
             "vb0 = null",
             f"ResourceDragJiggleTempVB0_{cn}_{ns} = copy cs-u5",
             "cs-u5 = null", "cs-u6 = null", "cs-t71 = null",

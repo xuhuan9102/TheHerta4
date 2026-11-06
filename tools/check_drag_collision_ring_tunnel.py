@@ -243,6 +243,41 @@ def clamp_inward(p0, p, n0):
     return p
 
 
+def far_side_barrier(p, p0, grab, offset, center, axis, axis_min, axis_max, radius, gap):
+    """CPU 复刻 rzm_jiggle_interaction.hlsl::ClampFarSideBarrier（远侧方向性约束）。"""
+    d = np.asarray(offset, dtype=np.float64)
+    n = float(np.linalg.norm(d))
+    if n < 1e-9:
+        return p
+    d = d / n
+    d = d - axis * float(np.dot(d, axis))
+    n = float(np.linalg.norm(d))
+    if n < 1e-9:
+        return p
+    d = d / n
+
+    rel0 = p0 - center
+    axial = float(np.dot(rel0, axis))
+    if axial < axis_min or axial > axis_max:
+        return p
+    radial = rel0 - axis * axial
+    envelope = radius + gap + 1e-4
+    if float(np.dot(radial, radial)) > envelope * envelope:
+        return p
+    grab_side = float(np.dot(grab - center, d))
+    if abs(grab_side) < 1e-6:
+        return p
+    s = 1.0 if grab_side > 0.0 else -1.0
+    mid = float(np.dot(center, d))
+    side = s * (float(np.dot(p0, d)) - mid)
+    w = min(max(side / radius, 0.0), 1.0)
+    block = 1.0 - (w * w * (3.0 - 2.0 * w))
+    if block <= 1e-4:
+        return p
+    along = float(np.dot(p - p0, d))
+    return p + d * (along * (1.0 - block) - along)
+
+
 def collision_solve_grid(grid, p0, offset, n0, gap, gate, clamp=False):
     p = p0 + offset
     tolerance = 0.0                              # COLLISION_PARAMS.y 取 0
@@ -410,7 +445,7 @@ def path_dip(p0, p1, samples=480):
     return worst
 
 
-def run(gate, drag, mag, t0, label, clamp=False):
+def run(gate, drag, mag, t0, label, clamp=False, barrier=False):
     A, B, C, N = make_cylinder()
     grid = bake_tri_grid(A, B, C, N)
     gap = COLLISION_BASE_SIGN * max(abs(t0), COLLISION_MIN_GAP) * COLLISION_GAP_SCALE
@@ -430,6 +465,12 @@ def run(gate, drag, mag, t0, label, clamp=False):
     d = d / np.linalg.norm(d)
     offset = d * mag
 
+    # 远侧方向性约束的圆柱形状（与导出侧 PCA 对圆柱的结果一致）
+    shape_center = np.array([0.0, H_LEG / 2.0, 0.0])
+    shape_axis = np.array([0.0, 1.0, 0.0])
+    shape_min, shape_max, shape_radius = 0.0, H_LEG, R_LEG
+    grab = shape_center + d * (R_LEG + t0)
+
     tunneled = 0
     inside_end = 0
     flip = 0
@@ -439,6 +480,12 @@ def run(gate, drag, mag, t0, label, clamp=False):
     tags = {}
     for i in range(n):
         p, tag = collision_solve_grid(grid, p0s[i], offset, n0s[i], gap, gate, clamp)
+        if barrier and clamp:
+            p = far_side_barrier(
+                p, p0s[i], grab, offset,
+                shape_center, shape_axis, shape_min, shape_max, shape_radius, gap,
+            )
+            tag = tag + "+barrier"
         tags[tag] = tags.get(tag, 0) + 1
         moves.append(float(np.linalg.norm(p - p0s[i])))
         if inside_solid(p):
@@ -453,7 +500,7 @@ def run(gate, drag, mag, t0, label, clamp=False):
             blocked += 1
     moves = np.asarray(moves)
     dips = np.asarray(dips)
-    print(f"  {label:<30} gate={gate:<3} clamp={str(clamp):<5} "
+    print(f"  {label:<30} gate={gate:<3} clamp={str(clamp):<5} barrier={str(barrier):<5} "
           f"陷穿={tunneled:>3}/{n} 最深={dips.max()*1000:6.2f}mm  "
           f"跨侧={flip:>3}  被拦={blocked:>3}  位移中位={np.median(moves):.4f} "
           f"max={moves.max():.4f}  {tags}")
@@ -463,12 +510,16 @@ def run(gate, drag, mag, t0, label, clamp=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gate", choices=["old", "new", "both"], default="both")
+    ap.add_argument("--barrier", action="store_true",
+                    help="在 clamp=True 的出口上再加远侧方向性约束（新修复）")
     args = ap.parse_args()
 
     print("圆柱碰撞体 R=0.075 H=0.90 —— 整圈 96 个顶点全部落在拖拽范围内")
-    variants = [("old", False), ("old", True), ("new", True)]
+    variants = [("old", False, False), ("old", True, False), ("new", True, False)]
+    if args.barrier:
+        variants += [("old", True, True), ("new", True, True)]
     if args.gate != "both":
-        variants = [(args.gate, False), (args.gate, True)]
+        variants = [v for v in variants if v[0] == args.gate]
 
     cases = [
         ("垂直腿轴 +x, 0.15", (1, 0, 0), 0.15, 3.9e-4),
@@ -480,17 +531,17 @@ def main():
         ("垂直 -z, 0.50", (0, 0, -1), 0.50, 3.9e-4),
         ("垂直腿轴 +x, 0.50, t0=1e-4", (1, 0, 0), 0.50, 1.0e-4),
     ]
-    totals: dict[tuple[str, bool], float] = {}
+    totals: dict[tuple[str, bool, bool], float] = {}
     for label, drag, mag, t0 in cases:
-        for gate, clamp in variants:
-            n, dip, flip = run(gate, drag, mag, t0, label, clamp)
-            key = (gate, clamp)
+        for gate, clamp, barrier in variants:
+            n, dip, flip = run(gate, drag, mag, t0, label, clamp, barrier)
+            key = (gate, clamp, barrier)
             prev = totals.get(key, (0, 0.0, 0))
             totals[key] = (prev[0] + n, max(prev[1], dip), prev[2] + flip)
     print("\n汇总（陷穿顶点数 / 最深 / 跨侧顶点数）：")
-    for (gate, clamp), (n, dip, flip) in totals.items():
-        print(f"  gate={gate:<3} clamp={str(clamp):<5}  陷穿={n:>4}  "
-              f"最深={dip*1000:7.2f}mm  跨侧={flip:>4}")
+    for (gate, clamp, barrier), (n, dip, flip) in totals.items():
+        print(f"  gate={gate:<3} clamp={str(clamp):<5} barrier={str(barrier):<5}  "
+              f"陷穿={n:>4}  最深={dip*1000:7.2f}mm  跨侧={flip:>4}")
 
 
 if __name__ == "__main__":

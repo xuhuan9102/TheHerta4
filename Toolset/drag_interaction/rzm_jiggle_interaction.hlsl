@@ -140,11 +140,20 @@ Texture1D<float4> IniParams : register(t120);
 #define JIGGLE_MULT_EXTRA    IniParams[73]
 #define TIME_PARAMS          IniParams[76]
 #define ZONE_RUNTIME_META    IniParams[119]
+// 【远侧方向性约束】碰撞体在 vb0 local 绑定空间的形状（导出侧 PCA 烘焙）：
+//   [112].xyz = 中心，[113].xyz = 轴向单位向量，[113].w = 轴向最小值，
+//   [114].x   = 轴向最大值，[114].y = 最大径向半径，[114].z = 有效位（1=可用）。
+// 只在碰撞开启（x101 > 0.5 且 x104 >= 2）时由 ini 发射；碰撞关时不写，shader 也不读。
+#define COLLIDER_SHAPE_CENTER IniParams[112]
+#define COLLIDER_SHAPE_AXIS   IniParams[113]
+#define COLLIDER_SHAPE_RANGE  IniParams[114]
 // Collision params (anti-clipping). Set by the jiggle INI section; zero = disabled.
 //   [101]: x=enabled, y=margin, z=mode (0=soft-slide, 1=hard-clamp), w=safety
 //   [104]: x=drag mode variable
 #define COLLISION_PARAMS    IniParams[101]
 #define COLLISION_META      IniParams[104]
+// The final surface pass constrains complete triangles from the current VB0.
+#define COLLISION_SURFACE   IniParams[115]
 // 动态三角形网格（当前首选路径）：运行时按顶点当前位置现查邻域三角形，约束 =
 // 「到碰撞体表面的带符号距离不许比绑定姿态时更小」。导出侧把碰撞体三角形装进
 // 均匀网格（CSR），shader 侧查 27 邻域后对候选三角形算精确点-三角形距离。
@@ -1254,6 +1263,69 @@ float3 GuardInwardHalfSpace(float3 p0, float3 p, float3 n0)
     return inward < 0.0 ? p0 + disp - n0 * inward : p;
 }
 
+// 【远侧方向性约束 · 用户 m00001/m00030 的「半径覆盖整柱」场景】
+// 问题：原有碰撞只保证「不沿顶点法线向内」，切向分量原样保留。半径覆盖整根圆柱时，
+// 右侧 45°~90° 的顶点虽然不穿进实体，但会沿切向绕柱滑到左侧，看起来就是「右边跟着走」。
+// 做法：把碰撞体当作一根有轴向范围的圆柱（导出侧 PCA 给中心/轴/轴向范围/最大半径），
+// 以「抓取点所在侧」为近侧、反侧为远侧；远侧顶点（含中面）沿拖拽方向的位移按到中面的
+// 距离平滑衰减到 0，切向（垂直于拖拽方向）保留。远侧顶点因此停在原表面点/只做贴壁滑，
+// 不会沿切向绕到另一侧，也不会被推进实体内部。
+//   - 一次轴向 dot + 一次径向长度 + 一次侧向 dot，不做三角网格查询。
+//   - 轴向范围外的顶点（从开口端/顶部进入）直接放行；径向包络外（圆柱外的角落）放行。
+//   - 过渡宽度用碰撞体半径（几何量），不是拍脑袋的容差；中面处 block=1，近侧表面 block=0，
+//     因此远侧完全截断、近侧平滑过渡，不会在壁上留下台阶。
+//   - 只在碰撞开启时由调用方进入；碰撞关或形状无效（[114].z=0）时原样返回。
+float3 ClampFarSideBarrier(uint i, float3 p, float3 p0, float3 grab, float3 offset)
+{
+    if (COLLIDER_SHAPE_RANGE.z < 0.5)
+        return p;
+    float3 dRaw = SafeNormalize(offset, float3(0.0, 0.0, 0.0));
+    if (dot(dRaw, dRaw) < 1e-12)
+        return p;
+
+    float3 center = COLLIDER_SHAPE_CENTER.xyz;
+    float3 axis = SafeNormalize(COLLIDER_SHAPE_AXIS.xyz, float3(0.0, 1.0, 0.0));
+    float axisMin = COLLIDER_SHAPE_AXIS.w;
+    float axisMax = COLLIDER_SHAPE_RANGE.x;
+    float radius = max(COLLIDER_SHAPE_RANGE.y, 1e-6);
+
+    // 只关心「横向」拖拽；纯轴向拖拽不产生绕柱越界，直接放行。
+    float3 d = dRaw - axis * dot(dRaw, axis);
+    if (dot(d, d) < 1e-12)
+        return p;
+    d = normalize(d);
+
+    float3 rel0 = p0 - center;
+    float axial = dot(rel0, axis);
+    // 开口端/顶部：不在碰撞体轴向范围内 ⇒ 不是「越过轮廓」，放行。
+    if (axial < axisMin || axial > axisMax)
+        return p;
+
+    float3 radial = rel0 - axis * axial;
+    float gap = max(abs(ColliderVertexL0[i * 2u + 0u].w), COLLISION_MIN_GAP);
+    float envelope = radius + gap + COLLISION_NUMERIC_EPS;
+    // 圆柱径向包络外（例如从上方/角落绕过去）放行。
+    if (dot(radial, radial) > envelope * envelope)
+        return p;
+
+    float grabSide = dot(grab - center, d);
+    if (abs(grabSide) < 1e-6)
+        return p;                       // 抓取点落在中面上，方向不明确
+    float s = grabSide > 0.0 ? 1.0 : -1.0;
+    float mid = dot(center, d);
+    float side = s * (dot(p0, d) - mid);
+    // side <= 0：远侧/中面；side >= radius：近侧表面。
+    float w = saturate(side / radius);
+    float block = 1.0 - smoothstep(0.0, 1.0, w);
+    if (block <= 1e-4)
+        return p;
+
+    // 只衰减「沿拖拽方向」的位移；切向原样保留 ⇒ 远侧停在原表面/贴壁滑，不被推进实体。
+    float along = dot(p - p0, d);
+    float alongAllowed = along * (1.0 - block);
+    return p + d * (alongAllowed - along);
+}
+
 // 逐顶点碰撞求解的路径段（最终不变量在下面的 CollisionSolveGrid 里加）。
 // 约束语义（用户 m03851 的「表面滑移」要求）：
 //   切向位移自由保留，径向被裁到「离表面 ≥ base」。
@@ -2048,7 +2120,7 @@ void main(uint3 threadID : SV_DispatchThreadID)
     // 推动顶点 ⇒ 原先这帧不做碰撞 ⇒ 回弹穿模。位移量判据对回弹同样成立。
     float3 totalOffset = v.position - localPos;
     bool collisionDue = dot(totalOffset, totalOffset) > 1e-12;
-    if (COLLISION_PARAMS.x > 0.5 && COLLISION_META.x >= 2.0 && collisionDue)
+    if (COLLISION_PARAMS.x > 0.5 && COLLISION_META.x >= 2.0 && collisionDue && COLLISION_SURFACE.x < 0.5)
     {
         float3 vnRaw = v.normal;
         float vnLen = length(vnRaw);
@@ -2062,6 +2134,11 @@ void main(uint3 threadID : SV_DispatchThreadID)
         float4 invL0n = ColliderVertexL0[i * 2u + 1u];
         solved = GuardInwardHalfSpace(localPos, solved, SafeNormalize(invL0n.xyz, vnUnit));
         v.position = GuardClampDelta(solved, localPos, GUARD_MAX_OFFSET);
+
+        // 远侧方向性约束：只压「沿拖拽方向越过碰撞体中面」的位移；
+        // Path Slide / Sock Slide 是另一条硬位移路径，不参与，避免互相打架。
+        if (!hasPathOffset && !SockSlideEnabled(activeZone))
+            v.position = ClampFarSideBarrier(i, v.position, localPos, nextCenter.xyz, nextCurrent.xyz);
     }
 
     // t33 守卫：唯一写回出口。非有限 ⇒ 回退本帧输入行；位移按 GUARD_MAX_OFFSET 限幅。
