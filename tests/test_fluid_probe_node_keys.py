@@ -283,8 +283,6 @@ class EmitterKeyExportTests(unittest.TestCase):
             self.assertNotIn(var, text, "产物里不该再有 %s" % var)
 
 
-if __name__ == "__main__":
-    unittest.main()
 class SplashEnableExportTests(unittest.TestCase):
     """次生总开关：默认开不写任何行；关掉写 x61=1 / y61=0，紧跟 x47 之后。"""
 
@@ -464,3 +462,5 @@ class StageProbeExportTests(unittest.TestCase):
                            text.index("x47 = $fluid_gravity_scale"))
 
 
+if __name__ == "__main__":
+    unittest.main()
