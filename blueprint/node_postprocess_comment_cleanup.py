@@ -106,6 +106,10 @@ class SSMTNode_PostProcess_CommentCleanup(SSMTNode_PostProcess_Base):
         与动画驱动 / 文本追加 / UI 面板同口径：只有一个配置表就直接用它；
         有多个时按当前工作空间名消歧（先同名 ``<工作空间>.ini``，再
         ``<工作空间>_*.ini`` 前缀），仍不能唯一确定就报错并请用户手动指定。
+
+        材质转资源pro 的纯贴图模式会额外生成 ``*_PureTexture.ini`` 派生产物，
+        它不是主配置表：先排除再消歧；``find_config_table_files`` 本身不动，
+        备份 / 清理流程仍能看到这些片段。
         """
         if not mod_export_path or not os.path.isdir(mod_export_path):
             return "", "当前导出目录不存在，请先确认 Generate Mod 输出路径"
@@ -113,6 +117,23 @@ class SSMTNode_PostProcess_CommentCleanup(SSMTNode_PostProcess_Base):
         ini_files = find_config_table_files(mod_export_path)
         if not ini_files:
             return "", f"导出目录中未找到配置表（*.ini）: {mod_export_path}"
+
+        filtered_files = [
+            path for path in ini_files
+            if not os.path.basename(path).casefold().endswith("_puretexture.ini")
+        ]
+        excluded_count = len(ini_files) - len(filtered_files)
+        if excluded_count:
+            print(
+                "目标配置表定位：已排除材质转资源pro 的派生产物 "
+                f"*_PureTexture.ini（{excluded_count} 个）"
+            )
+        ini_files = filtered_files
+        if not ini_files:
+            return "", (
+                "导出目录中只剩材质转资源pro 的派生产物 *_PureTexture.ini，"
+                f"没有可清理的主配置表: {mod_export_path}"
+            )
 
         workspace_name = str(GlobalConfig.get_workspace_name() or "").strip()
         if workspace_name:
