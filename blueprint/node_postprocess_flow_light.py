@@ -715,7 +715,7 @@ class SSMTNode_PostProcess_FlowLight(SSMTNode_PostProcess_Base):
                 return
 
             had_flowlight = any(
-                name.startswith(("[CustomShaderFL", "[ResourceFL", "[PoolFLHistory", "[ShaderRegexFLMaterial_"))
+                name.startswith(("[CustomShaderFL", "[ResourceFL", "[PoolFLHistory", "[ShaderRegexFLMaterial_", "[KeyFlowLightToggle]"))
                 for name in sections
             )
             self._strip_old_flowlight(sections, tag)

@@ -495,6 +495,38 @@ class FlowLightNodeTests(unittest.TestCase):
         self.assertNotIn("persist $fl_enable", after)
 
 
+    def test_toggle_section_removed_when_only_the_key_section_remains(self):
+        """键位段：内容要能读回；只剩它一份旧产物时，本轮零命中必须把它清掉。
+
+        回归点：``had_flowlight`` 原来只认 FL 着色器段、不认 ``[KeyFlowLightToggle]``。
+        ini 里只剩这一段（上一轮写过键位，之后对象被清空/改名）且本轮零 draw 命中时，
+        ``execute_postprocess`` 会在写盘前 return（node:735-736），内存里删掉的段永远
+        落不了盘，盘上的键位段就赖着不走。把它加进 ``had_flowlight`` 元组后才会走到写盘。
+        """
+        node = self._make_node(key_toggle="VK_F9")
+        node.execute_postprocess(self.mod_dir)
+        text = self._read_ini_text()
+        self.assertEqual(text.count("[KeyFlowLightToggle]"), 1)
+        lines = [line.strip() for line in self._section_lines("[KeyFlowLightToggle]")]
+        self.assertIn("type = cycle", lines)
+        self.assertIn("$fl_enable = 1,0", lines)
+
+        # 只留键位段（其余 FL 段手工摘掉），本轮零 draw 命中。
+        with open(self.ini_path, "w", encoding="utf-8") as file_obj:
+            file_obj.write(
+                "[KeyFlowLightToggle]\n"
+                "    key = no_alt no_ctrl no_shift VK_F9\n"
+                "    type = cycle\n"
+                "    $fl_enable = 1,0\n"
+            )
+        idle_node = self._make_node(object_names=())
+        idle_node.execute_postprocess(self.mod_dir)
+
+        self.assertEqual(idle_node._last_resolved_draw_count, 0)
+        self.assertIsNone(self._section_lines("[KeyFlowLightToggle]"))
+        self.assertEqual(self._read_ini_text().count("[KeyFlowLightToggle]"), 0)
+
+
     def _write_template(self):
         import shutil
         os.makedirs(self.toolset_dir, exist_ok=True)
