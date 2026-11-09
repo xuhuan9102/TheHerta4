@@ -371,17 +371,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
-    export_group_weld_enabled: bpy.props.BoolProperty(
-        name="导出时按分组焊接接缝顶点",
-        description=(
-            "仅 ZZMI 生效：导出时把同一 DrawIB 内、由「接缝焊接」节点分组指定且被用户"
-            "标记为缝合边（seam）的接缝顶点属性统一（位置/权重/形态键/法线），"
-            "消除接缝裂缝与表面反光折线。不增删顶点、不改索引与 draw 分段，"
-            "因此物体切换（脸颈多套等）与形态键完全保留"
-        ),
-        default=True,
-    ) # type: ignore
-
     export_add_missing_vertex_groups: bpy.props.BoolProperty(
         name="导出时添加缺失顶点组",
         description="勾选此项后，生成Mod时会自动重新排列并填补数字顶点组间的间隙空缺",
@@ -561,12 +550,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def open_mod_folder_after_generate_mod(cls):
         return cls._instance().open_mod_folder_after_generate_mod
-
-    @classmethod
-    def is_export_group_weld_enabled(cls) -> bool:
-        """ZZMI 导出期接缝焊接开关（默认开）。"""
-        return cls._bool_attr("export_group_weld_enabled", True)
-
 
     @classmethod
     def zzz_use_slot_fix(cls):

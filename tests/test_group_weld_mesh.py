@@ -21,6 +21,7 @@ import numpy as np
 from common.group_weld import DEFAULT_WELD_THRESHOLD
 from common.group_weld_mesh import (
     assign_face_buckets,
+    build_ordered_transfer_pairs,
     build_mesh_vertex_ranges,
     build_vertex_owner_array,
     collect_weld_groups,
@@ -613,6 +614,29 @@ class GroupMemberTests(unittest.TestCase):
         self.assertEqual(groups[0]["buckets"], [0, 1])
         self.assertEqual(groups[1]["buckets"], [0])
         self.assertEqual(groups[0]["label"], "组1")
+
+    def test_group_bucket_order_follows_visible_object_order(self):
+        ranges = build_mesh_vertex_ranges(
+            [
+                _record(_FakeDrawCall("身体", 2), 0, 2),
+                _record(_FakeDrawCall("脸1", 2), 2, 2),
+                _record(_FakeDrawCall("颈部1", 2), 4, 2),
+            ]
+        )
+        groups = collect_weld_groups(ranges, [["颈部1", "身体", "脸1"]])
+        self.assertEqual(
+            groups[0]["bucket_order"],
+            [ranges[2]["bucket"], ranges[0]["bucket"], ranges[1]["bucket"]],
+        )
+
+    def test_transfer_pairs_follow_group_order_as_a_chain(self):
+        owner_ids = [2, 1, 0]
+        pairs = build_ordered_transfer_pairs(
+            members=[0, 1, 2],
+            owner_ids=owner_ids,
+            bucket_order=[0, 1, 2],
+        )
+        self.assertEqual(pairs, [(2, 1), (1, 0)])
 
     @unittest.skip("方案 A 改为「不合并顶点、只统一接缝顶点属性」，本用例的旧断言待重写")
     def test_duplicate_bucket_across_groups_is_welded_once(self):

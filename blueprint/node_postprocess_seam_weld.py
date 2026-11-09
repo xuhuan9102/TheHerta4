@@ -95,7 +95,25 @@ class SSMTNode_PostProcess_SeamWeld(SSMTNode_PostProcess_Base):
         if group.objects:
             for index, item in enumerate(group.objects):
                 row = obj_box.row(align=True)
-                row.label(text=str(item.object_name or "(空)"), icon='MESH_DATA')
+                row.label(text=f"{index + 1}. {item.object_name or '(空)'}", icon='MESH_DATA')
+                up_button = row.row(align=True)
+                up_button.enabled = index > 0
+                up = up_button.operator(
+                    "ssmt.seam_weld_move_object", text="", icon='TRIA_UP'
+                )
+                up.node_name = self.name
+                up.group_index = active
+                up.object_index = index
+                up.direction = -1
+                down_button = row.row(align=True)
+                down_button.enabled = index + 1 < len(group.objects)
+                down = down_button.operator(
+                    "ssmt.seam_weld_move_object", text="", icon='TRIA_DOWN'
+                )
+                down.node_name = self.name
+                down.group_index = active
+                down.object_index = index
+                down.direction = 1
                 op = row.operator("ssmt.seam_weld_remove_object", text="", icon='X')
                 op.node_name = self.name
                 op.group_index = active
@@ -322,6 +340,43 @@ class SSMT_OT_SeamWeldRemoveObject(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class SSMT_OT_SeamWeldMoveObject(bpy.types.Operator):
+    bl_idname = "ssmt.seam_weld_move_object"
+    bl_label = "调整物体顺序"
+    bl_description = "调整当前组物体的上下顺序；导出时按该顺序链式传递接缝数据"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    node_name: bpy.props.StringProperty()  # type: ignore
+    group_index: bpy.props.IntProperty(default=-1)  # type: ignore
+    object_index: bpy.props.IntProperty(default=-1)  # type: ignore
+    direction: bpy.props.IntProperty(default=0)  # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return _poll_node_editor(context)
+
+    def execute(self, context):
+        node = _resolve_weld_node(context, self.node_name)
+        if node is None:
+            self.report({'ERROR'}, "请选择接缝焊接节点")
+            return {'CANCELLED'}
+        group_index = int(self.group_index)
+        if not (0 <= group_index < len(node.groups)):
+            self.report({'WARNING'}, "没有当前组")
+            return {'CANCELLED'}
+        group = node.groups[group_index]
+        object_index = int(self.object_index)
+        target_index = object_index + int(self.direction)
+        if not (0 <= object_index < len(group.objects)):
+            self.report({'WARNING'}, "该组里没有这一项")
+            return {'CANCELLED'}
+        if not (0 <= target_index < len(group.objects)):
+            return {'CANCELLED'}
+        group.objects.move(object_index, target_index)
+        group.objects_index = target_index
+        return {'FINISHED'}
+
+
 class SSMT_OT_SeamWeldCreateGroupFromSelection(bpy.types.Operator):
     bl_idname = "ssmt.seam_weld_create_group_from_selection"
     bl_label = "按选中物体建组"
@@ -362,6 +417,7 @@ classes = (
     SSMT_OT_SeamWeldSetActiveGroup,
     SSMT_OT_SeamWeldAddSelected,
     SSMT_OT_SeamWeldRemoveObject,
+    SSMT_OT_SeamWeldMoveObject,
     SSMT_OT_SeamWeldCreateGroupFromSelection,
 )
 
