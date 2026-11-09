@@ -311,6 +311,15 @@ class BlueprintOutputFolderTests(unittest.TestCase):
     def test_non_blueprint_flow_uses_scene_global_setting(self):
         self.assertEqual(GlobalConfig.path_generate_mod_folder(), self.global_folder)
 
+    def test_non_blueprint_flow_with_empty_global_path_uses_default(self):
+        """快速局部导出等非蓝图流程勾了自定义目录但留空时必须用默认目录。"""
+        _FAKE_GLOBAL_PROTERTIES.generate_mod_folder_path = lambda: "   "
+
+        result = GlobalConfig.path_generate_mod_folder()
+
+        self.assertEqual(result, self._default_folder())
+        self.assertTrue(os.path.isdir(result), "默认目录应被创建")
+
     # --- 用例 3：指针作用域（问题 2 的回归） -------------------------------
 
     def test_pointer_restore_clears_blueprint_branch(self):

@@ -279,7 +279,9 @@ class GlobalConfig:
         # 非蓝图导出流程：沿用场景全局设置。
         # 但是这里有个问题就是SkipIB和VSCheck不会生成在指定位置。
         if GlobalProterties.use_specific_generate_mod_folder_path():
-            return GlobalProterties.generate_mod_folder_path()
+            global_path = str(GlobalProterties.generate_mod_folder_path() or "").strip()
+            if global_path:
+                return global_path
         return cls._default_generated_mod_folder()
     
     @classmethod
