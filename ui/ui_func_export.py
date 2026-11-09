@@ -76,6 +76,11 @@ _BG_MOUSE_MOVE_EVENT_TYPES = frozenset({'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'})
 _BG_NEST_NODE_IDNAME = "SSMTNode_Blueprint_Nest"
 _BG_SSMT_TREE_IDNAME = "SSMTBlueprintTreeType"
 _BG_NEST_SKIP_NAMES = frozenset({"", "NONE"})
+_BG_MOD_INI_NODE_IDNAMES = frozenset({
+    "SSMTNode_PostProcess_SwapPanel",
+    "SSMTNode_PostProcess_CombinedPanel",
+    "SSMTNode_PostProcess_ShapeKeyExt",
+})
 
 
 def _iter_nested_blueprint_trees(tree):
@@ -160,6 +165,22 @@ def compose_background_progress_text(text: str, progress_bar: str) -> str:
     if not step_text:
         return f"{_BG_PROGRESS_PREFIX}{progress_bar}"
     return f"{_BG_PROGRESS_PREFIX}{progress_bar} {step_text}"
+
+
+def _sync_background_export_ini_paths(tree_name, output_dir, workspace_name=""):
+    """把后台实例写出的主 INI 路径同步回主进程节点，供原地刷新使用。"""
+    from ..common.ini_variable_validator import find_primary_ini
+
+    tree = bpy.data.node_groups.get(str(tree_name or ""))
+    if tree is None:
+        return
+    ini_path = find_primary_ini(str(output_dir or ""), str(workspace_name or ""))
+    if not ini_path:
+        return
+    for node in getattr(tree, "nodes", []) or []:
+        if getattr(node, "bl_idname", "") in _BG_MOD_INI_NODE_IDNAMES:
+            node.ini_file_path = ini_path
+            node.last_mod_ini_path = ini_path
 
 
 #: 后台导出 modal 轮询的共用实现：Generate Mod 与快速局部导出共用同一套
@@ -274,6 +295,14 @@ class _BackgroundExportMixin:
             return
 
         if outcome == "success":
+            try:
+                _sync_background_export_ini_paths(
+                    getattr(session, "tree_name", ""),
+                    getattr(session, "output_dir", ""),
+                    getattr(session, "workspace_name", ""),
+                )
+            except Exception as error:
+                print(f"⚠️ 后台导出主 INI 路径同步失败: {error}")
             log_path = session.cleanup()
             self._open_background_output_folder(session)
             # 成功时**保留**一句完成文本（原来这里 clear_progress_header，状态栏瞬间
