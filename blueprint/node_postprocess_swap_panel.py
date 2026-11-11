@@ -24,6 +24,8 @@ from collections import OrderedDict
 import bpy
 
 from .node_postprocess_base import SSMTNode_PostProcess_Base
+from ..common.global_config import GlobalConfig
+from ..common.ini_variable_validator import find_primary_ini
 try:
     from ..common.ui_image_color import mark_png_as_srgb
 except (ImportError, ModuleNotFoundError):
@@ -59,6 +61,29 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+
+def _first_existing_ini(*paths):
+    for path in paths:
+        clean_path = str(path or "").strip()
+        if clean_path and os.path.isfile(clean_path):
+            return clean_path
+    return ""
+
+
+def _resolve_blueprint_ini_path(tree, *preferred_paths):
+    """优先使用已记录路径；失效时按当前蓝图自己的输出目录重新解析。"""
+    ini_path = _first_existing_ini(*preferred_paths)
+    if ini_path:
+        return ini_path
+
+    previous_tree_name = GlobalConfig.get_output_blueprint_tree_name()
+    try:
+        GlobalConfig.set_output_blueprint_tree(tree)
+        export_dir = GlobalConfig.path_generate_mod_folder()
+    finally:
+        GlobalConfig.restore_output_blueprint_tree(previous_tree_name)
+    return find_primary_ini(export_dir, GlobalConfig.get_workspace_name())
 
 
 class SSMT_SwapPanelEntry(bpy.types.PropertyGroup):
@@ -160,10 +185,15 @@ class SSMT_OT_SwapPanel_Refresh(bpy.types.Operator):
             if tree:
                 node = tree.nodes.get(self.node_name)
                 if node and node.bl_idname in {'SSMTNode_PostProcess_SwapPanel', 'SSMTNode_PostProcess_CombinedPanel'}:
-                    ini_path = (node.ini_file_path or "").strip() or node.last_mod_ini_path
-                    if not ini_path or not os.path.isfile(ini_path):
+                    ini_path = _resolve_blueprint_ini_path(
+                        tree,
+                        node.ini_file_path,
+                        node.last_mod_ini_path,
+                    )
+                    if not ini_path:
                         self.report({'WARNING'}, "未找到目标 ini：请先导出一次 mod，或在节点「INI文件」中指定")
                         return {'CANCELLED'}
+                    node.ini_file_path = ini_path
                     ok = node.execute_postprocess(os.path.dirname(ini_path), _in_place=True, _ini_path=ini_path)
                     if ok:
                         self.report({'INFO'}, f"已原地刷新物体切换面板: {os.path.basename(ini_path)}")
@@ -196,14 +226,16 @@ class SSMT_OT_CombinedPanel_Refresh(bpy.types.Operator):
             return {'CANCELLED'}
 
         slider_node = combined._find_shape_ext_node()
-        ini_path = (combined.ini_file_path or "").strip()
+        preferred_paths = [combined.ini_file_path, combined.last_mod_ini_path]
+        if slider_node is not None:
+            preferred_paths.extend([slider_node.ini_file_path, slider_node.last_mod_ini_path])
+        ini_path = _resolve_blueprint_ini_path(tree, *preferred_paths)
         if not ini_path:
-            ini_path = (combined.last_mod_ini_path or "").strip()
-        if not ini_path and slider_node is not None:
-            ini_path = (slider_node.ini_file_path or "").strip() or (slider_node.last_mod_ini_path or "").strip()
-        if not ini_path or not os.path.isfile(ini_path):
             self.report({'WARNING'}, "未找到目标 ini：请先导出一次 mod，或在共用设置中指定 INI 文件")
             return {'CANCELLED'}
+        combined.ini_file_path = ini_path
+        if slider_node is not None:
+            slider_node.ini_file_path = ini_path
 
         export_dir = os.path.dirname(ini_path)
         if combined.create_cumulative_backup:

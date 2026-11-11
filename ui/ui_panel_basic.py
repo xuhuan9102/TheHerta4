@@ -568,10 +568,6 @@ class PanelBasicInformation(bpy.types.Panel):
         )
         generate_operator.blueprint_name = selected_blueprint_name
 
-        # 接缝焊接（默认开，仅 ZZMI）：按「接缝焊接」节点分组，统一被标记为缝合边的
-        # 接缝顶点属性（不改顶点数/索引/draw 分段，切换与形态键完全保留）。
-        blueprint_box.prop(global_properties, "export_group_weld_enabled")
-
         layout.separator()
 
         layout.operator(SSMTQuickExportSelected.bl_idname, text="快速局部导出", icon='EXPORT')

@@ -593,19 +593,8 @@ class ExportZZMI(ExportUnity):
                 # 不能回退到旧的 ib=null/IB skip 路径让部件静默消失并串扰其它 hash。
                 self._zzmi_stub_object_names = self._ensure_stub_objects_for_missing_parts(blueprint_model)
 
-            # 接缝焊接开关（仅 ZZMI）：由 DrawIBExportBase 读取后传给 SubMeshModel，
-            # 在 join 之后、生成导出缓冲之前按「接缝焊接」节点的分组统一缝合边顶点属性。
-            # 关闭时与改动前行为完全一致；读开关异常时按关闭处理（fail-safe）。
-            weld_by_group = False
-            try:
-                weld_enabled_getter = getattr(
-                    GlobalProterties, "is_export_group_weld_enabled", None
-                )
-                if callable(weld_enabled_getter):
-                    weld_by_group = bool(weld_enabled_getter())
-            except Exception:
-                weld_by_group = False
-            self.weld_by_group_enabled = weld_by_group
+            # 接缝焊接由蓝图里的「接缝焊接」节点直接触发；节点不存在或没有分组时不焊接。
+            self.weld_by_group_enabled = True
             super().__init__(blueprint_model)
 
             self.cross_ib_info_dict = blueprint_model.cross_ib_info_dict

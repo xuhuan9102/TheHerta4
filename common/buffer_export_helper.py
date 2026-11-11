@@ -29,7 +29,10 @@ class BufferExportHelper:
 
     @staticmethod
     def write_buf_ib_r32_uint(index_list:list[int],buf_file_name:str):
-        ib_path = os.path.join(GlobalConfig.path_generatemod_buffer_folder(), buf_file_name)
+        if os.path.dirname(buf_file_name):
+            ib_path = buf_file_name
+        else:
+            ib_path = os.path.join(GlobalConfig.path_generatemod_buffer_folder(), buf_file_name)
         packed_data = struct.pack(f'<{len(index_list)}I', *index_list)
         with open(ib_path, 'wb') as ibf:
             ibf.write(packed_data) 
