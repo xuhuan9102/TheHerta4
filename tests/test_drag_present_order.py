@@ -8,6 +8,17 @@ from tests.test_node_postprocess_draginteraction import (
 
 
 class DragPresentOrderTests(unittest.TestCase):
+    def test_reexport_does_not_accumulate_blank_lines_after_shapekey_block(self):
+        node = _make_node(_load_drag_module())
+        lines = ['; --- SSMT DIRECT SHAPEKEY PRESENT BEGIN ---', 'if $active == 1',
+                 'run = CustomShaderShape', 'endif', '; --- SSMT DIRECT SHAPEKEY PRESENT END ---', '', '']
+        block = ['; --- DRAG PRESENT BEGIN ---', '$isMouseButtonDown = 0', '; --- DRAG PRESENT END ---']
+        node._place_drag_present_block(lines, block)
+        first = list(lines)
+        lines.append('')  # INI reader retains the separator before the next section.
+        node._place_drag_present_block(lines, block)
+        self.assertEqual(lines, first)
+
     def _emit(self, **props):
         node = _make_node(_load_drag_module(), **props)
         sections = _base_sections()

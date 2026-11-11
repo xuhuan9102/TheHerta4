@@ -787,7 +787,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     bl_description = (
         '把 LEWDHAND 的鼠标拖拽模型效果接入蓝图后处理链：Alt+左键抓取拖拽、弹簧回弹、戳，'
         '可与多文件/形态键叠加（多文件→形态键→拉扯三级接力）。'
-        '着色器原样复制自 LEWDHAND，仅替换顶点结构体定义。'
+        '可选当前帧整面碰撞，以及按衣物拓扑生成的实时贴身上下拖拽。'
     )
 
     # ---- 基本属性 ----
@@ -978,17 +978,17 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     # ---- 碰撞检测（防穿模；仅模式三/拉扯模式生效）----
     collision_enabled: bpy.props.BoolProperty(
         name="启用碰撞检测",
-        description="拉扯时被拖拽层顶点逼近指定碰撞体（如大腿）表面即停止，消除穿模；仅在拉扯模式（默认模式 2）下生效",
+        description="按当前帧身体三角形限制整张受控面片的位移，避免大半径同时拖到正反面时新增穿插；仅模式2生效，不修复模型原有交叉",
         default=False,
     )
     collision_margin: bpy.props.FloatProperty(
         name="碰撞裕量",
-        description="数值容差：允许顶点比导出时刻再向内接近这么多（vb0 局部单位），用于吸收蒙皮后的毫米级偏差与避免边界抖动；0=严格贴住导出间隙",
+        description="整面接触保留的安全间距（模型坐标单位），用于避免边界抖动",
         default=0.002, min=0.0, max=0.05,
     )
     collision_mode: bpy.props.EnumProperty(
         name="碰撞模式",
-        description="软投影：把顶点投影回全部邻近碰撞面的交集，只裁掉向内分量、保留切向（位移场连续、面不被折，推荐）；硬钳制：沿位移路径整体二分停止，相邻顶点会各停在各处、面被拉长后穿模",
+        description="旧版逐点求解兼容设置；当前三角面求解统一使用整面位移比例约束",
         items=[
             ('SOFT', "软投影", "投影回全部邻近面（位移场连续，面不被折）"),
             ('HARD', "硬钳制", "沿位移路径整体停止（相邻顶点位移不连续，面易被折）"),
@@ -1007,13 +1007,35 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     )
     collision_tri_count: bpy.props.IntProperty(
         name="约束三角形数",
-        description=(
-            "动态三角形网格的烘焙开关（0=不烘焙，退回点云约束）。烘焙后运行时按"
-            "顶点当前位置现查邻域三角形，约束是「到碰撞体表面的带符号距离不许比"
-            "绑定姿态时更小」——不再按固定 K 个最近三角形绑定，具体数值不影响结果"
-        ),
+        description="旧工程兼容值；当前启用碰撞时始终烘焙完整身体三角面，不再因0回退到逐点检测",
         default=8, min=0, max=32,
     )
+
+    cloth_slide_enabled: bpy.props.BoolProperty(
+        name="启用上下拖拽",
+        description="独立生成实时贴身穿脱、褶皱与动态贴合权重；不依赖普通碰撞开关。需要ZZMI合并骨架、衣物与同载体身体碰撞体",
+        default=False,
+    )
+    cloth_runtime_enabled: bpy.props.BoolProperty(name="运行时默认开启", default=False)
+    cloth_toggle_key: bpy.props.StringProperty(name="穿脱切换键", default="ctrl alt U")
+    cloth_reset_key: bpy.props.StringProperty(name="穿脱复位键", default="ctrl alt VK_BACK")
+    cloth_collection: bpy.props.PointerProperty(name="穿脱衣物集合（可选）", type=bpy.types.Collection,
+        description="留空沿用区域包含物体；指定后只把此集合内的网格生成穿脱，其他区域仍可普通拖拽")
+    cloth_collider_collection: bpy.props.PointerProperty(name="身体碰撞集合（可选）", type=bpy.types.Collection,
+        description="留空沿用区域碰撞体；独立于普通碰撞开关，用于衣物表面滑移")
+    cloth_drag_sensitivity: bpy.props.FloatProperty(name="穿脱灵敏度", default=2.0, min=.1, max=5.0)
+    cloth_stretch_compliance: bpy.props.FloatProperty(name="拉伸柔度（越小越硬）", default=.00003, min=.000001, max=.01, precision=6)
+    cloth_bend_compliance: bpy.props.FloatProperty(name="弯曲柔度（越小越硬）", default=.0008, min=.000001, max=.1, precision=6)
+    cloth_velocity_retention: bpy.props.FloatProperty(name="速度保留率（越小阻尼越强）", default=.85, min=0, max=.999)
+    cloth_bend_min_ratio: bpy.props.FloatProperty(name="抗折叠支撑", default=.55, min=0, max=.8)
+    cloth_fold_height: bpy.props.FloatProperty(name="褶皱高度", default=.012, min=0, max=.025)
+    cloth_fold_spacing: bpy.props.FloatProperty(name="褶皱间距", default=.075, min=.04, max=.2)
+    cloth_gather_strength: bpy.props.FloatProperty(name="有序收拢强度", default=.8, min=0, max=1)
+    cloth_min_height_ratio: bpy.props.FloatProperty(name="最低袜口高度比例", default=.22, min=.1, max=.9)
+    cloth_proxy_budget: bpy.props.IntProperty(name="物理代理点预算", default=2450, min=64, max=2450,
+        description="超出预算时自动简化物理代理，渲染网格保留原顶点")
+    cloth_up_axis: bpy.props.EnumProperty(name="衣物向上轴", default='AUTO',
+        items=[('AUTO','自动','由衣物长轴估计')]+[(v,v,'导出模型坐标方向') for v in ('X','Y','Z','-X','-Y','-Z')])
 
     _RUNTIME_VARIABLE_DEFAULTS = {
         "drag_mode_variable_name": "ssmtdrag_drag_enabled",
@@ -1123,6 +1145,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         except Exception:
             current_logic = ""
         is_efmi = current_logic == LogicName.EFMI
+        cloth_supported = not current_logic or LogicName.is_zzmi_family(current_logic)
 
         if is_efmi:
             # ---- EFMI 分支专属（t25 全面 zzmi 化：参数完全跟随全局，仅提示）----
@@ -1181,7 +1204,24 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         feature_box.prop(self, "feature_panel_link", text="启用面板联动")
         collision_row = feature_box.row()
         collision_row.enabled = not is_efmi
-        collision_row.prop(self, "collision_enabled", text="启用碰撞检测（未完善）")
+        collision_row.prop(self, "collision_enabled", text="启用碰撞检测")
+        cloth_row = feature_box.row()
+        cloth_row.enabled = cloth_supported or self._cloth_enabled()
+        cloth_row.prop(self, "cloth_slide_enabled", text="启用上下拖拽")
+        if not cloth_supported and self._cloth_enabled():
+            feature_box.label(text="当前穿脱需要 ZZMI 合并骨架，请关闭此开关后导出", icon='ERROR')
+        if self._cloth_enabled() and cloth_supported:
+            cloth_box = feature_box.box()
+            cloth_box.label(text="实时贴身穿脱（ZZMI 合并骨架）", icon='MOD_CLOTH')
+            cloth_box.prop(self, "cloth_collection")
+            cloth_box.prop(self, "cloth_collider_collection")
+            cloth_box.label(text="集合留空时，区域包含物体=衣物，碰撞体=身体", icon='INFO')
+            cloth_box.label(text="连通衣物同步，分开的袜子独立；脚部固定", icon='INFO')
+            for prop in ('cloth_runtime_enabled','cloth_toggle_key','cloth_reset_key','cloth_drag_sensitivity',
+                         'cloth_fold_height','cloth_fold_spacing','cloth_gather_strength','cloth_stretch_compliance',
+                         'cloth_bend_compliance','cloth_velocity_retention','cloth_bend_min_ratio',
+                         'cloth_min_height_ratio','cloth_proxy_budget','cloth_up_axis'):
+                cloth_box.prop(self, prop)
 
         # ---- 形态键驱动输出（开关已并入上方「功能开关·启用形态键联动」，此 box 仅余输出配置）----
         drive_box = layout.box()
@@ -1299,7 +1339,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 # 碰撞体列表（留空 = 该区域不参与碰撞约束）
                 col_box = sub.box()
                 col_box.label(text="碰撞体（防穿模，留空=不约束）", icon='PHYSICS')
-                col_box.prop(obj.ssmt_drag_zone, "collision_override", text="碰撞开关")
+                col_box.prop(obj.ssmt_drag_zone, "collision_override", text="普通碰撞开关")
                 col_row = col_box.row(align=True)
                 add_col = col_row.operator(SSMT_OT_DragZoneColliderAdd.bl_idname, text="添加选中物体", icon='ADD')
                 add_col.empty_name = obj.name
@@ -1320,11 +1360,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         col_box.prop(self, "collision_enabled")
         if self.collision_enabled:
             col = col_box.column(align=True)
-            col.prop(self, "collision_mode")
             col.prop(self, "collision_margin")
-            col.prop(self, "collision_point_budget")
-            col.prop(self, "collision_cell_size")
-            col.prop(self, "collision_tri_count")
+            col.label(text="当前帧身体三角面 → 整面位移约束", icon='INFO')
             col_box.label(text="在下方区域的「碰撞体」列表中指定被遮挡物体（如大腿）", icon='INFO')
 
         # 权重预览（视口热力图）
@@ -1540,6 +1577,23 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             self._remove_existing_draw_hooks(sections)
             self._remove_existing_legacy_jiggle_vb0_sections(sections)
             self._remove_existing_legacy_shapekey_sections(sections)
+            try:
+                from .drag_cloth import clean_sections, clean_tail
+            except (ImportError, ModuleNotFoundError) as _cloth_missing:
+                # 丝袜穿脱（drag_cloth）是**仓库的一部分**（随本仓库一同提交），正常情况永远不该缺。
+                # 一旦缺，只可能是：clone 到半截 / 手动删了 / 打包部署按白名单拷漏了
+                # / 从旧 commit 检出。这四种都该当场停下报清楚——不能让「仓库不完整」
+                # 变成「导出成功但布料悄悄少一块」。
+                # （若将来真有人只要拖拽不要布料，那是一个显式开关的事，不许靠文件缺失
+                #   隐式实现。）
+                raise RuntimeError(
+                    "仓库不完整：丝袜穿脱（drag_cloth）模块缺失，它应随本仓库一同提交。"
+                    "缺了它导出的模组会「丝袜拖不动 / 穿不脱」，所以这里直接中止，不猜着继续。"
+                    "请先 git checkout / 重新拉取后再导出，不要在半截仓库上生成模组。"
+                ) from _cloth_missing
+            else:
+                clean_sections(sections, self._resolve_namespace(ini_file_path))
+                preserved_tail_content = clean_tail(preserved_tail_content)
         except FileNotFoundError:
             return None, "", ""
         return sections, preserved_tail_content, preserved_driver_content
@@ -1846,6 +1900,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             current_logic = str(getattr(GlobalConfig, "logic_name", "") or "")
         except Exception:
             current_logic = ""
+        if self._cloth_enabled() and current_logic and not LogicName.is_zzmi_family(current_logic):
+            raise ValueError("上下拖拽目前需要 ZZMI 合并骨架，当前游戏不生成此运行时")
         if current_logic == LogicName.EFMI:
             from .node_postprocess_draginteraction_efmi import (
                 DragInteractionEFMIExporter,
@@ -1866,6 +1922,10 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             )
             return
         print(f"[DragInteraction] 开始执行, 输出路径: {mod_export_path}")
+        if self._cloth_enabled():
+            self._cloth_object_names(required=True)
+            if not self._collect_enabled_zone_entries():
+                raise ValueError("上下拖拽：请先配置至少一个启用的拖拽区域")
         if not NUMPY_AVAILABLE:
             print("[DragInteraction][ERROR] 需要 numpy，已跳过")
             return
@@ -1884,6 +1944,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         res_dir = os.path.join(mod_export_path, "res", "drag_interaction")
         os.makedirs(res_dir, exist_ok=True)
         self._copy_shaders(res_dir)
+        cloth_tokens = set()
 
         for ini_file in ini_files:
             ini_path = os.path.join(mod_export_path, ini_file)
@@ -1905,6 +1966,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             active_components = []
             skipped_components = []
             for comp in components:
+                comp['cloth_ini_token'] = os.path.splitext(ini_file)[0]
                 if self._bake_component_resources(mod_export_path, sections, comp, ns):
                     active_components.append(comp)
                 else:
@@ -1921,6 +1983,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 )
                 continue
             components = active_components
+            cloth_tokens.update(comp['cloth']['token'] for comp in components if comp.get('cloth'))
 
             # 2) 生成 CustomShader/CommandList/Resource 段
             self._emit_sections(sections, components, ns)
@@ -1928,9 +1991,18 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             # 3) 注入绘制钩子（ib= 之后、第一个 run=/drawindexed= 之前）
             for comp in components:
                 self._inject_draw_hooks(sections, comp, ns)
+                if comp.get('cloth'):
+                    from .drag_cloth import publish_before_draws
+                    publish_before_draws(sections, comp)
+            if any(comp.get('cloth') for comp in components):
+                from .drag_cloth import publish_in_tail
+                preserved_tail = publish_in_tail(preserved_tail, sections, components)
 
             # 4) Present 块 + Constants globals
             self._emit_present_and_constants(sections, components, ns)
+            if self._cloth_enabled():
+                from .drag_cloth import stabilize_globals
+                stabilize_globals(sections, ns)
 
             # 5) 变形接力终态规整（幂等，含多文件/形态键条件锚定）
             deform_chain.finalize_deform_chain(sections)
@@ -1944,6 +2016,10 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             )
             print(f"[DragInteraction] 已注入 {len(components)} 个组件到 {ini_file}")
 
+        from .drag_cloth import prune_assets
+        prune_assets(mod_export_path, self._resolve_namespace(None), cloth_tokens)
+        if self._cloth_enabled() and not cloth_tokens:
+            raise ValueError("上下拖拽：衣物没有匹配到有效拖拽组件，请检查目标哈希、区域包含物体和身体碰撞体")
         print("[DragInteraction] 完成")
 
     # =======================================================================
@@ -2476,6 +2552,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # 碰撞检测资源（仅模式三/拉扯模式；碰撞体未命中仅警告，不阻断拖拽导出）
         if self._collision_enabled_for_component():
             self._write_collision_resources(mod_export_path, sections, comp, ns)
+        if self._cloth_enabled():
+            from .drag_cloth import bake_component
+            cloth_names, body_names = self._cloth_object_names()
+            comp['cloth'] = bake_component(self, mod_export_path, sections, comp, ns,
+                cloth_names, body_names, _blender_object_key)
         return True
 
     def _write_triangle_object_ids(self, mod_export_path, sections, comp):
@@ -3734,7 +3815,10 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         triangles, tri_part_names = result
 
         collider_mask = np.zeros(source_vertex_count, dtype=bool)
-        for _, empty in self._collect_enabled_zone_entries():
+        collision_zones = self._collider_zone_ids()
+        for zone_id, empty in self._collect_enabled_zone_entries():
+            if int(zone_id) not in collision_zones:
+                continue
             m = _collider_vertex_mask(
                 empty.ssmt_drag_zone,
                 source_vertex_count,
@@ -3851,13 +3935,15 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             print(f"[DragInteraction] 接触覆盖: 受控 {len(controlled_idx)} 行 / 有接触 "
                   f"{int(has_contact[controlled_idx].sum())} 行 / 缺接触 {len(miss)} 行")
             if len(miss):
-                print(f"[DragInteraction][WARNING] 受控但无接触数据 {len(miss)} 行: "
+                print(f"[DragInteraction][INFO] 受控但无接触数据 {len(miss)} 行: "
                       f"{miss[:32].tolist()}{' ...' if len(miss) > 32 else ''}"
-                      f"（这些行运行时会静默冻结：应扩大碰撞体裁剪可达性或显式排除）")
+                      "（整面碰撞仍按受控面覆盖；仅旧版绑定滑移缺少这些点锚）")
 
         # 三角形约束表（首选路径）：把每个受碰撞约束的顶点绑定到绑定姿态下最近的
         # K 个碰撞体三角形。运行时零搜索，约束 = dist(p, tri_j) >= base_j。
-        tri_k = int(getattr(self, "collision_tri_count", 8) or 0)  # 仅用于「动态三角形网格」烘焙的开关（静态 K 表路径已于 2026-10-14 移除）
+        # Keep the stored property for old blueprints, but never silently replace
+        # the validated whole-face solver with point constraints when it is zero.
+        tri_k = max(1, int(getattr(self, "collision_tri_count", 8) or 0))
 
         # 动态三角形网格（当前首选路径）：把碰撞体三角形装进均匀网格，运行时按
         # 顶点当前位置现查邻域三角形，约束 =「到表面的带符号距离不许变小」。
@@ -3869,6 +3955,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             grid_baked = self._bake_collider_tri_grid(
                 positions, triangles, collider_mask, vertex_normals=vertex_normals,
             )
+        # 注意：`_bake_collider_tri_grid` **不会**返回 None——没有完整三角形时它返回
+        # 四元组空数组（见该函数 :3528-3535），所以这里不能写 `if grid_baked is None: raise`：
+        # 那条守卫永远不会成立，只会让后来的人以为这条路被守住了。
+        # 真正的分支是「空网格」：下面 `if leaves and len(cloth)` 不成立 ⇒ 不发
+        # collision_surface（x115=0），退回旧点云求解。
         if grid_baked is not None:
             g_arr, g_tris, g_vidx, g_meta = grid_baked
             g_arr.tofile(os.path.join(out_dir, f"{stem}ColliderTriGrid.buf"))
@@ -3878,7 +3969,12 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             (g_vidx + vertex_base).astype(np.uint32).tofile(
                 os.path.join(out_dir, f"{stem}ColliderTriGridVerts.buf"))
             order, leaves = bake_sweep_order(g_tris)
-            contact_rows = l0.reshape(-1, 2, 4)[:, 1, 3] > 0.5
+            # Whole-face coverage follows controlled geometry, not successful
+            # bind-pose point contacts: a loose layer must still be stopped when
+            # it is dragged toward the body later.
+            controlled = np.ones(source_vertex_count, dtype=bool) if masked is None else np.asarray(masked, dtype=bool)
+            contact_rows = np.zeros(vertex_count, dtype=bool)
+            contact_rows[vertex_base:vertex_base + source_vertex_count] = controlled
             cloth, adjacency = bake_cloth_adjacency(
                 np.asarray(triangles, dtype=np.int64) + vertex_base, contact_rows
             )
@@ -4356,6 +4452,29 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         """组件级碰撞烘焙/发射开关：节点级开启且至少一个区域配置了碰撞体。"""
         return len(self._collect_collider_objects()) > 0
 
+    def _cloth_enabled(self):
+        return bool(getattr(self, 'cloth_slide_enabled', False))
+
+    def _cloth_object_names(self, required=False):
+        cloth, body = set(), set()
+        for _, empty in self._collect_enabled_zone_entries():
+            settings = empty.ssmt_drag_zone
+            included = _zone_allowed_names(settings)
+            colliders = _collider_allowed_names(settings)
+            if included and colliders:
+                cloth.update(_blender_object_key(name) for name in included)
+                body.update(_blender_object_key(name) for name in colliders)
+        for attr, result in (('cloth_collection', cloth), ('cloth_collider_collection', body)):
+            collection = getattr(self, attr, None)
+            if collection is not None:
+                result.clear()
+                for obj in getattr(collection, 'all_objects', ()):
+                    if getattr(obj, 'type', None) == 'MESH':
+                        result.add(_blender_object_key(obj.name))
+        if required and (not cloth or not body):
+            raise ValueError("上下拖拽：请明确选择衣物和身体碰撞体（可用专用集合，或区域的包含物体/碰撞体列表）")
+        return cloth, body
+
     def _collect_click_export_drivers(self):
         """扫描同主树「动画驱动蓝图」关联树中的点击计数导出节点，
         返回 [(zone_id, 循环档数, 首个受控变量名或"")]：
@@ -4432,6 +4551,12 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
 
     def validate_export_configuration(self):
         """在写入任何导出文件前验证拖拽交互的跨节点约束。"""
+        if self._cloth_enabled():
+            self._cloth_object_names(required=True)
+            if not self._collect_enabled_zone_entries():
+                raise ValueError("上下拖拽：请先配置至少一个启用的拖拽区域")
+            if self._is_efmi_mode():
+                raise ValueError("上下拖拽目前需要 ZZMI 合并骨架")
         if self._feature_skd():
             self._click_export_seed_entries()
         if getattr(self, "feature_variable_link", True) and not self._feature_skd():
@@ -4816,6 +4941,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # ---- 视口探针系统：资源 + 探针段 + ShaderOverride ----
         if self.enable_viewport_probe:
             self._emit_viewport_probe_sections(sections, ns)
+        if self._cloth_enabled():
+            from .drag_cloth import emit_components
+            emit_components(self, sections, components, ns)
 
     def _emit_component_resources(self, sections, comp, ns):
         cn = comp["comp_name"]
@@ -6191,6 +6319,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         temp_vb0 = f"ResourceDragJiggleTempVB0_{cn}_{ns}"
         last_dispatch = f"$ssmtdrag_last_dispatch_{cn}_{ns}"
         lines = [f"\t; --- DRAG HOOK BEGIN {part_tag}_{ns} ---"]
+        if comp.get('cloth_bind'):
+            lines.append('\trun = ' + comp['cloth_bind'])
         if self.enable_viewport_probe:
             # 视口探针快照：armed 时抓本帧角色渲染 RT 供探针分析视口矩形。
             # 注意：条件里不能写 ResourceDragViewportSource === null —— 该资源是
@@ -6213,7 +6343,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 "\tendif",
             ])
         lines.extend([
-            f"\tif {drag_mode_var} >= 2 && $ssmtdrag_mode_{ns} == 1",
+            f"\tif {drag_mode_var} >= 2 && $ssmtdrag_mode_{ns} == 1" + (f" && $ssmtcloth_{ns}_enabled == 0" if comp.get('cloth') else ''),
             f"\t\tif time != {last_dispatch}",
             f"\t\t\trun = CustomShaderDragJiggle{cn}_{ns}",
             f"\t\t\t{last_dispatch} = time",
@@ -6237,6 +6367,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             ])
         lines.extend([
             "\tendif",
+            *(['\trun = ' + comp['cloth_publish'], '\tpost run = ' + comp['cloth_restore']] if comp.get('cloth_publish') else []),
             f"\t; --- DRAG HOOK END {part_tag}_{ns} ---",
         ])
         return lines
@@ -6261,6 +6392,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 del present_lines[start:]
             else:
                 del present_lines[start:end + 1]
+            while start < len(present_lines) and not present_lines[start].strip():
+                del present_lines[start]
 
         marker_idx = next(
             (i for i, line in enumerate(present_lines) if "; --- MODEL DRAG BINDING BEGIN ---" in line),
@@ -6278,7 +6411,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         if binding_idx is not None:
             present_lines[binding_idx:binding_idx] = block
             return
-        if present_lines and present_lines[-1] != "":
+        while present_lines and not present_lines[-1].strip():
+            present_lines.pop()
+        if present_lines:
             present_lines.append("")
         present_lines.extend(block)
 

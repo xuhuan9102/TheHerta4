@@ -5239,6 +5239,48 @@ class DragCollisionTests(unittest.TestCase):
             l0 = np.fromfile(p / "sampleColliderVertexL0.buf", dtype=np.float32)
             self.assertEqual(len(l0), 8 * 2 * 4)
 
+    def test_empty_trigrid_does_not_raise_and_skips_surface(self):
+        """空网格（没有完整碰撞三角形）时不许崩：写空资源、不发 collision_surface。
+
+        回归点：原来 `if grid_baked is None: raise` 是**死守卫**——
+        `_bake_collider_tri_grid` 无三角形时返回四元组空数组而不是 None（:3528-3535），
+        所以那条 raise 永远不触发。这条把烘焙器直接替换成空网格返回值，钉住调用方
+        走的是「空网格」分支：不抛、`leaves` 为空 ⇒ 不发 collision_surface（x115=0），
+        退回旧点云求解。
+        """
+        import tempfile
+        node = _make_node(self.mod, collision_enabled=True,
+                          zone_objects=[self._collider_item(0, ["Thigh"])])
+        verts = np.array([
+            [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+            [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
+        ], dtype=np.float32)
+        tris = np.array([
+            [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
+            [0, 4, 5], [0, 5, 1], [3, 2, 6], [3, 6, 7],
+            [0, 3, 7], [0, 7, 4], [1, 5, 6], [1, 6, 2],
+        ], dtype=np.int64)
+        node._read_position_buf = lambda *a: verts
+        node._read_component_triangles = lambda *a: (tris, np.array(["Thigh"] * 12, dtype=object))
+        node._buffer_dir = lambda sections, comp: "Meshes"
+        empty_meta = {"bmin": (0.0, 0.0, 0.0), "cell": 0.0125, "dims": (1, 1, 1), "cell_count": 0}
+        node._bake_collider_tri_grid = lambda *a, **k: (
+            np.zeros(0, dtype=np.uint32),
+            np.zeros((0, 4, 4), dtype=np.float32),
+            np.zeros(0, dtype=np.int64),
+            empty_meta,
+        )
+        comp = {"vertex_count": 8, "base_name": "sample", "comp_name": "sample", "parts": []}
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertTrue(node._write_collision_resources(td, {}, comp, "testns"))
+            p = Path(td) / "Meshes"
+            self.assertIn("collision_grid", comp)
+            self.assertNotIn("collision_surface", comp, "空网格不得发整面约束")
+            self.assertTrue((p / "sampleColliderTriGrid.buf").exists())
+            self.assertEqual((p / "sampleColliderTriGrid.buf").stat().st_size, 0)
+            self.assertFalse((p / "sampleColliderSweepOrder.buf").exists())
+
     def test_collider_block_ids_splits_disconnected_blocks(self):
         """分离的两块碰撞体各自成块（用于各自的朝外判定）。"""
         a = np.random.RandomState(7).rand(200, 3).astype(np.float32) * 0.1
