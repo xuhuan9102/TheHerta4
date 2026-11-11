@@ -967,7 +967,7 @@ class _Emitter:
                 run("Self"),
                 run("Body"),
             ]
-            for _ in range(2):
+            for _ in range(4):
                 lines += [run("Face" + str(i)) for i in range(len(offsets) - 1)]
             lines += [run("Velocity"), run("Weights"), run("Apply")]
             self.s(self.cmd(f"G{g}Simulate_s{slot}"), lines)

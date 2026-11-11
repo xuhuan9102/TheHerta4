@@ -1734,15 +1734,13 @@ class DragNodeEmitTests(unittest.TestCase):
         ])
 
     def test_jiggle_temp_vb0_empty_declaration_and_copy_roundtrip(self):
-        # R9 回退：恢复 TempVB0 声明 + copy 往返自愈链（Alt 模型消失回归修复）
-        # 声明形态已演进（方法名保留为历史）：空声明 / RWBuffer+format 会让 D3D 建视图失败
-        # （E_INVALIDARG）或按 16 B 元素取址错位；现发射与 hlsl 同构的
-        # `RWStructuredBuffer<VertexAttributes>`（stride 40、被 cs-t24 当 SRV 读 ⇒ 需 shader_resource）
+        # The structured u5 scratch is copied into a plain draw buffer.
+        # Copy-out must explicitly clear the inherited structured misc flag.
         _, sections, _ = self._emit()
         self.assertEqual(
             sections["[ResourceDragJiggleTempVB0_abc123_43191_testns]"],
-            ["type = RWStructuredBuffer", "stride = 40", "array = 14078",
-             "bind_flags = shader_resource unordered_access"],
+            ["type = Buffer", "stride = 40", "array = 14078",
+             "bind_flags = vertex_buffer", "misc_flags = none"],
         )
         self.assertNotIn("[ResourceDragJiggleShadowVB_abc123_43191_testns]", sections)
         jig = "\n".join(sections["[CustomShaderDragJiggleabc123_43191_testns]"])

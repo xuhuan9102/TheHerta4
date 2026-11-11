@@ -162,6 +162,9 @@ class GeneratedCloth:
                 except ValueError:
                     self.variables[match.group(1)] = 0
         self.prefix = "$ssmtcloth_" + namespace + "_"
+        # Present normally replaces the INI's 1x1 startup dimensions.
+        self.variables["$screenW"] = 1920
+        self.variables["$screenH"] = 1080
         self.variables[self.prefix + "enabled"] = 1
         self.variables["$ssmtdrag_drag_enabled_" + namespace] = 2
 
@@ -306,7 +309,7 @@ class GeneratedCloth:
         lines = self.sections["[" + name + "]"]
         active = True
         stack = []
-        for raw in lines:
+        for index, raw in enumerate(lines):
             line = raw.strip()
             if not line or line.startswith(";"):
                 continue
@@ -350,7 +353,7 @@ class GeneratedCloth:
                 if path not in self.shaders:
                     self.shaders[path] = self.gpu.shader(path)
                 self.current_shader = self.shaders[path]
-            elif key == "Dispatch":
+            elif key.casefold() == "dispatch":
                 self.gpu.method(
                     self.gpu.context,
                     48,
@@ -389,9 +392,36 @@ class GeneratedCloth:
                 slot = int(key[4:])
                 view = None
                 if value != "null":
-                    view = self.view(
-                        self.resource(re.sub(r"^ref\s+", "", value)), writable
+                    mode, _, reference = value.partition(" ")
+                    source = self.resource(
+                        reference if mode in ("copy", "ref") else value
                     )
+                    bound = source
+                    if mode == "copy":
+                        identity = f"{name}:{index}:{key}"
+                        if identity not in self.resources:
+                            structured = source.structured or (
+                                source.fmt == 0 and source.stride > 0
+                            )
+                            self.external(
+                                identity,
+                                np.zeros(source.size, np.uint8),
+                                source.stride,
+                                source.fmt,
+                                structured,
+                                flags=8 | (128 if writable else 0),
+                            )
+                        bound = self.resources[identity]
+                        self.gpu.method(
+                            self.gpu.context,
+                            47,
+                            [ct.c_void_p, ct.c_void_p],
+                            bound.pointer,
+                            source.pointer,
+                            result=None,
+                        )
+                    self.resources[key] = bound
+                    view = self.view(bound, writable)
                 self.gpu.bind(slot, view, writable)
             elif key.startswith("Resource") or key in ("vb0", "vb2"):
                 parts = value.split()

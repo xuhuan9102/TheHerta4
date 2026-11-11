@@ -363,6 +363,136 @@ class GarmentExportTests(unittest.TestCase):
                 self.assertNotIn("#include", data)
                 self.assertIn("geometryReady", data)
 
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_both_features_route_the_draw_to_one_solver_at_a_time(self):
+        path = Path(__file__).resolve().parents[1] / "tools/check_drag_cloth.py"
+        spec = importlib.util.spec_from_file_location("cloth_draw_gate_gpu", path)
+        gpu = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gpu)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root, collision=True)
+            node._write_collision_resources(str(root), sections, comp, "unit")
+            node._emit_sections(sections, [comp], "unit")
+            node._inject_draw_hooks(sections, comp, "unit")
+            lines = sections[comp["parts"][0]["section"]]
+            start = next(i for i, line in enumerate(lines) if "DRAG HOOK BEGIN" in line)
+            end = next(i for i, line in enumerate(lines) if "DRAG HOOK END" in line)
+            sections["[TestDrawGate]"] = [
+                line
+                for line in lines[start:end]
+                if not line.strip().startswith("post ")
+            ]
+            cn = comp["comp_name"]
+            sections[f"[CustomShaderDragJiggle{cn}_unit]"] = ["$ordinary_called = 1"]
+            runner = gpu.GeneratedCloth(root, sections, comp)
+            try:
+                runner.prepare_identity()
+                runner.external(
+                    f"ResourceDragJiggleTempVB0_{cn}_unit", runner.native, 40, flags=1
+                )
+                runner.external(
+                    f"Resource{cn}Blend",
+                    np.fromfile(root / "Meshes/abc123-Blend.buf", np.uint8),
+                    32,
+                    flags=1,
+                )
+                runner.variables.update(
+                    {
+                        "$ssmtdrag_mode_unit": 1,
+                        "$ObjectDetectAllowed_unit": 0,
+                        "$ssmtdrag_viewport_probe_armed_unit": 0,
+                        "$ordinary_called": 0,
+                        "time": 1,
+                    }
+                )
+                runner.variables[runner.prefix + "enabled"] = 0
+                runner.execute("TestDrawGate")
+                self.assertEqual(runner.variables["$ordinary_called"], 1)
+                self.assertEqual(runner.dispatches, 0)
+                runner.variables["$ordinary_called"] = 0
+                runner.variables[runner.prefix + "enabled"] = 1
+                runner.variables["time"] = 2
+                runner.execute("TestDrawGate")
+                self.assertEqual(runner.variables["$ordinary_called"], 0)
+                self.assertGreater(runner.dispatches, 0)
+            finally:
+                runner.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_cloth_contact_blocks_other_surfaces_and_resolves_anchored_faces(self):
+        path = Path(__file__).resolve().parents[1] / "tools/check_drag_cloth.py"
+        spec = importlib.util.spec_from_file_location("cloth_contact_gpu", path)
+        gpu = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gpu)
+        for anchored in (False, True):
+            with self.subTest(anchored=anchored), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                node, sections, comp = self.prepare(root)
+                node._emit_sections(sections, [comp], "unit")
+                runner = gpu.GeneratedCloth(root, sections, comp)
+                try:
+                    runner.prepare_identity()
+                    runner.frame()
+                    data = comp["cloth"]["garments"][0]
+                    particle_ids = data["faces"][0].astype(int)
+                    rest = data["rest"].copy()
+                    hem = data["hem_map"].copy()
+                    hem[particle_ids] = 0xFFFFFFFF
+                    rest[particle_ids * 2, 3] = 0 if anchored else 1
+                    prefix = "ResourceSSMTCloth_abc123_unit_G0_"
+                    runner.external(prefix + "Rest", rest, 16, 2)
+                    runner.external(prefix + "HemMap", hem, 4, 42)
+                    other_owner = 2 if int(data["config"][12, 3]) == 1 else 1
+                    triangle = int(
+                        np.flatnonzero(
+                            (data["body_regions"] == other_owner)
+                            & (data["surface_mask"] != 0)
+                        )[0]
+                    )
+                    body_ids = np.fromfile(
+                        root / comp["cloth"]["paths"]["body_vertices"], "<u4"
+                    ).reshape(-1, 3)[triangle]
+                    source = runner.native.view("<f4").reshape(-1, 10)
+                    body = source[body_ids, :3]
+                    normal = source[body_ids, 3:6].mean(0)
+                    normal /= np.linalg.norm(normal)
+                    center = body.mean(0)
+                    tangent = body[1] - body[0]
+                    tangent /= np.linalg.norm(tangent)
+                    points = np.array(
+                        [
+                            center - normal * 0.01,
+                            center + normal * 0.01 + tangent * 0.002,
+                            center + normal * 0.01 - tangent * 0.002,
+                        ],
+                        np.float32,
+                    )
+                    particles = runner.resources[prefix + "Particles_s1"]
+                    values = runner.gpu.read_bytes(
+                        particles.pointer, particles.size
+                    ).copy()
+                    values = values.view("<f4").reshape(-1, 8)
+                    values[particle_ids, :3] = points
+                    values[particle_ids, 4:7] = points
+                    runner.external(
+                        prefix + "Particles_s1", values, 32, structured=True, flags=136
+                    )
+                    slot = int(np.flatnonzero(data["face_colors"] == 0)[0])
+                    color = int(
+                        np.searchsorted(data["face_offsets"], slot, side="right") - 1
+                    )
+                    runner.execute(f"CustomShaderSSMTClothG0Face{color}_s1_abc123_unit")
+                    particles = runner.resources[prefix + "Particles_s1"]
+                    after = runner.gpu.read_bytes(particles.pointer, particles.size)
+                    after = after.view("<f4").reshape(-1, 8)[particle_ids, :3]
+                    self.assertGreater(
+                        float(np.max(np.linalg.norm(after - points, axis=1))), 1e-5
+                    )
+                    self.assertGreater(float((after[0] - points[0]) @ normal), 0)
+                finally:
+                    runner.close()
+
     def test_skinout_snapshots_the_converted_palette_at_each_dispatch(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

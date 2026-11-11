@@ -4005,6 +4005,18 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 "dims": tuple(int(d) for d in g_meta["dims"]),
                 "cell_count": int(g_meta["cell_count"]),
             }
+        if vertex_base:
+            blend_dir = self._buffer_dir(sections, comp)
+            blend_path = os.path.join(mod_export_path, blend_dir, f"{comp['base_name']}-Blend.buf")
+            if os.path.isfile(blend_path):
+                blend = np.fromfile(blend_path, dtype=np.uint8)
+                if blend.size != source_vertex_count * 32:
+                    raise ValueError("碰撞滑移权重需要每顶点32字节的Blend布局")
+                padded = np.zeros((vertex_count, 32), dtype=np.uint8)
+                padded[vertex_base:vertex_base + source_vertex_count] = blend.reshape(-1, 32)
+                filename = f"{comp['base_name']}ColliderBlend.buf"
+                padded.tofile(os.path.join(mod_export_path, blend_dir, filename))
+                comp["collision_blend_file"] = f"{blend_dir}/{filename}"
         return True
 
     def _read_position_buf(self, mod_export_path, sections, comp, vertex_count):
@@ -4778,8 +4790,14 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # ---- 全局共享资源 ----
         global_resources = {
             f"[ResourceDragDetectID_{ns}]": ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 15"],
-            f"[ResourceDragPinnedDetectID_{ns}]": ["type = StructuredBuffer", "stride = 4", "array = 2"],
-            f"[ResourceDragPinnedDetectInfo_{ns}]": ["type = StructuredBuffer", "stride = 16", "array = 15"],
+            f"[ResourceDragPinnedDetectID_{ns}]": [
+                "type = StructuredBuffer", "stride = 4", "array = 2",
+                "bind_flags = shader_resource unordered_access",
+            ],
+            f"[ResourceDragPinnedDetectInfo_{ns}]": [
+                "type = StructuredBuffer", "stride = 16", "array = 15",
+                "bind_flags = shader_resource unordered_access",
+            ],
             f"[ResourceDragZoneOut_{ns}]": ["type = RWBuffer", "format = R32_FLOAT", "array = 1"],
             f"[ResourceDragJiggleScreenState_{ns}]": ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 15"],
             f"[ResourceDragPathProgressState_{ns}]": [
@@ -4960,25 +4978,24 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             ],
             f"[ResourceDragDebugDetect_{cn}_{ns}]": ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 23"],
             f"[ResourceDragComponentDetect_{cn}_{ns}]": ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 15"],
-            f"[ResourceDragPinnedComponentID_{cn}_{ns}]": ["type = RWBuffer", "format = R32_FLOAT", "array = 2"],
-            f"[ResourceDragPinnedComponentInfo_{cn}_{ns}]": ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 15"],
+            f"[ResourceDragPinnedComponentID_{cn}_{ns}]": [
+                "type = RWStructuredBuffer", "stride = 4", "array = 2",
+                "bind_flags = shader_resource unordered_access",
+            ],
+            f"[ResourceDragPinnedComponentInfo_{cn}_{ns}]": [
+                "type = RWStructuredBuffer", "stride = 16", "array = 15",
+                "bind_flags = shader_resource unordered_access",
+            ],
             f"[ResourceDragComponentZoneOut_{cn}_{ns}]": ["type = RWBuffer", "format = R32_FLOAT", "array = 1"],
             f"[ResourceDragJiggleState_{cn}_{ns}]": ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 10"],
-            # TempVB0：位置缓冲的 UAV 别名（原地改写顶点位置后回绑 vb0）。
-            # 必须与 hlsl 同构：hlsl 是 `RWStructuredBuffer<VertexAttributes> rw_buffer : register(u5)`
-            # + `StructuredBuffer<VertexAttributes> base_buffer : register(t24)`，元素尺寸 = stride 40。
-            # 只声明 type（无 stride/array）会让 D3D 侧创建失败（日志指纹：
-            # Failed to substantiate custom Buffer [...dragjiggletempvb0_*]: 0x80070057 = E_INVALIDARG）；
-            # 写成 RWBuffer + format（16 B 元素）则会与结构化声明取址错位，等于没修。
-            # array 必须 == 该部件顶点数：hlsl 用 `rw_buffer.GetDimensions()` 取 vertexCount 当
-            # 可写边界（`if (i >= vertexCount) return;`），运行期又把本缓冲换绑成绘制 vb0。
-            # 写死偏小 ⇒ 越界顶点读 0 ⇒ 被索引到的顶点整片塌到原点（洛克茜 d5e1e7ff 实机：
-            # 曾写死 19039 而真实 262153，模式2 一开就爆炸，与碰撞/法线拖拽开关无关）。
+            # u5 is a separate structured scratch copy. Copying it back must
+            # clear its structured misc flag before the result can be a VB.
             f"[ResourceDragJiggleTempVB0_{cn}_{ns}]": [
-                "type = RWStructuredBuffer",
-                "stride = 40",
+                "type = Buffer",
+                f"stride = {self._get_vertex_attribute_layout('position')[0]}",
                 f"array = {_vc}",
-                "bind_flags = shader_resource unordered_access",
+                "bind_flags = vertex_buffer",
+                "misc_flags = none",
             ],
         }
         comp_resources[f"[ResourceDragJiggleZoneIDs_{cn}_{ns}]"] = [
@@ -5063,12 +5080,19 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                     # 文件名必须带连字符：真实文件是 `d5e1e7ff-Blend.buf`（与 [Resourced5e1e7ffBlend]
                     # 段一致）。曾经写成 `d5e1e7ffBlend.buf` ⇒ 目录里没有该文件 ⇒ 资源加载失败、
                     # cs-t86 读不到权重，穿脱的权重投影整条链断掉（t3 §D 报的 F1）。
-                    f"filename = {res_dir}/{stem}-Blend.buf",
+                    f"filename = {comp.get('collision_blend_file') or f'{res_dir}/{stem}-Blend.buf'}",
                 ]
-                # 重映射后的权重（每顶点 2 个 float4：权重 + 索引），渲染段把 vb2 指向它
+                # Persistent compute state matches RWStructuredBuffer<SockBlendRec>.
+                # The draw receives a separate plain VB snapshot at stride 32.
                 comp_resources[f"[ResourceDragJiggleBlendOut_{cn}_{ns}]"] = [
-                    "type = RWBuffer", "format = R32G32B32A32_FLOAT",
-                    f"array = {_vc * 2}",
+                    "type = RWStructuredBuffer", "stride = 32", f"array = {_vc}",
+                    "bind_flags = shader_resource unordered_access",
+                    f"filename = {comp.get('collision_blend_file') or f'{res_dir}/{stem}-Blend.buf'}",
+                ]
+                comp_resources[f"[ResourceDragJiggleBlendVB_{cn}_{ns}]"] = [
+                    "type = Buffer", "stride = 32", f"array = {_vc}",
+                    "bind_flags = vertex_buffer",
+                    "misc_flags = none",
                 ]
         for sec, lines in comp_resources.items():
             sections.setdefault(sec, lines)
@@ -5498,6 +5522,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                                                    int(surface["face_count"]), dispatch_n, RES_SHADER_DIR))
             lines.extend(f"run = CustomShaderDragCollision{stage}{cn}_{ns}"
                          for stage in ("Leaves", "Roots", "Surface", "Apply"))
+        if comp.get("collision_trigrid"):
+            lines.append(f"ResourceDragJiggleBlendVB_{cn}_{ns} = copy ResourceDragJiggleBlendOut_{cn}_{ns}")
         lines.extend([
             "vb0 = null",
             f"ResourceDragJiggleTempVB0_{cn}_{ns} = copy cs-u5",
@@ -6350,17 +6376,12 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             "\t\tendif",
             f"\t\tvb0 = {temp_vb0}",
         ])
-        # 权重重映射的输出缓冲（vb2）：S3/S4 每帧把所有顶点行（该部件 vertex_count 行）都写一遍——受控行走锚点插值
-        # 权重，其余行走 SockSyncRow 自写恒等值（从 BlendTyped 读原权重），所以不存在
-        # 「未初始化行被读到」的塌陷风险（t19 的 V4 已由 S3 的逐顶点写回闭合）。
-        # 条件绑定：只在「路径滑移总闸开启」时把 vb2 指向 BlendOut，
-        # 其余情况一律绑回静态 Blend 资源 ⇒ 关态与档位 0/1 的行为逐字节不变。
-        # T62：原条件里的分阶段总闸子句已随分阶段管线一并移除——该变量在清理后不再
-        # 声明，留着会让 3DMigoto 弃载整个 deform 段（用户 2026-10-14 实机事故）。
+        # BlendOut persists the initialized compute weights. BlendVB is its
+        # plain vertex-compatible snapshot, including rows untouched by slide.
         if comp.get("collision_trigrid"):
             lines.extend([
                 f"\t\tif $ssmtdrag_slide_enabled_{ns} == 1",
-                f"\t\t\tvb2 = ResourceDragJiggleBlendOut_{cn}_{ns}",
+                f"\t\t\tvb2 = ResourceDragJiggleBlendVB_{cn}_{ns}",
                 "\t\telse",
                 f"\t\t\tvb2 = Resource{cn}Blend",
                 "\t\tendif",

@@ -134,8 +134,9 @@ bool Hit(float3 p,float3 end,float3 a,float3 b,float3 c)
 void FaceGlobal(uint face)
 {
     uint3 ids=uint3(Faces[face*3],Faces[face*3+1],Faces[face*3+2]);float3 p[3];p[0]=Particles[ids.x].current.xyz;p[1]=Particles[ids.y].current.xyz;p[2]=Particles[ids.z].current.xyz;
-    float3 old[3];old[0]=p[0];old[1]=p[1];old[2]=p[2];float3 mass=float3(Mass(ids.x),Mass(ids.y),Mass(ids.z));if(dot(mass,1.0)<.5)return;
-    uint g0=NodeRegion(ids.x),g1=NodeRegion(ids.y),g2=NodeRegion(ids.z),group=g0==g1 && g1==g2?g0:3;
+    // Elastic anchors retain their material targets, while contact can offset
+    // every corner to keep a cuff or foot from crossing the body.
+    float3 old[3];old[0]=p[0];old[1]=p[1];old[2]=p[2];float3 mass=float3(1,1,1);
     float3 lo=min(p[0],min(p[1],p[2])),hi=max(p[0],max(p[1],p[2]));uint node=1,count,leaves=(uint)IniParams[115].y;BodyOrder.GetDimensions(count);
     [loop]while(node>0)
     {
@@ -144,7 +145,8 @@ void FaceGlobal(uint face)
         {
             if(node<leaves){node*=2;continue;}
             uint at=node-leaves;
-            if(at<count && Allowed(BodyOrder[at],group))
+            // Ownership restricts adhesion. All exterior surfaces block entry.
+            if(at<count && Allowed(BodyOrder[at],0))
             {
                 uint tri=BodyOrder[at];uint3 bi=uint3(BodyVertices[tri*3],BodyVertices[tri*3+1],BodyVertices[tri*3+2]);
                 Vertex a=Source[bi.x],b=Source[bi.y],c=Source[bi.z];float3 q[3];q[0]=a.position;q[1]=b.position;q[2]=c.position;
