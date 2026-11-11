@@ -1,3 +1,6 @@
+import os
+import shutil
+import tempfile
 # -*- coding: utf-8 -*-
 """流体探针节点里两条「要靠 bpy 才跑得到」的契约。
 
@@ -460,6 +463,101 @@ class StageProbeExportTests(unittest.TestCase):
         self.assertIn("x63 = 1", text)
         self.assertGreater(text.index("x63 = 1"),
                            text.index("x47 = $fluid_gravity_scale"))
+
+
+class StrengthLevelTests(unittest.TestCase):
+    """发射量档位是独立输入：填了用填的，勾「跟随速度」才反解。"""
+
+    def _emu(self, **kw):
+        cfg = dict(remap_ini_params=False, gate_by_host_hash=False, force_scale=1.0,
+                   particle_radius=0.02, gravity_scale=1.0, viscosity=0.05,
+                   launch_speed=1.5, enabled=True, depth_test=True, auto_pulse=False,
+                   tint_r=0.9, tint_g=0.75, tint_b=0.03, absorb_m=0.015,
+                   wet_darken=0.85, puddle_reflect=0.15, stream_reflect=1.6,
+                   scatter=0.35, refraction=0.02, include_shaders_cache=False,
+                   exclude_draw_hashes="", emitters=[])
+        cfg.update(kw)
+        cls = node.SSMTNode_PostProcess_FluidProbe
+        inst = cls.__new__(cls)
+        for k, v in cfg.items():
+            setattr(inst, k, v)
+        return inst
+
+    def test_manual_level_is_written(self):
+        """显式填 4.0029 ⇒ 导出写 4.0029（不反解）。"""
+        inst = self._emu(strength_level=4.0029, auto_strength_level=False)
+        text = inst._build_main_ini("FluidTest", [])
+        self.assertIn("global $fluid_strength_level = 4.0029", text)
+
+    def test_auto_level_follows_speed(self):
+        """勾「跟随速度」⇒ 速度 1.5 反解成 7。"""
+        inst = self._emu(strength_level=4.0029, auto_strength_level=True)
+        text = inst._build_main_ini("FluidTest", [])
+        self.assertIn("global $fluid_strength_level = 7", text)
+        self.assertNotIn("global $fluid_strength_level = 4.0029", text)
+
+
+class NamespaceGuardTests(unittest.TestCase):
+    """命名空间自检：裸 Fluid_mod / 撞名 / 引用他人 ns 都要被抓出来。"""
+
+    def _node(self):
+        return node.SSMTNode_PostProcess_FluidProbe.__new__(node.SSMTNode_PostProcess_FluidProbe)
+
+    def test_namespace_has_hash_suffix(self):
+        ns = node._namespace_id(os.path.join("Mods", "蕾米埃尔·月夜密语"))
+        self.assertRegex(ns, r"^Fluid_[A-Za-z0-9_]*_[0-9a-f]{8}$")
+
+    def test_two_chinese_mods_get_different_namespaces(self):
+        a = node._namespace_id(os.path.join("Mods", "蕾米埃尔·月夜密语"))
+        b = node._namespace_id(os.path.join("Mods", "菲欧妮"))
+        self.assertNotEqual(a, b)
+
+    def test_verify_flags_bare_and_foreign(self):
+        inst = self._node()
+        tmp = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp, "fluid_probe.ini"), "w", encoding="utf-8") as fh:
+                fh.write("namespace = Fluid_mod\n")
+            problems = inst._verify_generated_ns(tmp, "Fluid_x_32dc3d21")
+            self.assertTrue(any("裸 Fluid_mod" in p for p in problems))
+            with open(os.path.join(tmp, "fluid_probe.ini"), "w", encoding="utf-8") as fh:
+                fh.write("run = CommandList\\Fluid_mod_deadbeef\\MarkPresent\n")
+            problems = inst._verify_generated_ns(tmp, "Fluid_x_32dc3d21")
+            self.assertTrue(any("别的 namespace" in p for p in problems))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_conflict_detection_finds_same_namespace(self):
+        inst = self._node()
+        tmp = tempfile.mkdtemp()
+        try:
+            mine = os.path.join(tmp, "mods", "A")
+            other = os.path.join(tmp, "mods", "B")
+            os.makedirs(mine)
+            os.makedirs(other)
+            for path in (mine, other):
+                with open(os.path.join(path, "fluid_probe.ini"), "w", encoding="utf-8") as fh:
+                    fh.write("namespace = Fluid_same_12345678\n")
+            hits = inst._namespace_conflicts(mine, "Fluid_same_12345678")
+            self.assertEqual(len(hits), 1)
+            self.assertIn("B", hits[0])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class NamespaceVarRefTests(unittest.TestCase):
+    """变量层：引用了别的模组 ns 的变量必须被自检抓出来。"""
+
+    def test_foreign_variable_reference_is_flagged(self):
+        inst = node.SSMTNode_PostProcess_FluidProbe.__new__(node.SSMTNode_PostProcess_FluidProbe)
+        tmp = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp, "fluid_probe.ini"), "w", encoding="utf-8") as fh:
+                fh.write("x = $\\Fluid_mod_deadbeef\\fluid_emit_0\n")
+            problems = inst._verify_generated_ns(tmp, "Fluid_x_32dc3d21")
+            self.assertTrue(any("别的模组的变量" in p for p in problems), problems)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

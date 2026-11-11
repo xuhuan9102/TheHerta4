@@ -112,3 +112,30 @@ class TestForceField:
         for _ in range(20):
             sim.step(1.0 / 30.0, np.random.default_rng(7))
         assert np.isfinite(sim.pos).all()
+
+
+class TestClampCountersBeforePrime:
+    """不调 prime() 直接 step 的路径不许炸。
+
+    回归点：``clamp_hits`` / ``clamp_checks`` 原来只在 ``prime()`` 里初始化，
+    直接 ``Simulator(...)`` 再 step 的调用方（本文件、tools/measure-preview-sim.py、
+    tools/preview-*.py）第二次 step 就会 AttributeError。
+    """
+
+    def test_step_without_prime_keeps_counters(self):
+        sim = S.Simulator(64, [_emitter()])
+        rng = np.random.default_rng(11)
+        for _ in range(3):
+            sim.step(1.0 / 30.0, rng)
+        assert isinstance(sim.clamp_hits, int)
+        assert isinstance(sim.clamp_checks, int)
+        assert sim.clamp_hits >= 0 and sim.clamp_checks >= 0
+
+    def test_prime_still_resets_counters(self):
+        sim = S.Simulator(64, [_emitter()])
+        rng = np.random.default_rng(12)
+        sim.step(1.0 / 30.0, rng)
+        sim.clamp_hits = 7
+        sim.clamp_checks = 9
+        sim.prime(np.random.default_rng(13))
+        assert sim.clamp_hits == 0 and sim.clamp_checks == 0

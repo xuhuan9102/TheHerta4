@@ -622,6 +622,12 @@ class Simulator(object):
         if self.force_field_unscoped:
             print("[FluidSim][WARN] %d 个力场没有 owner（旧数据？），预览里它们不会施力"
                   % self.force_field_unscoped)
+        # 速度钳制的计数器（见 step() 里的 SPEED_CLAMP 段）：必须在 __init__ 里就存在。
+        # 只在 prime() 里初始化过一次，导致「不调 prime 直接 step」的路径（测试、
+        # tools/measure-preview-sim.py 等直接 Simulator(...) 的调用方）在第二次 step
+        # 撞 AttributeError。prime() 仍会把它们清零，那是「重新开始」的语义。
+        self.clamp_hits = 0
+        self.clamp_checks = 0
         self.force_scale = float(force_scale)
         self.ground_z = ground_z
         self.ground_normal = (
@@ -872,6 +878,8 @@ class Simulator(object):
         self.next_birth = ((n - 1 - idx) + jitter) * LIFETIME / float(max(n, 1))
         self.alive[:] = False
         self.age[:] = 0.0
+        self.clamp_hits = 0
+        self.clamp_checks = 0
 
     def recycle(self, rng):
         """把到了预定出生时刻的槽位重生（``next_birth <= time``）。
