@@ -566,9 +566,6 @@ class NamespaceVarRefTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class DebugWriteRemovedTests(unittest.TestCase):
     """``[fluid-dbg]`` 整屏输出分支必须不在树里。
 
@@ -631,3 +628,6 @@ class StrengthLevelPrecisionTests(unittest.TestCase):
         b.strength_level = 3.9
         self.assertNotEqual(node._sim_fingerprint(a), node._sim_fingerprint(b))
 
+
+if __name__ == "__main__":
+    unittest.main()
