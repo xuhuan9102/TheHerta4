@@ -258,14 +258,15 @@ def build_vertex_owner_array(ranges, vertex_count: int) -> numpy.ndarray:
 def collect_weld_groups(ranges, groups) -> list:
     """把节点配置的每个组映射成本 mesh 内的原物体 bucket 集合。
 
-    返回 ``list[dict]``，每项 ``{"label", "names", "buckets"}``：
+    返回 ``list[dict]``，每项 ``{"label", "names", "buckets", "bucket_order"}``：
     - 组内只保留**本 mesh 里找得到**的物体；找不到的名字 warning 后跳过；
     - 一个物体都没匹配到的组直接跳过；
-    - 同一物体若同时出现在多个组里，由调用方保证只归属第一个组（避免重复焊接）。
+    - ``bucket_order`` 保留节点列表的可见上下顺序，供代表数据逐级传递。
     """
     groups_out: list = []
     for group_index, names in enumerate(groups or []):
         buckets: set = set()
+        bucket_order: list = []
         matched_names: list = []
         for name in names or []:
             hits = _match_units_for_name(list(ranges or []), name)
@@ -276,7 +277,10 @@ def collect_weld_groups(ranges, groups) -> list:
                 )
                 continue
             for unit in hits:
-                buckets.add(int(unit.get("bucket", 0)))
+                bucket = int(unit.get("bucket", 0))
+                buckets.add(bucket)
+                if bucket not in bucket_order:
+                    bucket_order.append(bucket)
                 matched_names.append(str(name))
         if not buckets:
             continue
@@ -285,9 +289,26 @@ def collect_weld_groups(ranges, groups) -> list:
                 "label": f"组{group_index + 1}",
                 "names": matched_names,
                 "buckets": sorted(buckets),
+                "bucket_order": bucket_order,
             }
         )
     return groups_out
+
+
+def build_ordered_transfer_pairs(members, owner_ids, bucket_order) -> list:
+    """按节点列表顺序生成链式传递对：第一→第二，第二→第三，依此类推。"""
+    order_index = {
+        int(bucket): index for index, bucket in enumerate(bucket_order or [])
+    }
+    fallback = len(order_index)
+    ordered = sorted(
+        (int(member) for member in members),
+        key=lambda member: (
+            order_index.get(int(owner_ids[member]), fallback),
+            member,
+        ),
+    )
+    return list(zip(ordered, ordered[1:]))
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +564,8 @@ def _weld_with_bmesh(obj, owner_ids, face_buckets, weld_groups, threshold) -> di
     1. 建 bmesh，给每个顶点 / 每个面写 int 层「原物体 id」；
     2. 读 ``bm.edges`` 里 ``edge.seam == True`` 的边 → 缝合边顶点集合；
     3. ``cluster_positions`` 按 ``threshold`` 把 seam 顶点聚成「同一处」；
-    4. 逐组、逐簇：把组内成员的坐标 / 顶点组权重 / 形态键统一到代表顶点
-       （代表优先常驻物体，否则组内最小号）；同时记下「代表 → 成员」供法线统一；
+    4. 逐组、逐簇：严格按节点物体列表顺序链式传递坐标 / 顶点组权重 / 形态键 /
+       顶点法线（第一传第二、第二传第三……）；
     5. 全部处理完 ``bm.to_mesh(mesh)``；
     6. 读回焊后每个顶点 / 每个面的原物体 id，并把接缝两侧的 per-loop 法线统一。
     """
@@ -606,16 +627,6 @@ def _weld_with_bmesh(obj, owner_ids, face_buckets, weld_groups, threshold) -> di
         except Exception:
             shape_layers = []
 
-        # 每个原物体出现在几个组里：出现 >= 2 次的是常驻物体（例如三组都含身体）
-        owner_group_count: dict = {}
-        for group in weld_groups or []:
-            for value in group.get("buckets") or []:
-                owner = int(value)
-                owner_group_count[owner] = owner_group_count.get(owner, 0) + 1
-        resident_owners = {
-            owner for owner, count in owner_group_count.items() if count >= 2
-        }
-
         # 聚类键交给「距离阈值」：seam 顶点彼此相距 <= threshold 才算同一处接缝，
         # 不再用固定的 1e-6 量化网格（那样阈值填什么都不起作用）。
         seam_verts = sorted(initial_seam_verts, key=lambda vert: vert.index)
@@ -640,65 +651,51 @@ def _weld_with_bmesh(obj, owner_ids, face_buckets, weld_groups, threshold) -> di
                             if int(vert[vert_layer]) in buckets
                         )
                     ),
+                    "merged_vertex_count": 0,
                 }
             )
 
         before = len(bm.verts)
         unified_vertices = 0
-        # 代表顶点下标 -> 被统一到它的顶点下标（代表自己也记进去，法线要统一到同一值）
-        unified_pairs: dict = {}
+        normal_targets: dict = {}
         for members in clusters:
             if len(members) < 2:
                 continue
-            for group in weld_groups or []:
+            vert_by_index = {int(vert.index): vert for vert in members}
+            for group_index, group in enumerate(weld_groups or []):
                 buckets = {int(value) for value in (group.get("buckets") or [])}
                 group_members = [
                     vert for vert in members if int(vert[vert_layer]) in buckets
                 ]
                 if len(group_members) < 2:
                     continue
-                # 代表顶点：优先常驻物体（身体）的顶点，否则取组内最小号
-                resident_members = [
-                    vert
-                    for vert in group_members
-                    if int(vert[vert_layer]) in resident_owners
-                ]
-                if resident_members:
-                    representative = min(resident_members, key=lambda item: item.index)
-                else:
-                    representative = min(group_members, key=lambda item: item.index)
-                representative_owner = int(representative[vert_layer])
-                pair = unified_pairs.setdefault(int(representative.index), [])
-                if int(representative.index) not in pair:
-                    pair.append(int(representative.index))
-                for vert in group_members:
-                    if vert is representative:
-                        continue
-                    # 常驻物体顶点只在作为代表时使用，不反向覆盖其它常驻顶点
-                    if (
-                        int(vert[vert_layer]) in resident_owners
-                        and int(vert[vert_layer]) != representative_owner
-                    ):
-                        continue
-                    vert.co = representative.co.copy()
+                pairs = build_ordered_transfer_pairs(
+                    [int(vert.index) for vert in group_members],
+                    owner_array,
+                    group.get("bucket_order") or group.get("buckets") or [],
+                )
+                if not pairs:
+                    continue
+                first_source = vert_by_index[pairs[0][0]]
+                first_normal = tuple(float(value) for value in first_source.normal)
+                for source_index, target_index in pairs:
+                    source = vert_by_index[source_index]
+                    target = vert_by_index[target_index]
+                    target.co = source.co.copy()
                     if deform_layer is not None:
-                        weights = vert[deform_layer]
+                        weights = target[deform_layer]
                         weights.clear()
-                        for group_index, weight in representative[deform_layer].items():
-                            weights[group_index] = weight
+                        for vertex_group_index, weight in source[deform_layer].items():
+                            weights[vertex_group_index] = weight
                     for shape_layer in shape_layers:
-                        vert[shape_layer] = representative[shape_layer]
+                        target[shape_layer] = source[shape_layer]
+                    normal_targets[target_index] = first_normal
                     unified_vertices += 1
-                    if int(vert.index) not in pair:
-                        pair.append(int(vert.index))
+                    group_stats[group_index]["merged_vertex_count"] += 1
         after = len(bm.verts)
-        for index, item in enumerate(group_stats):
+        for item in group_stats:
             item["before_vertex_count"] = int(before)
             item["after_vertex_count"] = int(after)
-            # 方案 A 不减少顶点数；统一数只记在第一组上（避免重复累加）
-            item["merged_vertex_count"] = (
-                int(unified_vertices) if index == 0 else 0
-            )
         # 汇报给调用方的是焊前的 seam 边 / 顶点数量（分组日志里另有每组数量）
         seam_vertex_count = len(initial_seam_verts)
 
@@ -723,11 +720,10 @@ def _weld_with_bmesh(obj, owner_ids, face_buckets, weld_groups, threshold) -> di
 
     mesh.update()
     # 法线统一：导出器读的是 per-loop 法线（mesh.loops.normal，obj_buffer_helper 同款）。
-    # 方案 A 只统一属性，所以接缝两侧必须把 per-loop 法线也统一到**代表顶点自己的
-    # corner 法线**——只改一侧会让折线换个位置出现，用顶点平均法线又会抹掉硬边。
-    if unified_pairs:
+    # 方案 A 只统一属性，所以接缝两侧必须把 per-loop 法线统一到链首源顶点的顶点法线。
+    if normal_targets:
         try:
-            _unify_seam_loop_normals(mesh, unified_pairs)
+            _unify_seam_loop_normals(mesh, normal_targets)
         except Exception as exc:
             _warn(f"[接缝焊接] 接缝法线统一失败（表面可能出现折线）: {exc}")
     _remove_mesh_attribute(mesh, VERT_OWNER_LAYER)
@@ -758,8 +754,8 @@ def _read_loop_normals(mesh, loop_count: int):
     return normals.reshape(-1, 3)
 
 
-def _unify_seam_loop_normals(mesh, unified_pairs: dict) -> None:
-    """把每组接缝顶点（代表 + 被统一侧）的 per-loop 法线写成代表顶点的 corner 法线。"""
+def _unify_seam_loop_normals(mesh, normal_targets: dict) -> None:
+    """把被传递顶点的 per-loop 法线写成源顶点的顶点法线。"""
     loop_count = int(len(mesh.loops))
     vertex_count = int(len(mesh.vertices))
     if loop_count <= 0 or vertex_count <= 0:
@@ -768,29 +764,16 @@ def _unify_seam_loop_normals(mesh, unified_pairs: dict) -> None:
     mesh.loops.foreach_get("vertex_index", loop_vertex)
     loop_normals = _read_loop_normals(mesh, loop_count)
 
-    # 每个顶点的第一条 loop：代表顶点从这里取自己的 corner 法线
-    first_loop_of_vertex = numpy.full(vertex_count, -1, dtype=numpy.int32)
-    for loop_index in range(loop_count - 1, -1, -1):
-        first_loop_of_vertex[int(loop_vertex[loop_index])] = loop_index
-
     target_normals = numpy.zeros((vertex_count, 3), dtype=numpy.float32)
     has_target = numpy.zeros(vertex_count, dtype=bool)
     assigned = 0
-    for representative, members in unified_pairs.items():
-        representative = int(representative)
-        if not 0 <= representative < vertex_count:
+    for target_index, normal in normal_targets.items():
+        target_index = int(target_index)
+        if not 0 <= target_index < vertex_count:
             continue
-        loop_index = int(first_loop_of_vertex[representative])
-        if loop_index < 0:
-            continue
-        normal = loop_normals[loop_index]
-        for member in members:
-            member = int(member)
-            if not 0 <= member < vertex_count:
-                continue
-            target_normals[member] = normal
-            has_target[member] = True
-            assigned += 1
+        target_normals[target_index] = normal
+        has_target[target_index] = True
+        assigned += 1
     if not assigned:
         return
     mask = has_target[loop_vertex]
