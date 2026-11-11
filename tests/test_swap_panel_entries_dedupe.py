@@ -70,13 +70,23 @@ def _load_panel():
             return content, ""
 
     base.SSMTNode_PostProcess_Base = Base
+    root_pkg = types.ModuleType(PKG)
+    root_pkg.__path__ = []
+    common_pkg = types.ModuleType(PKG + ".common")
+    common_pkg.__path__ = [str(ROOT / "common")]
+
     stubs = {
+        root_pkg.__name__: root_pkg,
+        common_pkg.__name__: common_pkg,
         "bpy": fake_bpy,
         "bpy.props": fake_bpy.props,
         PKG + ".blueprint": package,
         base.__name__: base,
     }
     with mock.patch.dict(sys.modules, stubs):
+        # 产品代码用相对导入 `from ..common.global_config import ...`；
+        # 这里按**真实文件位置**把 common 包挂进假包，别复制副本（复制会随产品改动腐坏）。
+        importlib.import_module(PKG + ".common.global_config")
         return _load_module(
             PKG + ".blueprint.node_postprocess_swap_panel",
             ROOT / "blueprint" / "node_postprocess_swap_panel.py",

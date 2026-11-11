@@ -238,13 +238,22 @@ class SwapPanelEFMITests(unittest.TestCase):
         # （mock.patch.dict 退出时会还原到进入前的状态，所以这里先装再进 patch）。
         export_helper = _make_export_helper_stub(package_name)
         sys.modules[export_helper.__name__] = export_helper
+        # 产品代码用相对导入 `from ..common.global_config import ...`：这里按**真实文件位置**
+        # 把同级的 common 包挂进假包（不复制内容，避免随产品改动腐坏）。
+        root_pkg = types.ModuleType('_test_swap_panel')
+        root_pkg.__path__ = []
+        common_pkg = types.ModuleType('_test_swap_panel.common')
+        common_pkg.__path__ = [str(ROOT / 'common')]
         stubs = {
             'bpy': fake_bpy,
+            '_test_swap_panel': root_pkg,
+            '_test_swap_panel.common': common_pkg,
             package_name: package,
             base.__name__: base,
             export_helper.__name__: export_helper,
         }
         with mock.patch.dict(sys.modules, stubs):
+            importlib.import_module('_test_swap_panel.common.global_config')
             return _load_module(
                 package_name + '.node_postprocess_swap_panel',
                 ROOT / 'blueprint' / 'node_postprocess_swap_panel.py',
