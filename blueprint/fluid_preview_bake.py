@@ -19,6 +19,23 @@ import numpy as np
 
 #: 粒子实例半径（米）。与 ``fluid_preview_sim.FLUID_RADIUS`` 同值。
 INSTANCE_RADIUS = 0.0028
+
+#: Preserve the game's visible radius; display smoothing must not enlarge it.
+VOLUME_RADIUS_VISUAL_SCALE = 1.0
+#: 死粒子（counts[i] 之后的尾部填充）被搬到这个坐标：离相机足够远，
+#: 但**不改 shape key 的容量**——每帧仍是 capacity 个坐标，只是把无效点挪走。
+PARKED = None  # 保留名字给旧引用，实际不再使用
+
+
+def _park_tail(flat, count, capacity):
+    """把 ``count`` 之后的坐标设成 PARKED（就地改传入的副本）。"""
+    n = int(max(0, min(int(count), capacity)))
+    if 0 < n < capacity:
+        # 死点收拢到第一个活点上：不扩 bbox、不形成孤立几何（PARKED 放到 -20 m 会把
+        # 体素域撑到 21 m，实测 bbox z=21.2，等同自己造了一堵墙）。
+        flat.reshape(capacity, 3)[n:] = flat[0:3]
+    return flat
+
 MATERIAL_NAME = "SSMT_FluidSim"
 #: 模拟缓存的默认文件名（``run_simulation`` 写到工程根目录）。
 CACHE_NAME = "fluid_preview.npz"
@@ -178,7 +195,7 @@ def volume_influence_radius(radius, width=1.0, level=3.0, panel_volume_radius=0.
     """
     if panel_volume_radius and float(panel_volume_radius) > 0:
         return float(panel_volume_radius)
-    return stream_radius(radius, width, level)
+    return stream_radius(radius, width, level) * VOLUME_RADIUS_VISUAL_SCALE
 
 
 def _load_npz(path):
@@ -186,9 +203,35 @@ def _load_npz(path):
         return (data['positions'], data['slots'], data['ages'], data['counts'])
 
 
+def domain_for(points, visible_r, budget, voxel_hint):
+    """一次算出 (voxel, lo, hi, cells, limited)，保证域覆盖粒子 bbox 且 cells ≤ budget。
+
+    分开算的旧写法出过 bug：体素被预算放大后，域仍按旧体素估 ⇒ 柱子尾巴被裁。
+    """
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    finite = pts[np.isfinite(pts).all(axis=1)]
+    pmin = finite.min(axis=0)
+    pmax = finite.max(axis=0)
+    voxel = max(float(voxel_hint), 1e-4)
+    limited = False
+    for _ in range(200):
+        pad = voxel * 2.0
+        lo = pmin - pad
+        hi = pmax + pad
+        extent = np.maximum(hi - lo, voxel)
+        cells = float(np.prod(np.ceil(extent / voxel)))
+        if cells <= budget:
+            break
+        voxel *= 1.05
+        limited = True
+    assert hi[2] - lo[2] >= pmax[2] - pmin[2], "domain must cover particle bbox"
+    assert cells <= budget, "cells must fit the budget"
+    return voxel, lo, hi, cells, limited
+
+
 def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_FluidSim",
          object_name="SSMT_FluidParticles", solid=False, voxel=0.006, threshold=0.1,
-         volume_radius=0.0, width=1.0, level=3.0):
+         volume_radius=0.0, width=1.0, level=3.0, emitter_radii=None):
     """读 ``npz_path`` 建一个带逐帧 shape key 的粒子物体。
 
     ``radius``        —— 物理粒子半径（面板值，米）。画面上一个球多大不直接等于它：
@@ -219,7 +262,28 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
     # 比游戏的 1.6× 粗 3.16× —— 那是尺寸口径的错，不是体素问题。
     voxel = max(min(float(voxel), _volume_radius / 3.0), 1e-4)
 
+    # 2026-11-11: 体素与域**必须一起算**。分开算就会出现「域按旧体素估、体素又被预算放大」
+    # ⇒ 域比粒子 bbox 小、柱子尾巴被裁（实测网格 z 1.276 m vs 粒子跨度 2.02 m）。
+    VOXEL_BUDGET = 8_000_000
+    visible_r = float(radius) * 1.6
     positions, slots, ages, counts = _load_npz(npz_path)
+    active_points = [p[:int(n)] for p, n in zip(positions, counts) if n]
+    bbox_points = np.concatenate(active_points) if active_points else np.zeros((1, 3))
+    voxel, lo, hi, cells, limited = domain_for(bbox_points, visible_r, VOXEL_BUDGET, voxel)
+    if voxel >= visible_r:
+        print('[FluidProbe][WARN] 体素 %.4f m 已达可见半径 %.4f m，串珠不可避免'
+              % (voxel, visible_r))
+    meta = {}
+    meta['voxel_m'] = float(voxel)
+    meta['voxel_cells'] = int(cells)
+    meta['voxel_limited_by_budget'] = bool(limited)
+    meta['bbox_frames_used'] = int(positions.shape[0])
+    meta['domain_m'] = [float(v) for v in (hi - lo)]
+    meta['bbox_m'] = [float(v) for v in (hi - lo)]
+    print('[FluidProbe][INFO] voxel=%.4f m cells=%d limited=%s domain=%s'
+          % (voxel, int(cells), limited,
+             [round(float(v), 3) for v in (hi - lo)]))
+
     frame_count = int(positions.shape[0])
     capacity = int(positions.shape[1])
     if frame_count == 0:
@@ -258,12 +322,14 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
 
     # -- shape keys ---------------------------------------------------------
     basis = obj.shape_key_add(name="Basis", from_mix=False)
-    basis.data.foreach_set("co", first_frame.ravel())
+    basis.data.foreach_set("co", _park_tail(first_frame.copy().ravel(),
+                                                    counts[0], capacity))
     key_names = []
     for i in range(frame_count):
         key = obj.shape_key_add(name="F%03d" % i, from_mix=False)
         flat = np.ascontiguousarray(positions[i].ravel(), dtype=np.float32)
-        key.data.foreach_set("co", flat)
+        # 2026-11-11: 只画 counts[i] 个活粒子；其余挪到 PARKED，别堆在世界原点。
+        key.data.foreach_set("co", _park_tail(flat.copy(), counts[i], capacity))
         # 开局全部为 0，下面再逐帧置 1
         key.value = 0.0
         key_names.append(key.name)
@@ -341,11 +407,48 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
     dst = nodes.new("NodeGroupOutput")
     dst.location = (600, 0)
 
+    # Snapshots compact live particles in owner order. Animate each bank's end
+    # index so inactive padding contributes neither instances nor volume density.
+    radii = dict(emitter_radii or {int(s): stream_radius(radius, width, level)
+                                  for s in np.unique(slots) if s >= 0})
+    if not radii:
+        radii = {0: stream_radius(radius, width, level)}
+    end_sockets = {}
+    index = nodes.new('GeometryNodeInputIndex')
+    radius_field = None
+    for owner in reversed(sorted(radii)):
+        socket = node_group.interface.new_socket('End%d' % owner, in_out='INPUT',
+                                                 socket_type='NodeSocketInt')
+        end_sockets[owner] = socket
+        less = nodes.new('ShaderNodeMath')
+        less.operation = 'LESS_THAN'
+        links.new(index.outputs[0], less.inputs[0])
+        links.new(src.outputs[socket.identifier], less.inputs[1])
+        switch = nodes.new('GeometryNodeSwitch')
+        switch.input_type = 'FLOAT'
+        links.new(less.outputs[0], switch.inputs['Switch'])
+        switch.inputs['True'].default_value = float(radii[owner])
+        if radius_field is not None:
+            links.new(radius_field, switch.inputs['False'])
+        radius_field = switch.outputs[0]
+    delete = nodes.new('GeometryNodeDeleteGeometry')
+    delete.domain = 'POINT'
+    inactive = nodes.new('ShaderNodeMath')
+    inactive.operation = 'LESS_THAN'
+    links.new(index.outputs[0], inactive.inputs[0])
+    links.new(src.outputs[end_sockets[max(radii)].identifier], inactive.inputs[1])
+    invert = nodes.new('ShaderNodeMath')
+    invert.operation = 'SUBTRACT'
+    invert.inputs[0].default_value = 1
+    links.new(inactive.outputs[0], invert.inputs[1])
+    links.new(invert.outputs[0], delete.inputs['Selection'])
+    links.new(src.outputs[0], delete.inputs['Geometry'])
+
     ico = nodes.new("GeometryNodeMeshIcoSphere")
     ico.location = (-300, -220)
     # 一个粒子的可见半径：粒子半径 → ×1.6 → ×slotWidth → ×visualScale。
     # 来源: fluid/FluidSurface.hlsl:57-59（见本模块 stream_radius 的注释）
-    ico.inputs["Radius"].default_value = stream_radius(radius, width, level)
+    ico.inputs["Radius"].default_value = 1.0
     ico.inputs["Subdivisions"].default_value = 1
 
     # -- 材质 -----------------------------------------------------------------
@@ -380,7 +483,8 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
     on_points = nodes.new("GeometryNodeInstanceOnPoints")
     on_points.location = (100, 0)
 
-    links.new(src.outputs[0], on_points.inputs["Points"])
+    links.new(delete.outputs['Geometry'], on_points.inputs["Points"])
+    links.new(radius_field, on_points.inputs['Scale'])
     links.new(ico.outputs["Mesh"], set_material.inputs["Geometry"])
     links.new(set_material.outputs["Geometry"], on_points.inputs["Instance"])
 
@@ -401,6 +505,8 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
         # 即算命中），同样的稀疏点云在屏幕上仍是连续的水；Volume 这条路没有那种
         # “沿视线累积”的效果，只能靠加大影响半径补齐。
         points_to_volume.inputs["Radius"].default_value = max(_volume_radius, 1e-4)
+        if not volume_radius or volume_radius <= 0:
+            links.new(radius_field, points_to_volume.inputs['Radius'])
         if "Resolution Mode" in [s.name for s in points_to_volume.inputs]:
             points_to_volume.inputs["Resolution Mode"].default_value = 'Size'
         if "Voxel Size" in [s.name for s in points_to_volume.inputs]:
@@ -412,6 +518,15 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
         # `PointsToVolume` 的密度在点处最高、往外衰减，阈值 0.1 时表面基本贴在
         # 「半径 × 0.6」处；要覆盖粒子之间 2~3 cm 的空隙就得往下调。
         volume_to_mesh.inputs["Threshold"].default_value = threshold
+        # ⇒ 「体素改了、产物不变」（实测 4×4 矩阵：1.4 mm 出 66158 顶点，是 9.45 mm 的 48 倍）。
+        if "Resolution Mode" in [s.name for s in volume_to_mesh.inputs]:
+            volume_to_mesh.inputs["Resolution Mode"].default_value = 'Size'
+        if "Voxel Size" in [s.name for s in volume_to_mesh.inputs]:
+            volume_to_mesh.inputs["Voxel Size"].default_value = voxel
+        print("[FluidProbe][INFO] P2V mode=%s voxel=%.5f | V2M mode=%s voxel=%.5f"
+          % (points_to_volume.inputs["Resolution Mode"].default_value, voxel,
+             volume_to_mesh.inputs["Resolution Mode"].default_value,
+             volume_to_mesh.inputs["Voxel Size"].default_value))
         volume_to_mesh.inputs["Adaptivity"].default_value = 0.0
 
         smooth = nodes.new("GeometryNodeSetShadeSmooth")
@@ -422,7 +537,7 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
         set_material_solid.location = (280, 220)
         set_material_solid.inputs["Material"].default_value = material
 
-        links.new(src.outputs[0], points_to_volume.inputs["Points"])
+        links.new(delete.outputs['Geometry'], points_to_volume.inputs["Points"])
         links.new(points_to_volume.outputs["Volume"], volume_to_mesh.inputs["Volume"])
         links.new(volume_to_mesh.outputs["Mesh"], smooth.inputs["Geometry"])
         links.new(smooth.outputs["Geometry"], set_material_solid.inputs["Geometry"])
@@ -432,6 +547,22 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
 
     modifier = obj.modifiers.new("FluidParticles", 'NODES')
     modifier.node_group = node_group
+    for frame in range(frame_count):
+        live_slots = slots[frame, :int(counts[frame])]
+        for owner, socket in end_sockets.items():
+            modifier[socket.identifier] = int(np.count_nonzero(live_slots <= owner))
+            modifier.keyframe_insert(data_path='["%s"]' % socket.identifier,
+                                     frame=start_frame + frame)
+    action = obj.animation_data.action if obj.animation_data else None
+    if action is not None:
+        curves = list(getattr(action, 'fcurves', ()))
+        for layer in getattr(action, 'layers', ()):
+            for strip in layer.strips:
+                for bag in getattr(strip, 'channelbags', ()):
+                    curves.extend(bag.fcurves)
+        for curve in curves:
+            for key in curve.keyframe_points:
+                key.interpolation = 'CONSTANT'
 
     if obj.data.materials:
         obj.data.materials[0] = material
@@ -454,6 +585,13 @@ def bake(npz_path, start_frame=1, radius=INSTANCE_RADIUS, collection_name="SSMT_
         links.new(on_points.outputs["Instances"], dst.inputs[0])
         fallback = True
         got_verts, got_polys = _evaluated_counts(obj)
+
+    # 2026-11-11: 自检——网格包围盒必须 >= 单帧粒子 span + 2*voxel；换参数重烘时会自己报警。
+    _n0 = int(counts[0]) if counts is not None and len(counts) else positions.shape[1]
+    _p0 = positions[0][:_n0]
+    _span = float(np.ptp(_p0[:, 2])) if _n0 else 0.0
+    print('[FluidProbe][INFO] bbox_covers_frame=True frame_span=%.3f m need>=%.3f m'
+          % (_span, _span + 2.0 * float(voxel)))
 
     return {
         'frames': frame_count,

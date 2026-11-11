@@ -139,3 +139,35 @@ class TestClampCountersBeforePrime:
         sim.clamp_checks = 9
         sim.prime(np.random.default_rng(13))
         assert sim.clamp_hits == 0 and sim.clamp_checks == 0
+
+class TestPhysicsSource:
+    """重力来源必须可追溯：默认值 = 4× 游戏值，不能静默。"""
+
+    def test_default_physics_warns_only_once_and_marks_source(self):
+        import contextlib
+        import io as _io
+        sim = S.Simulator(32, [_emitter()])
+        buf = _io.StringIO()
+        rng = np.random.default_rng(21)
+        with contextlib.redirect_stdout(buf):
+            for _ in range(3):
+                sim.step(1.0 / 30.0, rng)
+        out = buf.getvalue()
+        assert out.count("set_physics") == 1, out
+        assert "4x" in out
+        assert sim.physics_source == "default"
+
+    def test_set_physics_marks_explicit_and_does_not_warn(self):
+        import contextlib
+        import io as _io
+        S.set_physics(gravity_scale=0.25)
+        try:
+            sim = S.Simulator(32, [_emitter()])
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                sim.step(1.0 / 30.0, np.random.default_rng(22))
+            assert sim.physics_source == "explicit"
+            assert "set_physics" not in buf.getvalue()
+        finally:
+            S.set_physics(gravity_scale=1.0)
+

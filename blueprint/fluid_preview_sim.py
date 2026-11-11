@@ -1,26 +1,17 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Position Based Fluids 的预览实现。
 
 逐行对照参考实现翻译，每个常量都标了出处：
 
-- ``C:\\Users\\anlingQWQ\\Desktop\\LiquidGravityProbe\\fluid\\FluidSolver.hlsl``
-- ``C:\\Users\\anlingQWQ\\Desktop\\LiquidGravityProbe\\Probe.ini``
+- ``Toolset/fluid/fluid/FluidSolver.hlsl``
+- ``Toolset/fluid/Probe.ini``
 
 只依赖 numpy，**不 import bpy**——这样能在 pytest 里直接跑，也能在
 ``blender --background`` 里跑。Blender 侧只负责把结果变成关键帧。
 
-与参考实现的差异（都是有意的，列出来备查）：
-
-1. **槽位/多发射器合并**：参考实现按 slot 分区，这里把所有发射器的粒子放进
-   一个大数组，用 ``slot_id`` 区分。邻居搜索跨 slot 也允许——在预览里
-   两个喷口的水本来就该互相碰。
-2. **JetGuide 的聚焦/弹道分支**：参考实现在 ``FluidSolver.hlsl:288-301``
-   有一条被 ``longLane.w < -2`` 控制的独立弹道，只对 ``velocityAlive.w > .5``
-   的“叶片几何”生效。预览里没有叶片释放，直接跳过。
-3. **SheetProfile 的片状恢复力**（``:390-401``）：依赖 ``sheetFrame``，
-   预览里没有出水口片状信息，跳过。
-4. **Splash 子系统**（撞击后生成子水滴）：单独一个 CS 池，预览里用
-   简化版——撞上表面后粒子黏住并缩短寿命，不做二次溅射。
+主水柱按仓库 ``Toolset/fluid`` 的预测、释放、力场和分槽求解推进。
+碰撞使用场景地面平面；游戏的屏幕深度碰撞、二次飞溅及屏幕空间渲染
+需要游戏相机和深度缓冲，未在此模块模拟。
 """
 
 import numpy as np
@@ -30,7 +21,7 @@ import numpy as np
 #: 核半径。``Probe.ini:419`` 的 ``x238 = 0.012 ...`` 第一个分量。
 H = 0.012
 #: 单粒子质量。``Probe.ini:419`` 第二分量。
-MASS = 2.1333e-5
+MASS = 0.0000213333
 #: 静止密度。``Probe.ini:419`` 第三分量。
 RHO = 1000.0
 #: 运动黏度。``Probe.ini:419`` 第四分量。
@@ -47,6 +38,9 @@ FLUID_RADIUS = 0.0028
 #: 参考实现把它乘在切向重力上，让水顺着斜面向下溜。
 # nhd-pick: 面板可调，和 game 侧 IniParams[47].x/.y 一一对应
 _GRAVITY_SCALE = 1.0
+#: 这次模拟用的是谁给的重力：``"explicit"`` = 调用过 set_physics；``"default"`` = 模块默认值。
+#: 报告/日志里必须能看出这一点——默认值是参考重力（4× 游戏值），拿它跟游戏对比会错。
+_PHYSICS_SOURCE = "default"
 _VISCOSITY_OVERRIDE = 0.0
 
 
@@ -67,11 +61,13 @@ def set_physics(gravity_scale=None, viscosity=None):
     ``GSCALE`` 同义：0 是合法值，不是「用默认」—— 这一行以前写错了）。
     粘度同理：``<=0`` 表示沿用 profile 里的值（那个 0 语义是有意的）。
     """
-    global _GRAVITY_SCALE, _VISCOSITY_OVERRIDE
+    global _GRAVITY_SCALE, _VISCOSITY_OVERRIDE, _PHYSICS_SOURCE
     if gravity_scale is not None:
         _GRAVITY_SCALE = float(gravity_scale)   # 允许负值：负 = 反重力（火焰上飘）
+        _PHYSICS_SOURCE = "explicit"
     if viscosity is not None:
         _VISCOSITY_OVERRIDE = max(float(viscosity), 0.0)
+        _PHYSICS_SOURCE = "explicit"
 
 
 TANGENT_GRAVITY_SCALE = 0.35 / 18.0
@@ -87,6 +83,10 @@ SURFACE_DRAG = 8.0
 LIFETIME = 1.1
 #: 速度上限。``FluidSolver.hlsl:440`` ``velocity*=min(1,6/max(speed,1e-9))``。
 MAX_SPEED = 6.0
+
+#: 速度钳制开关（与 FluidSolver.hlsl:440 同口径）。默认开=产品行为；
+#: 仅用于 2x2 对照实验时置 False，并把取值写进 npz 元数据。
+SPEED_CLAMP = True
 #: 单次修正的最大位移。``FluidSolver.hlsl:342`` ``min(1,.002/max(len,1e-9))``。
 CORRECTION_CLAMP = 0.002
 #: lambda 分母的正则项。``FluidSolver.hlsl:322`` ``+10``。
@@ -200,7 +200,7 @@ def neighbour_pairs(points):
         diff = points[:, None, :] - points[None, :, :]
         r2_all = np.einsum('ijk,ijk->ij', diff, diff)
         np.fill_diagonal(r2_all, np.inf)
-        i, j = np.nonzero(r2_all < H * H)
+        i, j = np.nonzero(np.triu(r2_all < H * H, k=1))
 
     diff = points[i] - points[j]
     r2 = np.einsum('ij,ij->i', diff, diff)
@@ -245,6 +245,7 @@ def _gradient(d, r):
     q = 1.0 - r / H
     np.clip(q, 0.0, None, out=q)
     scale = _GRAD_COEF * q * q / np.maximum(r, 1e-7)
+    scale[r < 1e-7] = 0
     return d * scale[:, None]
 
 
@@ -520,18 +521,8 @@ def force_field_accel(points, fields, scale=1.0, owners=None):
     ``owners=None`` = 不做归属过滤（**只给"改之前"的复现与单测用**；Simulator 永远传
     ``self.slot[idx]``）。
 
-    与 GPU 剩下的差异（都是可指的，不是"只有浮点精度"）：
-
-    1. **每力场开关掩码未实现**：``ForceField.hlsl:51-60 emitterFieldOn(id,k)`` 读
-       ``IniParams[41].w``（族开关）+ ``IniParams[58]/[59]``（每发射器一个 lane 的位掩码），
-       预览没有这两级。当前导出写 ``w41 = 0``（``probes/after3/three_onefield.ini:766``）
-       ⇒ shader 里 ``if(IniParams[41].w<.5)return true;`` 短接，掩码不参与，所以**今天无影响**；
-       一旦有人把 ``w41`` 打开，预览会多施力。
-    2. **叶形段**：``FluidSolver.hlsl:309-311`` 在闭式解上补一次常加速度，预览
-       ``:929`` 那一支直接跳过（``pred[guided] = p[guided]``）。
-    3. **出生那一拍**：游戏出生分支里一次都不调 ``forceFieldAccel``（第一次调用在
-       ``FluidSolver.hlsl:276``），预览对所有粒子一视同仁。
-    4. 浮点精度与遍历顺序。
+    字段的 enabled 对应节点开关初值；游戏中由动画或热键改变的运行期
+    开关状态需要作为新的 enabled 输入。CPU 与 GPU 的浮点与求和顺序可能不同。
     """
     total = np.zeros_like(points, dtype=np.float64)
     if not fields or abs(float(scale)) < 1e-12:
@@ -553,11 +544,7 @@ def force_field_accel(points, fields, scale=1.0, owners=None):
                 continue
         center = np.asarray(f['center'], dtype=np.float64)
         axis = np.asarray(f['axis'], dtype=np.float64)
-        axis_len = float(np.linalg.norm(axis))
-        if axis_len < 1e-12:
-            axis = np.array([0.0, 0.0, 1.0])
-        else:
-            axis = axis / axis_len
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-6)
 
         d = points - center[None, :]
         r2 = np.einsum('ij,ij->i', d, d)
@@ -575,15 +562,16 @@ def force_field_accel(points, fields, scale=1.0, owners=None):
         d_m = d[mask]
         if kind == 'RADIAL':
             n = np.linalg.norm(d_m, axis=1)
-            n = np.maximum(n, 1e-12)
+            n = np.maximum(n, 1e-6)
             direction = d_m / n[:, None]
         elif kind == 'VORTEX':
             along = d_m @ axis
             radial = d_m - along[:, None] * axis[None, :]
             tangential = np.cross(np.broadcast_to(axis, radial.shape), radial)
             n = np.linalg.norm(tangential, axis=1)
-            n = np.maximum(n, 1e-12)
+            n = np.maximum(n, 1e-6)
             direction = tangential / n[:, None]
+            direction *= float(f.get('handedness', 1.0))
         else:  # DIRECTIONAL
             direction = np.broadcast_to(axis, d_m.shape).copy()
 
@@ -605,7 +593,8 @@ class Simulator(object):
 
     def __init__(self, capacity, emitters, ground_z=None, ground_normal=None,
                  force_fields=None, force_scale=1.0, radius=FLUID_RADIUS):
-        self.capacity = int(capacity)
+        self.per_emitter_capacity = int(capacity)
+        self.capacity = int(capacity) * max(1, len(emitters))
         # 物理粒子半径（米）——与游戏同一个数。
         # 来源: Toolset/fluid/fluid/ParticleConfig.hlsl:26
         #   float fluidRadiusOf(float4 row){float r=row.x;return r>1e-6?r:FLUID_RADIUS_DEFAULT;}
@@ -628,6 +617,9 @@ class Simulator(object):
         # 撞 AttributeError。prime() 仍会把它们清零，那是「重新开始」的语义。
         self.clamp_hits = 0
         self.clamp_checks = 0
+        # 重力来源：跟着模块状态走（set_physics 之后新建的 Simulator 才是 explicit）
+        self.physics_source = _PHYSICS_SOURCE
+        self._physics_warned = False
         self.force_scale = float(force_scale)
         self.ground_z = ground_z
         self.ground_normal = (
@@ -645,6 +637,9 @@ class Simulator(object):
 
         self._next = 0
         self.time = 0.0
+        self._opening = np.ones(len(self.emitters))
+        self._nozzle_dt = 1.0 / 60.0
+        self._frame_seconds = 1.0 / 30.0
 
         # 每帧发射多少：由 **capacity** 推出，不能写死。
         #
@@ -692,11 +687,17 @@ class Simulator(object):
         self.guide_axis = np.zeros((n, 3), dtype=np.float32)
         self.guide_long = np.zeros((n, 3), dtype=np.float32)
         self.guide_seed = np.zeros(n, dtype=np.float32)
+        self.free_velocity = np.zeros((n, 3), dtype=np.float32)
+        self.lifetime = np.full(n, LIFETIME, dtype=np.float64)
+        for k, e in enumerate(self.emitters):
+            life = float(e.get('lifetime', 0.0))
+            start = k * self.per_emitter_capacity
+            self.lifetime[start:start + self.per_emitter_capacity] = life if life > 1e-6 else LIFETIME
 
 
     # -- 发射 ---------------------------------------------------------------
 
-    def _emitter_nozzle(self, e):
+    def _emitter_nozzle(self, e, birth_time=None, emitter_index=0):
         """按发射器参数算一次喷口几何（`SoftNozzle.hlsl:24-43`）。
 
         每个发射器每帧算一次就够——喷口开合是**发射器级**的量，不是逐粒子随机的。
@@ -712,34 +713,39 @@ class Simulator(object):
         setting = float(e.get('setting', SHEET_THRESHOLD))
         if speed > 0.0:
             base = float(lv if lv is not None else STRENGTH_LEVEL_REFERENCE)
-            lv = _ini_merge().level_for_speed(speed) + (base - STRENGTH_LEVEL_REFERENCE)
+            lv = _ini_merge().level_for_speed(speed) + float(e.get('level_offset', base - STRENGTH_LEVEL_REFERENCE))
         if lv is not None:
             lv = min(max(float(lv), 0.0), 7.0)
             setting = slot_drive(lv)
         else:
             # 既没档位也没速度：只有裸 setting 的旧调用方式，按默认档记账。
             lv = STRENGTH_LEVEL_REFERENCE
-        t = float(self.time)
-        nozzle = evaluate_soft_nozzle(setting, pulse_speed, 1.0, t)
+        if e.get('trickle', False):
+            setting = SETTING_MIN
+        t = float(self.time if birth_time is None else birth_time)
+        opening = advance_nozzle_opening(self._opening[emitter_index],
+                                        nozzle_pressure(setting, pulse_speed), self._nozzle_dt)
+        nozzle = evaluate_soft_nozzle(setting, pulse_speed, opening, t)
         # 面板给的是**出水速度**，游戏直接拿它盖掉喷嘴公式算出来的那个：
         # 来源: FluidSolver.hlsl:146
         #   {float ls=fluidLaunchSpeedOf(IniParams[46]);if(ls>0)nozzle.speed=ls;}
         # 来源: ParticleConfig.hlsl:25  fluidLaunchSpeedOf -> min(v,6.0)
         if speed > 0.0:
             nozzle['speed'] = min(speed, 6.0)
+        if float(e.get('speed_override', 0.0)) > 0:
+            nozzle['speed'] = float(e['speed_override'])
         nozzle['speed'] *= float(e.get('speed_scale', 1.0))
         nozzle['level'] = lv
+        nozzle['setting'] = setting
+        nozzle['pulse_speed'] = pulse_speed
         nozzle['low_scatter'] = low_flow_scatter(setting, pulse_speed)
         return nozzle
 
     def _spawn_one(self, idx, k, rng, back_time=0.0):
-        """把槽位 ``idx`` 放回喷口，并让它先沿初速飞 ``back_time`` 秒。
-
-        ``back_time`` 就是相位预填充用的"已经飞了多久"——只按初速后退，
-        不做重力积分：退役时刻落地的那些粒子在 :meth:`prime` 里另作处理。
-        """
+        """Create one scheduled shader birth, including its fractional age."""
         n_em = len(self.emitters)
-        e = self.emitters[k % n_em]
+        emitter_index = k % n_em
+        e = self.emitters[emitter_index]
         origin = np.asarray(e['origin'], dtype=np.float32)
         direction = np.asarray(e['direction'], dtype=np.float32)
         direction = direction / max(np.linalg.norm(direction), 1e-9)
@@ -774,75 +780,128 @@ class Simulator(object):
         slit_long = slit_long / max(ln, 1e-9)
         right = np.cross(slit_long, direction)
         right = right / max(np.linalg.norm(right), 1e-9)
+        if 'right' in e:
+            right = np.asarray(e['right'], dtype=np.float32)
 
-        nozzle = self._emitter_nozzle(e)
+        birth_time = self.time - back_time
+        nozzle = self._emitter_nozzle(e, birth_time, emitter_index)
         speed = float(nozzle['speed'])
 
         # ---- 喷口：椭圆 `halfGap × halfLength`，不是圆盘 -----------------
         # `FluidSolver.hlsl:147`：原点先在各向异性的椭圆上撒开，再往后偏
         # 1 mm、向上偏 4 mm（出水面偏移）。
-        ang = rng.random() * 2.0 * _PI
+        ang = float(_hash1(idx + birth_time * 17)) * 2.0 * _PI
         # 宽度口径与游戏同一个函数（线性 + clamp .4..5），不再开根号。
         # 来源: Toolset/fluid/fluid/FluidSolver.hlsl:156  ...*slotWidth(slot)*r*rim
         width_scale = slot_width(e.get('width', 1.0))
-        rr = np.sqrt(rng.random())
+        rr = np.sqrt(float(_hash1(idx * 7 + birth_time * 13)))
+        rr *= 1 + 0.10 * np.sin(ang * 3 + 1.1) + 0.05 * np.cos(ang * 5 - 0.4)
         offset = (right * (np.cos(ang) * nozzle['half_gap'] * width_scale * rr)
                   + slit_long * (np.sin(ang) * nozzle['half_length'] * width_scale * rr))
         spawn = origin + offset - slit_long * 0.001 + direction * 0.004
 
         # ---- 方向：椭圆锥（`FluidSolver.hlsl:150-153`） -------------------
-        azimuth = rng.random() * 2.0 * _PI
-        radial = np.sqrt(rng.random())
+        azimuth = float(_hash1(idx * 11 + birth_time * 37)) * 2.0 * _PI
+        radial = np.sqrt(float(_hash1(idx * 19 + birth_time * 23)))
         side_slope = (np.cos(azimuth) * radial * nozzle['lateral_fan']
                       + nozzle['lateral_bias'])
         long_slope = np.sin(azimuth) * radial * nozzle['longitudinal_fan']
         scatter = nozzle['low_scatter'] * 1.25
         side_slope += np.cos(azimuth) * radial * scatter
         long_slope += np.sin(azimuth) * radial * scatter
+        branch = 0
+        frozen = nozzle['sheet'] if nozzle['sheet'] > 0.001 else -nozzle['low_scatter']
+        minimum_flow = not e.get('trickle', False) and nozzle['setting'] < 0.4
+        if minimum_flow:
+            frozen = -1
+            cycle = np.floor(birth_time / 4.8)
+            clock = birth_time - cycle * 4.8
+            start = 0.35 + 0.30 * float(_hash1(cycle * 5.17 + 11))
+            duration = 0.20 + 1.20 * float(_hash1(cycle * 7.91 + 23))
+            ramp = min(0.22, duration * 0.25)
+            def heading(angle_key, slope_key):
+                angle = 2 * _PI * float(_hash1(angle_key))
+                slope = 0.45 + 1.35 * float(_hash1(slope_key))
+                return np.array([np.cos(angle), np.sin(angle)]) * slope
+            previous = heading((cycle - 1) * 19.3 + 7.7, (cycle - 1) * 23.1 + 3.1)
+            before = heading(cycle * 19.3, cycle * 23.1)
+            after = heading(cycle * 19.3 + 7.7, cycle * 23.1 + 3.1)
+            before = previous + (before - previous) * _smoothstep(0, 0.22, clock)
+            h = before + (after - before) * _smoothstep(start, start + 0.22, clock)
+            blend = (_smoothstep(start, start + ramp, clock)
+                     * (1 - _smoothstep(start + duration - ramp, start + duration, clock)))
+            angle = 2 * _PI * float(_hash1(idx * 13.7 + birth_time * 17.3))
+            slope = 0.8 + 3.2 * np.sqrt(float(_hash1(idx * 3.91 + birth_time * 9.7)))
+            h += (np.array([np.cos(angle), np.sin(angle)]) * slope - h) * blend
+            jitter = 0.025 + (0.15 - 0.025) * blend
+            side_slope = h[0] + (float(_hash1(idx * 5.7 + birth_time * 3)) - 0.5) * jitter
+            long_slope = h[1] + (float(_hash1(idx * 9.3 + birth_time * 5)) - 0.5) * jitter
+            branch = -3 if blend > 0.65 else (0 if blend > 0.05 else (2 if clock < start else 3))
+            tightening = float(_smoothstep(0, 0.45, np.clip((nozzle['pulse_speed'] - 1) / 0.85, 0, 1)))
+            speed *= 1 + ((0.75 + 0.75 * float(_hash1(idx * 31.3 + birth_time * 23.7))) - 1) * blend * (1 - tightening)
+        if e.get('trickle', False):
+            frozen, branch = -1, 2
+            side_slope = long_slope = 0
+            speed = 0.27 * min(max(float(e.get('trickle_scale', 0.1)), 0.1), 8)
         launch_dir = direction + right * side_slope + slit_long * long_slope
         launch_dir = launch_dir / max(np.linalg.norm(launch_dir), 1e-9)
 
         vel = launch_dir * speed
+        if branch < -2:
+            bits = int(np.float32(birth_time).view(np.uint32)) ^ ((idx * 747796405 + 2891336453) & 0xffffffff)
+            bits ^= bits >> 16
+            bits = (bits * 2246822519) & 0xffffffff
+            bits ^= bits >> 13
+            angle = (bits & 65535) * (2 * _PI / 65536)
+            horizontal = 0.55 + 0.65 * ((bits >> 16) & 65535) / 65535
+            downward = 0.12 + 0.28 * float(_hash1(idx * 7.91 + birth_time))
+            magnitude = np.sqrt(horizontal**2 + downward**2)
+            half_angle = 0.5 * np.arctan2(horizontal, downward)
+            vel = ((right * np.cos(angle) + slit_long * np.sin(angle)) * magnitude * np.sin(half_angle)
+                   + direction * magnitude * np.cos(half_angle)) * 0.70
+        if minimum_flow:
+            magnitude = max(float(np.linalg.norm(vel)), 1e-6)
+            ray = vel / magnitude + (direction - vel / magnitude) * tightening
+            ray /= max(float(np.linalg.norm(ray)), 1e-6)
+            vel = ray * (magnitude + (speed - magnitude) * tightening)
+            if tightening > 0.97:
+                branch = 2
 
         # ---- JetGuide：出生时冻结坐标系，解析轨迹要用它 -------------------
-        self.guide_origin[idx] = spawn
+        self.guide_origin[idx] = origin - slit_long * 0.001 + direction * 0.004
+        if branch < -2:
+            self.guide_origin[idx] = spawn
         self.guide_carrier[idx] = e.get('carrier', (0.0, 0.0, 0.0))
         self.guide_axis[idx] = direction
         self.guide_long[idx] = slit_long
-        self.guide_seed[idx] = float(rng.random())
-        self.lane[idx] = float(e.get('lane', 0.0))
-        self.sheet[idx] = float(nozzle['sheet'])
+        self.guide_seed[idx] = birth_time
+        self.lane[idx] = 2 * ((idx * 0.61803398875 + np.floor(birth_time / 0.48) * 0.137) % 1) - 1
+        if branch:
+            self.lane[idx] = branch
+        self.sheet[idx] = frozen
         self.launch_speed[idx] = speed
         # 出生那一档 `$strength_level` 与这一槽的水柱宽度倍数：显示端要读它们。
         # 来源: Slots.hlsl:51 slotDrive(s) / :57 slotWidth(s)
         self.level[idx] = float(nozzle['level'])
         self.width[idx] = width_scale
 
-        # ``back_time`` 是「它本该在多少秒之前出生」。必须**真的积分**这一段
-        # （重力 + 初速），不能只按初速做直线前推：同一帧重生的那批粒子
-        # back 都在 [0, 1/fps) 内，直线前推只把它们铺开 16 mm，于是每帧
-        # 挤成一团、团间距恰好等于一帧的飞行距离——渲染出来就是一串糖葫芦。
-        # 用 4 个子步积分，误差已经远小于粒子半径。
-        pos_b = spawn + vel * back_time
-        vel_b = vel + _gravity() * back_time
-        if back_time > 0.0:
-            steps = 4
-            sub = back_time / steps
-            pos_b = spawn
-            vel_b = vel.copy()
-            for _ in range(steps):
-                vel_b = vel_b + _gravity() * sub
-                pos_b = pos_b + vel_b * sub
-            floor = float(self.ground_z) if self.ground_z is not None else None
-            if floor is not None and pos_b[2] < floor:
-                pos_b[2] = floor
+        # Births are backdated with the shader's closed-form launch equation.
+        vel = vel + self.guide_carrier[idx]
+        self.free_velocity[idx] = vel
+        gravity = _gravity() * jet_gravity_scale(speed, 0)
+        pos_b = spawn + vel * back_time + 0.5 * gravity * back_time * back_time
+        vel_b = vel + gravity * back_time
 
         self.pos[idx] = pos_b
         self.vel[idx] = vel_b
         self.age[idx] = back_time
-        self.travel[idx] = speed * back_time
+        self.travel[idx] = 0
         self.slot[idx] = int(e.get('slot', 0))
         self.alive[idx] = True
+        if e.get('trickle', False) and idx % 5 != 0:
+            self.alive[idx] = False
+        if branch < -2 and (idx + int(np.floor(birth_time / 0.48))) & 1:
+            self.alive[idx] = False
         self.stuck[idx] = False
 
     def emit(self, count, rng):
@@ -856,189 +915,176 @@ class Simulator(object):
             self._spawn_one(idx, k, rng, back_time=rng.random() * (1.0 / 30.0))
 
     def prime(self, rng):
-        """只把各槽位的**预定出生时刻**铺开，粒子留给后续帧自然出生。
-
-        参考实现里每个粒子有固定的 ``scheduled`` 出生时刻
-        （``FluidSolver.hlsl:93-99``）。这里等价地给每个槽位一个
-        ``next_birth``，均匀铺在 ``[0, LIFETIME)`` 上。
-
-        这里**刻意不做位置预填充**：先前用「初速 × back」估算已经飞了多久，
-        估算值和真实轨迹差一个重力项，落地后又只把 z 钳住、速度清零，
-        结果是一批位置对不上速度的粒子——预热几十帧都收敛不回来。
-        直接让它们按预定时刻出生、交给模拟自己积分，几十帧后就是稳态。
-        """
-        n = self.capacity
-        # 排班相位照游戏：每槽 1024 个粒子在一个寿命内错峰出生，顺序反转、带 0.78 个
-        # 槽距的 hash 抖动。
-        # 来源: FluidSolver.hlsl:104
-        #   scheduled=cycle*lifetime+(BASE-1-inSlot+offset+.78*hash1(i*3.71+cycle*7.13))*lifetime/BASE
-        # 等距相位会让同一段水流里的相邻粒子间距过于均匀（实测空中最近邻中位比游戏大 12%）。
-        idx = np.arange(n, dtype=np.float64)
-        jitter = 0.78 * _hash1(idx * 3.71)
-        self.next_birth = ((n - 1 - idx) + jitter) * LIFETIME / float(max(n, 1))
+        """Reset the pool; births are evaluated at each shader substep timestamp."""
         self.alive[:] = False
-        self.age[:] = 0.0
-        self.clamp_hits = 0
-        self.clamp_checks = 0
+        self.age[:] = 0
+        self.time = 0.0
+        self._opening[:] = 1
+        self.clamp_hits = self.clamp_checks = 0
+        self._born = np.zeros(self.capacity, dtype=bool)
 
     def recycle(self, rng):
-        """把到了预定出生时刻的槽位重生（``next_birth <= time``）。
+        """FluidSolver PHASE_PREDICT: only births in the current substep."""
+        if not self.emitters:
+            return
+        n = self.per_emitter_capacity
+        index = np.arange(self.capacity)
+        cycle = np.floor(self.time / self.lifetime)
+        phase = n - 1 - index % n
+        scheduled = (cycle + (phase + 0.78 * _hash1(index * 3.71 + cycle * 7.13)) / n) * self.lifetime
+        previous = scheduled > self.time
+        cycle[previous] -= 1
+        scheduled[previous] = (cycle[previous] + (phase[previous] + 0.78 * _hash1(
+            index[previous] * 3.71 + cycle[previous] * 7.13)) / n) * self.lifetime[previous]
+        age = self.time - scheduled
+        self._born = (age >= 0) & (age < self._current_dt)
+        for idx in np.flatnonzero(self._born):
+            k = int(idx) // n
+            if not self.emitters[k].get('enabled', True):
+                self._born[idx] = False
+                continue
+            self._spawn_one(int(idx), k, rng, back_time=float(age[idx]))
+        for k, e in enumerate(self.emitters):
+            if not e.get('enabled', True):
+                self.alive[k * n:(k + 1) * n] = False
 
-        ``back = time - next_birth`` 是「它晚出生了多久」——用它把位置沿初速
-        前推，同一帧里所有新生的粒子就沿着轨迹铺开一小段，而不是全挤在喷口。
-        没有这一步，年龄就只有「每帧一档」的 33 个值，渲染出来是一串糖葫芦。
-
-        ``next_birth`` 用 ``while`` 追平：一帧只加一个寿命的话，被拖慢的槽位
-        会永远落在后面，每帧都重生一次，轨迹直接乱掉。
-        """
-        due = np.flatnonzero(self.next_birth <= self.time)
-        for idx in due:
-            back = float(self.time - self.next_birth[idx])
-            self._spawn_one(int(idx), int(idx), rng, back_time=back)
-            while self.next_birth[idx] <= self.time:
-                self.next_birth[idx] += LIFETIME
-
-    # -- 单步 ---------------------------------------------------------------
+    def _advance_substep(self, dt, rng, first=False):
+        self._current_dt = dt
+        self._nozzle_dt = dt if first else dt * 2
+        self.time += dt
+        self.recycle(rng)
+        self._substep(dt, rng)
+        if not first:
+            for k, e in enumerate(self.emitters):
+                nozzle = self._emitter_nozzle(e, emitter_index=k)
+                self._opening[k] = advance_nozzle_opening(
+                    self._opening[k], nozzle['pressure'], self._frame_seconds)
 
     def step(self, frame_seconds, rng):
-        """推进一帧（内部两个子步，与 ``Probe.ini`` 的 2 次 FluidSubstep 一致）。"""
-        dt_total = frame_dt(frame_seconds)
-        for _ in range(2):
-            self._substep(dt_total * 0.5, rng)
-        # 子步里只负责让到寿命的粒子退出运算（``velocityAlive.w = 0``）；
-        # 按相位重生放在帧末统一做，避免同一帧里重生出来的粒子立刻又参与半步。
-        self.recycle(rng)
-        self.time += dt_total
+        """One game frame, with exactly two FluidSubstep dispatches."""
+        if not self._physics_warned and self.physics_source == 'default':
+            self._physics_warned = True
+            print('[FluidSim][WARN] 未调用 set_physics，正在用默认重力倍率 1；'
+                  '节点默认倍率为 0.25（4x 差异）。')
+        self._frame_seconds = frame_dt(frame_seconds)
+        self._advance_substep(self._frame_seconds / 2, rng, first=True)
+        self._advance_substep(self._frame_seconds / 2, rng)
 
     def _substep(self, dt, rng):
-        live = self.alive
-        count = int(live.sum())
-        if count == 0:
-            self.age[live] += dt
-            self.alive &= self.age < LIFETIME
+        idx = np.flatnonzero(self.alive)
+        if not len(idx):
             return
-
-        idx = np.flatnonzero(live)
-        p = self.pos[idx]
-        v = self.vel[idx]
-        movable = ~self.stuck[idx]
-
-        # 0) 叶形段（JetGuide）：`travel < focusDistance` 的粒子走**解析轨迹**，
-        #    完全不进 PBF。参考实现 `FluidSolver.hlsl:288-294` 就是直接拿
-        #    `evaluateJetGuide` 的结果覆盖 `predictedLambda`，`:306` 的
-        #    `active = !released && ...` 把这些粒子排除出邻居求解。
-        #    不做这一步的话，叶形会被 PBF 的排斥力抹平成一团。
-        sheet = self.sheet[idx] > 0.001
-        guided = np.zeros(len(idx), dtype=bool)
-        if sheet.any():
-            gi = idx[sheet]
-            focus = np.array([sheet_focus_distance(float(a)) for a in self.sheet[gi]],
-                             dtype=np.float32)
-            in_leaf = self.travel[gi] < focus
-            for j, g in enumerate(gi):
-                if not in_leaf[j]:
-                    continue
-                guide = {
-                    'origin': self.guide_origin[g],
-                    'axis': self.guide_axis[g],
-                    'longitudinal': self.guide_long[g],
-                    'carrier': self.guide_carrier[g],
-                    'speed': float(self.launch_speed[g]),
-                    'amount': float(self.sheet[g]),
-                    'lane': float(self.lane[g]),
-                    'seed': float(self.guide_seed[g]),
-                }
-                pos_g, vel_g, travel_g = evaluate_jet_guide(
-                    guide, float(self.age[g]), float(focus[j]), _gravity())
-                self.pos[g] = pos_g
-                self.vel[g] = vel_g
-                self.travel[g] = travel_g
-                self.age[g] += dt
-                self.alive[g] &= self.age[g] < LIFETIME
-                guided[np.argwhere(gi == g)[0][0]] = True
-            p = self.pos[idx]
-            v = self.vel[idx]
-
-        # 1) 预测：p += v*dt + g*dt²*jetGravityScale（`FluidSolver.hlsl:263-274`）
-        #
-        # 近场重力只有 55%（`SoftNozzle.hlsl:45-50`），水柱初段才立得住。
-        # 先前一律用全量 9.81，喷出去立刻往下垂，这是"不像水"的一半原因。
+        born = getattr(self, '_born', np.zeros(self.capacity, dtype=bool))[idx]
+        self.age[idx[~born]] += dt
+        retirement = self.lifetime[idx].copy()
+        for e in self.emitters:
+            if e.get('trickle', False) and e.get('trickle_lifetime', 0) > 0:
+                retirement[self.slot[idx] == int(e.get('slot', 0))] = e['trickle_lifetime']
+        self.alive[idx] &= self.age[idx] < retirement
+        p = self.pos[idx].copy()
+        v = self.vel[idx].copy()
+        owners = self.slot[idx]
+        amount = self.sheet[idx]
         scale = np.array([jet_gravity_scale(float(self.launch_speed[i]),
-                                            float(self.travel[i])) for i in idx],
-                         dtype=np.float32)
-        # 力场与重力合成在同一次预测里（`FluidSolver.hlsl:263-274` 那句
-        # `(gravity + bend)`）：位置先按 `a·dt²` 推，随后 `new_vel = (pred-p)/dt`
-        # 自然把这部分冲量带进速度，不需要再单独加一次。
-        accel = _gravity()[None, :] * scale[:, None]
-        if self.force_fields:
-            # 归属按**发射器下标**：`self.slot[idx]` 是 node:3249 写下的 `'slot': i`，
-            # 不是 3Dmigoto 的运行期槽号。来源: ForceField.hlsl:87-89 按 owner 取行块。
-            accel = accel + force_field_accel(p, self.force_fields,
-                                              self.force_scale,
-                                              owners=self.slot[idx]).astype(np.float32)
-        pred = p + v * dt + accel * (dt * dt)
-        pred[guided] = p[guided]     # 叶形段已由解析轨迹定位置，别再积分一次
+                                            float(self.travel[i])) for i in idx])
+        gravity = _gravity()[None, :] * scale[:, None]
+        for k, e in enumerate(self.emitters):
+            if e.get('trickle', False):
+                gravity[owners == int(e.get('slot', 0))] *= 0.5
+        accel = gravity + force_field_accel(p, self.force_fields, self.force_scale, owners)
+        for e in self.emitters:
+            if not e.get('trickle', False):
+                continue
+            selected = ((owners == int(e.get('slot', 0)))
+                        & (self.age[idx] >= float(e.get('bend_delay', 0))))
+            root = np.asarray(e.get('root', (0, 0, 0)))
+            h = p[selected, :2] - root[:2]
+            length = np.linalg.norm(h, axis=1)
+            h0 = self.guide_origin[idx[selected], :2] - root[:2]
+            inward = -np.einsum('ij,ij->i', h, v[selected, :2]) / np.maximum(length, 1e-4)
+            side = np.einsum('ij,ij->i', h, h0) >= 0
+            weight = (float(e.get('bend_strength', 0)) * np.clip((length - 0.08) / 0.04, 0, 1)
+                      * side * (1 - _smoothstep(0.4, 0.8, inward)))
+            bend = -h / np.maximum(length, 1e-4)[:, None] * weight[:, None]
+            accel[np.flatnonzero(selected), :2] += bend
+        pred = p + v * dt + accel * dt * dt
+        velocity = v + accel * dt
+        pred[born] = p[born]
+        velocity[born] = v[born]
 
-        # 2) 密度 + lambda + 修正，**每轮重算**（FluidSolver.hlsl:328-367）
-        #
-        # 游戏每个子步是 Density→Correct ×3（Probe.ini:938-946），Correct 把位置
-        # 写回后下一轮 Density 读的是新位置，所以 λ 必须重算。预览旧版只算一次 λ、
-        # 连做三次同样的修正 —— 等于把同一份推力叠三遍（实测空中间距偏稀 12.5%）。
-        # 来源: FluidSolver.hlsl:343-347  C/demon/λ；:349-367  correction*
-        for _ in range(ITERATIONS):
-            density, grad_sum, grad_sq_sum = self._density_terms(pred)
-            c = np.maximum(density / RHO - 1.0, 0.0)
-            denom = grad_sq_sum + np.einsum('ij,ij->i', grad_sum, grad_sum) + LAMBDA_EPS
-            lam = -c / denom
-            correction = self._correction(pred, lam)
-            length = np.linalg.norm(correction, axis=1)
-            scale = np.minimum(1.0, CORRECTION_CLAMP / np.maximum(length, 1e-9))
-            pred += correction * scale[:, None]
+        # Released leaf particles never enter Density/Correct or viscosity.
+        # Keep the analytic velocity: (pred-p)/dt would erase it in the guide.
+        leaf = amount > 0.001
+        analytic = np.zeros(len(idx), dtype=bool)
+        for j in np.flatnonzero(leaf):
+            g = idx[j]
+            focus = sheet_focus_distance(float(amount[j]))
+            if born[j] or self.travel[g] < focus:
+                guide = dict(origin=self.guide_origin[g], axis=self.guide_axis[g],
+                             longitudinal=self.guide_long[g], carrier=self.guide_carrier[g],
+                             speed=float(self.launch_speed[g]), amount=float(amount[j]),
+                             lane=float(self.lane[g]), seed=float(self.guide_seed[g]))
+                gg = _gravity() * jet_gravity_scale(float(self.launch_speed[g]), 0)
+                pos_g, vel_g, travel = evaluate_jet_guide(guide, self.age[g], focus, gg)
+                ff = force_field_accel(pos_g[None, :], self.force_fields,
+                                      self.force_scale, owners[j:j+1])[0]
+                age = self.age[g]
+                pred[j] = pos_g + ff * (0.5 * age * age)
+                velocity[j] = vel_g + ff * age
+                self.travel[g] = travel
+                analytic[j] = True
+        released = np.abs(amount) > 0.001
+        free = self.lane[idx] < -2
+        for j in np.flatnonzero(free):
+            g = idx[j]
+            age = self.age[g]
+            base = self.guide_origin[g] + self.free_velocity[g] * age
+            ff = force_field_accel(base[None, :], self.force_fields,
+                                  self.force_scale, owners[j:j+1])[0]
+            pred[j] = base + 0.5 * (_gravity() + ff) * age * age
+            velocity[j] = self.free_velocity[g] + _gravity() * age
+            self.travel[g] = np.linalg.norm(pred[j] - self.guide_origin[g])
+            analytic[j] = True
 
-        # 4) 最终化（FluidSolver.hlsl:346-440）
-        new_vel = (pred - p) / max(dt, 1e-9)
-        # 已飞路程：每子步按段长累加。渲染端用它算水洼/飞溅的盘半径
-        # （`FluidSurface.hlsl:61/74` 的 `max(densityBirth.z,.1)`）。
-        # 来源: FluidSolver.hlsl:440  travel=oldTravel+segmentLength;  :458 写回 densityBirth.z
-        # 叶形段不会在这里重复累加：`:741` 已把 pred 置回 p，那一段的段长是 0，
-        # 而叶形段的路程由叶形分支里的 evaluate_jet_guide 返回值直接写入。
-        # 顺序也要和游戏一致：地面钳制在本函数 :770 之后才改 pred，游戏同样是
-        # 先算 travel（:440）再 collideFluid（:462），所以累加用的是"未钳制"的段长。
-        self.travel[idx] = (self.travel[idx]
-                            + np.linalg.norm(pred - p, axis=1)).astype(np.float32)
-        viscous, cohesion, smooth = self._viscous_cohesion(pred, p, dt, density)
-        new_vel += (dt * (viscous + cohesion * COHESION_SCALE)
-                    + smooth * SMOOTHING_SCALE)
-
-        # 5) 速度上限
-        speed = np.linalg.norm(new_vel, axis=1)
-        new_vel *= (np.minimum(1.0, MAX_SPEED / np.maximum(speed, 1e-9)))[:, None]
-
-        # 6) 碰撞：地面平面（参考实现用屏幕深度，预览用场景地面近似）
-        #
-        # 对齐游戏：**命中就判死**，不是贴地滑到寿命。
-        # 来源: FluidSolver.hlsl:466-492
-        #   if(collideFluid(...)){ ... p.velocityAlive.w=0; p.predictedLambda.xyz=contact; }
-        # 撞上的粒子当帧退出模拟（渲染端也要求 velocityAlive.w>.5 才画），位置停在
-        # 接触点，等下一次排班出生时被 `_spawn_one` 覆盖。
-        hit = np.zeros(len(idx), dtype=bool)
+        # Each GPU slot searches only its own PRIMARY_PER_SLOT block.
+        for owner in np.unique(owners[~released & ~free]):
+            local = np.flatnonzero((owners == owner) & ~released & ~free)
+            q = pred[local].copy()
+            old = p[local].copy()
+            old[born[local]] -= v[local][born[local]] * dt
+            for _ in range(ITERATIONS):
+                density, grad, grad2 = self._density_terms(q)
+                lam = -np.maximum(density / RHO - 1, 0) / (
+                    grad2 + np.einsum('ij,ij->i', grad, grad) + LAMBDA_EPS)
+                correction = self._correction(q, lam)
+                length = np.linalg.norm(correction, axis=1)
+                q += correction * np.minimum(1, CORRECTION_CLAMP / np.maximum(length, 1e-9))[:, None]
+            vv = (q - old) / dt
+            viscous, cohesion, smooth = self._viscous_cohesion(q, old, dt, density)
+            vv += dt * (viscous + cohesion * COHESION_SCALE) + smooth * SMOOTHING_SCALE
+            pred[local] = q
+            velocity[local] = vv
+        # Negative sheet amounts are released low-flow particles too, but their
+        # ordinary (non-analytic) positions still advance in PHASE_PREDICT.
+        advancing = ~analytic
+        previous = p.copy()
+        previous[born] -= v[born] * dt
+        self.travel[idx[advancing]] += np.linalg.norm(pred[advancing] - previous[advancing], axis=1)
+        speed = np.linalg.norm(velocity, axis=1)
+        if SPEED_CLAMP:
+            self.clamp_hits += int(np.count_nonzero(speed > MAX_SPEED))
+            self.clamp_checks += len(idx)
+            velocity *= np.minimum(1, MAX_SPEED / np.maximum(speed, 1e-9))[:, None]
         if self.ground_z is not None:
-            depth = (pred[:, 2] - float(self.ground_z))
-            hit = depth < self.radius
-            if hit.any():
-                pred[hit, 2] = float(self.ground_z) + self.radius
-                new_vel[hit] = 0.0
-                self.alive[idx[hit]] = False
-
-        # 7) 只有可动的粒子才更新；撞地/黏住的不再前进
-        keep = ~hit
-        writable = idx[movable & keep]
-        self.pos[writable] = pred[movable & keep]
-        self.vel[writable] = new_vel[movable & keep]
-
-        # 8) 寿命
-        self.age[live] += dt
-        self.alive &= self.age < LIFETIME
+            hit = pred[:, 2] < float(self.ground_z) + self.radius
+            pred[hit, 2] = float(self.ground_z) + self.radius
+            self.alive[idx[hit]] = False
+        finite = np.isfinite(pred).all(axis=1) & np.isfinite(velocity).all(axis=1)
+        self.alive[idx] &= finite
+        self.pos[idx] = pred
+        self.vel[idx] = velocity
+        if hasattr(self, '_born'):
+            self._born[:] = False
 
     # -- 内部 ---------------------------------------------------------------
 
@@ -1065,8 +1111,7 @@ class Simulator(object):
         density = _scatter_sum(i, w, n) + _scatter_sum(j, w, n) + self_term
 
         # 来源: FluidSolver.hlsl:338  (MASS/RHO)*gradient(d)，d = 自己 - 邻居
-        direction = (pred[i] - pred[j]) / _safe_r(r2)[:, None]
-        g = _gradient(direction, r) * (MASS / RHO)     # (M,3)
+        g = _gradient(pred[i] - pred[j], r) * (MASS / RHO)
         grad_sum = _scatter_sum_vec(i, g, n) - _scatter_sum_vec(j, g, n)
         gg = np.einsum('ij,ij->i', g, g)
         grad_sq_sum = _scatter_sum(i, gg, n) + _scatter_sum(j, gg, n)
@@ -1080,8 +1125,7 @@ class Simulator(object):
             return np.zeros((n, 3))
 
         volume = MASS / RHO
-        direction = (pred[i] - pred[j]) / _safe_r(r2)[:, None]
-        g = _gradient(direction, r) * volume
+        g = _gradient(pred[i] - pred[j], r) * volume
         pair = (lam[i] + lam[j])[:, None] * g         # (M,3)
         out = _scatter_sum_vec(i, pair, n) - _scatter_sum_vec(j, pair, n)
         return out
@@ -1098,6 +1142,8 @@ class Simulator(object):
         """
         n = pred.shape[0]
         i, j, r, r2 = neighbour_pairs(pred)
+        valid = r >= 1e-7
+        i, j, r, r2 = i[valid], j[valid], r[valid], r2[valid]
         if i.size == 0:
             return (np.zeros((n, 3)),) * 3
 
@@ -1143,7 +1189,7 @@ class SimulationJob(object):
     """
 
     def __init__(self, emitters, frames, fps=30.0, capacity=1024, ground_z=None,
-                 seed=20261029, warmup_frames=None, subframes=1,
+                 seed=20261029, warmup_frames=None, subframes=2, adaptive_substeps=False,
                  force_fields=None, force_scale=1.0, radius=FLUID_RADIUS):
         self.rng = np.random.default_rng(seed)
         self.sim = Simulator(capacity, emitters, ground_z=ground_z,
@@ -1152,8 +1198,40 @@ class SimulationJob(object):
         self.sim.prime(self.rng)
         self.sub = max(1, int(subframes))
         self.step_seconds = 1.0 / float(fps) / self.sub
+        # 显式粘性的稳定预算：dt_safe = 0.4 * H^2 / (8 * nu)。
+        # 游戏侧同样是显式（FluidSolver.hlsl:444 累加、:458 乘 DT），但它每步把速度
+        # 钳在 6 m/s（FluidSolver.hlsl:480），所以发散不会显形。预览没有那层钳制，
+        # 因此必须自己按粘度选子步；撞上限时如实回报 unstable_viscosity。
+        self.unstable_viscosity = None
+        try:
+            _nu = float(_VISCOSITY_OVERRIDE)
+        except Exception:
+            _nu = 0.0
+        dt_frame = frame_dt(1.0 / float(fps))
+        self.step_seconds = dt_frame / self.sub
+        self.sim._frame_seconds = dt_frame
+        # 子步下限 2：游戏每帧两次 FluidSubstep（Probe.ini:939/942，每步 x239 = dt/2），
+        # 1 次整步 != 2 次半步（位置积分/碰撞裁剪/粘性耗散都不等价）。自动子步只许往上加。
+        if self.sub < 2:
+            self.sub = 2
+            self.step_seconds = dt_frame / 2.0
+        # 自适应子步改成**显式开启**：默认关闭，固定按 subframes（默认 2）走，
+        # 与 Probe.ini:939/942 的两次 FluidSubstep 对齐。子步 8 会把真实发散藏起来，
+        # 于是永远「预览正常、游戏爆炸」。
+        self.substeps_source = "forced"
+        if adaptive_substeps and _nu > 0.0:
+            self.substeps_source = "adaptive"
+            dt_safe = 0.4 * (0.012 ** 2) / (8.0 * max(_nu, 1e-9))
+            want = int(np.ceil(dt_frame / max(dt_safe, 1e-9)))
+            want = max(2, min(8, want))
+            if want > self.sub:
+                self.sub = want
+                self.step_seconds = dt_frame / self.sub
+            if want >= 8 and dt_frame / self.sub > dt_safe:
+                self.unstable_viscosity = dict(nu=_nu, dt=dt_frame,
+                                           dt_safe=dt_safe, sub=self.sub)
         if warmup_frames is None:
-            warmup_frames = int(np.ceil(LIFETIME / (1.0 / float(fps))))
+            warmup_frames = int(np.ceil(float(self.sim.lifetime.max()) / dt_frame))
         self.warmup_total = int(warmup_frames) * self.sub
         self._warmup_left = self.warmup_total
         self.total_frames = int(frames)
@@ -1189,7 +1267,8 @@ class SimulationJob(object):
         for _ in range(max(1, int(units))):
             if self.finished:
                 break
-            self.sim.step(self.step_seconds, self.rng)
+            phase = self.units_done % self.sub
+            self.sim._advance_substep(self.step_seconds, self.rng, first=phase == 0)
             self.units_done += 1
             if self._warmup_left > 0:
                 self._warmup_left -= 1
@@ -1213,11 +1292,7 @@ def simulate(emitters, frames, fps=30.0, capacity=1024, ground_z=None,
     按预定时刻出生的，不预热的话前 1.1 秒水柱还在"长"，第 1 帧几乎是空的；
     预热完再记录，每一帧都是稳态形态。
 
-    ``subframes`` 是每个预览帧内部跑几小步（默认 1，即物理跟预览同频）。
-    实测把它提到 4（120 Hz 物理）**不会**让点云更密——细胞数由
-    ``capacity / LIFETIME`` 决定，与步长无关；只是白花 4 倍时间
-    （90 帧从 25 s 变 118 s，形态一模一样）。留着这个参数是为了将来
-    真要细步长时可用。
+    每个预览帧默认推进两个游戏子步；显式指定更多 subframes 仅用于离线诊断。
 
     内部走 :class:`SimulationJob`，只是把预算一次给足；所以界面里带进度条的
     那次计算和这里的离线计算是同一段代码。
