@@ -120,7 +120,13 @@ if _SAVED_BPY is not None:
 
 def _emitter(key="", **extra):
     cfg = dict(key=key, name="emitter", object_name="Body", poly_index=0,
-               force_fields=[])
+               force_fields=[],
+               # _emitters_fingerprint 要的几何字段（缺一个就 AttributeError）
+               bx=0.0, by=0.0, bz=0.0, tilt=0.0, yaw=0.0, roll=0.0, width=1.0,
+               level=0, ox=0.0, oy=0.0, oz=0.0,
+               custom_color=False, tint_r=1.0, tint_g=1.0, tint_b=1.0,
+               absorption=0.0, tlen=0.0, bend_delay=0.0, bend_str=0,
+               trick=False, trick_sp=0.0, vis=True)
     cfg.update(extra)
     return types.SimpleNamespace(**cfg)
 
@@ -562,3 +568,66 @@ class NamespaceVarRefTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DebugWriteRemovedTests(unittest.TestCase):
+    """``[fluid-dbg]`` 整屏输出分支必须不在树里。
+
+    它曾经在合成 PS 的 ``clip()`` 之前无条件 ``return``（条件一成立就是整屏写编码色），
+    而且 ``x66`` 从没登记进 ``FLUID_INI_PARAM_MAP``，与别人共享的 IniParams 会互相踩。
+    """
+
+    def test_generated_ini_has_no_width_probe_block(self):
+        text = _bare_node([_emitter()])._build_main_ini("FluidTest", [])
+        for lane in ("x66", "y66", "z66", "w66"):
+            self.assertNotIn(lane + " =", text)
+
+    def test_composite_shader_has_no_param66_branch(self):
+        src = (_REPO / "Toolset" / "fluid" / "fluid" / "FluidComposite.hlsl").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertNotIn("IniParams[66]", src)
+        self.assertNotIn("fluid-dbg", src)
+
+    def test_node_has_no_debug_write_property(self):
+        inst = _bare_node([_emitter()])
+        self.assertFalse(hasattr(inst, "fluid_debug_write"),
+                         "fluid_debug_write 属性应随 [fluid-dbg] 一起删除")
+
+class ExportFailModeTests(unittest.TestCase):
+    """导出失败必须是「可接住的异常」，且导出后自检真的会拦人。"""
+
+    def test_namespace_conflict_raises_runtime_error_not_systemexit(self):
+        inst = _bare_node([_emitter()])
+        inst._namespace_conflicts = lambda *a: ["C:/other/fluid_probe.ini"]
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(RuntimeError):
+                inst.execute_postprocess(td)
+
+    def test_generated_ns_problems_abort_export(self):
+        inst = _bare_node([_emitter()])
+        inst._namespace_conflicts = lambda *a: []
+        inst._host_hashes = lambda *a: []
+        inst._deploy = lambda *a, **k: (0, 0, 0, [])
+        inst._inject_emitter_hooks = lambda *a: 0
+        inst._verify_generated_ns = lambda *a: ["裸 Fluid_mod（缺 8 位后缀）: x.ini"]
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(RuntimeError):
+                inst.execute_postprocess(td)
+
+
+class StrengthLevelPrecisionTests(unittest.TestCase):
+    """档位是小数值（3.0029 / 3.9…），任何一处 int() 截断都会让「调了没反应」。"""
+
+    def test_export_keeps_fractional_level(self):
+        inst = _bare_node([_emitter()])
+        inst.strength_level = 3.9
+        text = inst._build_main_ini("FluidTest", [])
+        self.assertIn("global $fluid_strength_level = 3.9", text)
+        self.assertNotIn("global $fluid_strength_level = 3\n", text)
+
+    def test_sim_fingerprint_changes_between_fractional_levels(self):
+        a = _bare_node([_emitter()])
+        b = _bare_node([_emitter()])
+        a.strength_level = 3.0
+        b.strength_level = 3.9
+        self.assertNotEqual(node._sim_fingerprint(a), node._sim_fingerprint(b))
+

@@ -58,6 +58,7 @@
   而它由流体自己的 gate 段写入，宿主无需配合。
 """
 
+import hashlib
 import importlib
 import json
 import os
@@ -292,7 +293,8 @@ def _auto_rebuild(id_data):
     """
     if _PREVIEW_STATE['busy'] or id_data is None:
         return
-    if bpy.data.collections.get(PREVIEW_COLLECTION) is None:
+    if (bpy.data.collections.get(PREVIEW_COLLECTION) is None
+            and bpy.data.collections.get(FORCE_FIELD_COLLECTION) is None):
         return
     scene = bpy.context.scene or (bpy.data.scenes[0] if bpy.data.scenes else None)
     if scene is None:
@@ -303,11 +305,12 @@ def _auto_rebuild(id_data):
         fp = _emitters_fingerprint(n)
         if fp == _PREVIEW_STATE['fingerprint']:
             return
-        _PREVIEW_STATE['fingerprint'] = fp
         # 重建会改场景，可能再触发别的 update —— 挡住重入，否则递归。
         _PREVIEW_STATE['busy'] = True
         try:
             build_preview_markers(n, scene)
+            build_force_field_markers(n, scene)
+            _PREVIEW_STATE['fingerprint'] = fp
         finally:
             _PREVIEW_STATE['busy'] = False
         return
@@ -347,7 +350,7 @@ class SSMTFluidForceField(bpy.types.PropertyGroup):
     （重力 9.81，默认强度 3.0 大约是重力的三分之一）。
     """
 
-    enabled: bpy.props.BoolProperty(
+    enabled: bpy.props.BoolProperty(update=_on_param_update,
         name='启用', default=True,
         description='这个力场的开关，一个力场一份：1 = 生效，0 = 不生效（缺省 1）。'
                     '导出时同时写两处同源的东西 —— ResourceFluidForceField 行里的 '
@@ -356,7 +359,7 @@ class SSMTFluidForceField(bpy.types.PropertyGroup):
                     '上一层的 $force_enabled / IniParams[41].x 是由「任一场启用」派生的，'
                     '没有单独的面板控件。',
     )
-    kind: bpy.props.EnumProperty(
+    kind: bpy.props.EnumProperty(update=_on_param_update,
         name='类型',
         description='DIRECTIONAL 沿轴推；RADIAL 从中心向外（负强度变向内吸）；'
                     'VORTEX 绕轴旋。三者共用同一套衰减。',
@@ -367,43 +370,43 @@ class SSMTFluidForceField(bpy.types.PropertyGroup):
         ),
         default='RADIAL',
     )
-    offset_u: bpy.props.FloatProperty(
+    offset_u: bpy.props.FloatProperty(update=_on_param_update,
         name='偏移 U(m)', default=0.0, min=-0.25, max=0.25, precision=4, step=10,
         description='沿发射器 right 轴离开锚点的距离（米）。'
                     'U/V/W 依次对应 ForceField.hlsl:52 的 right/up/forward。',
     )
-    offset_v: bpy.props.FloatProperty(
+    offset_v: bpy.props.FloatProperty(update=_on_param_update,
         name='偏移 V(m)', default=0.0, min=-0.25, max=0.25, precision=4, step=10,
         description='沿发射器 up 轴离开锚点的距离（米）。',
     )
-    offset_w: bpy.props.FloatProperty(
+    offset_w: bpy.props.FloatProperty(update=_on_param_update,
         name='偏移 W(m)', default=0.0, min=-0.25, max=0.25, precision=4, step=10,
         description='沿发射器 forward 轴（即喷射方向）离开锚点的距离（米）。',
     )
-    axis_u: bpy.props.FloatProperty(
+    axis_u: bpy.props.FloatProperty(update=_on_param_update,
         name='轴 U', default=0.0, precision=4, step=1,
         description='方向轴 / 旋轴在发射器 right 上的分量。不必归一，shader 会归一。',
     )
-    axis_v: bpy.props.FloatProperty(
+    axis_v: bpy.props.FloatProperty(update=_on_param_update,
         name='轴 V', default=0.0, precision=4, step=1,
         description='轴在发射器 up 上的分量。',
     )
-    axis_w: bpy.props.FloatProperty(
+    axis_w: bpy.props.FloatProperty(update=_on_param_update,
         name='轴 W', default=1.0, precision=4, step=1,
         description='轴在发射器 forward 上的分量。默认 (0,0,1) = 沿喷射方向，'
                     '「定向」模式下就是顺着水流推。',
     )
-    radius: bpy.props.FloatProperty(
+    radius: bpy.props.FloatProperty(update=_on_param_update,
         name='影响半径(m)', default=0.15, min=0.001, max=5.0, precision=4, step=10,
         description='超出这个半径完全没有力（米）。衰减是 (1-r²/R²)^衰减指数，'
                     '默认指数 2 时半径边界处值与斜率同时归零，所以出入口看不见断层。',
     )
-    strength: bpy.props.FloatProperty(
+    strength: bpy.props.FloatProperty(update=_on_param_update,
         name='强度', default=3.0, precision=3, step=1,
         description='加速度，m/s²。重力是 9.81；3.0 大约能把水柱推开三分之一重力。'
                     'RADIAL 取负数向内吸，VORTEX 取负数反转旋向。',
     )
-    falloff: bpy.props.FloatProperty(
+    falloff: bpy.props.FloatProperty(update=_on_param_update,
         name='衰减指数', default=2.0, min=1.0, max=8.0, precision=2, step=10,
         description='衰减曲线 (1-r²/R²)^指数。2 是参考实现的形状（边界处值与'
                     '斜率同时归零，看不见断层）；调大则边缘更陡、力更集中在中心，'
@@ -548,14 +551,14 @@ class SSMTFluidEmitter(bpy.types.PropertyGroup):
     # ------------------------------------------------------------------
     # 运行期变量（每个发射器一个，键位只是手动入口，变量是唯一真相）
     # ------------------------------------------------------------------
-    enable: bpy.props.BoolProperty(
+    enable: bpy.props.BoolProperty(update=_on_param_update,
         name='开关',
         default=True,
         description='= $fluid_emit_N（N = 这个发射器的序号，从 0 起；导出后叫 '
                     '$fluid_emit_N）。1 = 这个发射器出水，0 = 不出水；缺省 1。'
                     '面板这里给的是初值，键位与动画驱动写的是同一个变量。',
     )
-    speed: bpy.props.FloatProperty(
+    speed: bpy.props.FloatProperty(update=_on_param_update,
         name='速度 (m/s)',
         default=0.0, min=0.0, max=6.0, precision=3,
         description='= $fluid_emitter_speed_N（N = 发射器序号）。0 = 沿用内部兜底 '
@@ -569,7 +572,7 @@ class SSMTFluidEmitter(bpy.types.PropertyGroup):
     #: 0 也按不填处理；0 秒不是合法值（`FluidSolver.hlsl` 的
     #: `cycle=floor(STEP.y/lifetime)` 拿它当除数）。写盘规则见
     #: `fluid_ini_merge.build_emitter_control` 的 `want_life`。
-    lifetime: bpy.props.FloatProperty(
+    lifetime: bpy.props.FloatProperty(update=_on_param_update,
         name='生命周期 (s)',
         default=1.1, min=0.0, max=5.0, precision=3,
         description='= $fluid_emitter_lifetime_N（N = 发射器序号）。1.1 s = 不填'
@@ -604,7 +607,12 @@ def _namespace_id(mod_export_path):
     safe = re.sub(r"_+", "_", safe).strip("_")
     if not safe:
         safe = "mod"
-    return "Fluid_" + safe[:40]
+    # 中文目录名会被整段洗成空、只剩回落值 "mod"，于是两份中文名的模组都拿到
+    # ``Fluid_mod``，在同一个 d3d11 里共用一套变量与命令列表——表现就是"两个模组
+    # 的水流一模一样"。所以文件名派生的部分之外，再钉一段目录名的 sha1：
+    # 可读部分给眼睛，哈希部分保证唯一。
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    return "Fluid_" + safe[:32] + "_" + digest
 
 
 #: 门控 hash 收集：住到 fluid_ini_merge 里（纯函数，可单测）。
@@ -705,7 +713,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         description='= $fluid_emit_flags 的 bit1。开着时散射/缠流阶段会额外出 1/5 的细尾流；'
                     '关掉就只有一支主流。')
     #: 次生总开关（默认开；关掉时写 x61=1/y61=0，见 _build_main_ini）。
-    splash_enable: bpy.props.BoolProperty(
+    splash_enable: bpy.props.BoolProperty(update=_on_param_update,
         name='飞溅与水洼', default=True,
         description='= $fluid_splash_enable（IniParams[61].x 有效位 / .y 值）。'
                     '关掉后只剩主粒子水柱，不再有飞溅与水洼；默认开 = 不写变量，产物不变。')
@@ -808,10 +816,18 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
     # ------------------------------------------------------------------
     # 全局外观（对应 Probe.ini:2-24 的 8 个对外变量）
     # ------------------------------------------------------------------
-    strength_level: bpy.props.IntProperty(
-        name='强度档 ($strength_level)', default=3, min=0, max=7,
-        description='Probe.ini:14 的 $strength_level。Probe.ini:434-436 用它算全局强度：'
-                    '0 档是 0.28，1-7 档是 0.565+(level-1)*0.5625。',
+    # 发射量档位：与「发射速度」是两个不同的物理量——速度管形态（喷多远、散不散），
+    # 档位管密度（浓不浓、连不连成股）。2026-11-09 实测：速度 1.5 + 档位 4 好看，
+    # 而速度 1.5 反解出的档位 7 会糊成大团。
+    strength_level: bpy.props.FloatProperty(
+        name='发射量档位 ($strength_level)', default=3.0029, min=0.0, max=7.0, precision=4,
+        description='$strength_level：管发射量/密度（浓不浓），与「发射速度」是两个量。'
+                    'Probe.ini:434-436 用它算全局强度：0 档是 0.28，1-7 档是 0.565+(level-1)*0.5625。',
+    )
+    auto_strength_level: bpy.props.BoolProperty(
+        name='档位跟随速度', default=False,
+        description='开=按「发射速度」反解档位（旧行为，速度 1.5 会解出 7）；'
+                    '关（默认）=用上面填的档位值。',
     )
     tint_r: bpy.props.FloatProperty(name='液体R ($liquid_tint_r)', default=0.9, min=0.0, max=1.0)
     tint_g: bpy.props.FloatProperty(name='液体G ($liquid_tint_g)', default=0.75, min=0.0, max=1.0)
@@ -865,12 +881,12 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         description='只影响时间轴间隔，不影响物理（物理按 DT 钳制逐步积分）。',
     )
     sim_capacity: bpy.props.IntProperty(
-        name='粒子池', default=1024, min=64, max=8192,
-        description='同时存在的粒子上限。参考实现是 SLOT_COUNT*64 = 1024。',
+        name='每发射器粒子数', default=1024, min=64, max=8192,
+        description='游戏每个发射器固定 1024 个；场景预览使用相同数量。',
     )
-    launch_speed: bpy.props.FloatProperty(
+    launch_speed: bpy.props.FloatProperty(update=_on_param_update,
         name='发射速度 (m/s)',
-        default=0.514, min=0.02, max=6.0, precision=4,
+        default=0.513999999, min=0.02, max=6.0, precision=4,
         description='出水速度，直接对应 $fluid_launch_speed（IniParams[46].x）。'
                     '0.514 是强度档 3 档的喷速；导出的 $strength_level 由这个速度反解，'
                     '所以喷嘴开口、片状程度、重力近场缩放都会跟着它一起变。',
@@ -881,7 +897,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                     '这是物理粒子的尺度，决定碰撞/密度核的作用范围。',
     )
     gravity_scale: bpy.props.FloatProperty(
-        name='重力倍率 ($fluid_gravity_scale)', default=1.0, min=-4.0, max=4.0, precision=3,
+        name='重力倍率 ($fluid_gravity_scale)', default=0.25, min=-4.0, max=4.0, precision=3,
         description='1 = 9.81 m/s²；调小流动变慢；负值 = 反重力，火焰/蒸汽往上飘。写进 IniParams[47].x',
     )
     viscosity: bpy.props.FloatProperty(
@@ -896,7 +912,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
     )
     solid: bpy.props.BoolProperty(
         name='体积化', default=True,
-        description='开=点云转体积再转网格（像连续水柱）；关=直接画小球（像珍珠串）。',
+        description='开=体积化水柱（推荐，实测这条才有可见水面）；关(=0)在游戏里是完全不渲染、不是另一种风格——2026-11-09 实测确认。'
     )
     ground_auto: bpy.props.BoolProperty(
         name='地面自动', default=True,
@@ -1156,7 +1172,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         row.prop(self, 'sim_frames')
         row.prop(self, 'sim_fps')
         row = box.row(align=True)
-        row.prop(self, 'sim_capacity')
+        row.label(text='每发射器 1024 粒子（与游戏一致）')
         box.prop(self, 'volume_radius')
         box.prop(self, 'solid')
         row = box.row(align=True)
@@ -1642,7 +1658,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             return ("%." + str(n) + "f") % float(v)
 
         return {
-            "strength_level": str(int(max(0, min(7, self.strength_level)))),
+            "strength_level": fluid_ini_merge._fmt_float(float(max(0.0, min(7.0, self.strength_level)))),
             "depth_test": "1" if self.depth_test else "0",
             "auto_pulse": "1" if self.auto_pulse else "0",
             "liquid_tint_r": f(self.tint_r),
@@ -1815,6 +1831,33 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         text = fluid_ini_merge.apply_particle_radius(text, self.particle_radius)
         text = fluid_ini_merge.apply_gravity_scale(text, self.gravity_scale)
         text = fluid_ini_merge.apply_viscosity(text, self.viscosity)
+        # 2026-11-11: 2 子步够不够的闸。游戏每帧固定两次 FluidSubstep（Probe.ini:939/942），
+        # 显式粘性的稳定上限约 dt_safe = 0.4·H²/(8ν)；dt_frame/dt_safe > 2 就是「2 子步不够」。
+        # 那种参数导出去，游戏里会表现为「前半段正常、后半段整片散开」——不许悄悄放行。
+        try:
+            _nu = float(getattr(self, 'viscosity', 0.0) or 0.0)
+            _fps = float(getattr(self, 'assumed_fps', 120.0) or 120.0)
+            _dt = 1.0 / max(_fps, 1e-3)
+            # H = 0.012 m（支撑半径）。出处：FluidSolver.hlsl:24 `#define H PARAM.x`，
+            # 取值 Probe.ini `x238 = 0.012`；预览侧同一常量在 sim.py:31。
+            _h = 0.012
+            _limit_nu = 0.4 * (_h ** 2) / (8.0 * _dt / 2.0)
+            print('[FluidProbe][INFO] 2 子步下的粘度上限 = %.6g（H=%.4f m，'
+                  '出处 FluidSolver.hlsl:24 / Probe.ini x238）；超过它游戏里会后半段散开。'
+                  % (_limit_nu, _h))
+            if _nu > 0.0:
+                _dt_safe = 0.4 * (0.012 ** 2) / (8.0 * _nu)
+                if _dt / _dt_safe > 2.0:
+                    _need = int(_dt / _dt_safe) + 1
+                    _msg = ('当前粘度 %.6g 在 2 子步下会发散（需要约 %d 子步）；'
+                            '游戏里会表现为后半段整片散开。建议把粘度降到 %.6g 以下。'
+                            % (_nu, _need, 0.4 * (0.012 ** 2) / (8.0 * _dt / 2.0)))
+                    print('[FluidProbe][ERROR] ' + _msg)
+                    text = text.replace(
+                        'global $fluid_viscosity = ', '; [FluidProbe][ERROR] ' + _msg + '\n'
+                        'global $fluid_viscosity = ', 1)
+        except Exception as _exc:  # 闸不能因为读数失败把导出搞挂
+            print('[FluidProbe][WARN] 粘度稳定性检查失败: %s' % _exc)
         speed = max(0.0, min(6.0, float(self.launch_speed)))
         text = re.sub(
             r"global\s+\$fluid_launch_speed\s*=\s*[^\s;]+",
@@ -1823,14 +1866,71 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         )
         # 档位是喷嘴形状的输入（开口/片状/扇角/重力近场），由目标速度反解出来，
         # 这样「速度」只有一个数是他填的，其余都由它决定。
+        if bool(getattr(self, 'auto_strength_level', False)):
+            level_value = fluid_ini_merge.level_for_speed(speed)
+        else:
+            level_value = float(getattr(self, 'strength_level', 4.0))
         text = re.sub(
             r"global\s+\$strength_level\s*=\s*[^\s;]+",
-            "global $strength_level = " + fluid_ini_merge._fmt_float(
-                fluid_ini_merge.level_for_speed(speed)),
+            "global $strength_level = " + fluid_ini_merge._fmt_float(level_value),
             text,
         )
         return fluid_ini_merge.prefix_variables(text)
 
+
+
+    # ------------------------------------------------------------------
+    # 命名空间自检（2026-11-09：两个中文名模组撞 Fluid_mod 的防线上移到生成器）
+    # ------------------------------------------------------------------
+    _NS_FILES = ("fluid_probe.ini",
+                 os.path.join("res", "fluid_probe", "fluid", "Composite.ini"),
+                 os.path.join("res", "fluid_probe", "surface", "ProfileLoader.ini"))
+
+    def _namespace_conflicts(self, mod_export_path, ns):
+        """扫 Mods 下所有 fluid_probe.ini，返回占用同一 namespace 的其它路径。"""
+        conflicts = []
+        mods_root = os.path.dirname(os.path.dirname(os.path.abspath(mod_export_path)))
+        if not os.path.isdir(mods_root):
+            return conflicts
+        pattern = re.compile(r"^\s*namespace\s*=\s*(.+?)\s*$", re.M)
+        mine = os.path.abspath(mod_export_path)
+        for root, _dirs, files in os.walk(mods_root):
+            if "fluid_probe.ini" not in files:
+                continue
+            path = os.path.join(root, "fluid_probe.ini")
+            if os.path.dirname(os.path.abspath(path)) == mine:
+                continue
+            try:
+                text = open(path, encoding="utf-8-sig", errors="replace").read()
+            except OSError:
+                continue
+            found = pattern.search(text)
+            if found and found.group(1) == ns:
+                conflicts.append(path)
+        return conflicts
+
+    def _verify_generated_ns(self, mod_export_path, ns):
+        """导出后自检：不得出现裸 Fluid_mod，也不得引用别人的 Fluid_mod_<hash>。"""
+        problems = []
+        bare = re.compile(r"(?<![A-Za-z0-9_])Fluid_mod(?![_A-Za-z0-9])")
+        foreign = re.compile(r"Fluid_mod_([0-9a-f]{8})")
+        for rel in self._NS_FILES:
+            path = os.path.join(mod_export_path, rel)
+            if not os.path.isfile(path):
+                problems.append("缺文件: {}".format(path))
+                continue
+            text = open(path, encoding="utf-8-sig", errors="replace").read()
+            if bare.search(text):
+                problems.append("裸 Fluid_mod（缺 8 位后缀）: {}".format(path))
+            for hit in set(foreign.findall(text)):
+                if not ns.endswith(hit):
+                    problems.append("引用了别的 namespace Fluid_mod_{}: {}".format(hit, path))
+            # 变量层：$\Fluid_mod_<hash8>\var 形式的引用也必须是本模组的
+            var_re = re.compile(r"\$\\Fluid_mod_([0-9a-f]{8})\\")
+            for hit in set(var_re.findall(text)):
+                if not ns.endswith(hit):
+                    problems.append("引用了别的模组的变量 $\\Fluid_mod_{}\\...: {}".format(hit, path))
+        return problems
 
     def _force_fields_by_slot(self):
         """按发射器序号收集力场，返回 ``({槽号: [字段字典, ...]}, 告警列表)``。
@@ -2363,6 +2463,15 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             return
 
         ns = _namespace_id(mod_export_path)
+        _conflicts = self._namespace_conflicts(mod_export_path, ns)
+        if _conflicts:
+            print("[FluidProbe][ERROR] namespace 冲突：本模组 {}".format(ns))
+            for _p in _conflicts:
+                print("[FluidProbe][ERROR]   已被占用: {}".format(_p))
+            # 用普通异常：`SystemExit` 不是 `Exception`，外层的 except Exception 接不住，
+            # 会把「导出失败」变成「Blender 进程退出」。
+            raise RuntimeError(
+                "流体导出中止：namespace {} 已被其它模组占用（见上方路径）。".format(ns))
         host_hashes = self._host_hashes(mod_export_path)
         # 排除列表要按宿主 ini 的 mesh 注释解析物体 → 记下导出目录，
 
@@ -2392,6 +2501,15 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             print("[FluidProbe][ERROR] 部署失败: {}".format(exc))
             traceback.print_exc()
             return
+
+        # 导出后自检（此前 `_verify_generated_ns` 只有定义、没有调用点 ⇒ 等于没有自检）。
+        # 扫生成出来的三份 ini：裸 Fluid_mod（缺 8 位后缀）或引用别的 namespace 都要当场报错。
+        _problems = self._verify_generated_ns(mod_export_path, ns)
+        if _problems:
+            for _p in _problems:
+                print("[FluidProbe][ERROR] 自检: {}".format(_p))
+            raise RuntimeError(
+                "流体导出自检失败：{} 处（见上方）。".format(len(_problems)))
 
         try:
             hooks = self._inject_emitter_hooks(mod_export_path, ns)
@@ -2681,6 +2799,8 @@ class SSMT_OT_FluidForceFieldAdd(bpy.types.Operator):
         field.name = 'field%d' % len(em.force_fields)
         em.force_field_index = len(em.force_fields) - 1
         _on_param_update(node)
+        # Adding a field is also a request to see its extent, before any bake.
+        build_force_field_markers(node, context.scene)
         return {'FINISHED'}
 
 
@@ -2709,6 +2829,7 @@ class SSMT_OT_FluidForceFieldRemove(bpy.types.Operator):
         em.force_fields.remove(idx)
         em.force_field_index = max(0, idx - 1)
         _on_param_update(node)
+        build_force_field_markers(node, context.scene)
         return {'FINISHED'}
 
 
@@ -2874,58 +2995,11 @@ def build_preview_markers(node, scene):
     made = 0
     skipped = []
     for i, e in enumerate(node.emitters):
-        obj = bpy.data.objects.get(e.object_name) if e.object_name else None
-        if obj is None or obj.type != 'MESH':
-            skipped.append('%d:no-object' % i)
+        basis = node._emitter_basis(e)
+        if basis is None:
+            skipped.append('%d:invalid-emitter' % i)
             continue
-        # 面序号是物体内的 polygon.index，直接可用；
-        # first_index 是游戏 IB 里的绝对索引（含该 draw 的偏移），
-        # 除以 3 得到的是「整个 IB 摊平后的三角形号」而不是物体内的序号，
-        # 只有在该物体 draw 从索引 0 起时才碰巧相等。所以没填面序号就不预览。
-        if int(e.poly_index) < 0:
-            skipped.append('%d:no-poly(用「取选中面」填面序号)' % i)
-            continue
-        tri = int(e.poly_index)
-        me = obj.data
-        if tri >= len(me.polygons):
-            skipped.append('%d:tri%d>=%d' % (i, tri, len(me.polygons)))
-            continue
-        poly = me.polygons[tri]
-        if len(poly.vertices) < 3:
-            skipped.append('%d:not-a-triangle' % i)
-            continue
-        # 三角形自己的 TBN，与 ResolveSurface.hlsl:35-40 的取法一致：
-        #   n = normalize(cross(b-a, c-a))、tangent = normalize(b-a)、bitangent = cross(n, tangent)
-        # 早先这里用 _basis_from_direction(nrm) 造了一个“随便一组正交基”，
-        # 那不是三角形的切空间，预览出来的方向与游戏里的方向对不上。
-        pv = [obj.matrix_world @ me.vertices[vi].co for vi in poly.vertices]
-        nrm = (pv[1] - pv[0]).cross(pv[2] - pv[0])
-        if nrm.length < 1e-10:
-            skipped.append('%d:degenerate' % i)
-            continue
-        nrm.normalize()
-        t_axis = (pv[1] - pv[0])
-        if t_axis.length < 1e-10:
-            skipped.append('%d:degenerate' % i)
-            continue
-        t_axis.normalize()
-        b_axis = nrm.cross(t_axis)
-
-        # 喷口位置用重心坐标，而不是死用三角形中心——
-        # 「取选中面」在合并多个面时会把等效中心折成重心坐标存下来，
-        # 这里要用同一个重心才能把位置还原出来。
-        contact = pv[0] * e.bx + pv[1] * e.by + pv[2] * e.bz
-        center = contact
-
-        t = math.radians(e.tilt)
-        yaw = math.radians(e.yaw)
-        # v[5..7] = (sin t·cos yaw, sin t·sin yaw, cos t) 是在 (tangent, bitangent, n) 下的系数
-        direction = (t_axis * (math.sin(t) * math.cos(yaw))
-                     + b_axis * (math.sin(t) * math.sin(yaw))
-                     + nrm * math.cos(t))
-        if direction.length < 1e-8:
-            direction = nrm
-        direction.normalize()
+        center, _right, _up, direction, _normal = basis
 
         # 颜色反映该发射器最终的 tint（自定义色优先，否则跟全局）。
         # 注意是元组字面量，不是 tuple(a, b, c)——后者会 TypeError。
@@ -3011,7 +3085,7 @@ def _circle(center, u, v, radius, segments=32):
     return verts, edges
 
 
-def _force_field_geometry(field, center, right, up, forward):
+def _force_field_geometry(field, center, right, up, forward, handedness=1.0):
     """把一条力场变成 ``(顶点, 边, 面)``。
 
     共同部分是一圈圈线框（半径 = 影响半径，直接给出衰减范围）；
@@ -3033,6 +3107,7 @@ def _force_field_geometry(field, center, right, up, forward):
 
     R = max(float(field.radius), 1e-4)
     axis = right * float(field.axis_u) + up * float(field.axis_v) + forward * float(field.axis_w)
+    has_axis = axis.length >= 1e-9
     if axis.length < 1e-9:
         axis = forward.copy()
     axis.normalize()
@@ -3048,8 +3123,12 @@ def _force_field_geometry(field, center, right, up, forward):
     take(*_circle(center, right, up, R))
     take(*_circle(center, right, forward, R))
     take(*_circle(center, up, forward, R))
+    if not has_axis and field.kind != 'RADIAL':
+        return verts, edges, faces
 
     if field.kind == 'DIRECTIONAL':
+        if field.strength < 0:
+            axis = -axis
         # 轴线 + 尖端 + 一圈伞骨：一眼看出往哪边推。
         tip = center + axis * (R * 1.35)
         head = center + axis * (R * 1.05)
@@ -3078,7 +3157,8 @@ def _force_field_geometry(field, center, right, up, forward):
         for lane in (0.45, 0.8):
             pts = []
             for k in range(steps):
-                a = 2.0 * pi * k / (steps - 1) * 1.5
+                sign = handedness * (-1 if field.strength < 0 else 1)
+                a = 2.0 * pi * k / (steps - 1) * 1.5 * sign
                 radial = a1 * (R * lane * cos(a)) + a2 * (R * lane * sin(a))
                 pts.append(tuple(center + radial + axis * (R * 0.55 * (k / (steps - 1) - 0.5))))
             base = len(verts)
@@ -3133,6 +3213,8 @@ def build_force_field_markers(node, scene):
             continue
         origin, right, up, forward, _normal = basis
         src = bpy.data.objects.get(e.object_name) if e.object_name else None
+        frame = node._game_frame(e)
+        handedness = -1.0 if frame is not None and frame[6] else 1.0
 
         for j, f in enumerate(e.force_fields):
             if not f.enabled:
@@ -3141,7 +3223,7 @@ def build_force_field_markers(node, scene):
             keep.add(name)
             center = (origin + right * float(f.offset_u)
                       + up * float(f.offset_v) + forward * float(f.offset_w))
-            verts, edges, faces = _force_field_geometry(f, center, right, up, forward)
+            verts, edges, faces = _force_field_geometry(f, center, right, up, forward, handedness)
 
             # 挂到发射源物体上：源物体移动/旋转，标记自动跟着走，不用重建。
             if src is not None:
@@ -3520,6 +3602,31 @@ def _scene_ground_z(skip_names=()):
     return lowest
 
 
+def _preview_fingerprint(node, extra=None):
+    """参数指纹：流体参数 + capacity/fps/帧数 + 生成器版本号，取 8 位 hex。
+
+    用途：命中就复用已有 npz（不重算、不重烘）；未命中才算。
+    """
+    import hashlib
+    import json
+
+    names = ("particle_radius", "viscosity", "launch_speed", "strength_level",
+             "gravity_scale", "surface_mode", "sim_frames", "sim_fps",
+             "sim_capacity", "solid", "volume_radius", "ground_height")
+    payload = {}
+    for n in names:
+        try:
+            payload[n] = round(float(getattr(node, n, 0.0)), 6)
+        except Exception:
+            payload[n] = str(getattr(node, n, ""))
+    payload['simulation'] = _sim_fingerprint(node)
+    if extra:
+        payload.update(extra)
+    payload["generator"] = "fluid-preview-2026-11-12-parity"
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()[:8]
+
+
 def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
                particle_radius=None, solid=None, voxel=None, threshold=0.1,
                cache_name='fluid_preview.npz'):
@@ -3537,7 +3644,7 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
 
     frames = getattr(node, 'sim_frames', 60) if frames is None else frames
     fps = getattr(node, 'sim_fps', 30.0) if fps is None else fps
-    capacity = getattr(node, 'sim_capacity', 1024) if capacity is None else capacity
+    capacity = 1024 if capacity is None else capacity
     if particle_radius is None:
         # 节点上存的**就是米**（面板单位已统一成米），不需要换算：
         # 物理常量（FLUID_RADIUS / H / MASS）与着色器全是米制。
@@ -3552,9 +3659,11 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
     # 所以体素跟着**影响半径**走，取 0.75 倍留余量，而不是跟着 particle_radius。
     _vol_m = float(getattr(node, 'volume_radius', 0.0) or 0.0)
     _vol_str = _vol_m if _vol_m > 0.0 else float(particle_radius) * 4.5
+    voxel = float(voxel) if voxel is not None else None
     if voxel is None:
-        voxel = max(_vol_str * 0.75, 0.0015)
-
+        # 2026-11-11: 体素 ≤ 半径的一半才熔得成连续面；上限 0.02 防 1350³ 把 Blender 算死。
+        voxel = max(min(float(particle_radius) * 0.5, _vol_str), 0.0008)
+        voxel = min(voxel, 0.02)
     # 速度不设独立倍率：游戏里喷速完全由强度档决定（SoftNozzle.hlsl:9-51 拿
     # slotDrive 的 pressure 换算），预览也走同一条路，多一个倍率只会让两边不一致。
     speed_scale = 1.0
@@ -3562,26 +3671,37 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
     emitters = []
     skipped = []
     for i, e in enumerate(node.emitters):
-        world = node._emitter_world(e)
-        if world is None:
+        basis = node._emitter_basis(e)
+        if basis is None:
             skipped.append('%s(#%d 面 %d)' % (e.name or ('e%d' % i),
                                               -1 if not e.object_name else 0,
                                               e.poly_index))
             continue
-        origin, direction, normal = world
+        origin, right, up, direction, normal = basis
         emitters.append({
             'origin': [origin.x, origin.y, origin.z],
             'direction': [direction.x, direction.y, direction.z],
             # 喷口椭圆要用「上」这个参考方向：`FluidSolver.hlsl:140` 拿它投影出 slitLong
-            'up': [normal.x, normal.y, normal.z],
+            'up': list(up),
+            'right': list(right),
+            'root': list(bpy.data.objects[e.object_name].matrix_world.translation),
             'speed': float(getattr(node, 'launch_speed', sim_mod.DEFAULT_SPEED)),
+            'speed_override': float(getattr(e, 'speed', 0.0)),
+            'lifetime': float(getattr(e, 'lifetime', 0.0)),
+            'enabled': bool(getattr(e, 'enable', True)),
+            'trickle': bool(e.trick and not e.vis),
+            'trickle_scale': float(e.trick_sp),
+            'trickle_lifetime': round(float(e.tlen) / 0.05) * 0.05,
+            'bend_delay': round(float(e.bend_delay) / 0.05) * 0.05,
+            'bend_strength': float(e.bend_str) * 0.4,
+            'level_offset': float(e.level),
             'speed_scale': speed_scale,
             'width': float(e.width),
             'slot': i,
             # 档位是**全局 strength_level + 本发射器的相对偏移**，
             # 不是我先前那样直接拿偏移当档位（`Probe.ini:14` 的 `$strength_level`
             # 默认 3、`:434-436` 把它换算成 .565+(level-1)*.5625）。
-            'level': int(max(0, min(7, int(getattr(node, 'strength_level', 3)) + int(e.level)))),
+            'level': max(0.0, min(7.0, float(getattr(node, 'strength_level', 3.0)) + float(e.level))),
         })
     if not emitters:
         raise ValueError('没有可解析的发射器（物体不存在或面号越界）')
@@ -3608,7 +3728,9 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
         if basis is None:
             continue
         origin, right, up, forward, _normal = basis
-        for f in fields:
+        frame = node._game_frame(e)
+        handedness = -1.0 if frame is not None and frame[6] else 1.0
+        for f in fields[:fluid_ini_merge.FORCE_FIELDS_PER_SLOT]:
             if not f.enabled:
                 continue
             center = (origin + right * float(f.offset_u)
@@ -3617,6 +3739,7 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
                     + up * float(f.axis_v) + forward * float(f.axis_w))
             force_fields.append({
                 'owner': i,
+                'handedness': handedness,
                 'kind': f.kind,
                 'center': [center.x, center.y, center.z],
                 'axis': [axis.x, axis.y, axis.z],
@@ -3673,10 +3796,15 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
         'voxel': float(voxel),
         'threshold': float(threshold),
         'volume_radius': _vol_m,
-        'capacity': int(capacity),
+        'capacity': int(capacity) * len(emitters),
         'emitters': len(emitters),
         'skipped': skipped,
         'force_fields': len(force_fields),
+        'fingerprint': _sim_fingerprint(node),
+        'fps': float(fps),
+        'emitter_radii': {int(e['slot']): bake_mod.stream_radius(
+            particle_radius, e['width'], fluid_ini_merge.level_for_speed(e['speed']) + e['level_offset'])
+            for e in emitters},
     }
     return sim_mod, bake_mod, sim_kwargs, finish
 
@@ -3697,13 +3825,17 @@ def _sim_finalize(node, sim_frames, finish):
         cache_path, start_frame=1, radius=float(finish['radius']),
         solid=bool(finish['solid']), voxel=float(finish['voxel']),
         threshold=float(finish['threshold']),
-        volume_radius=float(finish['volume_radius']))
+        volume_radius=float(finish['volume_radius']),
+        emitter_radii=finish['emitter_radii'])
+    scene = bpy.context.scene
+    scene.render.fps = max(1, round(finish['fps']))
+    scene.render.fps_base = scene.render.fps / finish['fps']
     info['emitters'] = finish['emitters']
     info['skipped'] = finish['skipped']
     info['cache'] = cache_path
     info['force_fields'] = finish['force_fields']
     # 跑完要更新指纹，否则自动重算会立刻把刚算好的结果再算一遍。
-    _PREVIEW_STATE['sim_fingerprint'] = _sim_fingerprint(node)
+    _PREVIEW_STATE['sim_fingerprint'] = finish['fingerprint']
     return info
 
 
@@ -3772,6 +3904,9 @@ def _emitters_fingerprint(node):
             round(float(e.absorption), 5),
             round(float(e.tlen), 4), round(float(e.bend_delay), 4), int(e.bend_str),
             bool(e.trick), round(float(e.trick_sp), 4), bool(e.vis),
+            bool(getattr(e, 'enable', True)),
+            float(getattr(e, 'speed', 0.0)),
+            float(getattr(e, 'lifetime', 0.0)),
             # 力场也影响可见形状（线框落点、半径、方向），必须进指纹，
             # 否则改力场参数时标记不跟着动。
             tuple(
@@ -3783,6 +3918,11 @@ def _emitters_fingerprint(node):
                 for f in getattr(e, 'force_fields', ())
             ),
         ))
+        obj = bpy.data.objects.get(e.object_name) if bpy.data.objects is not None else None
+        if obj is not None and obj.type == 'MESH':
+            poly = obj.data.polygons[int(e.poly_index)] if 0 <= int(e.poly_index) < len(obj.data.polygons) else None
+            geometry = tuple(tuple(obj.data.vertices[vi].co) for vi in poly.vertices[:3]) if poly else ()
+            parts.append((tuple(tuple(row) for row in obj.matrix_world), geometry))
     return tuple(parts)
 
 
@@ -3801,7 +3941,7 @@ def _sim_fingerprint(node):
         round(float(getattr(node, 'particle_radius', 0.0028)), 6),
         bool(getattr(node, 'solid', True)),
         round(float(getattr(node, 'volume_radius', 0.0) or 0.0), 4),
-        int(getattr(node, 'strength_level', 3)),
+        round(float(getattr(node, 'strength_level', 3.0)), 4),
         # 速度/重力/粘度都是流态旋钮：不进取指纹的话，面板上改了它们
         # 只会静默失效（看起来「调了没反应」），必须进。
         round(float(getattr(node, 'launch_speed', 0.0) or 0.0), 5),
@@ -3862,14 +4002,14 @@ def _on_depsgraph_update(scene, depsgraph=None):
         fp = _emitters_fingerprint(node)
         if fp == _PREVIEW_STATE['fingerprint']:
             continue
-        _PREVIEW_STATE['fingerprint'] = fp
         # 重建自己会改场景，再触发 depsgraph —— 必须挡住重入，否则递归。
         _PREVIEW_STATE['busy'] = True
         try:
             if has_preview:
                 build_preview_markers(node, scene)
-            if has_ff:
+            if has_preview or has_ff:
                 build_force_field_markers(node, scene)
+            _PREVIEW_STATE['fingerprint'] = fp
         finally:
             _PREVIEW_STATE['busy'] = False
 
