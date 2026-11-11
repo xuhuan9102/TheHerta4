@@ -66,4 +66,31 @@ runtime/blender-icons.txt
 # 全仓零引用、运行期不读；2026-11-06 主人拍板删净（含 __pycache__），留规则防止再被 git add -A 带回来。
 runtime/flow_light_diagnosis/
 
+# ---- 整目录排除的本地产物（2026-11-11 主人：以目录划分，产物不需要提交就加排除）----
+# _tmp/：任务树的临时工作台（按 AGENTS.md 约定「临时文件写进 _tmp/，收工前清掉」）；
+# 里面是另一个节点的 nsneg 导出对拍副本（fluid_probe 整套 res + .bin + Profiles），全仓零引用。
+_tmp/
+# shots/：对拍截图（before/after 各一张 png，472 KB/张），只用于人眼看效果，不进库。
+shots/
+# _backups/：11-05 前后改动前的源码存档（30 个 *.bak-*，文件名就能看出对应哪个文件）。
+# 单个文件本来就命中 *.bak-*，这里整目录排一次，省得以后混进别的后缀又裸奔。
+_backups/
+# 仓库根上被测量脚本写出来的三个 json（脚本里写死了 E:\代码\TheHerta4\<名字>）：
+# tools/profile-preview.py:59 → profile-before.json、tools/profile-preview2.py:55 → profile-after.json、
+# param-parity.json 是同类对拍产物。都是「跑一次生成一次」的中间结果，不是配置。
+/profile-before.json
+/profile-after.json
+/param-parity.json
+
 Microsoft/
+
+# ---- 本地产物目录（2026-11-11 显式列出；此前只靠 `**/.*/` 的副作用挡着）----
+# `.dbg/` 调试导出与抓帧、`.scratch/` 手工实验区、`.dsh-tmp/` 外部工具解包——
+# 都是跑一次生成一次的本地产物，全仓零引用；需要留档某一份时用 git add -f 单独强加。
+.dbg/
+.scratch/
+.dsh-tmp/
+# tests/ 下的运行产物：预览 dump 的 npz、测试期间写的日志。
+# **不排除** `tests/*.py`——测试源码要入库。`.bak-*` 已由上面的 `*.bak-*` 挡住。
+/tests/*.npz
+/tests/*.log
