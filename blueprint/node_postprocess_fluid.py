@@ -1913,7 +1913,9 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         """导出后自检：不得出现裸 Fluid_mod，也不得引用别人的 Fluid_mod_<hash>。"""
         problems = []
         bare = re.compile(r"(?<![A-Za-z0-9_])Fluid_mod(?![_A-Za-z0-9])")
-        foreign = re.compile(r"Fluid_mod_([0-9a-f]{8})")
+        # namespace 现在形如 ``Fluid_<可读名>_<sha1[:8]>``（``_namespace_id``），
+        # 只认 `Fluid_mod_<hash8>` 会漏掉全部 ASCII 目录名的模组——自检等于没有。
+        foreign = re.compile(r"Fluid_[A-Za-z0-9_]*?([0-9a-f]{8})(?![0-9a-f])")
         for rel in self._NS_FILES:
             path = os.path.join(mod_export_path, rel)
             if not os.path.isfile(path):
@@ -1922,11 +1924,12 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             text = open(path, encoding="utf-8-sig", errors="replace").read()
             if bare.search(text):
                 problems.append("裸 Fluid_mod（缺 8 位后缀）: {}".format(path))
-            for hit in set(foreign.findall(text)):
-                if not ns.endswith(hit):
-                    problems.append("引用了别的 namespace Fluid_mod_{}: {}".format(hit, path))
+            for m in foreign.finditer(text):
+                if m.group(0) != ns:
+                    problems.append("引用了别的 namespace {}（本模组 {}）: {}".format(
+                        m.group(0), ns, path))
             # 变量层：$\Fluid_mod_<hash8>\var 形式的引用也必须是本模组的
-            var_re = re.compile(r"\$\\Fluid_mod_([0-9a-f]{8})\\")
+            var_re = re.compile(r"\$\\Fluid_[A-Za-z0-9_]*?([0-9a-f]{8})\\")
             for hit in set(var_re.findall(text)):
                 if not ns.endswith(hit):
                     problems.append("引用了别的模组的变量 $\\Fluid_mod_{}\\...: {}".format(hit, path))
@@ -3627,6 +3630,20 @@ def _preview_fingerprint(node, extra=None):
     return hashlib.sha1(blob).hexdigest()[:8]
 
 
+def _resolve_emitter_level(node, emitter, speed):
+    """发射器档位的**唯一**解析点：导出、预览喷嘴、bake 半径都调它。
+
+    ``auto_strength_level`` 关（默认）= 面板填的档位；开 = 按发射速度反解（旧行为）。
+    返回值 = 全局档位 + 该发射器的相对偏移，夹在 0..7。
+    """
+    panel = float(getattr(node, 'strength_level', 3.0))
+    if bool(getattr(node, 'auto_strength_level', False)):
+        base = float(fluid_ini_merge.level_for_speed(float(speed or 0.0)))
+    else:
+        base = panel
+    return max(0.0, min(7.0, base + float(getattr(emitter, 'level', 0))))
+
+
 def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
                particle_radius=None, solid=None, voxel=None, threshold=0.1,
                cache_name='fluid_preview.npz'):
@@ -3701,7 +3718,7 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
             # 档位是**全局 strength_level + 本发射器的相对偏移**，
             # 不是我先前那样直接拿偏移当档位（`Probe.ini:14` 的 `$strength_level`
             # 默认 3、`:434-436` 把它换算成 .565+(level-1)*.5625）。
-            'level': max(0.0, min(7.0, float(getattr(node, 'strength_level', 3.0)) + float(e.level))),
+            'level': _resolve_emitter_level(node, e, e.speed),
         })
     if not emitters:
         raise ValueError('没有可解析的发射器（物体不存在或面号越界）')
@@ -3802,8 +3819,9 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
         'force_fields': len(force_fields),
         'fingerprint': _sim_fingerprint(node),
         'fps': float(fps),
+        # 半径用的档位必须与喷嘴/导出同源：直接取 emitter dict 里已解析好的 'level'。
         'emitter_radii': {int(e['slot']): bake_mod.stream_radius(
-            particle_radius, e['width'], fluid_ini_merge.level_for_speed(e['speed']) + e['level_offset'])
+            particle_radius, e['width'], e['level'])
             for e in emitters},
     }
     return sim_mod, bake_mod, sim_kwargs, finish

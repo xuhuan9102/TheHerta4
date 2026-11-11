@@ -631,3 +631,63 @@ class StrengthLevelPrecisionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EmitterLevelSourceTests(unittest.TestCase):
+    """L-FLUID-005 回归：档位只有一个解析点 `_resolve_emitter_level`。"""
+
+    def _e(self, level=0):
+        return types.SimpleNamespace(level=level)
+
+    def test_manual_mode_uses_panel_level(self):
+        inst = _bare_node([_emitter()])
+        inst.strength_level = 4.5
+        inst.auto_strength_level = False
+        self.assertAlmostEqual(node._resolve_emitter_level(inst, self._e(0), 1.5), 4.5, places=6)
+        self.assertAlmostEqual(node._resolve_emitter_level(inst, self._e(1), 1.5), 5.5, places=6)
+
+    def test_auto_mode_uses_speed(self):
+        inst = _bare_node([_emitter()])
+        inst.strength_level = 4.5
+        inst.auto_strength_level = True
+        want = node.fluid_ini_merge.level_for_speed(1.5)
+        self.assertAlmostEqual(node._resolve_emitter_level(inst, self._e(0), 1.5), want, places=6)
+
+    def test_level_is_clamped_to_0_7(self):
+        inst = _bare_node([_emitter()])
+        inst.strength_level = 9.0
+        inst.auto_strength_level = False
+        self.assertEqual(node._resolve_emitter_level(inst, self._e(0), 1.5), 7.0)
+
+
+class NamespaceSelfCheckTests(unittest.TestCase):
+    """L-FLUID-009 回归：自检要认 `Fluid_<name>_<hash8>`，不只认旧的 Fluid_mod_<hash8>。"""
+
+    NS_FILES = ("fluid_probe.ini",
+                os.path.join("res", "fluid_probe", "fluid", "Composite.ini"),
+                os.path.join("res", "fluid_probe", "surface", "ProfileLoader.ini"))
+
+    def _problems(self, text, ns):
+        inst = _bare_node([_emitter()])
+        with tempfile.TemporaryDirectory() as td:
+            for rel in self.NS_FILES:
+                path = os.path.join(td, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            return inst._verify_generated_ns(td, ns)
+
+    def test_ascii_namespace_foreign_ref_is_caught(self):
+        ns = "Fluid_beta_55667788"
+        problems = self._problems("run = CommandList\\Fluid_alpha_1234abcd\\x\n", ns)
+        self.assertTrue(any("alpha_1234abcd" in p for p in problems), problems)
+
+    def test_chinese_namespace_foreign_ref_is_caught(self):
+        ns = "Fluid_deadbeef"
+        problems = self._problems("$\\Fluid_mod_deadbeef\\fluid_emit_0 = 1\n", ns)
+        self.assertTrue(any("Fluid_mod_deadbeef" in p for p in problems), problems)
+
+    def test_own_namespace_is_not_flagged(self):
+        ns = "Fluid_beta_55667788"
+        problems = self._problems("run = CommandList\\Fluid_beta_55667788\\x\n", ns)
+        self.assertEqual(problems, [])
+

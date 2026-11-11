@@ -173,7 +173,9 @@ def test_trickle_births_use_shader_speed_and_one_in_five_schedule():
 
 
 def test_minimum_flow_has_frozen_independent_ballistic_branch():
-    sim = S.Simulator(16, [emitter(speed=0.1)])
+    # 档位是**面板值**（2026-11-12 起与导出同源），不再由速度反解：
+    # 想测"最小流量"，要给低档位，光给低速度已经不算了。
+    sim = S.Simulator(16, [emitter(speed=0.1, level=0.2)])
     sim.time = 0.7
     rng = np.random.default_rng(1)
     for i in range(16):
@@ -220,3 +222,28 @@ def test_cached_preview_invalidated_by_runtime_parameters(change):
     else:
         setattr(em, change, getattr(em, change) + 0.1)
     assert node._preview_fingerprint(inst) != before
+
+def test_nozzle_level_follows_explicit_level_not_speed():
+    """L-FLUID-005 回归：档位有显式值时，喷嘴必须用它，不许拿速度反解覆盖。
+
+    这条能失败：把 ``_emitter_nozzle`` 改回"speed>0 就 level_for_speed"，两个喷嘴的
+    setting 会完全相同（都按 1.5 m/s 反解），断言即红。
+    """
+    slow = S.Simulator(4, [emitter(speed=1.5, level=1.0)])
+    fast = S.Simulator(4, [emitter(speed=1.5, level=6.0)])
+    n1 = slow._emitter_nozzle(slow.emitters[0])
+    n6 = fast._emitter_nozzle(fast.emitters[0])
+    assert n1['level'] == pytest.approx(1.0)
+    assert n6['level'] == pytest.approx(6.0)
+    assert n1['setting'] != n6['setting'], "同速度不同档位必须给出不同喷嘴 setting"
+
+
+def test_emitter_radii_follow_the_same_level():
+    """L-FLUID-005 回归：bake 半径用的档位必须与喷嘴/导出同源。"""
+    em = emitter(speed=1.5, level=6.0, width=2.0)
+    r1 = B.stream_radius(0.0028, 2.0, 1.0)
+    r6 = B.stream_radius(0.0028, 2.0, 6.0)
+    assert r1 != r6, "半径必须随档位变化（否则说明它吃了另一套档位）"
+    sim = S.Simulator(4, [em])
+    assert sim._emitter_nozzle(em)['level'] == pytest.approx(6.0)
+

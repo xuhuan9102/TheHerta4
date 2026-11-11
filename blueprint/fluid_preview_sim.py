@@ -711,9 +711,10 @@ class Simulator(object):
         pulse_speed = float(e.get('pulse_speed', 1.0))
         lv = e.get('level')
         setting = float(e.get('setting', SHEET_THRESHOLD))
-        if speed > 0.0:
-            base = float(lv if lv is not None else STRENGTH_LEVEL_REFERENCE)
-            lv = _ini_merge().level_for_speed(speed) + float(e.get('level_offset', base - STRENGTH_LEVEL_REFERENCE))
+        if lv is None and speed > 0.0:
+            # 旧 dict 没给 'level' 才回落到速度反解；新 dict 的 'level' 由节点
+            # `_resolve_emitter_level()` 统一算好（导出/喷嘴/半径同源），这里不许再算第二套。
+            lv = _ini_merge().level_for_speed(speed) + float(e.get('level_offset', 0.0))
         if lv is not None:
             lv = min(max(float(lv), 0.0), 7.0)
             setting = slot_drive(lv)
