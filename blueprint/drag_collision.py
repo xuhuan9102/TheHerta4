@@ -26,16 +26,18 @@ def sweep_shader_sections(suffix, leaves, dispatch_n, shader_dir="res/drag_inter
     bounds = f"ResourceDragCollisionBounds_{suffix}"
     sections = {}
     for name, roots, groups in (("Leaves", 0, tiles), ("Roots", 1, max(1, (tiles + 30) // 32))):
+        # Later dispatches consume these UAV writes through the named resource.
+        # A copied UAV would lose the updated bounds when it is unbound.
         sections[f"[CustomShaderDragCollision{name}{suffix}]"] = [
             f"cs = {shader_dir}/rzm_drag_collision_bounds.hlsl",
             "x115 = 1", f"y115 = {leaves}", f"z115 = {roots}",
-            f"cs-t89 = {order}", "cs-t91 = null", f"cs-u4 = {bounds}",
+            f"cs-t89 = copy {order}", "cs-t91 = null", f"cs-u4 = ref {bounds}",
             f"Dispatch = {groups}, 1, 1", "cs-u4 = null",
         ]
     sections[f"[CustomShaderDragCollision{suffix}]"] = [
         f"cs = {shader_dir}/rzm_drag_collision.hlsl",
         "x115 = 1", f"y115 = {leaves}", "z115 = 0",
-        f"cs-t89 = {order}", f"cs-t91 = {bounds}",
+        f"cs-t89 = copy {order}", f"cs-t91 = copy {bounds}",
         f"Dispatch = {dispatch_n}, 1, 1", "cs-t89 = null", "cs-t91 = null",
     ]
     return sections
@@ -48,11 +50,11 @@ def surface_shader_sections(suffix, leaves, face_count, dispatch_n, shader_dir="
         sections[f"[CustomShaderDragCollision{stage}{suffix}]"] = [
             f"cs = {shader_dir}/rzm_drag_collision_surface.hlsl",
             "x115 = 1", f"y115 = {leaves}", f"z115 = {phase}",
-            f"cs-t89 = ResourceDragCollisionOrder_{suffix}",
-            f"cs-t91 = ResourceDragCollisionBounds_{suffix}",
-            f"cs-t92 = ResourceDragCollisionCloth_{suffix}",
-            f"cs-t93 = ResourceDragCollisionAdjacency_{suffix}",
-            f"cs-u4 = ResourceDragCollisionFaceLimits_{suffix}",
+            f"cs-t89 = copy ResourceDragCollisionOrder_{suffix}",
+            f"cs-t91 = copy ResourceDragCollisionBounds_{suffix}",
+            f"cs-t92 = copy ResourceDragCollisionCloth_{suffix}",
+            f"cs-t93 = copy ResourceDragCollisionAdjacency_{suffix}",
+            f"cs-u4 = ref ResourceDragCollisionFaceLimits_{suffix}",
             f"Dispatch = {max(groups, 1)}, 1, 1", "cs-u4 = null",
             "cs-t89 = null", "cs-t91 = null", "cs-t92 = null", "cs-t93 = null",
         ]

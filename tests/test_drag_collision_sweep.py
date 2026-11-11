@@ -37,6 +37,108 @@ class SweepOrderingTests(unittest.TestCase):
             collision.bake_sweep_order(np.full((1, 3, 3), np.nan))
 
 
+class SweepBindingTests(unittest.TestCase):
+    """Stage outputs must remain visible to later collision dispatches."""
+
+    REGISTERS = ("cs-t89", "cs-t91", "cs-t92", "cs-t93", "cs-u4")
+
+    def _bindings(self, sections):
+        for section, lines in sections.items():
+            for raw in lines:
+                register, _, value = raw.strip().partition(" = ")
+                if register in self.REGISTERS:
+                    yield section, register, value
+
+    def _assert_bindings(self, sections, expected):
+        # Teardown lines (``= null``) are not bindings and stay untouched.
+        bindings = [item for item in self._bindings(sections) if item[2] != "null"]
+        self.assertEqual(len(bindings), expected)
+        for section, register, value in bindings:
+            mode = "ref " if register == "cs-u4" else "copy "
+            self.assertTrue(value.startswith(mode),
+                            f"{section}: {register} = {value} (expected {mode.strip()})")
+        return bindings
+
+    def test_collision_outputs_are_shared_between_dispatches(self):
+        # Each builder is checked on its own dict: merging them would keep the
+        # sweep-only base section that surface_shader_sections() deletes.
+        sweep = self._assert_bindings(
+            collision.sweep_shader_sections("abc123_ns", 64, 3), 6)
+        surface = self._assert_bindings(
+            collision.surface_shader_sections("abc123_ns", 64, 6, 3), 14)
+        orders = [value for _, register, value in sweep + surface
+                  if register == "cs-t89" and value == "copy ResourceDragCollisionOrder_abc123_ns"]
+        self.assertTrue(orders, "sweep and surface must bind the Morton order with copy")
+
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 requires Windows")
+    def test_emitted_collision_chain_preserves_outward_drag_and_blocks_entry(self):
+        spec = importlib.util.spec_from_file_location(
+            "collision_command_gpu", ROOT / "tools/check_drag_cloth.py"
+        )
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        source = np.zeros((6, 10), np.float32)
+        source[:, :3] = [
+            [0, -2, -2], [0, 0, 2], [0, 2, -2],
+            [-.1, -.2, -.2], [-.1, .2, -.2], [-.1, 0, .2],
+        ]
+        source[:, 3] = -1
+        body = np.array([[0, 1, 2]], np.uint32)
+        order, leaves = collision.bake_sweep_order(source[body, :3])
+        cloth, adjacency = collision.bake_cloth_adjacency(
+            [[3, 4, 5]], [False, False, False, True, True, True]
+        )
+        suffix = "body_ns"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            arrays = {"Order": order, "Cloth": cloth, "Adjacency": adjacency}
+            sections = {}
+            for name, array in arrays.items():
+                array.tofile(root / (name + ".buf"))
+                sections[f"[ResourceDragCollision{name}_{suffix}]"] = [
+                    "type = Buffer", "format = R32_UINT",
+                    f"filename = {name}.buf",
+                ]
+            for name, count, fmt in [
+                ("Bounds", leaves * 4, "R32G32B32A32_FLOAT"),
+                ("FaceLimits", len(cloth), "R32_FLOAT"),
+            ]:
+                sections[f"[ResourceDragCollision{name}_{suffix}]"] = [
+                    "type = RWBuffer", f"format = {fmt}", f"array = {count}",
+                ]
+            chain = collision.surface_shader_sections(
+                suffix, leaves, len(cloth), 1,
+                shader_dir=(ROOT / "Toolset/drag_interaction").as_posix(),
+            )
+            sections.update(chain)
+            for travel in (-.3, .5):
+                runner = runtime.GeneratedCloth(root, sections, {})
+                try:
+                    candidate = source.copy()
+                    candidate[3:, 0] += travel
+                    inputs = runner.external("Input", source, 40, structured=True)
+                    indices = runner.external("Body", body, 4, 42)
+                    output = runner.external(
+                        "Output", candidate, 40, structured=True, flags=136
+                    )
+                    runner.gpu.bind(24, runner.view(inputs, False))
+                    runner.gpu.bind(87, runner.view(indices, False))
+                    runner.gpu.bind(5, runner.view(output, True), True)
+                    runner.params[101, 1] = .002
+                    for section in chain:
+                        runner.execute(section.strip("[]"))
+                    result = runner.gpu.read_bytes(output.pointer, output.size)
+                    result = result.view("<f4").reshape(-1, 10)
+                    np.testing.assert_array_equal(result[:3], source[:3])
+                    if travel < 0:
+                        np.testing.assert_allclose(result[3:, 0], candidate[3:, 0], atol=1e-6)
+                    else:
+                        self.assertTrue(np.all(result[3:, 0] < 0))
+                        self.assertTrue(np.all(result[3:, 0] > source[3:, 0] + .05))
+                finally:
+                    runner.close()
+
+
 class SweepInstallerTests(unittest.TestCase):
     def test_install_plan_is_idempotent_and_removes_post_solve_probe(self):
         spec = importlib.util.spec_from_file_location("sweep_installer", ROOT / "tools/install_drag_collision_sweep.py")
