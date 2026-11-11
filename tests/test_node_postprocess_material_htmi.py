@@ -2775,6 +2775,9 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             node.execute_postprocess(temp_dir)
 
             result = Path(ini_path).read_text(encoding="utf-8")
+            records = node_postprocess_material._rabbitfx_outputs[os.path.normcase(os.path.abspath(ini_path))]
+            self.assertTrue(any(record["object"] == object_name and record["type"] == "FXMap" for record in records))
+            self.assertTrue(all(record["marker"] in result for record in records))
             node.execute_postprocess(temp_dir)
             self.assertEqual(Path(ini_path).read_text(encoding="utf-8"), result)
 

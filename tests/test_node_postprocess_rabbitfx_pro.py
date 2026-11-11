@@ -207,6 +207,8 @@ def _make_node(**overrides):
         glow_v=0.0,
         glow_brightness=8.0,
         glow_interpolate=1.0,
+        preview_use_color=False,
+        preview_color=(1.0, 1.0, 1.0, 1.0),
         breath_mode='SINGLE',
         enable_breath=False,
         breath_fps=200,
@@ -240,6 +242,7 @@ def _make_node(**overrides):
     defaults.update(overrides)
     for key, value in defaults.items():
         setattr(node, key, value)
+    node.as_pointer = lambda: id(node)
     node.target_items = _FakeCollection(node.target_items)
     # 挂在一棵含「材质转资源」的假蓝图里（本节点的贴图绑定来源）；必须在
     # name 等属性设置之后建树，节点集合是按名字索引的。
@@ -390,6 +393,92 @@ FXMAP_SECTION = (
 
 
 class RabbitFXProTests(unittest.TestCase):
+    def test_preview_uses_static_and_breath_parameters(self):
+        node = _make_node(glow_h=30, glow_s=20, glow_v=-10,
+                          glow_brightness=4, glow_interpolate=0.5)
+        self.assertEqual(pro._preview_parameters(node, 0), (30, 20, -10, 4, 0.5))
+        node.enable_breath = True
+        node.breath_mode = 'SINGLE'
+        node.breath_fps = 60
+        node.breath_step = 1
+        node.breath_brightness_min = 2
+        node.breath_brightness_max = 6
+        self.assertEqual(pro._preview_parameters(node, 1)[3], 6)
+        self.assertEqual(pro._preview_parameters(node, 2)[3], 2)
+        node.breath_mode = 'RAINBOW'
+        self.assertEqual(pro._preview_parameters(node, 0.5)[0], 180)
+
+    def test_preview_ownership_follows_target_nodes_from_either_button(self):
+        """从任一节点预览时，目标物体仍使用各自列表所属节点的参数。"""
+        first_object = _fake_object()
+        second_object = _fake_object(SECOND_OBJECT)
+        first_node = _make_node(
+            name='RabbitFXPro.First',
+            enable_breath=True,
+            breath_mode='RAINBOW',
+            preview_use_color=True,
+            preview_color=(1.0, 0.0, 0.0, 1.0),
+            target_items=[_item(first_object)],
+        )
+        second_node = _make_node(
+            name='RabbitFXPro.Second',
+            enable_breath=False,
+            preview_use_color=True,
+            preview_color=(0.0, 0.0, 1.0, 1.0),
+            target_items=[_item(second_object)],
+        )
+        tree = _fake_tree([first_node, second_node])
+        first_node.id_data = tree
+        second_node.id_data = tree
+
+        self.assertEqual(pro._preview_tree_key(first_node), pro._preview_tree_key(second_node))
+        for trigger_node in (first_node, second_node):
+            owners = pro._preview_owner_nodes(trigger_node)
+            self.assertIs(owners[first_object], first_node)
+            self.assertIs(owners[second_object], second_node)
+
+    def test_material_record_controls_parameter_position(self):
+        obj = _fake_object()
+        node = _make_node(target_items=[_item(obj)])
+        marker = '; MaterialRabbitFX test'
+        lines = [
+            f'; [mesh:{obj.name}]',
+            r'run = CommandList\ZZMI\SetTextures',
+            r'$\RabbitFX\brightness = 5',
+            r'Resource\RabbitFX\Glowmap = ref Resource_Glow',
+            marker,
+            r'run = CommandList\RabbitFX\Run',
+            'drawindexed = 10, 0, 0',
+        ]
+        sections = {'[TextureOverride_Test]': lines}
+        records = [{'object': obj.name, 'type': 'Glowmap', 'marker': marker,
+                    'section': '[TextureOverride_Test]',
+                    'lines': [r'Resource\RabbitFX\Glowmap = ref Resource_Glow']}]
+        self.assertTrue(node._apply_material_records(sections, records, [obj], 'buffer'))
+        text = '\n'.join(lines)
+        self.assertLess(text.index(r'$\RabbitFX\brightness = 5'), text.index(r'$\RabbitFX\brightness = 8.0'))
+        self.assertLess(text.index(r'$\RabbitFX\brightness = 8.0'), text.index(r'run = CommandList\RabbitFX\Run'))
+        untouched = list(lines)
+        self.assertFalse(node._apply_material_records(sections, records, [_fake_object('another')], 'buffer'))
+        self.assertEqual(lines, untouched)
+
+    def test_material_record_keeps_fxmap_switch_branches(self):
+        obj = _fake_object()
+        node = _make_node(target_items=[_item(obj)], enable_glow=False, enable_colorshift=True)
+        marker = '; MaterialRabbitFX fx'
+        bindings = ['if $swapkey1 == 0', r'    Resource\RabbitFX\FXMap = ref Resource_A',
+                    'endif', 'if $swapkey1 == 1', r'    Resource\RabbitFX\FXMap = ref Resource_B', 'endif']
+        lines = [f'; [mesh:{obj.name}]', *bindings, marker,
+                 r'run = CommandList\RabbitFX\Run', 'drawindexed = 10, 0, 0']
+        records = [{'object': obj.name, 'type': 'FXMap', 'marker': marker,
+                    'section': '[TextureOverride_Test]', 'lines': bindings}]
+        self.assertTrue(node._apply_material_records({'[TextureOverride_Test]': lines}, records, [obj], 'buffer'))
+        after_run = '\n'.join(lines).split(r'run = CommandList\RabbitFX\Run', 1)[1]
+        self.assertIn('if $swapkey1 == 0\n    ; === RabbitFXPro ColorShift ===', after_run)
+        self.assertIn(r'Resource\RabbitFX\FXMap = ref Resource_A', after_run)
+        self.assertIn('if $swapkey1 == 1\n    ; === RabbitFXPro ColorShift ===', after_run)
+        self.assertIn(r'Resource\RabbitFX\FXMap = ref Resource_B', after_run)
+
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
         self.export_dir = self._temp.name
@@ -736,6 +825,54 @@ class RabbitFXProTests(unittest.TestCase):
         self.assertLess(
             content.index(pro._BREATH_BEGIN),
             content.index("run = CommandList\\RabbitFX\\Run"),
+        )
+
+    def test_breathing_splits_step_across_target_draw_units(self):
+        """同一个节点的多个目标绘制单元合计每帧只推进一次配置速度。"""
+        first = _fake_object()
+        second = _fake_object(SECOND_OBJECT)
+        first_marker = '; MaterialRabbitFX first'
+        second_marker = '; MaterialRabbitFX second'
+        lines = [
+            f'; [mesh:{first.name}]',
+            'hash = fd054d1d',
+            r'Resource\RabbitFX\Glowmap = ref Resource_Glowmap_1',
+            first_marker,
+            r'run = CommandList\RabbitFX\Run',
+            'drawindexed = 10, 0, 0',
+            f'; [mesh:{second.name}]',
+            'hash = aa11bb22',
+            r'Resource\RabbitFX\Glowmap = ref Resource_Glowmap_2',
+            second_marker,
+            r'run = CommandList\RabbitFX\Run',
+            'drawindexed = 20, 0, 0',
+        ]
+        records = [
+            {'object': first.name, 'type': 'Glowmap', 'marker': first_marker,
+             'section': '[TextureOverride_Test]',
+             'lines': [r'Resource\RabbitFX\Glowmap = ref Resource_Glowmap_1']},
+            {'object': second.name, 'type': 'Glowmap', 'marker': second_marker,
+             'section': '[TextureOverride_Test]',
+             'lines': [r'Resource\RabbitFX\Glowmap = ref Resource_Glowmap_2']},
+        ]
+        node = _make_node(
+            enable_breath=True,
+            breath_step=0.3,
+            target_items=[_item(first), _item(second)],
+        )
+
+        self.assertTrue(node._apply_material_records(
+            {'[TextureOverride_Test]': lines}, records, [first, second], 'buffer'
+        ))
+        content = '\n'.join(lines)
+
+        self.assertEqual(
+            content.count("$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + 0.15"),
+            2,
+        )
+        self.assertNotIn(
+            "$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + 0.3",
+            content,
         )
 
     def test_breathing_without_glow_switch_emits_nothing(self):

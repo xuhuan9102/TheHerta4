@@ -48,6 +48,7 @@ import glob
 import json
 import os
 import re
+import time
 import uuid
 from collections import OrderedDict
 
@@ -567,6 +568,236 @@ class _MaterialProbe:
 
 _PROBE = _MaterialProbe()
 
+# 只在当前 Blender 会话里保留预览材质，退出预览时恢复原材质。
+_glow_previews = {}
+_glow_preview_scenes = {}
+
+
+def _preview_tree_key(node):
+    tree = getattr(node, "id_data", None)
+    pointer = getattr(tree, "as_pointer", None)
+    if callable(pointer):
+        try:
+            return pointer()
+        except ReferenceError:
+            pass
+    return id(tree) if tree is not None else id(node)
+
+
+def _preview_owner_nodes(node):
+    """返回预览物体到所属 RabbitFX Pro 节点的映射。"""
+    tree = getattr(node, "id_data", None)
+    candidates = [
+        candidate
+        for candidate in (getattr(tree, "nodes", None) or [])
+        if getattr(candidate, "bl_idname", "") == NODE_IDNAME
+    ]
+    if not candidates:
+        candidates = [node]
+    owners = {}
+    for candidate in candidates:
+        for item in getattr(candidate, "target_items", None) or []:
+            obj = getattr(item, "target_object", None)
+            if obj is not None:
+                owners.setdefault(obj, candidate)
+    return owners
+
+
+def _enable_glow_bloom(context):
+    scene = context.scene
+    key = scene.as_pointer()
+    if key in _glow_preview_scenes:
+        return
+    tree = bpy.data.node_groups.new('RabbitFX Preview Bloom', 'CompositorNodeTree')
+    state = {'scene': scene, 'original': scene.compositing_node_group,
+             'tree': tree, 'shading': []}
+    _glow_preview_scenes[key] = state
+    tree.interface.new_socket(name='Image', in_out='OUTPUT', socket_type='NodeSocketColor')
+    render_layers = tree.nodes.new('CompositorNodeRLayers')
+    bloom = tree.nodes.new('CompositorNodeGlare')
+    bloom.inputs['Type'].default_value = 'Bloom'
+    bloom.inputs['Threshold'].default_value = 0.5
+    output = tree.nodes.new('NodeGroupOutput')
+    tree.links.new(render_layers.outputs['Image'], bloom.inputs['Image'])
+    tree.links.new(bloom.outputs['Image'], output.inputs['Image'])
+    scene.compositing_node_group = tree
+    for window in context.window_manager.windows:
+        if window.scene != scene:
+            continue
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                space = area.spaces.active
+                state['shading'].append((space, space.shading.type, space.shading.use_compositor))
+                if space.shading.type not in {'MATERIAL', 'RENDERED'}:
+                    space.shading.type = 'MATERIAL'
+                space.shading.use_compositor = 'ALWAYS'
+
+
+def _disable_glow_bloom(scene):
+    state = _glow_preview_scenes.pop(scene.as_pointer(), None)
+    if state is None:
+        return
+    if scene.compositing_node_group == state['tree']:
+        scene.compositing_node_group = state['original']
+    for space, shading, compositor in state['shading']:
+        try:
+            if space.shading.use_compositor == 'ALWAYS':
+                space.shading.use_compositor = compositor
+            if shading not in {'MATERIAL', 'RENDERED'} and space.shading.type == 'MATERIAL':
+                space.shading.type = shading
+        except ReferenceError:
+            pass
+    if state['tree'].users == 0:
+        bpy.data.node_groups.remove(state['tree'])
+
+
+def _preview_parameters(node, elapsed):
+    if not node.enable_breath:
+        return (node.glow_h, node.glow_s, node.glow_v,
+                node.glow_brightness, node.glow_interpolate)
+    period = max(1, node.breath_fps)
+    phase = (elapsed * 60.0 * node.breath_step) % (period * 2.0)
+    wave = phase if phase <= period else period * 2.0 - phase
+    if node.breath_mode == 'SINGLE':
+        brightness = node.breath_brightness_min + (node.breath_brightness_max - node.breath_brightness_min) * wave / period
+        hue = node.breath_h
+    else:
+        hue = wave * 360.0 / period
+        brightness = node.breath_brightness_max if node.breath_mode == 'RAINBOW' else node.breath_brightness_max * wave / period
+    return hue, node.breath_s, node.breath_v, brightness, node.breath_interpolate
+
+
+def _stop_glow_preview(key):
+    session = _glow_previews.pop(key, None)
+    if session is None:
+        return
+    for obj, index, original_link, original_material, material, *_ in session['materials']:
+        try:
+            slot = obj.material_slots[index]
+            if slot.material == material:
+                if original_link == 'OBJECT':
+                    slot.material = original_material
+                else:
+                    slot.link = original_link
+            if material.users == 0:
+                bpy.data.materials.remove(material)
+        except (ReferenceError, IndexError):
+            continue
+    scene = session['scene']
+    if not any(other['scene'] == scene for other in _glow_previews.values()):
+        _disable_glow_bloom(scene)
+
+
+def _stop_all_glow_previews(*_args):
+    for key in list(_glow_previews):
+        _stop_glow_preview(key)
+
+
+def _update_glow_previews():
+    for key, session in list(_glow_previews.items()):
+        try:
+            elapsed = time.monotonic() - session['started']
+            parameters = {}
+            for (_obj, _index, _link, _original, _material, tint, hsv, strength,
+                 has_image, sat_add, val_add, owner) in session['materials']:
+                node_parameters = parameters.get(owner)
+                if node_parameters is None:
+                    node_parameters = _preview_parameters(owner, elapsed)
+                    parameters[owner] = node_parameters
+                hue, saturation, value, brightness, interpolate = node_parameters
+                tint.inputs[0].default_value = 1.0 if owner.preview_use_color or not has_image else 0.0
+                tint.inputs[2].default_value = owner.preview_color
+                hsv.inputs['Hue'].default_value = (0.5 + hue / 360.0 * interpolate) % 1.0
+                sat_add.inputs[1].default_value = saturation / 100.0 * interpolate
+                val_add.inputs[1].default_value = value / 100.0 * interpolate
+                strength.inputs[1].default_value = brightness if owner.enable_glow else 0.0
+        except ReferenceError:
+            _stop_glow_preview(key)
+    return 0.1 if _glow_previews else None
+
+
+def _start_glow_preview(node, context):
+    key = _preview_tree_key(node)
+    if key in _glow_previews:
+        _stop_glow_preview(key)
+        return 0
+    session = {'scene': context.scene, 'started': time.monotonic(), 'materials': []}
+    _glow_previews[key] = session
+    for obj, owner in _preview_owner_nodes(node).items():
+        if obj.type != 'MESH':
+            continue
+        glow_materials = _PROBE.find_matching_materials(obj, 'Glowmap')
+        image = next((tex.image for material in glow_materials
+                      if material.use_nodes and material.node_tree
+                      for tex in material.node_tree.nodes
+                      if tex.bl_idname == 'ShaderNodeTexImage' and tex.image), None)
+        indices = {polygon.material_index for polygon in obj.data.polygons}
+        for index in indices:
+            if index >= len(obj.material_slots):
+                continue
+            slot = obj.material_slots[index]
+            original = slot.material
+            if original is None or not original.use_nodes or not original.node_tree:
+                continue
+            preview = original.copy()
+            nodes, links = preview.node_tree.nodes, preview.node_tree.links
+            shader = next((n for n in nodes if n.bl_idname == 'ShaderNodeBsdfPrincipled'), None)
+            if shader is None:
+                bpy.data.materials.remove(preview)
+                continue
+            emission_color = shader.inputs.get('Emission Color')
+            emission_strength = shader.inputs.get('Emission Strength')
+            if emission_color is None or emission_strength is None:
+                bpy.data.materials.remove(preview)
+                continue
+            tint = nodes.new('ShaderNodeMixRGB')
+            tint.blend_type = 'MIX'
+            hsv = nodes.new('ShaderNodeHueSaturation')
+            separate = nodes.new('ShaderNodeSeparateColor')
+            separate.mode = 'HSV'
+            combine = nodes.new('ShaderNodeCombineColor')
+            combine.mode = 'HSV'
+            sat_add = nodes.new('ShaderNodeMath')
+            sat_add.operation = 'ADD'
+            sat_add.use_clamp = True
+            val_add = nodes.new('ShaderNodeMath')
+            val_add.operation = 'ADD'
+            val_add.use_clamp = True
+            strength = nodes.new('ShaderNodeMath')
+            strength.operation = 'MULTIPLY'
+            strength.inputs[0].default_value = 1.0
+            if image is not None:
+                texture = nodes.new('ShaderNodeTexImage')
+                texture.image = image
+                links.new(texture.outputs['Color'], tint.inputs[1])
+                links.new(texture.outputs['Alpha'], strength.inputs[0])
+            else:
+                tint.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
+            links.new(tint.outputs['Color'], hsv.inputs['Color'])
+            links.new(hsv.outputs['Color'], separate.inputs['Color'])
+            links.new(separate.outputs[0], combine.inputs[0])
+            links.new(separate.outputs[1], sat_add.inputs[0])
+            links.new(separate.outputs[2], val_add.inputs[0])
+            links.new(sat_add.outputs[0], combine.inputs[1])
+            links.new(val_add.outputs[0], combine.inputs[2])
+            links.new(combine.outputs['Color'], emission_color)
+            links.new(strength.outputs[0], emission_strength)
+            original_link = slot.link
+            slot.link = 'OBJECT'
+            slot.material = preview
+            session['materials'].append((
+                obj, index, original_link, original, preview, tint, hsv, strength,
+                image is not None, sat_add, val_add, owner,
+            ))
+    if not session['materials']:
+        _glow_previews.pop(key, None)
+        return 0
+    _enable_glow_bloom(context)
+    if not bpy.app.timers.is_registered(_update_glow_previews):
+        bpy.app.timers.register(_update_glow_previews, first_interval=0.0)
+    _update_glow_previews()
+    return len(session['materials'])
+
 
 def _probe_marked_slots(obj):
     """导入侧记录的槽位标记（modimp_texture_slots）里是否有 Glowmap / FXMap。"""
@@ -687,6 +918,13 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         default=1.0,
         min=0,
         max=1,
+    )
+    preview_use_color: bpy.props.BoolProperty(
+        name="使用自定义底色", description="用指定颜色模拟发光贴图的颜色", default=False,
+    )
+    preview_color: bpy.props.FloatVectorProperty(
+        name="预览底色", description="模拟发光贴图的颜色，发光范围仍由贴图控制",
+        subtype='COLOR', size=4, min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0),
     )
 
     # ── 呼吸灯 ──
@@ -821,6 +1059,17 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         layout.separator()
         layout.label(text=self.fx_profile_label, icon='INFO')
         layout.prop(self, "enable_reset")
+        row = layout.row(align=True)
+        row.prop(self, "preview_use_color", text="")
+        colors = row.row(align=True)
+        colors.enabled = self.preview_use_color
+        colors.prop(self, "preview_color", text="预览底色")
+        op = row.operator(
+            "ssmt.rabbitfx_pro_preview",
+            text="退出预览" if _preview_tree_key(self) in _glow_previews else "预览发光",
+            icon='HIDE_OFF',
+        )
+        op.node_name = self.name
 
     def _draw_glow_block(self, layout):
         """发光贴图参数（一级折叠）→ 组内第一行是「标题 + 启用勾」（二级）。"""
@@ -1060,13 +1309,13 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             print("[RabbitFXPro] 错误: 未指定任何目标物体")
             return
 
-        ini_files = glob.glob(os.path.join(mod_export_path, "*.ini"))
-        if not ini_files:
-            return
-
-        for ini_file in ini_files:
+        from . import node_postprocess_material
+        output_path = os.path.normcase(os.path.abspath(mod_export_path))
+        for ini_file, records in node_postprocess_material._rabbitfx_outputs.items():
+            if os.path.dirname(ini_file) != output_path:
+                continue
             self._create_cumulative_backup(ini_file, mod_export_path)
-            self._process_ini_file(ini_file, targets, sync_source)
+            self._process_ini_file(ini_file, targets, sync_source, records)
 
     @staticmethod
     def _parse_ini(content):
@@ -1096,7 +1345,7 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
                 section_lines.pop()
         return sections, preamble
 
-    def _process_ini_file(self, ini_file, targets, sync_source):
+    def _process_ini_file(self, ini_file, targets, sync_source, records):
         with open(ini_file, 'r', encoding='utf-8') as handle:
             content = handle.read()
 
@@ -1105,14 +1354,13 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         sections, preamble = self._parse_ini(content)
 
         buffer_name = self.buffer_resource_name()
-        # 先一次性圈定所有目标（含提取源）的绘制单元，再统一注入：同一轮里
-        # 后处理的目标不会把别的目标刚写进去的参数块当成上一轮残留剥掉。
-        jobs, missing_targets, source_missing = self._plan_injections(
-            sections, targets, sync_source
+        changed = self._apply_material_records(
+            sections, records, [item.target_object for item in targets], buffer_name
         )
-        changed = self._apply_injections(sections, jobs, buffer_name)
-        for obj, hash_val in missing_targets:
-            self._log_missing_target(sections, obj, hash_val)
+        source_missing = False
+        if sync_source is not None:
+            jobs, _, source_missing = self._plan_injections(sections, [], sync_source)
+            changed |= self._apply_injections(sections, jobs, buffer_name)
         if source_missing and sync_source is not None:
             print(f"[RabbitFXPro] W-Engine 源 {sync_source.name}: 未找到可注入的绘制段")
         if self.enable_sync and self.fx_profile.supports_sync and changed:
@@ -1140,6 +1388,99 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             if tail:
                 handle.write(tail)
         print(f"[RabbitFXPro] 已写入 {os.path.basename(ini_file)}")
+
+    def _apply_material_records(self, sections, records, objects, buffer_name):
+        """仅处理材质节点提供的位置。"""
+        names = {obj.name for obj in objects}
+        grouped = OrderedDict()
+        for record in records:
+            if record['object'] not in names:
+                continue
+            section = sections.get(record['section'])
+            if section is None:
+                continue
+            try:
+                marker_index = next(i for i, line in enumerate(section)
+                                    if line.strip() == record['marker'])
+            except StopIteration:
+                continue
+            units = [unit for unit in ini_scope.iter_draw_units(section)
+                     if unit['start'] <= marker_index < unit['end']]
+            unit = max(units, key=lambda item: item['start']) if units else _section_fallback_unit(section)
+            key = (record['section'], unit['start'])
+            if key not in grouped:
+                grouped[key] = [unit, []]
+            grouped[key][1].append(record)
+
+        # 同一节点的计数器会跟着每个目标绘制单元各执行一次；先把本文件内会
+        # 执行的次数算出来，再平均分摊配置速度，避免实际每帧按目标数倍速推进。
+        breath_tick_count = 0
+        if self.enable_glow and self._breathing():
+            glow_ref_re = self.fx_profile.glow_ref_re
+            for _unit, items in grouped.values():
+                for record in items:
+                    if record['type'] == 'Glowmap' and any(
+                        glow_ref_re.match(str(line).strip()) for line in record['lines']
+                    ):
+                        breath_tick_count += 1
+
+        changed = False
+        for (section_name, _), (unit, items) in sorted(
+            grouped.items(), key=lambda item: (item[0][0], item[0][1]), reverse=True
+        ):
+            lines = sections[section_name]
+            start, end = _unit_edit_scope(lines, unit)
+            trailing = _collect_trailing_reset_lines(lines, end)
+            block = _strip_previous_blocks(lines[start:end])
+            wrote_glow = wrote_sync = wrote_colorshift = False
+            for record in reversed(items):
+                marker_index = next((i for i, line in enumerate(block)
+                                     if line.strip() == record['marker']), -1)
+                if marker_index < 0:
+                    continue
+                profile = self.fx_profile
+                regex = profile.glow_ref_re if record['type'] == 'Glowmap' else profile.fxmap_ref_re
+                refs = [regex.match(str(line).strip()) for line in record['lines']]
+                ref = next((match.group('name').strip() for match in refs if match), '')
+                glow = ref if record['type'] == 'Glowmap' else ''
+                fxmap = ref if record['type'] == 'FXMap' else ''
+                params, has_glow, has_sync = self._build_param_lines(
+                    glow, fxmap, record['object'], buffer_name,
+                    breath_tick_count=breath_tick_count,
+                )
+                colorshift = self._build_colorshift_lines(fxmap, record['object']) if fxmap else []
+                if colorshift and sum(match is not None for match in refs) > 1:
+                    colorshift = []
+                    for line in record['lines']:
+                        stripped = str(line).strip()
+                        if stripped.lower().startswith(('if ', 'else', 'endif')):
+                            colorshift.append(str(line))
+                        else:
+                            match = regex.match(stripped)
+                            if match:
+                                colorshift.extend(
+                                    _leading_whitespace(str(line)) + value
+                                    for value in self._build_colorshift_lines(
+                                        match.group('name').strip(), record['object']
+                                    )
+                                )
+                indent = _leading_whitespace(block[marker_index])
+                if colorshift:
+                    _insert_block(block, marker_index + 2, colorshift, indent)
+                if params:
+                    _insert_block(block, marker_index, params, indent)
+                wrote_glow |= has_glow
+                wrote_sync |= has_sync
+                wrote_colorshift |= bool(colorshift)
+            if not (wrote_glow or wrote_sync or wrote_colorshift):
+                continue
+            if self.enable_reset:
+                resets = self._build_reset_lines(block, wrote_glow, wrote_sync, wrote_colorshift, trailing)
+                if resets:
+                    _insert_block(block, _reset_insert_position(unit, block), resets, _trailing_indent(block))
+            lines[start:end] = block
+            changed = True
+        return changed
 
     # ──────────────────── 目标物体：参数注入 ────────────────────
 
@@ -1364,7 +1705,8 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         lines[start:scope_end] = block
         return True
 
-    def _build_param_lines(self, glow_ref, fxmap_ref, object_label, buffer_name):
+    def _build_param_lines(self, glow_ref, fxmap_ref, object_label, buffer_name,
+                           breath_tick_count=1):
         """返回 (行, 是否写了发光参数, 是否写了 W-Engine 同步参数)。"""
         profile = self.fx_profile
         lines = []
@@ -1373,7 +1715,8 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         if self.enable_glow and glow_ref:
             breathing = self._breathing()
             lines.extend(
-                self._build_breath_lines() if breathing else self._build_static_glow_lines()
+                self._build_breath_lines(breath_tick_count)
+                if breathing else self._build_static_glow_lines()
             )
             wrote_glow = True
         elif self.enable_glow:
@@ -1401,13 +1744,13 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             f"{param('interpolate')} = {_format_float(self.glow_interpolate)}",
         ]
 
-    def _build_breath_lines(self):
+    def _build_breath_lines(self, breath_tick_count=1):
         tag = self._var_tag()
         frame = f"{_VAR_PREFIX}{tag}_frame"
         valve = f"{_VAR_PREFIX}{tag}_valve"
         glow = f"{_VAR_PREFIX}{tag}_glow"
         fps = int(self.breath_fps)
-        step = _format_number(self.breath_step)
+        step = _format_number(float(self.breath_step) / max(1, int(breath_tick_count)))
         lines = [
             _BREATH_BEGIN,
             f"{frame} = {frame} + {step}",
@@ -1889,6 +2232,36 @@ class SSMT_OT_RabbitFXProAddSelected(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SSMT_OT_RabbitFXProPreview(bpy.types.Operator):
+    bl_idname = "ssmt.rabbitfx_pro_preview"
+    bl_label = "预览发光"
+    bl_description = "使用目标物体的预览材质模拟发光；再次点击恢复原材质"
+    bl_options = {'INTERNAL'}
+
+    node_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        node = _resolve_node(self, context)
+        if node is None:
+            return {'CANCELLED'}
+        key = _preview_tree_key(node)
+        active = key in _glow_previews
+        try:
+            count = _start_glow_preview(node, context)
+        except Exception as exc:
+            _stop_glow_preview(key)
+            self.report({'ERROR'}, f"发光预览失败: {exc}")
+            return {'CANCELLED'}
+        if active:
+            self.report({'INFO'}, "已退出发光预览")
+        elif count:
+            self.report({'INFO'}, f"已预览 {count} 个材质")
+        else:
+            self.report({'WARNING'}, "目标物体没有可预览的原理化材质")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 _classes = (
     RabbitFXProTargetItem,
     SSMT_UL_RabbitFXProTargets,
@@ -1897,14 +2270,24 @@ _classes = (
     SSMT_OT_RabbitFXProAdd,
     SSMT_OT_RabbitFXProRemoveAt,
     SSMT_OT_RabbitFXProAddSelected,
+    SSMT_OT_RabbitFXProPreview,
 )
 
 
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
+    bpy.app.handlers.persistent(_stop_all_glow_previews)
+    if _stop_all_glow_previews not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_stop_all_glow_previews)
+    if _stop_all_glow_previews not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_stop_all_glow_previews)
 
 
 def unregister():
+    _stop_all_glow_previews()
+    for handlers in (bpy.app.handlers.save_pre, bpy.app.handlers.load_pre):
+        if _stop_all_glow_previews in handlers:
+            handlers.remove(_stop_all_glow_previews)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

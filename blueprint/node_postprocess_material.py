@@ -32,6 +32,8 @@ from .node_postprocess_base import SSMTNode_PostProcess_Base
 
 _name_mapping_cache = {}
 _reverse_name_mapping_cache = {}
+# 本次材质节点生成的 RabbitFX 位置，供后续 RabbitFX 节点读取。
+_rabbitfx_outputs = {}
 # 资源缓存按“材质内容签名”去重，避免同一套贴图被重复复制/重复生成 Resource。
 _material_resource_cache = {}
 # 旧版把 TTL 写成段尾一整组，靠这两个标记在重导出时整组摘掉。现在是就地替换，
@@ -2638,6 +2640,17 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         object_to_diffuse_swapkey, material_group_to_swapkey,
                         swap_key_prefix, next_swap_key_num, used_swap_keys)
                     fxmap_lines.extend(generated_lines)
+                    pending = getattr(self, '_rabbitfx_pending', None)
+                    if pending is not None and texture_type in ('Glowmap', 'FXMap') and any(
+                        str(line).strip().lower().startswith(param_name.lower() + ' = ref ')
+                        for line in generated_lines
+                    ):
+                        marker = '; MaterialRabbitFX ' + hashlib.sha1(
+                            f'{obj.name}:{texture_type}:{len(pending)}'.encode('utf-8')
+                        ).hexdigest()
+                        fxmap_lines.append(marker)
+                        pending.append({'object': obj.name, 'type': texture_type,
+                                        'marker': marker, 'lines': list(generated_lines)})
                     # Run 行对三种贴图类型是同一条命令列表：调用/使用方法不变，
                     # 只是引用行多了一种贴图类型。
                     fxmap_lines.append(fx_profile.run_line)
@@ -2976,6 +2989,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
     def execute_postprocess(self, mod_export_path, exporter=None):
         from ..utils.log_utils import LOG as _LOG
 
+        _rabbitfx_outputs.clear()
+
         self._ntmi_modimp_extra_ps_t2_diffuse_map = bool(
             getattr(exporter, "extra_ps_t2_diffuse_map", False)
         )
@@ -2993,10 +3008,14 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         total_matched = 0
 
         for ini_file in ini_files:
+            self._rabbitfx_pending = []
             self._create_cumulative_backup(ini_file, mod_export_path)
 
             with open(ini_file, 'r', encoding='utf-8') as f:
                 content = f.read()
+
+            content = ''.join(line for line in content.splitlines(keepends=True)
+                              if not line.strip().startswith('; MaterialRabbitFX '))
 
             preserved_driver_content, content = self.split_anim_driver_block_content(content)
             content = self._strip_previous_transparency_sections(content)
@@ -3060,6 +3079,14 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
             with open(ini_file, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(new_content)
+
+            final_sections = self._parse_ini_content(new_content)[1]
+            records = []
+            for record in self._rabbitfx_pending:
+                for name, section_lines in final_sections.items():
+                    if record['marker'] in [line.strip() for line in section_lines]:
+                        records.append({**record, 'section': name})
+            _rabbitfx_outputs[os.path.normcase(os.path.abspath(ini_file))] = records
 
         _LOG.info(f"   ✅ 材质转资源节点执行完成")
 
