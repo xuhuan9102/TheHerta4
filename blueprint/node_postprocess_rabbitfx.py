@@ -57,7 +57,10 @@ class RabbitFXTargetItem(bpy.types.PropertyGroup):
     resource_suffix: bpy.props.StringProperty(name="标识", default="")
 
 
-class SSMTNode_PostProcess_Glow(SSMTNode_PostProcess_Base):
+# 2026-11-12 起由「材质转资源pro → RabbitFX贴图后处理pro」链替代。
+# 以下 _SSMTNode_PostProcess_GlowLegacyImpl 是旧版实现的完整副本：
+# 仅保留代码参考，不注册、不调用；不要在这里继续修 bug。
+class _SSMTNode_PostProcess_GlowLegacyImpl(SSMTNode_PostProcess_Base):
     bl_idname = 'SSMTNode_PostProcess_Glow'
     bl_label = 'RabbitFX贴图后处理'
     bl_description = '为指定物体添加 RabbitFX 发光/镂空/颜色偏移/W-Engine同步（支持多目标）'
@@ -551,7 +554,33 @@ class SSMTNode_PostProcess_Glow(SSMTNode_PostProcess_Base):
                 self._process_single_target(ini_file, mod_export_path, hash_val, suffix)
 
 
-# ── 目标列表操作运算符 ──
+class SSMTNode_PostProcess_Glow(SSMTNode_PostProcess_Base):
+    """RabbitFX 贴图后处理（弃用壳）。
+
+    仅保留 bl_idname 用于加载旧版蓝图文件，避免未知节点类型导致节点被
+    Blender 静默丢弃。功能已由「材质转资源pro → RabbitFX贴图后处理pro」链
+    承担；与「材质转资源」不同，本节点没有自动迁移，需要手动替换。
+    """
+    bl_idname = 'SSMTNode_PostProcess_Glow'
+    bl_label = 'RabbitFX贴图后处理（已弃用）'
+    bl_description = '已弃用：功能由「材质转资源pro → RabbitFX贴图后处理pro」链承担；本节点不会自动转换，请手动替换。'
+
+    def draw_buttons(self, context, layout):
+        layout.label(
+            text='已弃用：不会自动转换；请改用「材质转资源pro → RabbitFX贴图后处理pro」链',
+            icon='ERROR',
+        )
+
+    def execute_postprocess(self, mod_export_path):
+        # 弃用壳：显式 no-op。基类这里会 raise NotImplementedError，旧 .blend
+        # 里挂着本节点时会让整条导出链失败，所以必须在这里堵死导出入口。
+        print(
+            '[RabbitFX] 已弃用节点，跳过导出：请改用'
+            '「材质转资源pro → RabbitFX贴图后处理pro」链'
+        )
+
+
+# ── 旧版目标列表运算符（仅服务未注册的旧实现；不再注册）──
 class SSMT_OT_RabbitFX_TargetAdd(bpy.types.Operator):
     bl_idname = "ssmt.rabbitfx_target_add"
     bl_label = "添加目标"
@@ -597,13 +626,8 @@ class SSMT_OT_RabbitFX_TargetSelect(bpy.types.Operator):
         return {'FINISHED'}
 
 
-_classes = (
-    RabbitFXTargetItem,
-    SSMTNode_PostProcess_Glow,
-    SSMT_OT_RabbitFX_TargetAdd,
-    SSMT_OT_RabbitFX_TargetRemove,
-    SSMT_OT_RabbitFX_TargetSelect,
-)
+# 只注册弃用壳；旧实现及其 PropertyGroup/运算符保留定义但不注册。
+_classes = (SSMTNode_PostProcess_Glow,)
 
 
 def register():
