@@ -45,9 +45,12 @@ https://gamebanana.com/mods/531649
 
 import bpy
 import glob
+import importlib
+import importlib.util
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from collections import OrderedDict
@@ -548,6 +551,67 @@ def _insert_block(lines, position, block_lines, indent=""):
         lines.insert(position + offset, text)
 
 
+# ───────────────────── 材质转资源模块装载 ─────────────────────
+
+_MATERIAL_MODULE = None
+
+
+def _load_material_module():
+    """取得材质转资源模块（``_rabbitfx_outputs`` 的来源）。
+
+    正常插件导入走相对导入；纯 Python 单测按文件路径装载本模块时包结构不完整
+    （``PKG.blueprint.__path__`` 为空），退化为按 ``__file__`` 的兄弟模块路径
+    直接装载。装载结果写进 ``sys.modules`` 并缓存，重复调用不会重跑模块级副作用。
+    """
+    global _MATERIAL_MODULE
+    if _MATERIAL_MODULE is not None:
+        return _MATERIAL_MODULE
+
+    package = __package__
+    module_name = (
+        f"{package}.node_postprocess_material" if package else "node_postprocess_material"
+    )
+    module = sys.modules.get(module_name)
+    if module is None:
+        try:
+            if package:
+                module = importlib.import_module(".node_postprocess_material", package)
+            else:
+                module = importlib.import_module("node_postprocess_material")
+        except ImportError:
+            module = None
+        if module is None:
+            module_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "node_postprocess_material.py",
+            )
+            if not os.path.isfile(module_path):
+                raise ImportError(
+                    "本节点依赖 blueprint/node_postprocess_material.py，"
+                    f"但未找到: {module_path}"
+                )
+            module_spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if module_spec is None:
+                raise ImportError(
+                    "无法为 blueprint/node_postprocess_material.py 建立模块 spec: "
+                    f"{module_path}"
+                )
+            module = importlib.util.module_from_spec(module_spec)
+            sys.modules[module_name] = module
+            try:
+                module_spec.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(module_name, None)
+                raise
+    if package:
+        parent_package = sys.modules.get(package)
+        if parent_package is not None:
+            # 与正常 import 一致，把子模块挂到包上，后续 `from . import ...` 也能命中。
+            setattr(parent_package, "node_postprocess_material", module)
+    _MATERIAL_MODULE = module
+    return module
+
+
 # ────────────────────────── 材质侧探测 ──────────────────────────
 
 class _MaterialProbe:
@@ -555,9 +619,7 @@ class _MaterialProbe:
 
     @staticmethod
     def _load():
-        from .node_postprocess_material import SSMTNode_PostProcess_MaterialBase as base
-
-        return base
+        return _load_material_module().SSMTNode_PostProcess_MaterialBase
 
     def find_matching_materials(self, obj, texture_type):
         return self._load().find_matching_materials(self, obj, texture_type)
@@ -1287,6 +1349,12 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
     # ──────────────────────── 生成入口 ────────────────────────
 
     def execute_postprocess(self, mod_export_path):
+        """把参数注入本节点目标物体所在的 mesh 块。
+
+        有材质转资源登记时只消费登记记录（记录驱动，位置/绑定都由材质侧给出）；
+        该目录一条登记都没有（旧工程 / 单独使用本节点）时回退到旧口径：glob
+        目录下全部 ``*.ini``，按物体名自行圈定绘制单元。
+        """
         if not self.buffer_tag:
             self.buffer_tag = uuid.uuid4().hex[:8]
 
@@ -1309,13 +1377,25 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             print("[RabbitFXPro] 错误: 未指定任何目标物体")
             return
 
-        from . import node_postprocess_material
+        material_module = _load_material_module()
         output_path = os.path.normcase(os.path.abspath(mod_export_path))
-        for ini_file, records in node_postprocess_material._rabbitfx_outputs.items():
-            if os.path.dirname(ini_file) != output_path:
-                continue
+        registered = [
+            (ini_file, records)
+            for ini_file, records in material_module._rabbitfx_outputs.items()
+            if os.path.dirname(ini_file) == output_path
+        ]
+        if registered:
+            # 材质转资源已经登记过本目录：只处理它登记的文件。登记了但记录为空
+            # （该文件没有本节点可注入的 FX 绑定）时保持不动，不再扫目录。
+            for ini_file, records in registered:
+                self._create_cumulative_backup(ini_file, mod_export_path)
+                self._process_ini_file(ini_file, targets, sync_source, records)
+            return
+
+        # 回退：本目录没有登记（旧工程 / 本节点单独使用）时，保持旧行为。
+        for ini_file in glob.glob(os.path.join(mod_export_path, "*.ini")):
             self._create_cumulative_backup(ini_file, mod_export_path)
-            self._process_ini_file(ini_file, targets, sync_source, records)
+            self._process_ini_file(ini_file, targets, sync_source)
 
     @staticmethod
     def _parse_ini(content):
@@ -1345,7 +1425,12 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
                 section_lines.pop()
         return sections, preamble
 
-    def _process_ini_file(self, ini_file, targets, sync_source, records):
+    def _process_ini_file(self, ini_file, targets, sync_source, records=None):
+        """处理一个 ini。
+
+        ``records`` 为 ``None`` = 旧口径（按目标物体名自行圈定绘制单元，回退路径）；
+        否则只按材质转资源登记的记录注入。
+        """
         with open(ini_file, 'r', encoding='utf-8') as handle:
             content = handle.read()
 
@@ -1354,13 +1439,24 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         sections, preamble = self._parse_ini(content)
 
         buffer_name = self.buffer_resource_name()
-        changed = self._apply_material_records(
-            sections, records, [item.target_object for item in targets], buffer_name
-        )
-        source_missing = False
-        if sync_source is not None:
-            jobs, _, source_missing = self._plan_injections(sections, [], sync_source)
-            changed |= self._apply_injections(sections, jobs, buffer_name)
+        if records is None:
+            # 回退路径：和旧实现完全一致——目标与提取源一起圈定后再统一注入。
+            jobs, missing_targets, source_missing = self._plan_injections(
+                sections, targets, sync_source
+            )
+            changed = self._apply_injections(sections, jobs, buffer_name)
+            for obj, hash_val in missing_targets:
+                self._log_missing_target(sections, obj, hash_val)
+        else:
+            # 记录驱动：材质转资源已经给出每个绑定在段内的位置，本节点不再自己
+            # 按物体名扫段；提取源仍按结构圈定。
+            changed = self._apply_material_records(
+                sections, records, [item.target_object for item in targets], buffer_name
+            )
+            source_missing = False
+            if sync_source is not None:
+                jobs, _, source_missing = self._plan_injections(sections, [], sync_source)
+                changed |= self._apply_injections(sections, jobs, buffer_name)
         if source_missing and sync_source is not None:
             print(f"[RabbitFXPro] W-Engine 源 {sync_source.name}: 未找到可注入的绘制段")
         if self.enable_sync and self.fx_profile.supports_sync and changed:

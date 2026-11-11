@@ -17,6 +17,7 @@
   单元都保留参数块（互不剥离）。
 """
 
+import importlib
 import importlib.util
 import json
 import os
@@ -36,7 +37,7 @@ def _install_module(name, **attrs):
 
 
 PKG = "_rabbitfx_pro_test_pkg"
-for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common"):
+for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common", f"{PKG}.toolkit"):
     package = _install_module(package_name)
     package.__path__ = []
 
@@ -133,6 +134,13 @@ _install_module(
     f"{PKG}.common.global_config",
     GlobalConfig=types.SimpleNamespace(logic_name="ZZMI"),
 )
+# 材质转资源模块的导入级依赖：DDS 转换在记录驱动的测试里不会真正跑，
+# 桩成「转换成功」即可（真实转换由 test_dds_conversion 覆盖）。
+_install_module(
+    f"{PKG}.toolkit.tt_dds_conversion",
+    convert_texture_to_dds_cached=lambda *_args, **_kwargs: (True, ""),
+    is_dds_file=lambda path: str(path or "").lower().endswith(".dds"),
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -152,6 +160,8 @@ fx_namespace = _load("fx_namespace", "blueprint/fx_namespace.py")
 # 再加载旧的 RabbitFX 节点模块：新节点直接复用它导出的哈希/标识解析函数。
 _load("node_postprocess_rabbitfx", "blueprint/node_postprocess_rabbitfx.py")
 pro = _load("node_postprocess_rabbitfx_pro", "blueprint/node_postprocess_rabbitfx_pro.py")
+# 记录来源必须能在这套 fake-package 下装载（PR #68 的 ImportError 回归点）。
+material = pro._load_material_module()
 
 OBJECT_NAME = "LOD0.fd054d1d-30030-0.Body"
 MESH_NAME = "LOD0.fd054d1d-30030-0.Body"
@@ -381,6 +391,21 @@ MATERIAL_SECTION = (
     "run = CommandList\\RabbitFX\\Run\n"
 )
 
+RECORD_MARKER = '; MaterialRabbitFX record'
+
+# 材质转资源登记过的文件：标记行是它在段内的定位点，参数块要插在标记之前。
+MATERIAL_RECORD_SECTION = (
+    f"[{GLOW_SECTION}]\n"
+    f"[mesh:{MESH_NAME}]\n"
+    "hash = fd054d1d\n"
+    "match_first_index = 0\n"
+    "ps-t0 = Resource_DiffuseMap_Body\n"
+    "Resource\\RabbitFX\\Glowmap = ref Resource_Glowmap_5_Body\n"
+    f"{RECORD_MARKER}\n"
+    "run = CommandList\\RabbitFX\\Run\n"
+    "drawindexed = 52688, 0, 3\n"
+)
+
 FXMAP_SECTION = (
     f"[{SECOND_SECTION}]\n"
     f"[mesh:{SECOND_OBJECT}]\n"
@@ -485,12 +510,17 @@ class RabbitFXProTests(unittest.TestCase):
         self.ini_path = os.path.join(self.export_dir, "mod.ini")
         self._probe_backup = pro._PROBE
         pro._PROBE = _StubProbe()
+        # 材质转资源的登记表是模块级状态：每个用例从空表开始，避免互相污染。
+        self._outputs_backup = dict(material._rabbitfx_outputs)
+        material._rabbitfx_outputs.clear()
         # 命名空间按当前逻辑解析，测试之间必须复位，否则会互相污染。
         self._logic_backup = sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name
         sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "ZZMI"
 
     def tearDown(self):
         pro._PROBE = self._probe_backup
+        material._rabbitfx_outputs.clear()
+        material._rabbitfx_outputs.update(self._outputs_backup)
         sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = self._logic_backup
         self._temp.cleanup()
 
@@ -682,6 +712,72 @@ class RabbitFXProTests(unittest.TestCase):
         self.assertEqual(content.count("Resource\\RabbitFX\\Glowmap = ref null"), 1)
         self.assertEqual(content.count("$\\RabbitFX\\brightness = 0"), 1)
         self.assertIn("$\\RabbitFX\\interpolate = 0", content)
+
+    def test_registered_material_record_drives_injection(self):
+        """有材质登记：只处理登记文件，参数插在记录标记之前。"""
+        _write_ini(self.ini_path, MATERIAL_RECORD_SECTION)
+        decoy_path = os.path.join(self.export_dir, "unregistered.ini")
+        _write_ini(decoy_path, MATERIAL_SECTION)
+        material._rabbitfx_outputs[os.path.normcase(os.path.abspath(self.ini_path))] = [
+            {
+                'object': OBJECT_NAME,
+                'type': 'Glowmap',
+                'marker': RECORD_MARKER,
+                'section': f'[{GLOW_SECTION}]',
+                'lines': [r'Resource\RabbitFX\Glowmap = ref Resource_Glowmap_5_Body'],
+            }
+        ]
+        node = _make_node(target_items=[_item(_fake_object())])
+
+        node.execute_postprocess(self.export_dir)
+
+        content = _read_ini(self.ini_path)
+        self.assertIn(pro._PARAM_BEGIN, content)
+        self.assertLess(content.index(pro._PARAM_BEGIN), content.index(RECORD_MARKER))
+        self.assertLess(
+            content.index(pro._PARAM_BEGIN),
+            content.index("run = CommandList\\RabbitFX\\Run"),
+        )
+        # 同目录里没被登记的文件不走旧 glob 路径，必须保持原样。
+        self.assertEqual(_read_ini(decoy_path), MATERIAL_SECTION)
+
+    def test_no_record_for_directory_falls_back_to_glob(self):
+        """该目录一条登记都没有：回退旧口径，扫描目录下 *.ini 并注入。"""
+        _write_ini(self.ini_path, MATERIAL_SECTION)
+        # 别的目录的登记不能顶替本目录的回退判断。
+        material._rabbitfx_outputs[
+            os.path.normcase(
+                os.path.abspath(os.path.join(self.export_dir, "other", "other.ini"))
+            )
+        ] = []
+        node = _make_node(target_items=[_item(_fake_object())])
+
+        node.execute_postprocess(self.export_dir)
+
+        self.assertIn(pro._PARAM_BEGIN, _read_ini(self.ini_path))
+
+    def test_registered_empty_records_keep_ini_untouched(self):
+        """文件已登记但记录为空：新语义下不回退扫目录，字节不变。"""
+        _write_ini(self.ini_path, MATERIAL_SECTION)
+        material._rabbitfx_outputs[os.path.normcase(os.path.abspath(self.ini_path))] = []
+        node = _make_node(target_items=[_item(_fake_object())])
+
+        node.execute_postprocess(self.export_dir)
+
+        self.assertEqual(_read_ini(self.ini_path), MATERIAL_SECTION)
+
+    def test_material_module_imports_without_package_path(self):
+        """fake-package 下也能取到 material 记录来源；重复调用不重装载。"""
+        imported = pro._load_material_module()
+        self.assertIs(imported, material)
+        self.assertIs(imported, sys.modules[f"{PKG}.blueprint.node_postprocess_material"])
+        self.assertIs(sys.modules[f"{PKG}.blueprint"].node_postprocess_material, imported)
+        self.assertIsInstance(imported._rabbitfx_outputs, dict)
+        self.assertTrue(hasattr(imported, "SSMTNode_PostProcess_MaterialBase"))
+        self.assertIs(
+            importlib.import_module(".node_postprocess_material", f"{PKG}.blueprint"),
+            imported,
+        )
 
     def test_rerun_is_idempotent(self):
         _write_ini(self.ini_path, MATERIAL_SECTION)
