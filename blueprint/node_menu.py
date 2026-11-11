@@ -1425,6 +1425,7 @@ class SSMT_MT_NodeMenu_PostProcess_Material(bpy.types.Menu):
         _add_node_entry(layout, "贴图资源去重", 'PACKAGE', "SSMTNode_PostProcess_ResourceMerge")
         _add_node_entry(layout, "缓冲区清理", 'TRASH', "SSMTNode_PostProcess_BufferCleanup")
         _add_node_entry(layout, "配置文件清理", 'TEXT', "SSMTNode_PostProcess_CommentCleanup")
+        _add_node_entry(layout, "模型流光描边", 'LIGHT', "SSMTNode_PostProcess_FlowLight")
 
 
 class SSMT_MT_NodeMenu_PostProcess_Panel(bpy.types.Menu):
@@ -1445,6 +1446,7 @@ class SSMT_MT_NodeMenu_PostProcess_AnimDriver(bpy.types.Menu):
         _add_node_entry(layout, "拖拽交互", 'MOUSE_MOVE', "SSMTNode_PostProcess_DragInteraction")
         _add_node_entry(layout, "流体探针", 'MOD_FLUID', "SSMTNode_PostProcess_FluidProbe")
         _add_node_entry(layout, "动画驱动蓝图", 'ACTION', "SSMTNode_PostProcess_AnimDriver")
+        _add_node_entry(layout, "血量检测", 'HEART', "SSMTNode_PostProcess_HealthDetection")
 
 
 class SSMT_MT_NodeMenu_PostProcess_Creative(bpy.types.Menu):
@@ -1452,13 +1454,11 @@ class SSMT_MT_NodeMenu_PostProcess_Creative(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        _add_node_entry(layout, "血量检测", 'HEART', "SSMTNode_PostProcess_HealthDetection")
         _add_node_entry(layout, "贴图切换 V5.1", 'TEXTURE', "SSMTNode_PostProcess_DiffuseSwitch")
         _add_node_entry(layout, "物体贴图替换与清理", 'TEXTURE', "SSMTNode_PostProcess_ObjectTextureAssign")
         _add_node_entry(layout, "RabbitFX贴图后处理", 'LIGHT', "SSMTNode_PostProcess_Glow")
         _add_node_entry(layout, "RabbitFX贴图后处理pro", 'LIGHT', "SSMTNode_PostProcess_RabbitFXPro")
         _add_node_entry(layout, "PS绑定+IB限定", 'SHADERFX', "SSMTNode_PostProcess_PSBinding")
-        _add_node_entry(layout, "模型流光描边", 'LIGHT', "SSMTNode_PostProcess_FlowLight")
 
 
 class SSMT_OT_AlignNodes(bpy.types.Operator):
