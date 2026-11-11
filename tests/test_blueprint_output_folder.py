@@ -180,6 +180,10 @@ def _load_real_module(module_name, relative_path):
 # 真实模块：common/global_config.py（它会 from .global_properties import GlobalProterties）
 _global_config_module = _load_real_module(f"{PKG}.common.global_config", Path("common") / "global_config.py")
 GlobalConfig = _global_config_module.GlobalConfig
+_load_real_module(
+    f"{PKG}.common.ini_variable_validator",
+    Path("common") / "ini_variable_validator.py",
+)
 
 # 真实模块：ui/ui_func_export.py（它 from ..common.global_config import GlobalConfig）
 ui_func_export = _load_real_module(f"{PKG}.ui.ui_func_export", Path("ui") / "ui_func_export.py")
@@ -206,6 +210,12 @@ class _BlueprintTree:
 class _PostProcessNode:
     bl_idname = "SSMTNode_PostProcess_Material"
     mute = False
+
+
+class _ModIniNode:
+    def __init__(self, bl_idname):
+        self.bl_idname = bl_idname
+        self.last_mod_ini_path = ""
 
 
 class _FakeBlueprintModel:
@@ -319,6 +329,30 @@ class BlueprintOutputFolderTests(unittest.TestCase):
 
         self.assertEqual(result, self._default_folder())
         self.assertTrue(os.path.isdir(result), "默认目录应被创建")
+
+    def test_background_export_syncs_actual_blueprint_folder_ini_path(self):
+        combined_node = _ModIniNode("SSMTNode_PostProcess_CombinedPanel")
+        slider_node = _ModIniNode("SSMTNode_PostProcess_ShapeKeyExt")
+        tree = self._register(_BlueprintTree(
+            "蕾米埃尔-黑色皮肤",
+            blueprint_name_folder=True,
+            nodes=[combined_node, slider_node],
+        ))
+        output_dir = tempfile.mkdtemp(prefix="bp18_export_")
+        self.addCleanup(self._cleanup_dirs, output_dir)
+        ini_path = os.path.join(output_dir, "蕾米埃尔·黑色皮肤.ini")
+        Path(ini_path).write_text("[Constants]\n", encoding="utf-8")
+
+        ui_func_export._sync_background_export_ini_paths(
+            tree.name,
+            output_dir,
+            GlobalConfig.get_workspace_name(),
+        )
+
+        self.assertEqual(combined_node.ini_file_path, ini_path)
+        self.assertEqual(combined_node.last_mod_ini_path, ini_path)
+        self.assertEqual(slider_node.ini_file_path, ini_path)
+        self.assertEqual(slider_node.last_mod_ini_path, ini_path)
 
     # --- 用例 3：指针作用域（问题 2 的回归） -------------------------------
 
