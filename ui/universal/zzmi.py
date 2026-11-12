@@ -8428,7 +8428,7 @@ class ExportZZMI(ExportUnity):
             self.add_merged_skeleton_sections(ini_builder)
             self._copy_merged_skeleton_shader_to_mod()
 
-        ini_builder.save_to_file(os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.get_workspace_name() + ".ini"))
+        ini_builder.save_to_file(GlobalConfig.path_generate_mod_ini())
         TimerUtils.end_stage("INI配置生成")
 
 

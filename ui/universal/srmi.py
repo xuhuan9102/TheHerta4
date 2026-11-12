@@ -280,7 +280,7 @@ class ExportSRMI:
         )
 
         
-        ini_filepath = os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.get_workspace_name() + ".ini")
+        ini_filepath = GlobalConfig.path_generate_mod_ini()
         ini_builder.save_to_file(ini_filepath)
 
     def _integrate_object_swap_ini_hook(self, ini_builder):

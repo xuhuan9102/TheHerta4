@@ -170,6 +170,34 @@ class GlobalConfig:
             pass
 
         return cls.workspacename
+
+    @classmethod
+    def _sanitize_generated_mod_name(cls, name: str) -> str:
+        """清理将用作 Mod 目录名和 INI 文件名的蓝图名。"""
+        return re.sub(r'[\\/:*?"<>|]+', "_", str(name or "")).strip()
+
+    @classmethod
+    def get_generate_mod_name(cls, tree=None):
+        """返回本次导出的 Mod 名称，供输出目录和主 INI 文件名共用。"""
+        output_tree = tree if tree is not None else cls._get_output_blueprint_tree()
+        if (
+            output_tree is not None
+            and getattr(output_tree, "use_blueprint_name_generate_mod_folder", False)
+        ):
+            blueprint_name = cls._sanitize_generated_mod_name(
+                getattr(output_tree, "name", "")
+            )
+            if blueprint_name:
+                return blueprint_name
+        return cls.get_workspace_name()
+
+    @classmethod
+    def path_generate_mod_ini(cls, suffix: str = ""):
+        """返回本次导出的主 INI 路径；suffix 用于 WWMI 的 DrawIB 后缀。"""
+        return os.path.join(
+            cls.path_generate_mod_folder(),
+            cls.get_generate_mod_name() + str(suffix or "") + ".ini",
+        )
     
     @classmethod
     def path_workspace_folder(cls):
@@ -242,7 +270,7 @@ class GlobalConfig:
         ssmt_generated_mod_folder_path = os.path.join(GlobalConfig.path_mods_folder(),"SSMTGeneratedMod\\")
         name = str(folder_name or "").strip() or cls.get_workspace_name()
         # 蓝图名可能含路径非法字符，替换掉，避免建出意外层级的目录
-        name = re.sub(r'[\\/:*?"<>|]+', "_", name).strip() or cls.get_workspace_name()
+        name = cls._sanitize_generated_mod_name(name) or cls.get_workspace_name()
         generate_mod_folder_path = os.path.join(ssmt_generated_mod_folder_path, name + "\\")
         if not os.path.exists(generate_mod_folder_path):
             os.makedirs(generate_mod_folder_path)

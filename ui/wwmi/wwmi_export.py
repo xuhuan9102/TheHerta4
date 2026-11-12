@@ -755,7 +755,9 @@ class ExportWWMI:
             )
             M_IniHelper.generate_hash_style_texture_ini(ini_builder=config_ini_builder, drawib_drawibmodel_dict=self.drawib_drawibmodel_dict)
             M_IniHelper.generate_shared_slot_style_texture_ini(ini_builder=config_ini_builder, drawib_drawibmodel_dict=self.drawib_drawibmodel_dict)
-            config_ini_builder.save_to_file_not_reorder(os.path.join(GlobalConfig.path_generate_mod_folder(), GlobalConfig.get_workspace_name() + "_" + draw_ib + ".ini"))
+            config_ini_builder.save_to_file_not_reorder(
+                GlobalConfig.path_generate_mod_ini("_" + draw_ib)
+            )
             config_ini_builder.clear()
 
     def _integrate_object_swap_for_draw_ib(

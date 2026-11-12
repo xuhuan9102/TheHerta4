@@ -93,6 +93,10 @@ _GLOBAL_STATE = {"workspace": "", "mod": ""}
 _fake_global_config = types.SimpleNamespace(
     path_workspace_folder=lambda: _GLOBAL_STATE["workspace"],
     path_generate_mod_folder=lambda: _GLOBAL_STATE["mod"],
+    path_generate_mod_ini=lambda suffix="": os.path.join(
+        _GLOBAL_STATE["mod"],
+        os.path.basename(_GLOBAL_STATE["workspace"].rstrip("\\/")) + suffix + ".ini",
+    ),
     path_generatemod_buffer_folder=lambda: (
         os.path.join(_GLOBAL_STATE["mod"], "Meshes") if _GLOBAL_STATE["mod"] else ""
     ),

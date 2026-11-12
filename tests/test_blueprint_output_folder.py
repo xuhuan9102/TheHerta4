@@ -442,6 +442,20 @@ class BlueprintOutputFolderTests(unittest.TestCase):
         self.assertNotEqual(result, self.global_folder)
         self.assertTrue(os.path.isdir(result), "蓝图名目录应被创建")
 
+    def test_blueprint_name_option_also_uses_blueprint_name_for_ini(self):
+        tree = self._register(_BlueprintTree("蓝图B", blueprint_name_folder=True))
+
+        GlobalConfig.set_output_blueprint_tree(tree)
+
+        self.assertEqual(
+            GlobalConfig.path_generate_mod_ini(),
+            os.path.join(self._default_folder("蓝图B"), "蓝图B.ini"),
+        )
+        self.assertEqual(
+            GlobalConfig.path_generate_mod_ini("_1234"),
+            os.path.join(self._default_folder("蓝图B"), "蓝图B_1234.ini"),
+        )
+
     def test_blueprint_name_option_replaces_illegal_path_characters(self):
         illegal = '角/色:蓝*图?<A>|B"'
         tree = self._register(_BlueprintTree(illegal, blueprint_name_folder=True))
@@ -455,11 +469,26 @@ class BlueprintOutputFolderTests(unittest.TestCase):
         )
         self.assertNotIn("/", os.path.basename(os.path.dirname(GlobalConfig.path_generate_mod_folder())))
 
+    def test_blueprint_name_option_uses_same_clean_name_for_ini(self):
+        illegal = '角/色:蓝*图?<A>|B"'
+        tree = self._register(_BlueprintTree(illegal, blueprint_name_folder=True))
+
+        GlobalConfig.set_output_blueprint_tree(tree)
+
+        self.assertEqual(
+            os.path.basename(GlobalConfig.path_generate_mod_ini()),
+            "角_色_蓝_图_A_B_.ini",
+        )
+
     def test_blueprint_name_option_only_applies_inside_blueprint_flow(self):
         """非蓝图导出流程不受蓝图名开关影响（沿用场景全局设置）。"""
         self._register(_BlueprintTree("蓝图B", blueprint_name_folder=True))
 
         self.assertEqual(GlobalConfig.path_generate_mod_folder(), self.global_folder)
+        self.assertEqual(
+            os.path.basename(GlobalConfig.path_generate_mod_ini()),
+            GlobalConfig.get_workspace_name() + ".ini",
+        )
         self.assertFalse(os.path.isdir(self._default_folder("蓝图B")))
 
     def test_blueprint_name_no_longer_applies_after_pointer_restore(self):

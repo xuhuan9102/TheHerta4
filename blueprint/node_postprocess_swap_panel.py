@@ -83,7 +83,7 @@ def _resolve_blueprint_ini_path(tree, *preferred_paths):
         export_dir = GlobalConfig.path_generate_mod_folder()
     finally:
         GlobalConfig.restore_output_blueprint_tree(previous_tree_name)
-    return find_primary_ini(export_dir, GlobalConfig.get_workspace_name())
+    return find_primary_ini(export_dir, GlobalConfig.get_generate_mod_name(tree))
 
 
 class SSMT_SwapPanelEntry(bpy.types.PropertyGroup):
