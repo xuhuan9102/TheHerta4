@@ -17,7 +17,7 @@ from .node_postprocess_rabbitfx_pro import (
     ini_scope,
     SSMTNode_PostProcess_RabbitFXPro,
     _format_float,
-    _format_number,
+    build_breath_parameter_lines,
     _insert_block,
     _leading_whitespace,
     _load_material_module,
@@ -38,6 +38,12 @@ NAMESPACE = "GlowFX"
 RUN_LINE = rf"run = CommandList\{NAMESPACE}\Run"
 GLOW_REF_PREFIX = rf"Resource\{NAMESPACE}\Glowmap"
 PARAM_PREFIX = rf"$\{NAMESPACE}"
+_PARAM_NAME_CASE = {'h': 'H', 's': 'S', 'v': 'V'}
+
+
+def _glowfx_param(name):
+    """GlowFX 着色器参数名：H/S/V 大写，其余与 RabbitFX 同名。"""
+    return f"{PARAM_PREFIX}\\{_PARAM_NAME_CASE.get(str(name), name)}"
 
 _PARAM_BEGIN = "; === GlowFX Params ==="
 _PARAM_END = "; === End GlowFX Params ==="
@@ -504,61 +510,23 @@ class SSMTNode_PostProcess_GlowFX(
         ]
 
     def _build_breath_lines(self, breath_tick_count=1):
-        tag = self._var_tag()
-        frame = f"{_VAR_PREFIX}{tag}_frame"
-        valve = f"{_VAR_PREFIX}{tag}_valve"
-        glow = f"{_VAR_PREFIX}{tag}_glow"
-        fps = int(self.breath_fps)
-        step = _format_number(float(self.breath_step) / max(1, int(breath_tick_count)))
-        lines = [
-            _BREATH_BEGIN,
-            f"{frame} = {frame} + {step}",
-            f"if {frame} >= {fps}",
-            f"    {frame} = {frame} - {fps}",
-            f"    {valve} = 1 - {valve}",
-            "endif",
-            f"if {valve} == 0",
-            f"    {glow} = {frame}",
-            "else",
-            f"    {glow} = {fps} - {frame}",
-            "endif",
-        ]
-        bmin = _format_number(self.breath_brightness_min)
-        bmax = _format_number(self.breath_brightness_max)
-        if self.breath_mode == "SINGLE":
-            lines.extend(
-                [
-                    f"{PARAM_PREFIX}\\H = {_format_number(self.breath_h)}",
-                    f"{PARAM_PREFIX}\\S = {_format_number(self.breath_s)}",
-                    f"{PARAM_PREFIX}\\V = {_format_number(self.breath_v)}",
-                    f"{PARAM_PREFIX}\\brightness = {bmin} + ({bmax} - {bmin}) * {glow} / {fps}",
-                ]
-            )
-        elif self.breath_mode == "RAINBOW":
-            lines.extend(
-                [
-                    f"{PARAM_PREFIX}\\H = {glow} * {_format_number(360.0 / fps)}",
-                    f"{PARAM_PREFIX}\\S = {_format_number(self.breath_s)}",
-                    f"{PARAM_PREFIX}\\V = {_format_number(self.breath_v)}",
-                    f"{PARAM_PREFIX}\\brightness = {bmax}",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    f"{PARAM_PREFIX}\\H = {glow} * {_format_number(360.0 / fps)}",
-                    f"{PARAM_PREFIX}\\S = {_format_number(self.breath_s)}",
-                    f"{PARAM_PREFIX}\\V = {_format_number(self.breath_v)}",
-                    f"{PARAM_PREFIX}\\brightness = {glow} * {_format_number(float(self.breath_brightness_max) / fps)}",
-                ]
-            )
-        lines.extend(
-            [
-                f"{PARAM_PREFIX}\\interpolate = {_format_number(self.breath_interpolate)}",
-                _BREATH_END,
-            ]
+        return build_breath_parameter_lines(
+            _glowfx_param,
+            var_prefix=_VAR_PREFIX,
+            breath_begin=_BREATH_BEGIN,
+            breath_end=_BREATH_END,
+            tag=self._var_tag(),
+            fps=self.breath_fps,
+            step=self.breath_step,
+            mode=self.breath_mode,
+            h=self.breath_h,
+            s=self.breath_s,
+            v=self.breath_v,
+            brightness_min=self.breath_brightness_min,
+            brightness_max=self.breath_brightness_max,
+            interpolate=self.breath_interpolate,
+            tick_count=breath_tick_count,
         )
-        return lines
 
     def _ensure_glow_constants(self, sections):
         tag = self._var_tag()

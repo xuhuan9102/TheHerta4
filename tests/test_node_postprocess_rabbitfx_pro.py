@@ -2425,5 +2425,59 @@ class GlowFXTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "res")))
 
 
+    def test_breath_lines_come_from_one_shared_builder(self):
+        """两个节点的呼吸灯行都必须来自同一个共享生成器。"""
+        glow_module = _load_glowfx_module()
+        sentinel = ["SHARED-BREATH"]
+        calls = []
+
+        def fake(*_args, **kwargs):
+            calls.append(kwargs)
+            return list(sentinel)
+
+        old_pro = pro.build_breath_parameter_lines
+        old_glow = glow_module.build_breath_parameter_lines
+        pro.build_breath_parameter_lines = fake
+        glow_module.build_breath_parameter_lines = fake
+        try:
+            rabbit = _make_node(enable_breath=True)
+            glow = _make_glowfx_node(enable_breath=True)
+            self.assertEqual(rabbit._build_breath_lines(2), sentinel)
+            self.assertEqual(glow._build_breath_lines(2), sentinel)
+        finally:
+            pro.build_breath_parameter_lines = old_pro
+            glow_module.build_breath_parameter_lines = old_glow
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["tick_count"], 2)
+        self.assertEqual(calls[1]["tick_count"], 2)
+
+    def test_breath_lines_are_byte_identical_for_same_inputs(self):
+        """同一组入参交给共享生成器，两次产物逐字节相同。"""
+        kwargs = dict(
+            tag="abcd1234",
+            breath_begin="BEGIN",
+            breath_end="END",
+            fps=200,
+            step=0.3,
+            mode="RAINBOW",
+            h=10.0,
+            s=20.0,
+            v=30.0,
+            brightness_min=1.0,
+            brightness_max=8.0,
+            interpolate=0.5,
+            tick_count=2,
+        )
+        first = pro.build_breath_parameter_lines(
+            lambda name: rf"\NS\{name}", var_prefix="$x_", **kwargs
+        )
+        second = pro.build_breath_parameter_lines(
+            lambda name: rf"\NS\{name}", var_prefix="$x_", **kwargs
+        )
+        self.assertEqual(first, second)
+        self.assertIn(r"\NS\brightness = 8", "\n".join(first))
+        self.assertIn("$x_abcd1234_glow", "\n".join(first))
+
+
 if __name__ == "__main__":
     unittest.main()

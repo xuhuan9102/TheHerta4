@@ -546,6 +546,83 @@ def _format_float(value):
     return text
 
 
+def build_breath_parameter_lines(
+    param,
+    *,
+    var_prefix,
+    breath_begin,
+    breath_end,
+    tag,
+    fps,
+    step,
+    mode,
+    h,
+    s,
+    v,
+    brightness_min,
+    brightness_max,
+    interpolate,
+    tick_count=1,
+):
+    """共享的呼吸灯参数行生成器：RabbitFXPro 与 GlowFX 都只调这一份。
+
+    ``param`` 是命名空间参数名生成器（``param('h')`` → ``\\RabbitFX\\h`` / ``\\GlowFX\\H``）；
+    ``var_prefix`` 是计数器变量前缀（``$rfxpro_`` / ``$glowfx_``）。其余入参一致时，
+    除了这两处命名空间差异，两边产物逐字节相同。
+    """
+    frame = f"{var_prefix}{tag}_frame"
+    valve = f"{var_prefix}{tag}_valve"
+    glow = f"{var_prefix}{tag}_glow"
+    fps = int(fps)
+    step_text = _format_number(float(step) / max(1, int(tick_count)))
+    lines = [
+        breath_begin,
+        f"{frame} = {frame} + {step_text}",
+        f"if {frame} >= {fps}",
+        f"    {frame} = {frame} - {fps}",
+        f"    {valve} = 1 - {valve}",
+        "endif",
+        f"if {valve} == 0",
+        f"    {glow} = {frame}",
+        "else",
+        f"    {glow} = {fps} - {frame}",
+        "endif",
+    ]
+    bmin = _format_number(brightness_min)
+    bmax = _format_number(brightness_max)
+    if mode == 'SINGLE':
+        lines.extend(
+            [
+                f"{param('h')} = {_format_number(h)}",
+                f"{param('s')} = {_format_number(s)}",
+                f"{param('v')} = {_format_number(v)}",
+                f"{param('brightness')} = {bmin} + ({bmax} - {bmin}) * {glow} / {fps}",
+            ]
+        )
+    elif mode == 'RAINBOW':
+        lines.extend(
+            [
+                f"{param('h')} = {glow} * {_format_number(360.0 / fps)}",
+                f"{param('s')} = {_format_number(s)}",
+                f"{param('v')} = {_format_number(v)}",
+                f"{param('brightness')} = {bmax}",
+            ]
+        )
+    else:  # COMBO
+        lines.extend(
+            [
+                f"{param('h')} = {glow} * {_format_number(360.0 / fps)}",
+                f"{param('s')} = {_format_number(s)}",
+                f"{param('v')} = {_format_number(v)}",
+                f"{param('brightness')} = {glow} * {_format_number(float(brightness_max) / fps)}",
+            ]
+        )
+    lines.extend(
+        [f"{param('interpolate')} = {_format_number(interpolate)}", breath_end]
+    )
+    return lines
+
+
 def _insert_block(lines, position, block_lines, indent=""):
     """在 ``position`` 处插入一段行；``indent`` 用于跟锚点行保持同级缩进。"""
     for offset, line in enumerate(block_lines):
@@ -2026,59 +2103,23 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         ]
 
     def _build_breath_lines(self, breath_tick_count=1):
-        tag = self._var_tag()
-        frame = f"{_VAR_PREFIX}{tag}_frame"
-        valve = f"{_VAR_PREFIX}{tag}_valve"
-        glow = f"{_VAR_PREFIX}{tag}_glow"
-        fps = int(self.breath_fps)
-        step = _format_number(float(self.breath_step) / max(1, int(breath_tick_count)))
-        lines = [
-            _BREATH_BEGIN,
-            f"{frame} = {frame} + {step}",
-            f"if {frame} >= {fps}",
-            f"    {frame} = {frame} - {fps}",
-            f"    {valve} = 1 - {valve}",
-            "endif",
-            f"if {valve} == 0",
-            f"    {glow} = {frame}",
-            "else",
-            f"    {glow} = {fps} - {frame}",
-            "endif",
-        ]
-        bmin = _format_number(self.breath_brightness_min)
-        bmax = _format_number(self.breath_brightness_max)
-        param = self.fx_profile.param
-        if self.breath_mode == 'SINGLE':
-            lines.extend(
-                [
-                    f"{param('h')} = {_format_number(self.breath_h)}",
-                    f"{param('s')} = {_format_number(self.breath_s)}",
-                    f"{param('v')} = {_format_number(self.breath_v)}",
-                    f"{param('brightness')} = {bmin} + ({bmax} - {bmin}) * {glow} / {fps}",
-                ]
-            )
-        elif self.breath_mode == 'RAINBOW':
-            lines.extend(
-                [
-                    f"{param('h')} = {glow} * {_format_number(360.0 / fps)}",
-                    f"{param('s')} = {_format_number(self.breath_s)}",
-                    f"{param('v')} = {_format_number(self.breath_v)}",
-                    f"{param('brightness')} = {bmax}",
-                ]
-            )
-        else:  # COMBO
-            lines.extend(
-                [
-                    f"{param('h')} = {glow} * {_format_number(360.0 / fps)}",
-                    f"{param('s')} = {_format_number(self.breath_s)}",
-                    f"{param('v')} = {_format_number(self.breath_v)}",
-                    f"{param('brightness')} = {glow} * {_format_number(float(self.breath_brightness_max) / fps)}",
-                ]
-            )
-        lines.extend(
-            [f"{param('interpolate')} = {_format_number(self.breath_interpolate)}", _BREATH_END]
+        return build_breath_parameter_lines(
+            self.fx_profile.param,
+            var_prefix=_VAR_PREFIX,
+            breath_begin=_BREATH_BEGIN,
+            breath_end=_BREATH_END,
+            tag=self._var_tag(),
+            fps=self.breath_fps,
+            step=self.breath_step,
+            mode=self.breath_mode,
+            h=self.breath_h,
+            s=self.breath_s,
+            v=self.breath_v,
+            brightness_min=self.breath_brightness_min,
+            brightness_max=self.breath_brightness_max,
+            interpolate=self.breath_interpolate,
+            tick_count=breath_tick_count,
         )
-        return lines
 
     def _build_sync_lines(self, buffer_name):
         lines = [f"$\\rabbitfx\\blendmode = {int(self.sync_blendmode)}"]
