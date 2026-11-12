@@ -279,6 +279,21 @@ class SSMTNode_PostProcess_GlowFX(
         if generated:
             self._copy_glow_fx_resources(mod_export_path)
 
+    def _has_sibling_rabbitfx_targets(self):
+        """同蓝图里是否有另一套 RabbitFXPro 节点、且它还配置了目标物体。"""
+        tree = getattr(self, "id_data", None)
+        for other in getattr(tree, "nodes", None) or []:
+            if other is self:
+                continue
+            if getattr(other, "bl_idname", "") != "SSMTNode_PostProcess_RabbitFXPro":
+                continue
+            if bool(getattr(other, "mute", False)):
+                continue
+            for item in getattr(other, "target_items", None) or []:
+                if getattr(item, "target_object", None) is not None:
+                    return True
+        return False
+
     def _process_ini_file(self, ini_file, targets, records=None):
         with open(ini_file, "r", encoding="utf-8") as handle:
             content = handle.read()
@@ -298,10 +313,16 @@ class SSMTNode_PostProcess_GlowFX(
         if not changed:
             return False
         if generated:
-            sections = _strip_material_rabbitfx_sections(sections)
-            preamble = _strip_material_rabbitfx_lines(preamble)
-            preserved_driver = _strip_material_rabbitfx_text(preserved_driver)
-            tail = _strip_material_rabbitfx_text(tail)
+            if self._has_sibling_rabbitfx_targets():
+                # 同蓝图还有 RabbitFXPro 在用：只清本节点自己的单元，别动别人的运行元素。
+                print(
+                    "[GlowFX] 同蓝图存在 RabbitFXPro 目标，保留其 RabbitFX 运行元素"
+                )
+            else:
+                sections = _strip_material_rabbitfx_sections(sections)
+                preamble = _strip_material_rabbitfx_lines(preamble)
+                preserved_driver = _strip_material_rabbitfx_text(preserved_driver)
+                tail = _strip_material_rabbitfx_text(tail)
 
         with open(ini_file, "w", encoding="utf-8") as handle:
             if preserved_driver:
@@ -434,26 +455,17 @@ class SSMTNode_PostProcess_GlowFX(
         start, end = _unit_edit_scope(lines, unit)
         block = _strip_previous_blocks(lines[start:end])
         block = _strip_previous_glowfx_blocks(block)
-        block = _strip_rabbitfx_glow_lines(block, self.fx_profile)
-
-        marker_index = next(
-            (
-                index
-                for index, line in enumerate(block)
-                if marker and str(line).strip() == marker
-            ),
-            0,
-        )
-        draw_index, draw_args = _first_draw_after(block, marker_index)
-        if draw_index < 0:
-            draw_index, draw_args = _first_draw_after(block, 0)
-        if draw_index < 0:
-            print(f"[GlowFX] 跳过 {unit.get('mesh', '')}: 找不到三参数 drawindexed")
-            return False
-
         ref = record_ref or _block_resource_ref(block, self.fx_profile)
         if not ref:
             print(f"[GlowFX] 跳过 {unit.get('mesh', '')}: 找不到 Glowmap 资源引用")
+            return False
+        # 只在本目标单元内清 RabbitFX：同蓝图另有 RabbitFXPro 目标时，别动它的单元。
+        block = _strip_rabbitfx_glow_lines(block, self.fx_profile)
+        block = _strip_material_rabbitfx_lines(block)
+
+        draw_index, draw_args = _first_draw_after(block, 0)
+        if draw_index < 0:
+            print(f"[GlowFX] 跳过 {unit.get('mesh', '')}: 找不到三参数 drawindexed")
             return False
 
         indent = _leading_whitespace(block[draw_index])
@@ -480,7 +492,7 @@ class SSMTNode_PostProcess_GlowFX(
         _insert_block(block, draw_index + 1, call_lines, indent)
 
         if self.enable_glow:
-            param_position = min(draw_index, marker_index)
+            param_position = draw_index
             param_lines = [
                 _PARAM_BEGIN,
                 *self._build_glow_parameter_lines(breath_tick_count),

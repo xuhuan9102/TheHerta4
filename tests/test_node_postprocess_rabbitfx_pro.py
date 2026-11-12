@@ -2425,6 +2425,70 @@ class GlowFXTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "res")))
 
 
+    def test_glowfx_keeps_sibling_rabbitfx_runtime_elements(self):
+        """同蓝图里另有 RabbitFXPro 目标时，GlowFX 不得删掉它的运行元素。"""
+        marker = "; MaterialRabbitFX mix"
+        other_name = "LOD0.aa11bb22-30030-0.Other"
+        section = (
+            f"[{GLOW_SECTION}]\n"
+            f"[mesh:{MESH_NAME}]\n"
+            "hash = fd054d1d\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+            f"{marker}\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 10, 20, 0\n"
+            f"; [mesh:{other_name}]\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Other" "\n"
+            r"$\RabbitFX\brightness = 5" "\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 30, 40, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(marker)
+        glow = _make_glowfx_node(
+            name="Glow FX着色器",
+            target_items=[_item(_fake_object())],
+        )
+        rabbit = _make_node(
+            name="RabbitFXPro",
+            target_items=[_item(_fake_object(other_name))],
+        )
+        tree = _fake_tree([glow, rabbit])
+        glow.id_data = tree
+        rabbit.id_data = tree
+
+        glow.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        # GlowFX 自己的目标被替换成私有调用
+        self.assertIn(r"$\GlowFX\H =", content)
+        self.assertNotIn(r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal", content)
+        # 兄弟 RabbitFXPro 目标的运行元素必须原样保留
+        self.assertIn(r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Other", content)
+        self.assertIn(r"$\RabbitFX\brightness = 5", content)
+        self.assertIn("CommandList\\RabbitFX\\Run", content)
+
+    def test_glowfx_removes_rabbitfx_elements_when_no_sibling_node(self):
+        """没有兄弟 RabbitFXPro 时仍保持整文件清理（原语义不退化）。"""
+        marker = "; MaterialRabbitFX solo"
+        section = (
+            f"[{GLOW_SECTION}]\n"
+            f"[mesh:{MESH_NAME}]\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+            f"{marker}\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 10, 20, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(marker)
+        glow = _make_glowfx_node(name="Glow FX着色器", target_items=[_item(_fake_object())])
+        tree = _fake_tree([glow])
+        glow.id_data = tree
+
+        glow.execute_postprocess(self.export_dir)
+
+        self.assertNotIn("RabbitFX", _read_ini(self.ini_path))
+
     def test_breath_lines_come_from_one_shared_builder(self):
         """两个节点的呼吸灯行都必须来自同一个共享生成器。"""
         glow_module = _load_glowfx_module()
