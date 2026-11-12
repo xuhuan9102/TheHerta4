@@ -962,6 +962,7 @@ def _start_glow_preview(node, context):
             if image is not None:
                 texture = nodes.new('ShaderNodeTexImage')
                 texture.image = image
+                texture.interpolation = 'Closest'
                 links.new(texture.outputs['Color'], tint.inputs[1])
                 links.new(texture.outputs['Alpha'], strength.inputs[0])
             else:
