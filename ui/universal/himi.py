@@ -5783,10 +5783,7 @@ class ExportHIMI(ExportUnity):
         爆炸，且**全程不报错**。所以顺序只能是「先有写方，再撤静态来源」。
         """
         super().generate_unity_vs_config_ini()
-        ini_path = os.path.join(
-            GlobalConfig.path_generate_mod_folder(),
-            GlobalConfig.get_workspace_name() + ".ini",
-        )
+        ini_path = GlobalConfig.path_generate_mod_ini()
         # 【t73】落 CS + 两个"合并骨架专属"的引用硬门**只在合并骨架路径激活时**执行。
         # 普通导出（开关关闭）根本没有 attach CS、也没有 `cs =`/`cs-t1` 引用 ⇒ 旧行为会把
         # "整份 ini 里没有任何 `cs =` 引用"当成缺失而中止（用户实报的第二次误拦）。

@@ -80,8 +80,9 @@ class SSMTBlueprintTree(NodeTree):
     use_blueprint_name_generate_mod_folder: bpy.props.BoolProperty(
         name="生成Mod到 [蓝图名] 文件夹中",
         description=(
-            "勾选后默认输出目录用当前蓝图名代替工作空间名，即 "
-            "SSMTGeneratedMod/[蓝图名]（默认是 SSMTGeneratedMod/[工作空间名]）；"
+            "勾选后输出目录和主 INI 文件名都用当前蓝图名代替工作空间名，即 "
+            "SSMTGeneratedMod/[蓝图名]/[蓝图名].ini"
+            "（默认用工作空间名）；"
             "与「生成Mod到指定的文件夹中」互斥（仅对当前蓝图生效）"
         ),
         default=False,

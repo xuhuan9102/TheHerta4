@@ -642,13 +642,7 @@ def _collect_ini_variable_warnings(output_dir: str) -> list:
             validate_ini_file,
         )
 
-        workspace_name = ""
-        try:
-            workspace_name = str(GlobalConfig.get_workspace_name() or "")
-        except Exception:
-            workspace_name = ""
-
-        ini_path = find_primary_ini(output_dir, workspace_name)
+        ini_path = find_primary_ini(output_dir, GlobalConfig.get_generate_mod_name())
         if not ini_path:
             return []
         report = validate_ini_file(ini_path)
@@ -868,6 +862,9 @@ def _run_worker(manifest_path: str) -> None:
             tree = bpy.data.node_groups.get(tree_name)
             if tree is None:
                 raise RuntimeError(f"未找到蓝图树: {tree_name}")
+
+        # 输出目录已由清单固定；这里保留蓝图指针，让主 INI 文件名也沿用同一蓝图设置。
+        GlobalConfig.set_output_blueprint_tree(tree)
 
         # 贴图计划：按本蓝图「资源合并」节点的开关初始化（跨轮次累积，收尾统一落盘）。
         if TextureExportPlan is not None:

@@ -189,6 +189,7 @@ class ShaderReplaceExportPathTests(unittest.TestCase):
             f"{self.pkg}.common.global_config",
             GlobalConfig=types.SimpleNamespace(
                 path_generate_mod_folder=lambda: "E:/mod",
+                path_generate_mod_ini=lambda suffix="": f"E:/mod/Workspace{suffix}.ini",
                 path_generatemod_buffer_folder=lambda: "E:/mod/Buffer/",
                 get_workspace_name=lambda: "Workspace",
             ),

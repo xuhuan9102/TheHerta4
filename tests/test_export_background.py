@@ -248,6 +248,10 @@ class _FakeGlobalConfig:
         return cls.workspacename
 
     @classmethod
+    def get_generate_mod_name(cls, _tree=None):
+        return cls.get_workspace_name()
+
+    @classmethod
     def path_generate_mod_folder(cls):
         return cls.output_dir
 

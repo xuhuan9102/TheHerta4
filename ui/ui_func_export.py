@@ -174,7 +174,8 @@ def _sync_background_export_ini_paths(tree_name, output_dir, workspace_name=""):
     tree = bpy.data.node_groups.get(str(tree_name or ""))
     if tree is None:
         return
-    ini_path = find_primary_ini(str(output_dir or ""), str(workspace_name or ""))
+    ini_name = GlobalConfig.get_generate_mod_name(tree) or str(workspace_name or "")
+    ini_path = find_primary_ini(str(output_dir or ""), ini_name)
     if not ini_path:
         return
     for node in getattr(tree, "nodes", []) or []:
