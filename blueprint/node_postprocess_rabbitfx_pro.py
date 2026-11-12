@@ -903,6 +903,14 @@ def _preview_base_material(obj, original, glow_materials):
     return max(candidates, key=lambda item: item[0])[1] if candidates else original
 
 
+def _new_preview_glow_texture(nodes, image):
+    """预览用的发光贴图节点：最近邻采样，避免跨三角形 UV 插值出网格线。"""
+    texture = nodes.new('ShaderNodeTexImage')
+    texture.image = image
+    texture.interpolation = 'Closest'
+    return texture
+
+
 def _start_glow_preview(node, context):
     key = _preview_tree_key(node)
     if key in _glow_previews:
@@ -960,9 +968,7 @@ def _start_glow_preview(node, context):
             strength.operation = 'MULTIPLY'
             strength.inputs[0].default_value = 1.0
             if image is not None:
-                texture = nodes.new('ShaderNodeTexImage')
-                texture.image = image
-                texture.interpolation = 'Closest'
+                texture = _new_preview_glow_texture(nodes, image)
                 links.new(texture.outputs['Color'], tint.inputs[1])
                 links.new(texture.outputs['Alpha'], strength.inputs[0])
             else:

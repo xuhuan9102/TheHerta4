@@ -604,6 +604,28 @@ class RabbitFXProTests(unittest.TestCase):
         self.assertIs(source, override)
         self.assertEqual(source_link, 'OBJECT')
 
+    def test_preview_glow_texture_uses_closest_interpolation(self):
+        """预览发光贴图必须最近邻采样；线性插值会在三角形 UV 边界出网格线。"""
+        class FakeNodes:
+            def __init__(self):
+                self.created = []
+
+            def new(self, bl_idname):
+                node = types.SimpleNamespace(
+                    bl_idname=bl_idname, image=None, interpolation='Linear',
+                )
+                self.created.append(node)
+                return node
+
+        nodes = FakeNodes()
+        image = object()
+
+        texture = pro._new_preview_glow_texture(nodes, image)
+
+        self.assertEqual(texture.bl_idname, 'ShaderNodeTexImage')
+        self.assertIs(texture.image, image)
+        self.assertEqual(texture.interpolation, 'Closest')
+
     def test_preview_uses_diffuse_material_when_active_source_is_glowmap(self):
         """专用 Glowmap 材质只作发光遮罩，不能作为整个网格的可见材质。"""
         diffuse = types.SimpleNamespace(name='DiffuseMap_发光', use_nodes=True)
