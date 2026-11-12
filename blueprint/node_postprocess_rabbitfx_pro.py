@@ -665,6 +665,15 @@ def _preview_owner_nodes(node):
     return owners
 
 
+def _configure_preview_bloom(bloom):
+    bloom.inputs['Type'].default_value = 'Bloom'
+    bloom.inputs['Quality'].default_value = 'High'
+    bloom.inputs['Threshold'].default_value = 0.5
+    bloom.inputs['Strength'].default_value = 1.0
+    bloom.inputs['Size'].default_value = 0.9
+    bloom.inputs['Iterations'].default_value = 4
+
+
 def _enable_glow_bloom(context):
     scene = context.scene
     key = scene.as_pointer()
@@ -677,8 +686,7 @@ def _enable_glow_bloom(context):
     tree.interface.new_socket(name='Image', in_out='OUTPUT', socket_type='NodeSocketColor')
     render_layers = tree.nodes.new('CompositorNodeRLayers')
     bloom = tree.nodes.new('CompositorNodeGlare')
-    bloom.inputs['Type'].default_value = 'Bloom'
-    bloom.inputs['Threshold'].default_value = 0.5
+    _configure_preview_bloom(bloom)
     output = tree.nodes.new('NodeGroupOutput')
     tree.links.new(render_layers.outputs['Image'], bloom.inputs['Image'])
     tree.links.new(bloom.outputs['Image'], output.inputs['Image'])
@@ -713,6 +721,27 @@ def _disable_glow_bloom(scene):
         bpy.data.node_groups.remove(state['tree'])
 
 
+def _use_preview_emission_surface(nodes, links, output_node, color_socket, strength_socket):
+    """在原有表面上叠加独立发光，保留原材质内部节点连接。"""
+    surface = output_node.inputs['Surface']
+    original_output = (
+        surface.links[0].from_socket
+        if getattr(surface, 'links', None)
+        else None
+    )
+    emission = nodes.new('ShaderNodeEmission')
+    links.new(color_socket, emission.inputs['Color'])
+    links.new(strength_socket, emission.inputs['Strength'])
+    if original_output is None:
+        links.new(emission.outputs['Emission'], surface)
+        return emission
+    add_shader = nodes.new('ShaderNodeAddShader')
+    links.new(original_output, add_shader.inputs[0])
+    links.new(emission.outputs['Emission'], add_shader.inputs[1])
+    links.new(add_shader.outputs['Shader'], surface)
+    return emission
+
+
 def _preview_parameters(node, elapsed):
     if not node.enable_breath:
         return (node.glow_h, node.glow_s, node.glow_v,
@@ -727,6 +756,28 @@ def _preview_parameters(node, elapsed):
         hue = wave * 360.0 / period
         brightness = node.breath_brightness_max if node.breath_mode == 'RAINBOW' else node.breath_brightness_max * wave / period
     return hue, node.breath_s, node.breath_v, brightness, node.breath_interpolate
+
+
+def _mute_preview_base_emission(shader_nodes, nodes, links):
+    """把预览副本里的原发光贡献乘 0，同时保留原贴图节点和链路。"""
+    for shader in shader_nodes:
+        if getattr(shader, 'bl_idname', '') != 'ShaderNodeBsdfPrincipled':
+            continue
+        socket = shader.inputs.get('Emission Strength')
+        if socket is None:
+            continue
+        existing = list(socket.links)
+        if not existing:
+            socket.default_value = 0.0
+            continue
+        source = existing[0].from_socket
+        for link in existing:
+            links.remove(link)
+        multiply = nodes.new('ShaderNodeMath')
+        multiply.operation = 'MULTIPLY'
+        multiply.inputs[1].default_value = 0.0
+        links.new(source, multiply.inputs[0])
+        links.new(multiply.outputs['Value'], socket)
 
 
 def _stop_glow_preview(key):
@@ -760,6 +811,7 @@ def _update_glow_previews():
         try:
             elapsed = time.monotonic() - session['started']
             parameters = {}
+            dirty_materials = set()
             for (_obj, _index, _link, _original, _material, tint, hsv, strength,
                  has_image, sat_add, val_add, owner) in session['materials']:
                 node_parameters = parameters.get(owner)
@@ -773,9 +825,82 @@ def _update_glow_previews():
                 sat_add.inputs[1].default_value = saturation / 100.0 * interpolate
                 val_add.inputs[1].default_value = value / 100.0 * interpolate
                 strength.inputs[1].default_value = brightness if owner.enable_glow else 0.0
+                dirty_materials.add(_material)
+            for material in dirty_materials:
+                material.node_tree.update_tag()
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
         except ReferenceError:
             _stop_glow_preview(key)
     return 0.1 if _glow_previews else None
+
+
+def _on_preview_parameter_update(node, _context):
+    if _preview_tree_key(node) in _glow_previews:
+        _update_glow_previews()
+
+
+def _is_glow_preview_material(material):
+    if material is None:
+        return False
+    try:
+        if bool(material.get('_rabbitfx_glow_preview')):
+            return True
+    except (AttributeError, TypeError):
+        pass
+    name = str(getattr(material, 'name', '') or '')
+    suffix = name.rsplit('.', 1)[-1]
+    if not suffix.isdigit():
+        return False
+    node_tree = getattr(material, 'node_tree', None)
+    node_types = {
+        getattr(node, 'bl_idname', '')
+        for node in (getattr(node_tree, 'nodes', None) or [])
+    }
+    return {
+        'ShaderNodeEmission',
+        'ShaderNodeHueSaturation',
+        'ShaderNodeCombineColor',
+    } <= node_types
+
+
+def _preview_material_source(obj, index):
+    slot = obj.material_slots[index]
+    material = slot.material
+    if (
+        slot.link == 'OBJECT'
+        and _is_glow_preview_material(material)
+        and index < len(obj.data.materials)
+        and obj.data.materials[index] is not None
+    ):
+        return obj.data.materials[index], 'DATA'
+    return material, slot.link
+
+
+def _preview_base_material(obj, original, glow_materials):
+    name = str(getattr(original, 'name', '') or '').casefold()
+    if original not in glow_materials and not name.startswith('glowmap'):
+        return original
+    candidates = []
+    for material in [
+        *(getattr(getattr(obj, 'data', None), 'materials', None) or []),
+        *(getattr(slot, 'material', None) for slot in getattr(obj, 'material_slots', None) or []),
+    ]:
+        if material is None or material == original or not getattr(material, 'use_nodes', True):
+            continue
+        candidate_name = str(getattr(material, 'name', '') or '').casefold()
+        if candidate_name.startswith('imgpv_'):
+            score = 3
+        elif candidate_name.startswith('diffusemap_') or candidate_name.startswith('diffuse_'):
+            score = 2
+        elif material not in glow_materials:
+            score = 1
+        else:
+            continue
+        candidates.append((score, material))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else original
 
 
 def _start_glow_preview(node, context):
@@ -798,18 +923,24 @@ def _start_glow_preview(node, context):
             if index >= len(obj.material_slots):
                 continue
             slot = obj.material_slots[index]
-            original = slot.material
+            current_material = slot.material
+            original, original_link = _preview_material_source(obj, index)
+            base_material = _preview_base_material(obj, original, glow_materials)
+            if base_material is not original:
+                original = base_material
+                original_link = 'DATA'
             if original is None or not original.use_nodes or not original.node_tree:
                 continue
             preview = original.copy()
+            preview['_rabbitfx_glow_preview'] = True
+            preview['_rabbitfx_glow_preview_original'] = original.name
             nodes, links = preview.node_tree.nodes, preview.node_tree.links
-            shader = next((n for n in nodes if n.bl_idname == 'ShaderNodeBsdfPrincipled'), None)
-            if shader is None:
-                bpy.data.materials.remove(preview)
-                continue
-            emission_color = shader.inputs.get('Emission Color')
-            emission_strength = shader.inputs.get('Emission Strength')
-            if emission_color is None or emission_strength is None:
+            _mute_preview_base_emission(
+                [node for node in nodes if node.bl_idname == 'ShaderNodeBsdfPrincipled'],
+                nodes, links,
+            )
+            output_node = next((n for n in nodes if n.bl_idname == 'ShaderNodeOutputMaterial'), None)
+            if output_node is None:
                 bpy.data.materials.remove(preview)
                 continue
             tint = nodes.new('ShaderNodeMixRGB')
@@ -831,6 +962,7 @@ def _start_glow_preview(node, context):
             if image is not None:
                 texture = nodes.new('ShaderNodeTexImage')
                 texture.image = image
+                texture.interpolation = 'Closest'
                 links.new(texture.outputs['Color'], tint.inputs[1])
                 links.new(texture.outputs['Alpha'], strength.inputs[0])
             else:
@@ -842,11 +974,17 @@ def _start_glow_preview(node, context):
             links.new(separate.outputs[2], val_add.inputs[0])
             links.new(sat_add.outputs[0], combine.inputs[1])
             links.new(val_add.outputs[0], combine.inputs[2])
-            links.new(combine.outputs['Color'], emission_color)
-            links.new(strength.outputs[0], emission_strength)
-            original_link = slot.link
+            _use_preview_emission_surface(
+                nodes, links, output_node, combine.outputs['Color'], strength.outputs[0],
+            )
             slot.link = 'OBJECT'
             slot.material = preview
+            if (
+                current_material != original
+                and _is_glow_preview_material(current_material)
+                and current_material.users == 0
+            ):
+                bpy.data.materials.remove(current_material)
             session['materials'].append((
                 obj, index, original_link, original, preview, tint, hsv, strength,
                 image is not None, sat_add, val_add, owner,
@@ -963,16 +1101,27 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             "HIMI（崩坏 3）是 $\\HI3FX\\h/s/v/brightness/interpolate"
         ),
         default=True,
+        update=_on_preview_parameter_update,
     )
-    glow_h: bpy.props.FloatProperty(name="H 色相", default=0.0, min=-360, max=360)
-    glow_s: bpy.props.FloatProperty(name="S 饱和度", default=0.0, min=-100, max=100)
-    glow_v: bpy.props.FloatProperty(name="V 明度", default=0.0, min=-100, max=100)
+    glow_h: bpy.props.FloatProperty(
+        name="H 色相", default=0.0, min=-360, max=360,
+        update=_on_preview_parameter_update,
+    )
+    glow_s: bpy.props.FloatProperty(
+        name="S 饱和度", default=0.0, min=-100, max=100,
+        update=_on_preview_parameter_update,
+    )
+    glow_v: bpy.props.FloatProperty(
+        name="V 明度", default=0.0, min=-100, max=100,
+        update=_on_preview_parameter_update,
+    )
     glow_brightness: bpy.props.FloatProperty(
         name="发光强度/光晕范围",
         description="$\\RabbitFX\\brightness（HIMI 为 $\\HI3FX\\brightness），越大光晕越强",
         default=8.0,
         min=0,
         max=500,
+        update=_on_preview_parameter_update,
     )
     glow_interpolate: bpy.props.FloatProperty(
         name="插值",
@@ -980,13 +1129,16 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         default=1.0,
         min=0,
         max=1,
+        update=_on_preview_parameter_update,
     )
     preview_use_color: bpy.props.BoolProperty(
         name="使用自定义底色", description="用指定颜色模拟发光贴图的颜色", default=False,
+        update=_on_preview_parameter_update,
     )
     preview_color: bpy.props.FloatVectorProperty(
         name="预览底色", description="模拟发光贴图的颜色，发光范围仍由贴图控制",
         subtype='COLOR', size=4, min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0),
+        update=_on_preview_parameter_update,
     )
 
     # ── 呼吸灯 ──
@@ -994,6 +1146,7 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         name="启用呼吸灯",
         description="让发光贴图参数的 H/S/V/亮度/插值随时间变化",
         default=False,
+        update=_on_preview_parameter_update,
     )
     breath_mode: bpy.props.EnumProperty(
         name="呼吸模式",
@@ -1003,19 +1156,40 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             ('COMBO', "渐变式呼吸", "Hue 全色环循环 + 发光强度同步脉动"),
         ],
         default='SINGLE',
+        update=_on_preview_parameter_update,
     )
     breath_fps: bpy.props.IntProperty(
-        name="周期(帧)", description="三角波一个来回的帧数", default=200, min=10, max=7200
+        name="周期(帧)", description="三角波一个来回的帧数", default=200, min=10, max=7200,
+        update=_on_preview_parameter_update,
     )
     breath_step: bpy.props.FloatProperty(
-        name="速度", description="每帧给计数器加多少", default=0.3, min=0.01, max=100
+        name="速度", description="每帧给计数器加多少", default=0.3, min=0.01, max=100,
+        update=_on_preview_parameter_update,
     )
-    breath_h: bpy.props.FloatProperty(name="H 色相", default=0.0, min=0, max=360)
-    breath_s: bpy.props.FloatProperty(name="S 饱和度", default=0.0, min=0, max=100)
-    breath_v: bpy.props.FloatProperty(name="V 明度", default=0.0, min=0, max=100)
-    breath_brightness_min: bpy.props.FloatProperty(name="最小强度", default=1.0, min=0, max=500)
-    breath_brightness_max: bpy.props.FloatProperty(name="最大强度", default=8.0, min=0, max=500)
-    breath_interpolate: bpy.props.FloatProperty(name="插值", default=1.0, min=0, max=1)
+    breath_h: bpy.props.FloatProperty(
+        name="H 色相", default=0.0, min=0, max=360,
+        update=_on_preview_parameter_update,
+    )
+    breath_s: bpy.props.FloatProperty(
+        name="S 饱和度", default=0.0, min=0, max=100,
+        update=_on_preview_parameter_update,
+    )
+    breath_v: bpy.props.FloatProperty(
+        name="V 明度", default=0.0, min=0, max=100,
+        update=_on_preview_parameter_update,
+    )
+    breath_brightness_min: bpy.props.FloatProperty(
+        name="最小强度", default=1.0, min=0, max=500,
+        update=_on_preview_parameter_update,
+    )
+    breath_brightness_max: bpy.props.FloatProperty(
+        name="最大强度", default=8.0, min=0, max=500,
+        update=_on_preview_parameter_update,
+    )
+    breath_interpolate: bpy.props.FloatProperty(
+        name="插值", default=1.0, min=0, max=1,
+        update=_on_preview_parameter_update,
+    )
 
     # ── FX 贴图参数 ──
     enable_sync: bpy.props.BoolProperty(

@@ -433,6 +433,193 @@ class RabbitFXProTests(unittest.TestCase):
         node.breath_mode = 'RAINBOW'
         self.assertEqual(pro._preview_parameters(node, 0.5)[0], 180)
 
+    def test_preview_uses_wide_high_quality_bloom(self):
+        """预览 Bloom 应模拟游戏的大范围高亮溢出。"""
+        inputs = {
+            'Type': types.SimpleNamespace(default_value=None),
+            'Quality': types.SimpleNamespace(default_value=None),
+            'Threshold': types.SimpleNamespace(default_value=None),
+            'Strength': types.SimpleNamespace(default_value=None),
+            'Size': types.SimpleNamespace(default_value=None),
+            'Iterations': types.SimpleNamespace(default_value=None),
+        }
+        bloom = types.SimpleNamespace(inputs=inputs)
+
+        pro._configure_preview_bloom(bloom)
+
+        self.assertEqual(inputs['Type'].default_value, 'Bloom')
+        self.assertEqual(inputs['Quality'].default_value, 'High')
+        self.assertEqual(inputs['Threshold'].default_value, 0.5)
+        self.assertEqual(inputs['Strength'].default_value, 1.0)
+        self.assertEqual(inputs['Size'].default_value, 0.9)
+        self.assertEqual(inputs['Iterations'].default_value, 4)
+
+    def test_preview_uses_emission_surface_without_disconnecting_textures(self):
+        """预览在现有 Surface 上叠加发光着色器，不改内部贴图连接。"""
+        class FakeNodes:
+            def __init__(self):
+                self.created = []
+
+            def new(self, bl_idname):
+                sockets = {
+                    'ShaderNodeEmission': (
+                        {'Color': object(), 'Strength': object(), 'Weight': object()},
+                        {'Emission': object()},
+                    ),
+                    'ShaderNodeAddShader': (
+                        [object(), object()],
+                        {'Shader': object()},
+                    ),
+                }
+                inputs, outputs = sockets[bl_idname]
+                node = types.SimpleNamespace(
+                    bl_idname=bl_idname, inputs=inputs, outputs=outputs,
+                )
+                self.created.append(node)
+                return node
+
+        class FakeLinks:
+            def __init__(self):
+                self.log = []
+
+            def new(self, output, input_socket):
+                self.log.append((output, input_socket))
+
+        nodes = FakeNodes()
+        links = FakeLinks()
+        original_surface = object()
+        surface = types.SimpleNamespace(
+            links=[types.SimpleNamespace(from_socket=original_surface)],
+        )
+        output_node = types.SimpleNamespace(inputs={'Surface': surface})
+        color = object()
+        strength = object()
+
+        emission = pro._use_preview_emission_surface(
+            nodes, links, output_node, color, strength,
+        )
+
+        self.assertEqual(emission.bl_idname, 'ShaderNodeEmission')
+        self.assertEqual(len(links.log), 5)
+        self.assertIs(links.log[0][1], emission.inputs['Color'])
+        self.assertIs(links.log[1][1], emission.inputs['Strength'])
+        self.assertIs(links.log[2][0], original_surface)
+        self.assertIs(links.log[3][0], emission.outputs['Emission'])
+        self.assertIs(links.log[4][1], surface)
+
+    def test_preview_mutes_base_emission_without_removing_texture_nodes(self):
+        """预览副本保留原发光贴图，但把原 Emission Strength 路径乘 0。"""
+        class FakeNodes:
+            def __init__(self):
+                self.created = []
+
+            def new(self, bl_idname):
+                node = types.SimpleNamespace(
+                    bl_idname=bl_idname,
+                    inputs=[
+                        types.SimpleNamespace(default_value=0.0),
+                        types.SimpleNamespace(default_value=0.0),
+                    ],
+                    outputs={'Value': object()},
+                )
+                self.created.append(node)
+                return node
+
+        class FakeLinks:
+            def __init__(self):
+                self.log = []
+                self.removed = []
+
+            def new(self, output, input_socket):
+                self.log.append((output, input_socket))
+
+            def remove(self, link):
+                self.removed.append(link)
+
+        original_output = object()
+        original_link = types.SimpleNamespace(from_socket=original_output)
+        linked_strength = types.SimpleNamespace(
+            links=[original_link], default_value=3.0,
+        )
+        unlinked_strength = types.SimpleNamespace(
+            links=[], default_value=2.0,
+        )
+        shader_nodes = [
+            types.SimpleNamespace(
+                bl_idname='ShaderNodeBsdfPrincipled',
+                inputs={'Emission Strength': linked_strength},
+            ),
+            types.SimpleNamespace(
+                bl_idname='ShaderNodeBsdfPrincipled',
+                inputs={'Emission Strength': unlinked_strength},
+            ),
+        ]
+
+        nodes = FakeNodes()
+        links = FakeLinks()
+        pro._mute_preview_base_emission(shader_nodes, nodes, links)
+
+        self.assertEqual(links.removed, [original_link])
+        self.assertEqual(len(nodes.created), 1)
+        multiply = nodes.created[0]
+        self.assertEqual(multiply.bl_idname, 'ShaderNodeMath')
+        self.assertEqual(multiply.operation, 'MULTIPLY')
+        self.assertEqual(multiply.inputs[1].default_value, 0.0)
+        self.assertEqual(links.log, [
+            (original_output, multiply.inputs[0]),
+            (multiply.outputs['Value'], linked_strength),
+        ])
+        self.assertEqual(unlinked_strength.default_value, 0.0)
+
+    def test_preview_restarts_from_data_material_when_slot_holds_stale_preview(self):
+        """对象槽里的旧预览副本不能再作为下一次预览的复制源。"""
+        data_material = types.SimpleNamespace(
+            name='Glowmap_发光', node_tree=types.SimpleNamespace(nodes=[]), get=lambda *_args: None,
+        )
+        stale_preview = types.SimpleNamespace(
+            name='Glowmap_发光.010',
+            node_tree=types.SimpleNamespace(nodes=[
+                types.SimpleNamespace(bl_idname='ShaderNodeEmission'),
+                types.SimpleNamespace(bl_idname='ShaderNodeHueSaturation'),
+                types.SimpleNamespace(bl_idname='ShaderNodeCombineColor'),
+            ]),
+            get=lambda *_args: None,
+        )
+        obj = types.SimpleNamespace(
+            data=types.SimpleNamespace(materials=[data_material]),
+            material_slots=[types.SimpleNamespace(
+                link='OBJECT', material=stale_preview,
+            )],
+        )
+
+        source, source_link = pro._preview_material_source(obj, 0)
+        self.assertIs(source, data_material)
+        self.assertEqual(source_link, 'DATA')
+
+        override = types.SimpleNamespace(
+            name='IMGPV_Body', node_tree=types.SimpleNamespace(nodes=[]), get=lambda *_args: None,
+        )
+        obj.material_slots[0].material = override
+        source, source_link = pro._preview_material_source(obj, 0)
+        self.assertIs(source, override)
+        self.assertEqual(source_link, 'OBJECT')
+
+    def test_preview_uses_diffuse_material_when_active_source_is_glowmap(self):
+        """专用 Glowmap 材质只作发光遮罩，不能作为整个网格的可见材质。"""
+        diffuse = types.SimpleNamespace(name='DiffuseMap_发光', use_nodes=True)
+        glowmap = types.SimpleNamespace(name='Glowmap_发光', use_nodes=True)
+        composite = types.SimpleNamespace(name='IMGPV_Body', use_nodes=True)
+        obj = types.SimpleNamespace(
+            data=types.SimpleNamespace(materials=[diffuse, glowmap]),
+            material_slots=[
+                types.SimpleNamespace(link='DATA', material=diffuse),
+                types.SimpleNamespace(link='DATA', material=glowmap),
+            ],
+        )
+
+        self.assertIs(pro._preview_base_material(obj, glowmap, [glowmap]), diffuse)
+        self.assertIs(pro._preview_base_material(obj, composite, [glowmap]), composite)
+
     def test_preview_ownership_follows_target_nodes_from_either_button(self):
         """从任一节点预览时，目标物体仍使用各自列表所属节点的参数。"""
         first_object = _fake_object()
