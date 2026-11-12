@@ -276,6 +276,29 @@ class PreprocessShapeKeyApplyNoOperatorTests(unittest.TestCase):
 
         self.assertTrue(_fake_scene.render.use_simplify)
 
+    def test_disable_copy_modifiers_removes_animated_modifiers(self):
+        class _AnimatedModifier:
+            def __init__(self, name):
+                self.name = name
+                self.show_viewport = True
+
+        class _AnimatedModifierCollection(list):
+            def __iter__(self):
+                for modifier in list(super().__iter__()):
+                    # 模拟关键帧求值把 show_viewport 重新写回 True。
+                    modifier.show_viewport = True
+                    yield modifier
+
+        obj = _FakeObject("Mesh", [], [])
+        obj.modifiers = _AnimatedModifierCollection(
+            [_AnimatedModifier("碰撞推开"), _AnimatedModifier("矫正平滑")]
+        )
+        _fake_bpy_data_objects[obj.name] = obj
+
+        preprocess.PreProcessHelper._disable_copy_modifiers([obj.name])
+
+        self.assertEqual(list(obj.modifiers), [])
+
     def test_apply_modifiers_strict_mode_reports_missing_objects(self):
         with self.assertRaisesRegex(RuntimeError, "MissingMesh: object not found"):
             preprocess.PreProcessHelper._apply_modifiers_with_simplify_disabled(

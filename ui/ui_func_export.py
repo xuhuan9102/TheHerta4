@@ -1289,7 +1289,19 @@ class SSMTQuickExportSelected(_BackgroundExportMixin, bpy.types.Operator):
         """按选中的网格准备后台会话（manifest 里带 quick_export / object_names）。"""
         object_names = [safe_object_name(obj) for obj in selected_meshes]
         object_names = [name for name in object_names if name]
-
+        modifier_states = {}
+        for obj in selected_meshes:
+            obj_name = safe_object_name(obj)
+            if not obj_name:
+                continue
+            states = {}
+            for modifier in getattr(obj, "modifiers", []) or []:
+                modifier_name = str(getattr(modifier, "name", "") or "")
+                if modifier_name:
+                    states[modifier_name] = bool(
+                        getattr(modifier, "show_viewport", False)
+                    )
+            modifier_states[obj_name] = states
         # 临时蓝图树只有 Object Info / Group / Output，不含后处理节点；
         # 步骤口径与 worker 用同一个计划函数：单轮 1 + 后处理节点 0 + 收尾 1。
         try:
@@ -1312,6 +1324,7 @@ class SSMTQuickExportSelected(_BackgroundExportMixin, bpy.types.Operator):
             direct_export=False,
             total_steps=total_steps,
             quick_export=True,
+            quick_export_modifier_states=modifier_states,
             object_names=object_names,
         )
 

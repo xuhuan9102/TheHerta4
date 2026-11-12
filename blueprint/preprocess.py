@@ -1139,22 +1139,21 @@ class PreProcessHelper:
 
     @classmethod
     def _disable_copy_modifiers(cls, object_names: List[str]) -> int:
-        """把临时副本上的修改器全部关闭（show_viewport=False），不改动原物体。
+        """从临时副本上移除全部修改器，不改动原物体。
 
-        蓝图树勾选「导出前关闭副本修改器」时调用：关掉后
-        `_apply_modifiers_with_simplify_disabled` 会把这些修改器视为不可用而跳过应用，
-        等价于用户手动关掉修改器的显示开关再导出 —— 副本几何不含修改器效果，
-        含大量形态键的物体也不再逐键复制物体做保守应用。
+        蓝图树勾选「导出前关闭副本修改器」时调用。不能只写
+        ``show_viewport=False``：该属性可能被 Object Action 的关键帧或依赖图求值
+        自动写回 True。直接移除副本修改器可以彻底切断这条恢复路径，
+        副本几何不含修改器效果，含大量形态键的物体也不再逐键复制物体做保守应用。
         """
         disabled_count = 0
         for obj_name in object_names:
             obj = bpy.data.objects.get(obj_name)
             if not obj or obj.type != 'MESH':
                 continue
-            for modifier in obj.modifiers:
-                if not modifier.show_viewport:
-                    continue
-                modifier.show_viewport = False
+            modifiers = list(obj.modifiers)
+            for modifier in modifiers:
+                obj.modifiers.remove(modifier)
                 disabled_count += 1
         return disabled_count
 
