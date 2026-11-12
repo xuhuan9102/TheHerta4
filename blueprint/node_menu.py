@@ -1458,6 +1458,7 @@ class SSMT_MT_NodeMenu_PostProcess_Creative(bpy.types.Menu):
         _add_node_entry(layout, "物体贴图替换与清理", 'TEXTURE', "SSMTNode_PostProcess_ObjectTextureAssign")
         # 原版「RabbitFX贴图后处理」已弃用：功能由「材质转资源pro → RabbitFX贴图后处理pro」链承担，且不会自动迁移。
         _add_node_entry(layout, "RabbitFX贴图后处理pro", 'LIGHT', "SSMTNode_PostProcess_RabbitFXPro")
+        _add_node_entry(layout, "Glow FX着色器", 'LIGHT', "SSMTNode_PostProcess_GlowFX")
         _add_node_entry(layout, "PS绑定+IB限定", 'SHADERFX', "SSMTNode_PostProcess_PSBinding")
 
 

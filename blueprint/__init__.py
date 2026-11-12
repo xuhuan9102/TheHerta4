@@ -115,6 +115,7 @@ _MODULE_REGISTRY = [
     {"name": "node_postprocess_shapekey_ext", "required": False},
     {"name": "node_postprocess_rabbitfx", "required": False},
     {"name": "node_postprocess_rabbitfx_pro", "required": False},
+    {"name": "node_postprocess_glow_fx", "required": False},
     {"name": "node_postprocess_psbinding", "required": False},
     {"name": "node_postprocess_diffuse_switch", "required": False},
     {"name": "node_postprocess_object_texture", "required": False},
