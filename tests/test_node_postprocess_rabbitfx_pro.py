@@ -2185,6 +2185,18 @@ class GlowFXTests(unittest.TestCase):
         self.assertEqual(node_cls.bl_idname, "SSMTNode_PostProcess_GlowFX")
         self.assertEqual(node_cls.bl_label, "Glow FX着色器")
 
+    def test_glowfx_is_in_material_resource_menu(self):
+        source = (ROOT / "blueprint" / "node_menu.py").read_text(encoding="utf-8")
+        material_menu = source.split(
+            "class SSMT_MT_NodeMenu_PostProcess_Material", 1
+        )[1].split("class SSMT_MT_NodeMenu_PostProcess_Panel", 1)[0]
+        creative_menu = source.split(
+            "class SSMT_MT_NodeMenu_PostProcess_Creative", 1
+        )[1]
+
+        self.assertIn("SSMTNode_PostProcess_GlowFX", material_menu)
+        self.assertNotIn("SSMTNode_PostProcess_GlowFX", creative_menu)
+
     def test_glowfx_does_not_derive_from_registered_rabbitfx_node(self):
         """Blender 注册子节点会让已注册的 RabbitFX 基类节点失效。"""
         module = _load_glowfx_module()
