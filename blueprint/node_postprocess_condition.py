@@ -105,12 +105,15 @@ from .node_postprocess_base import SSMTNode_PostProcess_Base
 from .node_postprocess_skip import (
     _SECTION_HEADER_RE,
     _find_sibling_ini_sections,
+    _is_manual_skip_item,
     _strip_runtime_suffixes,
 )
 
 
 NODE_IDNAME = "SSMTNode_PostProcess_Condition"
 NODE_LABEL = "条件判断"
+SKIP_NODE_IDNAME = "SSMTNode_PostProcess_Skip"
+POSTPROCESS_SOCKET_IDNAME = "SSMTSocketPostProcess"
 
 #: 本节点插入行的统一标记前缀（后面接 ``<ns>:begin@@`` 等）。
 COND_MARKER_PREFIX = "; @@COND:"
@@ -125,6 +128,8 @@ _MATCH_KEY_RE = re.compile(
 _OBJECT_LOD_PREFIX_RE = re.compile(r"^LOD\d+[.]", re.IGNORECASE)
 #: 物体名开头的 8 位 hash（``LOD0.`` 剥掉之后取）。
 _OBJECT_HASH_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8}")
+#: 物体名开头的完整条件身份：``<draw_ib>-<index_count>``。
+_OBJECT_CONDITION_PREFIX_RE = re.compile(r"^([0-9a-fA-F]{8})-([0-9]+)")
 #: 兜底：物体名中夹着的 8 位 hash，要求前后是分隔符（``-`` / ``_`` / ``.`` / 行尾）。
 _OBJECT_HASH_FALLBACK_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{8})(?=[-_.]|$)")
 
@@ -218,6 +223,145 @@ def _safe_index_count(value):
         return None
     number = int(text)
     return number if number > 0 else None
+
+
+def _parse_object_condition_identity(name):
+    """从物体名解析 ``(draw_ib, index_count)``；无 IndexCount 时返回空字符串。"""
+    value = str(name or "").strip()
+    if not value:
+        return "", ""
+    value = _OBJECT_LOD_PREFIX_RE.sub("", value)
+    match = _OBJECT_CONDITION_PREFIX_RE.match(value)
+    if match:
+        hash_value = match.group(1).lower()
+        index_text = match.group(2)
+        index_count = index_text if _safe_index_count(index_text) is not None else ""
+        return hash_value, index_count
+    return _parse_hash_from_object_name(name), ""
+
+
+def _iter_upstream_postprocess_nodes(node):
+    """沿后处理输入口向上遍历节点链；重定向节点继续向上穿透。"""
+    pending = []
+    for input_socket in getattr(node, "inputs", []) or []:
+        if getattr(input_socket, "bl_idname", "") != POSTPROCESS_SOCKET_IDNAME:
+            continue
+        for link in getattr(input_socket, "links", []) or []:
+            upstream = getattr(link, "from_node", None)
+            if upstream is not None:
+                pending.append(upstream)
+
+    visited = set()
+    while pending:
+        current = pending.pop(0)
+        key = id(current)
+        if key in visited:
+            continue
+        visited.add(key)
+        yield current
+
+        is_reroute = getattr(current, "bl_idname", "") == "NodeReroute"
+        for input_socket in getattr(current, "inputs", []) or []:
+            if not is_reroute and getattr(input_socket, "bl_idname", "") != POSTPROCESS_SOCKET_IDNAME:
+                continue
+            for link in getattr(input_socket, "links", []) or []:
+                upstream = getattr(link, "from_node", None)
+                if upstream is not None:
+                    pending.append(upstream)
+
+
+def _collect_upstream_skip_object_names(node):
+    """收集上游未禁用跳过节点里的物体名；手动哈希条目不纳入。"""
+    names = []
+    seen = set()
+    for upstream in _iter_upstream_postprocess_nodes(node):
+        if getattr(upstream, "bl_idname", "") != SKIP_NODE_IDNAME:
+            continue
+        if getattr(upstream, "mute", False):
+            continue
+        for item in getattr(upstream, "skip_objects", []) or []:
+            if _is_manual_skip_item(item):
+                continue
+            name = str(getattr(item, "object_name", "") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _sync_upstream_skip_condition_objects(node):
+    """按开关同步自动项；关闭开关或上游移除时删除自动项，手动物体保留。"""
+    collection = getattr(node, "condition_objects", None)
+    if collection is None:
+        return []
+
+    enabled = bool(getattr(node, "auto_include_upstream_skip_objects", False))
+    upstream_names = _collect_upstream_skip_object_names(node) if enabled else []
+    upstream_set = set(upstream_names)
+    manual_names = {
+        str(getattr(item, "object_name", "") or "").strip()
+        for item in collection
+        if not getattr(item, "auto_from_skip", False)
+    }
+
+    for index in range(len(collection) - 1, -1, -1):
+        item = collection[index]
+        if not getattr(item, "auto_from_skip", False):
+            continue
+        name = str(getattr(item, "object_name", "") or "").strip()
+        if not enabled or name not in upstream_set or name in manual_names:
+            collection.remove(index)
+
+    existing_names = {
+        str(getattr(item, "object_name", "") or "").strip()
+        for item in collection
+    }
+    for name in upstream_names:
+        if name in existing_names:
+            continue
+        item = collection.add()
+        item.object_name = name
+        item.auto_from_skip = True
+        existing_names.add(name)
+    return upstream_names
+
+
+def _iter_downstream_postprocess_nodes(node):
+    """沿后处理输出口向下遍历节点链；重定向节点继续向下穿透。"""
+    pending = []
+    for output_socket in getattr(node, "outputs", []) or []:
+        if getattr(output_socket, "bl_idname", "") != POSTPROCESS_SOCKET_IDNAME:
+            continue
+        for link in getattr(output_socket, "links", []) or []:
+            downstream = getattr(link, "to_node", None)
+            if downstream is not None:
+                pending.append(downstream)
+
+    visited = set()
+    while pending:
+        current = pending.pop(0)
+        key = id(current)
+        if key in visited:
+            continue
+        visited.add(key)
+        yield current
+
+        is_reroute = getattr(current, "bl_idname", "") == "NodeReroute"
+        for output_socket in getattr(current, "outputs", []) or []:
+            if not is_reroute and getattr(output_socket, "bl_idname", "") != POSTPROCESS_SOCKET_IDNAME:
+                continue
+            for link in getattr(output_socket, "links", []) or []:
+                downstream = getattr(link, "to_node", None)
+                if downstream is not None:
+                    pending.append(downstream)
+
+
+def _sync_downstream_condition_nodes(skip_node):
+    """跳过列表变化时，立即刷新下游已开启自动纳入的条件判断节点。"""
+    for downstream in _iter_downstream_postprocess_nodes(skip_node):
+        if getattr(downstream, "bl_idname", "") == NODE_IDNAME:
+            _sync_upstream_skip_condition_objects(downstream)
 
 
 def _get_section_registry():
@@ -1663,10 +1807,40 @@ class SSMT_ConditionItem(bpy.types.PropertyGroup):
 
 class SSMT_ConditionObjectItem(bpy.types.PropertyGroup):
     object_name: bpy.props.StringProperty(name="物体名称", default="")  # type: ignore
+    auto_from_skip: bpy.props.BoolProperty(name="来自上游跳过节点", default=False)  # type: ignore
+
+
+def _update_auto_include_upstream_skip_objects(node, _context):
+    try:
+        _sync_upstream_skip_condition_objects(node)
+    except Exception as exc:
+        print(f"[条件判断] 同步上游跳过物体失败: {exc}")
+
+
+def _condition_item_summary(item):
+    """返回条件列表行的一行摘要与状态图标。"""
+    if getattr(item, "condition_type", "HASH") == 'VARIABLE':
+        name = str(getattr(item, "variable_name", "") or "").strip()
+        if not name:
+            return "变量：未填写", 'ERROR'
+        operator = str(getattr(item, "comparison_op", "") or "==").strip()
+        value = str(getattr(item, "compare_value", "") or "").strip()
+        return f"变量：{name} {operator} {value}".rstrip(), 'VIEWZOOM'
+
+    hash_value = str(getattr(item, "hash_value", "") or "").strip()
+    check_hash = str(getattr(item, "check_hash", "") or "").strip()
+    if not (hash_value or check_hash):
+        return "哈希：未填写", 'ERROR'
+
+    summary = f"哈希：{hash_value}" if hash_value else f"哈希：{check_hash}（备用）"
+    index_count = str(getattr(item, "index_count", "") or "").strip()
+    if index_count:
+        summary += f" · IndexCount {index_count}"
+    return summary, 'VIEWZOOM'
 
 
 class SSMT_UL_POSTPROCESS_CONDITIONS(bpy.types.UIList):
-    """条件列表（哈希 / 变量混排；行内可改类型、上下移、删除）。"""
+    """条件列表（哈希 / 变量混排；行内摘要与排序，字段在详情区编辑）。"""
 
     bl_idname = "SSMT_UL_POSTPROCESS_CONDITIONS"
 
@@ -1674,18 +1848,8 @@ class SSMT_UL_POSTPROCESS_CONDITIONS(bpy.types.UIList):
         if self.layout_type not in {'DEFAULT', 'COMPACT'}:
             return
         row = layout.row(align=True)
-        row.prop(item, "condition_type", text="")
-        if item.condition_type == 'VARIABLE':
-            name_icon = 'VIEWZOOM' if str(item.variable_name or "").strip() else 'ERROR'
-            row.prop(item, "variable_name", text="", icon=name_icon)
-            row.prop(item, "comparison_op", text="")
-            row.prop(item, "compare_value", text="")
-        else:
-            hash_icon = 'VIEWZOOM' if (
-                str(item.hash_value or "").strip() or str(item.check_hash or "").strip()
-            ) else 'ERROR'
-            row.prop(item, "hash_value", text="", icon=hash_icon)
-            row.prop(item, "index_count", text="ic")
+        summary, summary_icon = _condition_item_summary(item)
+        row.label(text=summary, icon=summary_icon)
 
         node_name = getattr(data, "name", "")
         op_up = row.operator("ssmt.postprocess_condition_move_up", text="", icon='TRIA_UP')
@@ -1722,6 +1886,12 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
 
     condition_objects: bpy.props.CollectionProperty(type=SSMT_ConditionObjectItem)  # type: ignore
     active_condition_object: bpy.props.IntProperty(default=0)  # type: ignore
+    auto_include_upstream_skip_objects: bpy.props.BoolProperty(  # type: ignore
+        name="自动纳入前置跳过物体",
+        description="开启后自动把节点链上游「跳过」节点里的物体加入生效物体列表",
+        default=False,
+        update=_update_auto_include_upstream_skip_objects,
+    )
 
     #: 条件列表（哈希 + 变量，组合语义固定「与」）。
     condition_list: bpy.props.CollectionProperty(type=SSMT_ConditionItem)  # type: ignore
@@ -1757,6 +1927,12 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
 
         box = layout.box()
         box.label(text=f"生效物体 ({len(self.condition_objects)})", icon='OBJECT_DATA')
+        box.prop(
+            self,
+            "auto_include_upstream_skip_objects",
+            text="自动纳入前置跳过节点物体",
+            icon='LINKED',
+        )
         if self.condition_objects:
             box.template_list(
                 "SSMT_UL_CONDITION_OBJECTS", "",
@@ -1791,28 +1967,35 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
         else:
             condition_box.label(text="条件列表为空", icon='INFO')
 
-        buttons = condition_box.row(align=True)
-        op_add_hash = buttons.operator(
+        add_buttons = condition_box.row(align=True)
+        op_add_hash = add_buttons.operator(
             "ssmt.postprocess_condition_add", text="+ 哈希条件", icon='ADD'
         )
         op_add_hash.node_name = self.name
         op_add_hash.condition_type = 'HASH'
-        op_add_var = buttons.operator(
+        op_add_var = add_buttons.operator(
             "ssmt.postprocess_condition_add", text="+ 变量条件", icon='ADD'
         )
         op_add_var.node_name = self.name
         op_add_var.condition_type = 'VARIABLE'
-        op_remove_condition = buttons.operator(
+        add_buttons.operator(
+            "ssmt.condition_resolve_hash",
+            text="从物体添加",
+            icon='OBJECT_DATA',
+        ).node_name = self.name
+
+        action_buttons = condition_box.row(align=True)
+        op_remove_condition = action_buttons.operator(
             "ssmt.postprocess_condition_remove", text="删除", icon='REMOVE'
         )
         op_remove_condition.node_name = self.name
         op_remove_condition.index = -1
-        op_move_up = buttons.operator(
+        op_move_up = action_buttons.operator(
             "ssmt.postprocess_condition_move_up", text="上移", icon='TRIA_UP'
         )
         op_move_up.node_name = self.name
         op_move_up.index = -1
-        op_move_down = buttons.operator(
+        op_move_down = action_buttons.operator(
             "ssmt.postprocess_condition_move_down", text="下移", icon='TRIA_DOWN'
         )
         op_move_down.node_name = self.name
@@ -1891,7 +2074,8 @@ class SSMTNode_PostProcess_Condition(SSMTNode_PostProcess_Base):
         return ns
 
     def _selected_object_names(self):
-        """收集节点上选定的物体名（去空、去重、保持顺序）。"""
+        """同步并收集生效物体名（去空、去重、保持顺序）。"""
+        _sync_upstream_skip_condition_objects(self)
         names = []
         seen = set()
         for item in self.condition_objects:
@@ -2199,15 +2383,25 @@ class SSMT_OT_PostProcess_AddConditionObject(bpy.types.Operator):
             self.report({'WARNING'}, "请先选中要添加的网格物体")
             return {'CANCELLED'}
 
-        existing = {str(item.object_name or "") for item in node.condition_objects}
+        existing = {
+            str(item.object_name or ""): item
+            for item in node.condition_objects
+            if str(item.object_name or "").strip()
+        }
         added_count = 0
         for obj in objects:
             name = str(getattr(obj, "name", "") or "").strip()
-            if not name or name in existing:
+            if not name:
+                continue
+            existing_item = existing.get(name)
+            if existing_item is not None:
+                if getattr(existing_item, "auto_from_skip", False):
+                    existing_item.auto_from_skip = False
                 continue
             item = node.condition_objects.add()
             item.object_name = name
-            existing.add(name)
+            item.auto_from_skip = False
+            existing[name] = item
             added_count += 1
 
         self.report({'INFO'}, f"已添加 {added_count} 个物体")
@@ -2263,8 +2457,8 @@ class SSMT_OT_PostProcess_ClearConditionObjects(bpy.types.Operator):
 
 class SSMT_OT_PostProcess_ResolveConditionHash(bpy.types.Operator):
     bl_idname = "ssmt.condition_resolve_hash"
-    bl_label = "从物体解析哈希"
-    bl_description = "从选中物体（或列表里的物体）名称解析 8 位哈希，填入当前哈希条件"
+    bl_label = "从物体添加哈希"
+    bl_description = "从选中物体（或生效物体列表）名称解析 8 位哈希与 IndexCount；没有当前哈希条件时自动创建"
     bl_options = {'REGISTER', 'UNDO'}
 
     node_name: bpy.props.StringProperty()  # type: ignore
@@ -2281,24 +2475,36 @@ class SSMT_OT_PostProcess_ResolveConditionHash(bpy.types.Operator):
         for item in node.condition_objects:
             candidates.append(str(getattr(item, "object_name", "") or ""))
 
-        # 优先写进当前选中的哈希条件；没有条件列表时兼容写旧属性。
-        target_item = None
-        conditions = list(getattr(node, "condition_list", []) or [])
-        active_index = int(getattr(node, "active_condition", 0) or 0)
-        if 0 <= active_index < len(conditions):
-            item = conditions[active_index]
-            if str(getattr(item, "condition_type", "HASH") or "HASH") == 'HASH':
-                target_item = item
-
         for name in candidates:
-            hash_val = _parse_hash_from_object_name(name)
+            hash_val, index_count = _parse_object_condition_identity(name)
             if not hash_val:
                 continue
-            if target_item is not None:
-                target_item.hash_value = hash_val
-            else:
-                node.condition_hash = hash_val
-            self.report({'INFO'}, f"已解析哈希: {hash_val}（来自「{name}」）")
+            conditions = list(getattr(node, "condition_list", []) or [])
+            active_index = int(getattr(node, "active_condition", 0) or 0)
+            target_item = None
+            if 0 <= active_index < len(conditions):
+                item = conditions[active_index]
+                if str(getattr(item, "condition_type", "HASH") or "HASH") == 'HASH':
+                    target_item = item
+
+            created = target_item is None
+            if created:
+                target_item = node.condition_list.add()
+                target_item.condition_type = 'HASH'
+                target_item.check_hash = ""
+                target_item.index_count = ""
+                target_item.variable_name = ""
+                target_item.comparison_op = '=='
+                target_item.compare_value = "1"
+                node.active_condition = len(node.condition_list) - 1
+            target_item.hash_value = hash_val
+            target_item.index_count = index_count
+            action = "已添加哈希条件" if created else "已填入当前哈希条件"
+            index_text = f"，IndexCount={index_count}" if index_count else ""
+            self.report(
+                {'INFO'},
+                f"{action}: {hash_val}{index_text}（来自「{name}」）",
+            )
             return {'FINISHED'}
 
         self.report({'WARNING'}, "无法从物体名称解析出 8 位哈希，请手动填写")

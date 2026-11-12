@@ -399,6 +399,36 @@ class _FakeConditionCollection(list):
         self.insert(to_index, item)
 
 
+class _FakeConditionObjectCollection(list):
+    def add(self):
+        item = types.SimpleNamespace(object_name="", auto_from_skip=False)
+        self.append(item)
+        return item
+
+    def remove(self, index):
+        del self[index]
+
+
+class _RecordingLayout:
+    def __init__(self, calls=None):
+        self.calls = [] if calls is None else calls
+
+    def row(self, align=True):
+        self.calls.append(("row", align))
+        return _RecordingLayout(self.calls)
+
+    def label(self, text="", icon=""):
+        self.calls.append(("label", text, icon))
+
+    def prop(self, _data, prop, text="", icon=""):
+        self.calls.append(("prop", prop, text, icon))
+
+    def operator(self, identifier, text="", icon=""):
+        result = types.SimpleNamespace(node_name="", index=0)
+        self.calls.append(("operator", identifier, text, icon, result))
+        return result
+
+
 def _make_node(conditions=None, legacy_hash="", legacy_check="", legacy_index=""):
     node = module.SSMTNode_PostProcess_Condition()
     node.name = "条件判断"
@@ -473,6 +503,179 @@ class GoldenRegressionTests(unittest.TestCase):
         )
         self.assertEqual(legacy, listed)
 
+
+# ---------------------------------------------------------------------------
+# 条件列表界面
+# ---------------------------------------------------------------------------
+
+class ConditionListUiTests(unittest.TestCase):
+    def test_empty_hash_row_uses_readable_summary_instead_of_cramped_inputs(self):
+        uilist = module.SSMT_UL_POSTPROCESS_CONDITIONS()
+        uilist.layout_type = "DEFAULT"
+        layout = _RecordingLayout()
+        item = types.SimpleNamespace(
+            condition_type="HASH",
+            hash_value="",
+            check_hash="",
+            index_count="",
+        )
+
+        uilist.draw_item(
+            None,
+            layout,
+            types.SimpleNamespace(name="条件判断"),
+            item,
+            None,
+            None,
+            None,
+            0,
+        )
+
+        self.assertEqual(
+            [],
+            [call for call in layout.calls if call[0] == "prop"],
+        )
+        self.assertIn(("label", "哈希：未填写", "ERROR"), layout.calls)
+
+
+class UpstreamSkipIntegrationTests(unittest.TestCase):
+    def test_switch_syncs_skip_objects_through_upstream_chain(self):
+        skip_node = types.SimpleNamespace(
+            bl_idname="SSMTNode_PostProcess_Skip",
+            mute=False,
+            inputs=[],
+            skip_objects=[
+                types.SimpleNamespace(
+                    object_name="LOD0.11112222-1260-0.跳过物体",
+                    is_manual=False,
+                    manual_hash="",
+                ),
+                types.SimpleNamespace(
+                    object_name="",
+                    is_manual=True,
+                    manual_hash="33334444",
+                ),
+            ],
+        )
+        middle_node = types.SimpleNamespace(
+            bl_idname="SSMTNode_PostProcess_CommentCleanup",
+            mute=False,
+            inputs=[
+                types.SimpleNamespace(
+                    bl_idname="SSMTSocketPostProcess",
+                    links=[
+                        types.SimpleNamespace(
+                            from_node=skip_node,
+                            to_node=None,
+                        )
+                    ],
+                )
+            ],
+        )
+        node = _make_node()
+        node.condition_objects = _FakeConditionObjectCollection()
+        manual_item = node.condition_objects.add()
+        manual_item.object_name = "LOD0.9999aaaa-1-0.手动物体"
+        node.auto_include_upstream_skip_objects = True
+        node.inputs = [
+            types.SimpleNamespace(
+                bl_idname="SSMTSocketPostProcess",
+                links=[
+                    types.SimpleNamespace(
+                        from_node=middle_node,
+                        to_node=node,
+                    )
+                ],
+            )
+        ]
+
+        module._sync_upstream_skip_condition_objects(node)
+
+        self.assertEqual(
+            ["LOD0.9999aaaa-1-0.手动物体", "LOD0.11112222-1260-0.跳过物体"],
+            [item.object_name for item in node.condition_objects],
+        )
+        self.assertFalse(node.condition_objects[0].auto_from_skip)
+        self.assertTrue(node.condition_objects[1].auto_from_skip)
+
+        node.auto_include_upstream_skip_objects = False
+        module._sync_upstream_skip_condition_objects(node)
+        self.assertEqual(
+            ["LOD0.9999aaaa-1-0.手动物体"],
+            [item.object_name for item in node.condition_objects],
+        )
+
+    def test_downstream_sync_keeps_enabled_condition_node_current(self):
+        node = _make_node()
+        node.condition_objects = _FakeConditionObjectCollection()
+        node.auto_include_upstream_skip_objects = True
+        skip_node = types.SimpleNamespace(
+            bl_idname="SSMTNode_PostProcess_Skip",
+            mute=False,
+            inputs=[],
+            skip_objects=[
+                types.SimpleNamespace(
+                    object_name="LOD0.11112222-1260-0.跳过物体",
+                    is_manual=False,
+                    manual_hash="",
+                )
+            ],
+        )
+        skip_node.outputs = [
+            types.SimpleNamespace(
+                bl_idname="SSMTSocketPostProcess",
+                links=[
+                    types.SimpleNamespace(
+                        from_node=skip_node,
+                        to_node=node,
+                    )
+                ],
+            )
+        ]
+        node.inputs = [
+            types.SimpleNamespace(
+                bl_idname="SSMTSocketPostProcess",
+                links=[
+                    types.SimpleNamespace(
+                        from_node=skip_node,
+                        to_node=node,
+                    )
+                ],
+            )
+        ]
+
+        module._sync_downstream_condition_nodes(skip_node)
+
+        self.assertEqual(
+            ["LOD0.11112222-1260-0.跳过物体"],
+            [item.object_name for item in node.condition_objects],
+        )
+
+
+class ConditionFromObjectTests(unittest.TestCase):
+    def test_operator_creates_hash_condition_when_list_is_empty(self):
+        node = _make_node()
+        node.condition_list = _FakeConditionCollection()
+        tree = types.SimpleNamespace(nodes={"条件判断": node})
+        selected = types.SimpleNamespace(
+            name="LOD0.92cb56c9-1260-9402.脸+眼",
+            type="MESH",
+        )
+        context = types.SimpleNamespace(
+            space_data=types.SimpleNamespace(edit_tree=tree),
+            selected_objects=[selected],
+            active_object=selected,
+        )
+        operator = module.SSMT_OT_PostProcess_ResolveConditionHash()
+        operator.node_name = "条件判断"
+
+        self.assertEqual({'FINISHED'}, operator.execute(context))
+        self.assertEqual(1, len(node.condition_list))
+        item = node.condition_list[0]
+        self.assertEqual("HASH", item.condition_type)
+        self.assertEqual("92cb56c9", item.hash_value)
+        self.assertEqual("1260", item.index_count)
+        self.assertEqual(0, node.active_condition)
 
 # ---------------------------------------------------------------------------
 # 变量条件
