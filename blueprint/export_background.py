@@ -451,6 +451,7 @@ def build_manifest(
     direct_export: bool = False,
     total_steps: int = 0,
     quick_export: bool = False,
+    quick_export_modifier_states: dict | None = None,
     object_names: list = None,
     preprocess_cache_dir: str = "",
     ntmi_output_node_name: str = "",
@@ -488,6 +489,17 @@ def build_manifest(
         "direct_export": bool(direct_export),
         "total_steps": max(0, int(total_steps or 0)),
         "quick_export": bool(quick_export),
+        "quick_export_modifier_states": {
+            str(object_name): {
+                str(modifier_name): bool(show_viewport)
+                for modifier_name, show_viewport in dict(states or {}).items()
+                if str(modifier_name)
+            }
+            for object_name, states in dict(
+                quick_export_modifier_states or {}
+            ).items()
+            if str(object_name)
+        },
         "object_names": [str(name) for name in (object_names or []) if str(name)],
         "preprocess_cache_dir": str(preprocess_cache_dir or ""),
         "ntmi_output_node_name": str(ntmi_output_node_name or ""),
@@ -839,6 +851,18 @@ def _run_worker(manifest_path: str) -> None:
             if not objects:
                 raise RuntimeError("后台快速局部导出未找到选中的网格物体")
             tree = build_quick_export_temp_tree(objects)
+            modifier_states = dict(
+                manifest.get("quick_export_modifier_states") or {}
+            )
+            for obj in objects:
+                states = dict(modifier_states.get(obj.name) or {})
+                if not states:
+                    continue
+                for modifier in list(obj.modifiers):
+                    if modifier.name not in states:
+                        continue
+                    if not bool(states[modifier.name]):
+                        obj.modifiers.remove(modifier)
         else:
             tree_name = str(manifest.get("tree_name") or "")
             tree = bpy.data.node_groups.get(tree_name)
@@ -1356,6 +1380,7 @@ class BackgroundExportSession:
         session_dir: str = "",
         total_steps: int = 0,
         quick_export: bool = False,
+        quick_export_modifier_states: dict | None = None,
         object_names: list = None,
         preprocess_cache_dir: str = "",
         ntmi_output_node_name: str = "",
@@ -1377,6 +1402,17 @@ class BackgroundExportSession:
         self.total_steps = max(0, int(total_steps or 0))
         #: 快速局部导出：worker 按 object_names 在快照里重定位网格并重建临时树
         self.quick_export = bool(quick_export)
+        self.quick_export_modifier_states = {
+            str(object_name): {
+                str(modifier_name): bool(show_viewport)
+                for modifier_name, show_viewport in dict(states or {}).items()
+                if str(modifier_name)
+            }
+            for object_name, states in dict(
+                quick_export_modifier_states or {}
+            ).items()
+            if str(object_name)
+        }
         self.object_names = [str(name) for name in (object_names or []) if str(name)]
         #: 前处理缓存目录由主进程算，worker 不能自己推（快照路径会指向临时目录）
         self.preprocess_cache_dir = str(preprocess_cache_dir or "")
@@ -1446,6 +1482,7 @@ class BackgroundExportSession:
                 direct_export=self.direct_export,
                 total_steps=self.total_steps,
                 quick_export=self.quick_export,
+                quick_export_modifier_states=self.quick_export_modifier_states,
                 object_names=self.object_names,
                 preprocess_cache_dir=self.preprocess_cache_dir,
                 ntmi_output_node_name=self.ntmi_output_node_name,

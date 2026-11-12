@@ -271,6 +271,9 @@ class ParallelPreprocessCoordinator:
             "instance_count": instance_count,
             "timeout_seconds": timeout_seconds,
             "keep_temp": GlobalProterties.parallel_preprocess_keep_temp_files(),
+            "runtime_blueprint_tree_name": str(
+                getattr(BlueprintExportHelper, "runtime_blueprint_tree_name", "") or ""
+            ),
             "preserve_shape_keys": preserve_shape_keys,
             "capture_shape_keys": capture_shape_keys,
         }
@@ -318,6 +321,9 @@ class ParallelPreprocessCoordinator:
             manifest = {
                 "version": cls.SESSION_VERSION,
                 "mode": "preprocess-only",
+                "runtime_blueprint_tree_name": str(
+                    config.get("runtime_blueprint_tree_name") or ""
+                ),
                 "preserve_shape_keys": preserve_shape_keys,
                 "capture_shape_keys": capture_shape_keys,
                 "snapshot_path": snapshot_path,
@@ -562,6 +568,15 @@ def _run_worker(manifest_path: str):
     try:
         configure_worker_output()
         LOG.start_collecting()
+
+        runtime_tree_name = str(manifest.get("runtime_blueprint_tree_name") or "")
+        if runtime_tree_name:
+            runtime_tree = bpy.data.node_groups.get(runtime_tree_name)
+            if runtime_tree is None:
+                raise ParallelPreprocessError(
+                    f"未找到并行前处理蓝图树: {runtime_tree_name}"
+                )
+            BlueprintExportHelper.set_runtime_blueprint_tree(runtime_tree)
 
         object_names = manifest.get("object_names", [])
         if not object_names:

@@ -686,6 +686,38 @@ class ManifestTests(_BackgroundTestBase):
         self.assertEqual(manifest["object_names"], ["M1", "M2"])
         self.assertEqual(manifest["total_steps"], 2)
 
+    def test_build_manifest_records_quick_export_modifier_states(self):
+        """快速局部导出要冻结每个修改器在点击导出时的实际开关状态。"""
+        session_dir = os.path.join(self.temp_dir, "manifest_quick_modifiers")
+        os.makedirs(session_dir)
+
+        manifest = export_background.build_manifest(
+            session_dir=session_dir,
+            snapshot_path=os.path.join(session_dir, "snapshot.blend"),
+            tree_name="",
+            output_dir=os.path.join(self.temp_dir, "out"),
+            round_plans=[],
+            quick_export=True,
+            quick_export_modifier_states={
+                "M1": {
+                    "关闭的修改器": False,
+                    "打开的修改器": True,
+                }
+            },
+            object_names=["M1"],
+            total_steps=2,
+        )
+
+        self.assertEqual(
+            manifest["quick_export_modifier_states"],
+            {
+                "M1": {
+                    "关闭的修改器": False,
+                    "打开的修改器": True,
+                }
+            },
+        )
+
     def test_build_manifest_records_preprocess_cache_dir(self):
         """主进程算好的前处理缓存目录必须进清单，worker 才有得用。"""
         session_dir = os.path.join(self.temp_dir, "manifest_cache")
@@ -1413,6 +1445,67 @@ class WorkerTests(_BackgroundTestBase):
         self.assertEqual(stage["stage"], "完成")
         self.assertEqual((stage["done"], stage["total"]), (2, 2))
 
+    def test_worker_quick_export_freezes_per_modifier_visibility(self):
+        """关闭的修改器从后台对象移除，打开的修改器保留并继续应用。"""
+        session_dir = os.path.join(self.temp_dir, "worker_quick_modifier_states")
+        os.makedirs(session_dir)
+        manifest = export_background.build_manifest(
+            session_dir=session_dir,
+            snapshot_path=os.path.join(session_dir, "snapshot.blend"),
+            tree_name="",
+            output_dir=os.path.join(self.temp_dir, "out_quick_modifier_states"),
+            round_plans=[dict(export_background.QUICK_EXPORT_ROUND_PLAN)],
+            logic_name="EFMI",
+            quick_export=True,
+            quick_export_modifier_states={
+                "M1": {
+                    "关闭的修改器": False,
+                    "打开的修改器": True,
+                }
+            },
+            object_names=["M1"],
+            total_steps=2,
+        )
+
+        class _ModifierCollection(list):
+            def remove(self, modifier):
+                super().remove(modifier)
+
+        mesh = types.SimpleNamespace(
+            name="M1",
+            type="MESH",
+            as_pointer=lambda: 1,
+            modifiers=_ModifierCollection(
+                [
+                    types.SimpleNamespace(name="关闭的修改器", show_viewport=True),
+                    types.SimpleNamespace(name="打开的修改器", show_viewport=True),
+                ]
+            ),
+        )
+        _FAKE_BPY.data.objects.get = lambda name: mesh if name == "M1" else None
+
+        quick_tree = types.SimpleNamespace(
+            name="SSMT_QuickExport_1",
+            disable_copy_modifiers_on_export=False,
+        )
+        original_build = export_background.build_quick_export_temp_tree
+        export_background.build_quick_export_temp_tree = (
+            lambda _objects: quick_tree
+        )
+        self.addCleanup(
+            setattr,
+            export_background,
+            "build_quick_export_temp_tree",
+            original_build,
+        )
+
+        export_background._run_worker(manifest["manifest_path"])
+
+        self.assertEqual(
+            [modifier.name for modifier in mesh.modifiers],
+            ["打开的修改器"],
+        )
+
     def test_worker_quick_export_errors_when_no_selected_mesh(self):
         session_dir = os.path.join(self.temp_dir, "worker_quick_empty")
         os.makedirs(session_dir)
@@ -1778,8 +1871,13 @@ class OperatorInvokeTests(_BackgroundTestBase):
             selected_objects=list(selected_objects or []),
         )
 
-    def _make_mesh(self, name, pointer=1):
-        return types.SimpleNamespace(type="MESH", name=name, as_pointer=lambda: pointer)
+    def _make_mesh(self, name, pointer=1, modifiers=None):
+        return types.SimpleNamespace(
+            type="MESH",
+            name=name,
+            as_pointer=lambda: pointer,
+            modifiers=list(modifiers or []),
+        )
 
     def _start_background_operator(self):
         """起一个真正走到 modal 的后台导出操作符（Generate 入口）。"""
@@ -1914,6 +2012,31 @@ class OperatorInvokeTests(_BackgroundTestBase):
         self.assertEqual(session.kwargs["round_plans"][0]["buffer_folder_name"], "Meshes")
         self.assertEqual(_FAKE_WINDOW_MANAGER.timers[0]["interval"], 0.2)
         self.assertEqual(_FAKE_WINDOW_MANAGER.modal_handlers, [operator])
+
+    def test_quick_session_captures_per_modifier_visibility(self):
+        mesh = self._make_mesh(
+            "M1",
+            modifiers=[
+                types.SimpleNamespace(name="关闭的修改器", show_viewport=False),
+                types.SimpleNamespace(name="打开的修改器", show_viewport=True),
+            ],
+        )
+        context = self._make_context([mesh])
+        operator = self._make_quick_operator()
+
+        operator.invoke(context, None)
+
+        self.assertEqual(
+            _RecordingSession.instances[0].kwargs[
+                "quick_export_modifier_states"
+            ],
+            {
+                "M1": {
+                    "关闭的修改器": False,
+                    "打开的修改器": True,
+                }
+            },
+        )
 
     def test_quick_modal_uses_same_navigation_dispatch(self):
         """快速局部导出与 Generate 共用同一套事件分派：普通移动吞掉、中键拖动放行。"""
