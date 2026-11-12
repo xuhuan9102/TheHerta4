@@ -207,8 +207,9 @@ def _fake_object(name=OBJECT_NAME):
     return _FakeObject(name)
 
 
-def _make_node(**overrides):
-    node = pro.SSMTNode_PostProcess_RabbitFXPro()
+def _make_node(node_cls=None, **overrides):
+    node_cls = node_cls or pro.SSMTNode_PostProcess_RabbitFXPro
+    node = node_cls()
     defaults = dict(
         name='RabbitFXPro',
         enable_glow=True,
@@ -258,6 +259,28 @@ def _make_node(**overrides):
     # name 等属性设置之后建树，节点集合是按名字索引的。
     node.id_data = _fake_tree([node])
     return node
+
+
+_GLOWFX_MODULE = None
+
+
+def _load_glowfx_module():
+    global _GLOWFX_MODULE
+    if _GLOWFX_MODULE is not None:
+        return _GLOWFX_MODULE
+    module_path = ROOT / "blueprint" / "node_postprocess_glow_fx.py"
+    if not module_path.is_file():
+        raise AssertionError(f"缺少 Glow FX 节点模块: {module_path}")
+    _GLOWFX_MODULE = _load("node_postprocess_glow_fx", module_path)
+    return _GLOWFX_MODULE
+
+
+def _make_glowfx_node(**overrides):
+    module = _load_glowfx_module()
+    return _make_node(
+        node_cls=module.SSMTNode_PostProcess_GlowFX,
+        **overrides,
+    )
 
 
 def _item(obj):
@@ -342,9 +365,14 @@ class _FakeLayout:
         self.log.append(("op", idname, ""))
         return _FakeOperator(self.log, idname)
 
-    def template_list(self, list_type, _list_id, _data, propname, _active_data, active_propname, **kwargs):
+    def template_list(self, list_type, list_id, _data, propname, _active_data, active_propname, **kwargs):
         self.log.append(
-            ("template_list", list_type, f"rows={kwargs.get('rows')} prop={propname} active={active_propname}")
+            (
+                "template_list",
+                list_type,
+                f"rows={kwargs.get('rows')} prop={propname} active={active_propname}",
+                list_id,
+            )
         )
         return self
 
@@ -2122,6 +2150,279 @@ class RabbitFXProTests(unittest.TestCase):
         # 重跑幂等：不累积、不漂移。
         node.execute_postprocess(self.export_dir)
         self.assertEqual(_read_ini(self.ini_path), content)
+
+
+class GlowFXTests(unittest.TestCase):
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.export_dir = self._temp.name
+        self.ini_path = os.path.join(self.export_dir, "mod.ini")
+        self._outputs_backup = dict(material._rabbitfx_outputs)
+        material._rabbitfx_outputs.clear()
+
+    def tearDown(self):
+        material._rabbitfx_outputs.clear()
+        material._rabbitfx_outputs.update(self._outputs_backup)
+        self._temp.cleanup()
+
+    def _register_glow_record(self, marker, resource_name="Resource_Glowmap_Personal"):
+        material._rabbitfx_outputs[os.path.normcase(os.path.abspath(self.ini_path))] = [
+            {
+                "object": OBJECT_NAME,
+                "type": "Glowmap",
+                "marker": marker,
+                "section": f"[{GLOW_SECTION}]",
+                "lines": [
+                    rf"Resource\RabbitFX\Glowmap = ref {resource_name}",
+                ],
+            }
+        ]
+
+    def test_glowfx_node_has_dedicated_identity(self):
+        module = _load_glowfx_module()
+        node_cls = module.SSMTNode_PostProcess_GlowFX
+
+        self.assertEqual(node_cls.bl_idname, "SSMTNode_PostProcess_GlowFX")
+        self.assertEqual(node_cls.bl_label, "Glow FX着色器")
+
+    def test_glowfx_is_in_material_resource_menu(self):
+        source = (ROOT / "blueprint" / "node_menu.py").read_text(encoding="utf-8")
+        material_menu = source.split(
+            "class SSMT_MT_NodeMenu_PostProcess_Material", 1
+        )[1].split("class SSMT_MT_NodeMenu_PostProcess_Panel", 1)[0]
+        creative_menu = source.split(
+            "class SSMT_MT_NodeMenu_PostProcess_Creative", 1
+        )[1]
+
+        self.assertIn("SSMTNode_PostProcess_GlowFX", material_menu)
+        self.assertNotIn("SSMTNode_PostProcess_GlowFX", creative_menu)
+
+    def test_glowfx_does_not_derive_from_registered_rabbitfx_node(self):
+        """Blender 注册子节点会让已注册的 RabbitFX 基类节点失效。"""
+        module = _load_glowfx_module()
+        node_cls = module.SSMTNode_PostProcess_GlowFX
+
+        self.assertNotIn(pro.SSMTNode_PostProcess_RabbitFXPro, node_cls.__mro__)
+
+    def test_glowfx_init_keeps_rabbitfx_pro_socket_and_width_setup(self):
+        module = _load_glowfx_module()
+        node = module.SSMTNode_PostProcess_GlowFX()
+        node.buffer_tag = ""
+
+        node.init(None)
+
+        self.assertEqual([socket.bl_idname for socket in node.inputs], ["SSMTSocketPostProcess"])
+        self.assertEqual([socket.bl_idname for socket in node.outputs], ["SSMTSocketPostProcess"])
+        self.assertEqual(node.width, 380)
+        self.assertTrue(node.buffer_tag)
+
+    def test_glowfx_target_list_ids_are_unique_per_node(self):
+        """UIList 的 list_id 必须按节点区分，否则高度和滚动位置会联动。"""
+        first = _make_glowfx_node(
+            name="Glow FX着色器",
+            target_items=[_item(_fake_object())],
+        )
+        second = _make_glowfx_node(
+            name="Glow FX着色器.001",
+            target_items=[_item(_fake_object(SECOND_OBJECT))],
+        )
+        first_layout = _FakeLayout()
+        second_layout = _FakeLayout()
+
+        first.draw_buttons(None, first_layout)
+        second.draw_buttons(None, second_layout)
+
+        first_list_id = next(
+            entry[3] for entry in first_layout.log if entry[0] == "template_list"
+        )
+        second_list_id = next(
+            entry[3] for entry in second_layout.log if entry[0] == "template_list"
+        )
+        self.assertTrue(first_list_id)
+        self.assertNotEqual(first_list_id, second_list_id)
+
+    def test_glow_fx_overlay_preserves_depth_culling_and_alpha(self):
+        ini_path = (
+            ROOT
+            / "Toolset"
+            / "glow_fx"
+            / "GlowFX"
+            / "GlowFX.ini"
+        )
+        states = {}
+        in_shader = False
+        for raw_line in ini_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line.casefold() == "[customshaderglowfx]":
+                in_shader = True
+                continue
+            if in_shader and line.startswith("["):
+                break
+            if in_shader and "=" in line:
+                key, value = line.split("=", 1)
+                states[key.strip().casefold()] = value.strip().casefold()
+
+        self.assertEqual(states.get("depth_func"), "equal")
+        self.assertNotIn("cull", states)
+        for suffix in ("", "[1]", "[2]", "[3]"):
+            self.assertEqual(states.get(f"blend{suffix}"), "add one one")
+            self.assertEqual(states.get(f"alpha{suffix}"), "add zero one")
+
+    def test_glow_fx_uses_exact_texel_load_without_mip_filtering(self):
+        shader_path = (
+            ROOT
+            / "Toolset"
+            / "glow_fx"
+            / "res"
+            / "glow_fx_ps.hlsl"
+        )
+        source = shader_path.read_text(encoding="utf-8")
+
+        self.assertIn("GlowMap.Load(", source)
+        self.assertNotIn("SampleLevel(", source)
+        self.assertIn("input.uv.z > 1.0f", source)
+        self.assertIn("SV_IsFrontFace", source)
+        self.assertIn("cb4[150]", source)
+
+    def test_glowfx_replaces_rabbitfx_with_private_call_after_draw(self):
+        marker = "; MaterialRabbitFX glow-fx"
+        section = (
+            f"[{GLOW_SECTION}]\n"
+            f"[mesh:{MESH_NAME}]\n"
+            "hash = fd054d1d\n"
+            r"Resource\ZZMI\GlowMap = ref ResourceTexture_Glowmap_Personal" "\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+            f"{marker}\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 52688, 0, 3\n"
+            r"Resource\RabbitFX\Glowmap = ref null" "\n"
+            r"$\RabbitFX\brightness = 0" "\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(marker)
+        node = _make_glowfx_node(
+            glow_h=12.0,
+            glow_s=-4.0,
+            glow_v=6.0,
+            glow_brightness=2.5,
+            glow_interpolate=0.75,
+            target_items=[_item(_fake_object())],
+        )
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        self.assertIn(r"Resource\ZZMI\GlowMap = ref ResourceTexture_Glowmap_Personal", content)
+        self.assertNotIn(r"Resource\RabbitFX\Glowmap", content)
+        self.assertNotIn(r"CommandList\RabbitFX\Run", content)
+        self.assertIn(r"$\GlowFX\H = 12.0", content)
+        self.assertIn(r"$\GlowFX\S = -4.0", content)
+        self.assertIn(r"$\GlowFX\V = 6.0", content)
+        self.assertIn(r"$\GlowFX\brightness = 2.5", content)
+        self.assertIn(r"$\GlowFX\interpolate = 0.75", content)
+
+        draw_index = content.index("drawindexed = 52688, 0, 3")
+        bind_index = content.index(
+            r"Resource\GlowFX\Glowmap = ref Resource_Glowmap_Personal"
+        )
+        run_index = content.index(r"run = CommandList\GlowFX\Run")
+        self.assertLess(draw_index, bind_index)
+        self.assertLess(bind_index, run_index)
+        self.assertIn(r"$\GlowFX\DrawCount = 52688", content)
+        self.assertIn(r"$\GlowFX\DrawStart = 0", content)
+        self.assertIn(r"$\GlowFX\DrawBase = 3", content)
+
+        self.assertTrue(
+            os.path.isfile(
+                os.path.join(self.export_dir, "GlowFX", "GlowFX.ini")
+            )
+        )
+        self.assertTrue(
+            os.path.isfile(
+                os.path.join(self.export_dir, "res", "glow_fx_ps.hlsl")
+            )
+        )
+
+    def test_glowfx_removes_all_rabbitfx_runtime_elements_from_export(self):
+        marker = "; MaterialRabbitFX glow-fx"
+        section = (
+            f"[{GLOW_SECTION}]\n"
+            f"[mesh:{MESH_NAME}]\n"
+            "hash = fd054d1d\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+            f"{marker}\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 10, 20, 0\n"
+            "; [mesh:LOD0.aa11bb22-30030-0.Other]\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Other" "\n"
+            r"$\RabbitFX\brightness = 5" "\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 30, 40, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(marker)
+        node = _make_glowfx_node(target_items=[_item(_fake_object())])
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        self.assertNotIn("RabbitFX", content)
+        self.assertIn("CommandList\\GlowFX\\Run", content)
+
+    def test_glowfx_breathing_uses_private_namespace_and_own_counter(self):
+        marker = "; MaterialRabbitFX breathing"
+        section = (
+            f"[{GLOW_SECTION}]\n"
+            f"[mesh:{MESH_NAME}]\n"
+            "hash = fd054d1d\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+            f"{marker}\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 10, 20, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(marker)
+        node = _make_glowfx_node(
+            enable_breath=True,
+            breath_mode="RAINBOW",
+            breath_fps=200,
+            breath_step=0.3,
+            target_items=[_item(_fake_object())],
+        )
+
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+
+        self.assertIn("$glowfx_abcd1234_frame = $glowfx_abcd1234_frame + 0.3", content)
+        self.assertIn(
+            r"$\GlowFX\H = $glowfx_abcd1234_glow * 1",
+            content,
+        )
+        self.assertIn("global persist $glowfx_abcd1234_frame = 0", content)
+        self.assertIn("global $glowfx_abcd1234_valve = 0", content)
+        self.assertIn("global $glowfx_abcd1234_glow = 0", content)
+        self.assertNotIn("$rfxpro_", content)
+
+    def test_glowfx_without_targets_keeps_mod_untouched(self):
+        marker = "; MaterialRabbitFX unconfigured"
+        section = (
+            f"[{GLOW_SECTION}]\n"
+            f"[mesh:{MESH_NAME}]\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+            f"{marker}\n"
+            r"run = CommandList\RabbitFX\Run" "\n"
+            "drawindexed = 10, 20, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(marker)
+        node = _make_glowfx_node(target_items=[])
+
+        node.execute_postprocess(self.export_dir)
+
+        self.assertEqual(_read_ini(self.ini_path), section)
+        self.assertFalse(os.path.exists(os.path.join(self.export_dir, "GlowFX")))
+        self.assertFalse(os.path.exists(os.path.join(self.export_dir, "res")))
 
 
 if __name__ == "__main__":

@@ -87,6 +87,8 @@ except ImportError:  # pragma: no cover
     _ini_scope_spec.loader.exec_module(ini_scope)
 
 NODE_IDNAME = 'SSMTNode_PostProcess_RabbitFXPro'
+GLOWFX_NODE_IDNAME = 'SSMTNode_PostProcess_GlowFX'
+POSTPROCESS_NODE_IDNAMES = (NODE_IDNAME, GLOWFX_NODE_IDNAME)
 MATERIAL_NODE_IDNAME = 'SSMTNode_PostProcess_CustomMaterialAssign'
 LEGACY_MATERIAL_NODE_IDNAME = 'SSMTNode_PostProcess_Material'
 
@@ -652,7 +654,7 @@ def _preview_owner_nodes(node):
     candidates = [
         candidate
         for candidate in (getattr(tree, "nodes", None) or [])
-        if getattr(candidate, "bl_idname", "") == NODE_IDNAME
+        if getattr(candidate, "bl_idname", "") in POSTPROCESS_NODE_IDNAMES
     ]
     if not candidates:
         candidates = [node]
@@ -1494,8 +1496,11 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         # 固定可见行数上限：一两百个物体时靠 UIList 自带的滚动条翻页，
         # 而不是把所有物体一次性铺开把节点撑爆。
         visible_rows = max(3, min(len(self.target_items), 6))
+        # template_list 的 list_id 为空时，Blender 会跨节点共享列表高度和滚动位置。
+        tree_name = getattr(getattr(self, "id_data", None), "name", "") or ""
+        list_id = f"postprocess_fx_targets::{tree_name}::{self.name}"
         list_row.template_list(
-            "SSMT_UL_RABBITFX_PRO_TARGETS", "",
+            "SSMT_UL_RABBITFX_PRO_TARGETS", list_id,
             self, "target_items",
             self, "active_target_index",
             rows=visible_rows, type='DEFAULT',
@@ -2269,7 +2274,7 @@ def _objects_used_by_other_nodes(node, obj):
         return ""
     owners = []
     for other in getattr(tree, "nodes", []) or []:
-        if other == node or getattr(other, "bl_idname", "") != NODE_IDNAME:
+        if other == node or getattr(other, "bl_idname", "") not in POSTPROCESS_NODE_IDNAMES:
             continue
         if any(item.target_object == obj for item in getattr(other, "target_items", []) or []):
             owners.append(other.name)
@@ -2282,7 +2287,7 @@ def _objects_used_by_other_nodes(node, obj):
 
 def _active_pro_node(context):
     node = getattr(context, "active_node", None)
-    if node is not None and getattr(node, "bl_idname", "") == NODE_IDNAME:
+    if node is not None and getattr(node, "bl_idname", "") in POSTPROCESS_NODE_IDNAMES:
         return node
     return None
 
@@ -2303,7 +2308,7 @@ def _node_by_name(context, node_name):
     nodes = getattr(tree, "nodes", None) if tree is not None else None
     if nodes is not None and node_name:
         found = nodes.get(node_name)
-        if found is not None and getattr(found, "bl_idname", "") == NODE_IDNAME:
+        if found is not None and getattr(found, "bl_idname", "") in POSTPROCESS_NODE_IDNAMES:
             return found
     return _active_pro_node(context)
 
@@ -2312,7 +2317,10 @@ def _resolve_node(operator, context):
     """取本节点；取不到时报出可读原因，避免按钮点了没反应。"""
     node = _node_by_name(context, getattr(operator, "node_name", ""))
     if node is None:
-        operator.report({"WARNING"}, "没找到 RabbitFX贴图后处理pro 节点（请直接点节点面板上的按钮）")
+        operator.report(
+            {"WARNING"},
+            "没找到 RabbitFX/Glow FX 后处理节点（请直接点节点面板上的按钮）",
+        )
     return node
 
 
