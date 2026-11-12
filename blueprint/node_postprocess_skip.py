@@ -1381,6 +1381,15 @@ def _resolve_skip_node(context, node_name):
     return node
 
 
+def _sync_downstream_condition_nodes(node):
+    try:
+        from .node_postprocess_condition import _sync_downstream_condition_nodes as sync
+
+        sync(node)
+    except Exception as exc:
+        print(f"[跳过部件] 同步下游条件判断失败: {exc}")
+
+
 class SSMT_OT_PostProcess_AddSkipObject(bpy.types.Operator):
     bl_idname = "ssmt.skip_parts_add_selected"
     bl_label = "添加选中物体"
@@ -1419,6 +1428,7 @@ class SSMT_OT_PostProcess_AddSkipObject(bpy.types.Operator):
             existing.add(name)
             added_count += 1
 
+        _sync_downstream_condition_nodes(node)
         self.report({'INFO'}, f"已添加 {added_count} 个部件")
         return {'FINISHED'}
 
@@ -1445,6 +1455,7 @@ class SSMT_OT_PostProcess_RemoveSkipObject(bpy.types.Operator):
         if 0 <= self.index < len(node.skip_objects):
             node.skip_objects.remove(self.index)
             node.active_skip_object = max(0, min(int(node.active_skip_object), len(node.skip_objects) - 1))
+            _sync_downstream_condition_nodes(node)
             return {'FINISHED'}
 
         self.report({'WARNING'}, "列表中没有这一项")
@@ -1480,6 +1491,7 @@ class SSMT_OT_PostProcess_ClearSkipObjects(bpy.types.Operator):
                 except (TypeError, ValueError):
                     del legacy[0]
         node.active_skip_object = 0
+        _sync_downstream_condition_nodes(node)
         self.report({'INFO'}, "已清空跳过部件列表")
         return {'FINISHED'}
 
