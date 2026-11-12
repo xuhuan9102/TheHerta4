@@ -633,6 +633,7 @@ _PROBE = _MaterialProbe()
 # 只在当前 Blender 会话里保留预览材质，退出预览时恢复原材质。
 _glow_previews = {}
 _glow_preview_scenes = {}
+_PREVIEW_BLOOM_CUTOFF = 0.05
 
 
 def _preview_tree_key(node):
@@ -687,9 +688,25 @@ def _enable_glow_bloom(context):
     render_layers = tree.nodes.new('CompositorNodeRLayers')
     bloom = tree.nodes.new('CompositorNodeGlare')
     _configure_preview_bloom(bloom)
+    bloom_luma = tree.nodes.new('CompositorNodeRGBToBW')
+    cutoff = tree.nodes.new('ShaderNodeMath')
+    cutoff.operation = 'GREATER_THAN'
+    cutoff.inputs[1].default_value = _PREVIEW_BLOOM_CUTOFF
+    masked_bloom = tree.nodes.new('ShaderNodeMixRGB')
+    masked_bloom.blend_type = 'MIX'
+    masked_bloom.inputs[1].default_value = (0.0, 0.0, 0.0, 1.0)
+    composite = tree.nodes.new('ShaderNodeMixRGB')
+    composite.blend_type = 'ADD'
+    composite.inputs[0].default_value = 1.0
     output = tree.nodes.new('NodeGroupOutput')
     tree.links.new(render_layers.outputs['Image'], bloom.inputs['Image'])
-    tree.links.new(bloom.outputs['Image'], output.inputs['Image'])
+    tree.links.new(bloom.outputs['Glare'], bloom_luma.inputs['Image'])
+    tree.links.new(bloom_luma.outputs['Val'], cutoff.inputs[0])
+    tree.links.new(cutoff.outputs['Value'], masked_bloom.inputs[0])
+    tree.links.new(bloom.outputs['Glare'], masked_bloom.inputs[2])
+    tree.links.new(render_layers.outputs['Image'], composite.inputs[1])
+    tree.links.new(masked_bloom.outputs['Color'], composite.inputs[2])
+    tree.links.new(composite.outputs['Color'], output.inputs['Image'])
     scene.compositing_node_group = tree
     for window in context.window_manager.windows:
         if window.scene != scene:

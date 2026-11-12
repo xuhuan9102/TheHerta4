@@ -453,6 +453,7 @@ class RabbitFXProTests(unittest.TestCase):
         self.assertEqual(inputs['Strength'].default_value, 1.0)
         self.assertEqual(inputs['Size'].default_value, 0.9)
         self.assertEqual(inputs['Iterations'].default_value, 4)
+        self.assertEqual(pro._PREVIEW_BLOOM_CUTOFF, 0.05)
 
     def test_preview_uses_emission_surface_without_disconnecting_textures(self):
         """预览在现有 Surface 上叠加发光着色器，不改内部贴图连接。"""
