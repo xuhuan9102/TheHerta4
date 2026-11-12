@@ -665,6 +665,15 @@ def _preview_owner_nodes(node):
     return owners
 
 
+def _configure_preview_bloom(bloom):
+    bloom.inputs['Type'].default_value = 'Bloom'
+    bloom.inputs['Quality'].default_value = 'High'
+    bloom.inputs['Threshold'].default_value = 0.5
+    bloom.inputs['Strength'].default_value = 1.0
+    bloom.inputs['Size'].default_value = 0.9
+    bloom.inputs['Iterations'].default_value = 4
+
+
 def _enable_glow_bloom(context):
     scene = context.scene
     key = scene.as_pointer()
@@ -677,8 +686,7 @@ def _enable_glow_bloom(context):
     tree.interface.new_socket(name='Image', in_out='OUTPUT', socket_type='NodeSocketColor')
     render_layers = tree.nodes.new('CompositorNodeRLayers')
     bloom = tree.nodes.new('CompositorNodeGlare')
-    bloom.inputs['Type'].default_value = 'Bloom'
-    bloom.inputs['Threshold'].default_value = 0.1
+    _configure_preview_bloom(bloom)
     output = tree.nodes.new('NodeGroupOutput')
     tree.links.new(render_layers.outputs['Image'], bloom.inputs['Image'])
     tree.links.new(bloom.outputs['Image'], output.inputs['Image'])
@@ -772,11 +780,6 @@ def _mute_preview_base_emission(shader_nodes, nodes, links):
         links.new(multiply.outputs['Value'], socket)
 
 
-def _preview_emission_strength(brightness):
-    """把游戏亮度值归一化到 Blender 可显示且不白核的强度。"""
-    return max(0.0, float(brightness)) / 8.0
-
-
 def _stop_glow_preview(key):
     session = _glow_previews.pop(key, None)
     if session is None:
@@ -821,10 +824,7 @@ def _update_glow_previews():
                 hsv.inputs['Hue'].default_value = (0.5 + hue / 360.0 * interpolate) % 1.0
                 sat_add.inputs[1].default_value = saturation / 100.0 * interpolate
                 val_add.inputs[1].default_value = value / 100.0 * interpolate
-                strength.inputs[1].default_value = (
-                    _preview_emission_strength(brightness)
-                    if owner.enable_glow else 0.0
-                )
+                strength.inputs[1].default_value = brightness if owner.enable_glow else 0.0
                 dirty_materials.add(_material)
             for material in dirty_materials:
                 material.node_tree.update_tag()

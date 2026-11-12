@@ -433,11 +433,26 @@ class RabbitFXProTests(unittest.TestCase):
         node.breath_mode = 'RAINBOW'
         self.assertEqual(pro._preview_parameters(node, 0.5)[0], 180)
 
-    def test_preview_emission_strength_is_normalized_for_blender(self):
-        """RabbitFX 的 brightness 需要归一化，避免 Blender 核心白化。"""
-        self.assertEqual(pro._preview_emission_strength(8.0), 1.0)
-        self.assertEqual(pro._preview_emission_strength(4.0), 0.5)
-        self.assertEqual(pro._preview_emission_strength(0.0), 0.0)
+    def test_preview_uses_wide_high_quality_bloom(self):
+        """预览 Bloom 应模拟游戏的大范围高亮溢出。"""
+        inputs = {
+            'Type': types.SimpleNamespace(default_value=None),
+            'Quality': types.SimpleNamespace(default_value=None),
+            'Threshold': types.SimpleNamespace(default_value=None),
+            'Strength': types.SimpleNamespace(default_value=None),
+            'Size': types.SimpleNamespace(default_value=None),
+            'Iterations': types.SimpleNamespace(default_value=None),
+        }
+        bloom = types.SimpleNamespace(inputs=inputs)
+
+        pro._configure_preview_bloom(bloom)
+
+        self.assertEqual(inputs['Type'].default_value, 'Bloom')
+        self.assertEqual(inputs['Quality'].default_value, 'High')
+        self.assertEqual(inputs['Threshold'].default_value, 0.5)
+        self.assertEqual(inputs['Strength'].default_value, 1.0)
+        self.assertEqual(inputs['Size'].default_value, 0.9)
+        self.assertEqual(inputs['Iterations'].default_value, 4)
 
     def test_preview_uses_emission_surface_without_disconnecting_textures(self):
         """预览在现有 Surface 上叠加发光着色器，不改内部贴图连接。"""
