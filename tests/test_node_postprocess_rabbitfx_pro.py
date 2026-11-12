@@ -365,9 +365,14 @@ class _FakeLayout:
         self.log.append(("op", idname, ""))
         return _FakeOperator(self.log, idname)
 
-    def template_list(self, list_type, _list_id, _data, propname, _active_data, active_propname, **kwargs):
+    def template_list(self, list_type, list_id, _data, propname, _active_data, active_propname, **kwargs):
         self.log.append(
-            ("template_list", list_type, f"rows={kwargs.get('rows')} prop={propname} active={active_propname}")
+            (
+                "template_list",
+                list_type,
+                f"rows={kwargs.get('rows')} prop={propname} active={active_propname}",
+                list_id,
+            )
         )
         return self
 
@@ -2198,6 +2203,31 @@ class GlowFXTests(unittest.TestCase):
         self.assertEqual([socket.bl_idname for socket in node.outputs], ["SSMTSocketPostProcess"])
         self.assertEqual(node.width, 380)
         self.assertTrue(node.buffer_tag)
+
+    def test_glowfx_target_list_ids_are_unique_per_node(self):
+        """UIList 的 list_id 必须按节点区分，否则高度和滚动位置会联动。"""
+        first = _make_glowfx_node(
+            name="Glow FX着色器",
+            target_items=[_item(_fake_object())],
+        )
+        second = _make_glowfx_node(
+            name="Glow FX着色器.001",
+            target_items=[_item(_fake_object(SECOND_OBJECT))],
+        )
+        first_layout = _FakeLayout()
+        second_layout = _FakeLayout()
+
+        first.draw_buttons(None, first_layout)
+        second.draw_buttons(None, second_layout)
+
+        first_list_id = next(
+            entry[3] for entry in first_layout.log if entry[0] == "template_list"
+        )
+        second_list_id = next(
+            entry[3] for entry in second_layout.log if entry[0] == "template_list"
+        )
+        self.assertTrue(first_list_id)
+        self.assertNotEqual(first_list_id, second_list_id)
 
     def test_glow_fx_overlay_preserves_depth_culling_and_alpha(self):
         ini_path = (

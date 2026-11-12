@@ -1496,8 +1496,11 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         # 固定可见行数上限：一两百个物体时靠 UIList 自带的滚动条翻页，
         # 而不是把所有物体一次性铺开把节点撑爆。
         visible_rows = max(3, min(len(self.target_items), 6))
+        # template_list 的 list_id 为空时，Blender 会跨节点共享列表高度和滚动位置。
+        tree_name = getattr(getattr(self, "id_data", None), "name", "") or ""
+        list_id = f"postprocess_fx_targets::{tree_name}::{self.name}"
         list_row.template_list(
-            "SSMT_UL_RABBITFX_PRO_TARGETS", "",
+            "SSMT_UL_RABBITFX_PRO_TARGETS", list_id,
             self, "target_items",
             self, "active_target_index",
             rows=visible_rows, type='DEFAULT',
