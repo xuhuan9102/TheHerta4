@@ -144,6 +144,7 @@ class _FakeAttr:
 class _FakeAttrCollection:
     def __init__(self, attrs):
         self._attrs = {attr.name: attr for attr in attrs}
+        self.new_calls = []
 
     def get(self, name):
         return self._attrs.get(name)
@@ -154,6 +155,7 @@ class _FakeAttrCollection:
         attr = _FakeAttr(name, domain, type, np.zeros(size, dtype=np.int32))
         # 替换为接受任意长度 foreach_set 的实现：通过先放置一个足够大的占位
         self._attrs[name] = attr
+        self.new_calls.append(name)
         return attr
 
     def remove(self, attr):
@@ -603,6 +605,87 @@ class StableIdVectorizedMappingTests(unittest.TestCase):
                 )
                 self.assertEqual(mode, "STABLE_ID")
                 self.assertEqual(list(mapping), [1, 0])
+
+
+class StableIdCacheStorageTests(unittest.TestCase):
+    """MAPPING-SPEC §4：缓存从 IDProperty 换成 INT 顶点属性的兼容行为。"""
+
+    def test_snapshot_writes_int_point_attribute_and_reads_back(self):
+        mesh = _FakeMesh(np.zeros((3, 3), dtype=np.float32))
+
+        split_module._snapshot_stable_ids_to_mesh(mesh, np.array([10, 20, 30], dtype=np.int64), "stable_id")
+
+        attr = mesh.attributes.get(split_module._STABLE_ID_CACHE_ATTR)
+        self.assertIsNotNone(attr)
+        self.assertEqual(attr.domain, "POINT")
+        self.assertEqual(attr.data_type, "INT")
+        # 不再写旧 IDProperty 列表，只保留 _name 字符串元数据
+        self.assertIsNone(mesh.get(split_module._STABLE_ID_STORAGE_KEY))
+        ids, name = split_module._read_cached_stable_ids(mesh)
+        self.assertEqual(ids.dtype, np.int64)
+        self.assertEqual(list(ids), [10, 20, 30])
+        self.assertEqual(name, "stable_id")
+
+    def test_repeated_snapshot_reuses_single_attribute(self):
+        mesh = _FakeMesh(np.zeros((3, 3), dtype=np.float32))
+
+        for ids in ([1, 2, 3], [4, 5, 6], [7, 8, 9]):
+            split_module._snapshot_stable_ids_to_mesh(mesh, ids, "stable_id")
+
+        self.assertEqual(mesh.attributes.new_calls, [split_module._STABLE_ID_CACHE_ATTR])
+        self.assertEqual(list(mesh.attributes._attrs), [split_module._STABLE_ID_CACHE_ATTR])
+        ids, _name = split_module._read_cached_stable_ids(mesh)
+        self.assertEqual(list(ids), [7, 8, 9])
+
+    def test_wrong_domain_type_or_length_cache_attribute_is_replaced(self):
+        wrong_type = _FakeAttr(split_module._STABLE_ID_CACHE_ATTR, "POINT", "FLOAT", np.zeros(3, dtype=np.float32))
+        mesh = _FakeMesh(np.zeros((3, 3), dtype=np.float32), attrs=[wrong_type])
+
+        split_module._snapshot_stable_ids_to_mesh(mesh, [1, 2, 3], "stable_id")
+
+        attr = mesh.attributes.get(split_module._STABLE_ID_CACHE_ATTR)
+        self.assertIsNot(attr, wrong_type)
+        self.assertEqual(attr.data_type, "INT")
+        self.assertEqual(mesh.attributes.new_calls, [split_module._STABLE_ID_CACHE_ATTR])
+        ids, _name = split_module._read_cached_stable_ids(mesh)
+        self.assertEqual(list(ids), [1, 2, 3])
+
+        too_short = _FakeAttr(split_module._STABLE_ID_CACHE_ATTR, "POINT", "INT", np.zeros(2, dtype=np.int32))
+        mesh2 = _FakeMesh(np.zeros((3, 3), dtype=np.float32), attrs=[too_short])
+        split_module._snapshot_stable_ids_to_mesh(mesh2, [4, 5, 6], "stable_id")
+        ids2, _name2 = split_module._read_cached_stable_ids(mesh2)
+        self.assertEqual(list(ids2), [4, 5, 6])
+
+    def test_out_of_int32_ids_skip_cache_without_error(self):
+        # 旧版 IDProperty 写 3e9 会抛 OverflowError 并被吞掉 = 没有缓存；
+        # 新版必须同样不写缓存、不崩，而不是抛 OverflowError 冒到状态机。
+        mesh = _FakeMesh(np.zeros((2, 3), dtype=np.float32))
+
+        split_module._snapshot_stable_ids_to_mesh(mesh, np.array([3000000000, 1], dtype=np.int64), "stable_id")
+
+        self.assertIsNone(mesh.attributes.get(split_module._STABLE_ID_CACHE_ATTR))
+        self.assertEqual(mesh.attributes.new_calls, [])
+        self.assertIsNone(mesh.get(split_module._STABLE_ID_CACHE_NAME_KEY))
+        self.assertEqual(split_module._read_cached_stable_ids(mesh), (None, None))
+
+    def test_legacy_idproperty_cache_still_reads(self):
+        mesh = _FakeMesh(
+            np.zeros((2, 3), dtype=np.float32),
+            props={
+                split_module._STABLE_ID_STORAGE_KEY: [10, 20],
+                split_module._STABLE_ID_STORAGE_KEY + "_name": "stable_id",
+            },
+        )
+        ids, name = split_module._read_cached_stable_ids(mesh)
+        self.assertEqual(list(ids), [10, 20])
+        self.assertEqual(name, "stable_id")
+
+    def test_cache_attribute_name_is_filtered_from_user_candidates(self):
+        props = _FakeProps(stable_id_attribute=f"stable_id, {split_module._STABLE_ID_CACHE_ATTR}")
+        self.assertEqual(split_module._candidate_stable_id_names(props), ["stable_id"])
+
+        only_cache = _FakeProps(stable_id_attribute=split_module._STABLE_ID_CACHE_ATTR)
+        self.assertEqual(split_module._candidate_stable_id_names(only_cache), ["stable_id"])
 
 
 if __name__ == "__main__":

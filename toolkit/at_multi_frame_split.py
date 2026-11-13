@@ -14,8 +14,12 @@ except ImportError:
     from utils.shapekey_rebase_utils import rebase_shape_key_coordinates
 
 
-# 用作 mesh 中保存稳定ID的自定义属性键，方便后续帧从快照中读出
+# 旧版缓存键：把稳定ID列表塞进 mesh IDProperty（仅保留读取兼容）
 _STABLE_ID_STORAGE_KEY = "atp_stable_id_attr"
+# 新版缓存：快照 mesh 上的 INT 顶点属性；名字避开用户 stable_id 候选
+_STABLE_ID_CACHE_ATTR = "atp_stable_id_cache"
+# 属性名元数据仍然很小（V 无关），继续用 IDProperty 字符串保存
+_STABLE_ID_CACHE_NAME_KEY = _STABLE_ID_STORAGE_KEY + "_name"
 
 
 def _candidate_stable_id_names(props):
@@ -24,6 +28,8 @@ def _candidate_stable_id_names(props):
     if props is not None:
         raw = getattr(props, "stable_id_attribute", "") or ""
     names = [token.strip() for token in raw.split(",") if token.strip()]
+    # 缓存属性名不能被当成用户稳定ID候选，否则读写会互相污染（MAPPING-SPEC §4.4）
+    names = [name for name in names if name != _STABLE_ID_CACHE_ATTR]
     if not names:
         names = ["stable_id"]
     return names
@@ -61,20 +67,71 @@ def _read_stable_ids_from_mesh(mesh, candidate_names):
 
 
 def _snapshot_stable_ids_to_mesh(mesh, ids, attr_name):
-    """把读到的稳定 ID 缓存到 mesh.id_properties，避免后续帧因 GN 重排丢失"""
+    """把稳定 ID 缓存到快照 mesh 的 INT 顶点属性（旧版是 IDProperty）。
+
+    缓存只写/读同一份快照 mesh（之后通常成为 Base 物体），不依赖
+    new_from_object 的传播；_name 元数据很小，继续用 IDProperty 字符串保存。
+    越出 int32 的 ID 不写缓存：旧版 `mesh[key] = list` 会抛 OverflowError 并被
+    静默吞掉，等效于“没有缓存”，这里显式保持同一结果。
+    """
     if mesh is None or ids is None:
         return
     try:
-        mesh[_STABLE_ID_STORAGE_KEY] = list(int(v) for v in ids)
-        mesh[_STABLE_ID_STORAGE_KEY + "_name"] = str(attr_name or "")
+        ids_arr = np.asarray(ids, dtype=np.int64).reshape(-1)
+        if ids_arr.size and (ids_arr.min() < -2**31 or ids_arr.max() > 2**31 - 1):
+            return
+        values = ids_arr.astype(np.int32, copy=False)
+        attributes = getattr(mesh, "attributes", None)
+        if attributes is None or not hasattr(attributes, "get"):
+            return
+        existing = attributes.get(_STABLE_ID_CACHE_ATTR)
+        if existing is not None and not (
+            getattr(existing, "domain", None) == 'POINT'
+            and getattr(existing, "data_type", None) in {'INT', 'INT32'}
+            and len(existing.data) == ids_arr.size
+        ):
+            attributes.remove(existing)
+            existing = None
+        attr = existing
+        if attr is None:
+            attr = attributes.new(name=_STABLE_ID_CACHE_ATTR, type='INT', domain='POINT')
+        attr.data.foreach_set("value", values)
+        mesh[_STABLE_ID_CACHE_NAME_KEY] = str(attr_name or "")
     except Exception:
         pass
 
 
 def _read_cached_stable_ids(mesh):
-    """从 mesh.id_properties 读出已缓存的稳定 ID 数组"""
+    """读回缓存的稳定 ID：先读新 INT 顶点属性，再兼容旧 IDProperty。"""
     if mesh is None:
         return None, None
+    vtx_count = len(mesh.vertices)
+    name = ""
+    try:
+        name = str(mesh.get(_STABLE_ID_CACHE_NAME_KEY, "") or "")
+    except Exception:
+        name = ""
+
+    attributes = getattr(mesh, "attributes", None)
+    if attributes is not None and hasattr(attributes, "get"):
+        try:
+            attr = attributes.get(_STABLE_ID_CACHE_ATTR)
+        except Exception:
+            attr = None
+        if (
+            attr is not None
+            and getattr(attr, "domain", None) == 'POINT'
+            and getattr(attr, "data_type", None) in {'INT', 'INT32'}
+            and len(attr.data) == vtx_count
+        ):
+            try:
+                buf = np.zeros(vtx_count, dtype=np.int32)
+                attr.data.foreach_get("value", buf)
+                return buf.astype(np.int64, copy=False), name
+            except Exception:
+                pass
+
+    # 旧 .blend 兼容：IDProperty 列表缓存（atp_stable_id_attr）
     try:
         cached = mesh.get(_STABLE_ID_STORAGE_KEY)
     except Exception:
@@ -85,8 +142,7 @@ def _read_cached_stable_ids(mesh):
         ids = np.fromiter((int(v) for v in cached), dtype=np.int64)
     except Exception:
         return None, None
-    name = mesh.get(_STABLE_ID_STORAGE_KEY + "_name", "")
-    return ids, str(name) if name else ""
+    return ids, name
 
 
 def _resolve_stable_ids_for_object(obj, candidate_names):
