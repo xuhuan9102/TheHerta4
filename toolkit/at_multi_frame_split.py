@@ -131,6 +131,45 @@ def _build_position_nearest_mapping(base_coords, target_coords):
     return mapping, collisions
 
 
+def _stable_id_mapping_vectorized(base_ids, target_ids):
+    """稳定ID映射的 numpy 向量化实现（等价于原先的 Python dict 循环）。
+
+    输入：base_ids / target_ids —— 一维整数序列（numpy 数组或 list），长度分别
+          等于 base/target 的顶点数。
+    输出：(mapping, missing)
+          mapping: np.int64, shape (len(target_ids),)，未匹配位置为 -1
+          missing: int，未匹配的 target 顶点数
+    语义：base 同一 ID 取第一次出现的下标；target 缺失记 -1 并计入 missing。
+    """
+    base_ids = np.asarray(base_ids, dtype=np.int64).reshape(-1)
+    target_ids = np.asarray(target_ids, dtype=np.int64).reshape(-1)
+    mapping = np.full(target_ids.size, -1, dtype=np.int64)
+
+    if target_ids.size == 0:
+        return mapping, 0
+    if base_ids.size == 0:
+        return mapping, int(target_ids.size)  # 全部缺失 → 调用方降级
+
+    order = np.argsort(base_ids, kind="stable")  # 稳定排序：相等值保持原始先后
+    sorted_ids = base_ids[order]
+
+    is_first = np.empty(sorted_ids.size, dtype=bool)
+    is_first[0] = True
+    is_first[1:] = sorted_ids[1:] != sorted_ids[:-1]  # 每个相等 run 的第一个
+
+    unique_ids = sorted_ids[is_first]     # 升序、唯一
+    first_index = order[is_first]         # 每个 ID 在 base 中第一次出现的下标
+
+    pos = np.searchsorted(unique_ids, target_ids)  # 左边界
+    in_range = pos < unique_ids.size
+    safe_pos = np.where(in_range, pos, 0)
+    found = in_range & (unique_ids[safe_pos] == target_ids)
+
+    mapping[found] = first_index[safe_pos[found]]
+    missing = int((~found).sum())
+    return mapping, missing
+
+
 # 稳定ID采样校验：默认关闭，只有 ATP_STABLE_ID_DEBUG=1 才启用。
 # 判据是「映射正确」——target 顶点 i 的 ID 必须等于 base 顶点 mapping[i] 的 ID；
 # 不能拿「属性等于 0..N-1」当判据，因为用户可以通过几何节点写入任意稳定ID。
@@ -212,18 +251,7 @@ def _build_target_to_base_mapping(base_obj, target_obj, props):
         base_ids, base_attr = _resolve_stable_ids_for_object(base_obj, candidates)
         target_ids, target_attr = _resolve_stable_ids_for_object(target_obj, candidates)
         if base_ids is not None and target_ids is not None and len(base_ids) == base_count and len(target_ids) == target_count:
-            base_lookup = {}
-            for idx, value in enumerate(base_ids):
-                base_lookup.setdefault(int(value), idx)
-            mapping = np.empty(target_count, dtype=np.int64)
-            missing = 0
-            for t_idx, value in enumerate(target_ids):
-                base_idx = base_lookup.get(int(value))
-                if base_idx is None:
-                    missing += 1
-                    mapping[t_idx] = -1
-                else:
-                    mapping[t_idx] = base_idx
+            mapping, missing = _stable_id_mapping_vectorized(base_ids, target_ids)
             if missing == 0:
                 attr_label = base_attr or target_attr or "stable_id"
                 # 调试开关下的抽样自检：确认 mapping 把每个 target 顶点指向了

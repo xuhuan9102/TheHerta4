@@ -450,5 +450,160 @@ class StableIdDebugVerificationTests(unittest.TestCase):
         self.assertEqual(calls, [([2, 0, 1], [10, 20, 30], [30, 10, 20])])
 
 
+def _reference_stable_id_mapping(base_ids, target_ids):
+    """原 :159-170 的 Python dict 循环，作为向量化实现的参考（逐元素等价判据）。"""
+    base_lookup = {}
+    for idx, value in enumerate(base_ids):
+        base_lookup.setdefault(int(value), idx)
+    mapping = np.empty(len(target_ids), dtype=np.int64)
+    missing = 0
+    for t_idx, value in enumerate(target_ids):
+        base_idx = base_lookup.get(int(value))
+        if base_idx is None:
+            missing += 1
+            mapping[t_idx] = -1
+        else:
+            mapping[t_idx] = base_idx
+    return mapping, missing
+
+
+def _make_id_mesh(ids, coords=None, attr_name="stable_id", domain="POINT", data_type="INT"):
+    ids = np.asarray(ids, dtype=np.int64)
+    if coords is None:
+        coords = np.zeros((ids.size, 3), dtype=np.float32)
+    return _FakeMesh(coords, attrs=[_FakeAttr(attr_name, domain, data_type, ids)])
+
+
+class StableIdVectorizedMappingTests(unittest.TestCase):
+    """MAPPING-SPEC §3 的 B1-B14：新旧实现逐元素等价 + 对外降级行为。"""
+
+    CASES = [
+        ("B1 ID 全重复", [7, 7, 7], [7, 7, 7], [0, 0, 0], 0),
+        ("B2 部分缺失", [10, 20, 30], [10, 99, 30], [0, -1, 2], 1),
+        ("B3 空数组", [], [], [], 0),
+        ("B4a V=1 命中", [42], [42], [0], 0),
+        ("B4b V=1 未命中", [42], [43], [-1], 1),
+        ("B6 超出 int32", [3000000000], [3000000000], [0], 0),
+        ("B8 非连续 ID 重排", [100, 200, 300], [300, 100, 200], [2, 0, 1], 0),
+        ("B9 重复+缺失", [5, 5, 7], [5, 7, 9], [0, 2, -1], 1),
+        ("B10 负 ID", [-1, -2], [-2, -1], [1, 0], 0),
+        ("B12 base 空 target 非空", [], [1, 2], [-1, -1], 2),
+        ("B13 全部缺失", [1, 2], [3, 4], [-1, -1], 2),
+    ]
+
+    def test_vectorized_matches_reference_for_all_cases(self):
+        for name, base_ids, target_ids, expected, expected_missing in self.CASES:
+            with self.subTest(case=name):
+                old_mapping, old_missing = _reference_stable_id_mapping(base_ids, target_ids)
+                new_mapping, new_missing = split_module._stable_id_mapping_vectorized(base_ids, target_ids)
+
+                np.testing.assert_array_equal(new_mapping, old_mapping)
+                np.testing.assert_array_equal(new_mapping, np.asarray(expected, dtype=np.int64))
+                self.assertEqual(new_missing, old_missing)
+                self.assertEqual(new_missing, expected_missing)
+                self.assertEqual(new_mapping.dtype, np.int64)
+                self.assertEqual(new_mapping.shape, (len(target_ids),))
+
+    def test_stable_id_mode_for_b1_b8_b10(self):
+        cases = [
+            ("B1", [7, 7, 7], [7, 7, 7], [0, 0, 0]),
+            ("B8", [100, 200, 300], [300, 100, 200], [2, 0, 1]),
+            ("B10", [-1, -2], [-2, -1], [1, 0]),
+        ]
+        for label, base_ids, target_ids, expected in cases:
+            with self.subTest(case=label):
+                base = _make_id_mesh(base_ids, coords=np.arange(len(base_ids) * 3, dtype=np.float32).reshape(-1, 3))
+                target = _make_id_mesh(target_ids, coords=np.arange(len(target_ids) * 3, dtype=np.float32).reshape(-1, 3))
+                mapping, mode, _msg = split_module._build_target_to_base_mapping(
+                    _FakeObject("Base", base), _FakeObject("Target", target), _FakeProps()
+                )
+                self.assertEqual(mode, "STABLE_ID")
+                self.assertEqual(list(mapping), expected)
+
+    def test_missing_ids_degrade_to_position(self):
+        cases = [
+            ("B2", [10, 20, 30], [10, 99, 30]),
+            ("B9", [5, 5, 7], [5, 7, 9]),
+            ("B13", [1, 2], [3, 4]),
+        ]
+        for label, base_ids, target_ids in cases:
+            with self.subTest(case=label):
+                base_coords = np.arange(len(base_ids) * 3, dtype=np.float32).reshape(-1, 3)
+                target_coords = base_coords.copy()
+                base = _make_id_mesh(base_ids, coords=base_coords)
+                target = _make_id_mesh(target_ids, coords=target_coords)
+                _mapping, mode, msg = split_module._build_target_to_base_mapping(
+                    _FakeObject("Base", base), _FakeObject("Target", target), _FakeProps()
+                )
+                self.assertNotEqual(mode, "STABLE_ID")
+                self.assertEqual(mode, "POSITION")
+                self.assertIn("稳定ID属性匹配失败", msg)
+
+    def test_b5_length_mismatch_returns_none_before_any_mode(self):
+        base = _make_id_mesh([1, 2, 3])
+        target = _make_id_mesh([1, 2])
+        mapping, mode, msg = split_module._build_target_to_base_mapping(
+            _FakeObject("Base", base), _FakeObject("Target", target), _FakeProps()
+        )
+        self.assertIsNone(mapping)
+        self.assertEqual(mode, "NONE")
+        self.assertIn("顶点数不一致", msg)
+
+    def test_b3_zero_vertex_mesh_uses_stable_id(self):
+        base = _make_id_mesh([])
+        target = _make_id_mesh([])
+        mapping, mode, _msg = split_module._build_target_to_base_mapping(
+            _FakeObject("Base", base), _FakeObject("Target", target), _FakeProps()
+        )
+        self.assertEqual(mode, "STABLE_ID")
+        self.assertEqual(mapping.dtype, np.int64)
+        self.assertEqual(mapping.shape, (0,))
+
+    def test_b7_non_int_attribute_filtering(self):
+        float_mesh = _FakeMesh(
+            np.zeros((2, 3), dtype=np.float32),
+            attrs=[_FakeAttr("stable_id", "POINT", "FLOAT", np.array([10.4, 10.6], dtype=np.float32))],
+        )
+        ids, name = split_module._read_stable_ids_from_mesh(float_mesh, ["stable_id"])
+        self.assertEqual(name, "stable_id")
+        self.assertEqual(list(ids), [10, 11])
+
+        vector_mesh = _FakeMesh(
+            np.zeros((2, 3), dtype=np.float32),
+            attrs=[_FakeAttr("stable_id", "POINT", "FLOAT_VECTOR", np.zeros((2, 3), dtype=np.float32))],
+        )
+        self.assertEqual(split_module._read_stable_ids_from_mesh(vector_mesh, ["stable_id"]), (None, None))
+
+        corner_mesh = _FakeMesh(
+            np.zeros((2, 3), dtype=np.float32),
+            attrs=[_FakeAttr("stable_id", "CORNER", "INT", np.array([1, 2], dtype=np.int32))],
+        )
+        self.assertEqual(split_module._read_stable_ids_from_mesh(corner_mesh, ["stable_id"]), (None, None))
+
+    def test_b11_cache_length_mismatch_falls_back_to_attribute(self):
+        mesh = _FakeMesh(
+            np.zeros((2, 3), dtype=np.float32),
+            attrs=[_FakeAttr("stable_id", "POINT", "INT", np.array([7, 8], dtype=np.int32))],
+            props={
+                split_module._STABLE_ID_STORAGE_KEY: [1, 2, 3],
+                split_module._STABLE_ID_STORAGE_KEY + "_name": "stable_id",
+            },
+        )
+        ids, name = split_module._resolve_stable_ids_for_object(_FakeObject("Source", mesh), ["stable_id"])
+        self.assertEqual(list(ids), [7, 8])
+        self.assertEqual(name, "stable_id")
+
+    def test_b14_invalid_mode_and_none_props_normalize_to_auto(self):
+        base = _make_id_mesh([10, 20])
+        target = _make_id_mesh([20, 10])
+        for props in (_FakeProps(vertex_mapping_mode="FOO"), None):
+            with self.subTest(props=props):
+                mapping, mode, _msg = split_module._build_target_to_base_mapping(
+                    _FakeObject("Base", base), _FakeObject("Target", target), props
+                )
+                self.assertEqual(mode, "STABLE_ID")
+                self.assertEqual(list(mapping), [1, 0])
+
+
 if __name__ == "__main__":
     unittest.main()
