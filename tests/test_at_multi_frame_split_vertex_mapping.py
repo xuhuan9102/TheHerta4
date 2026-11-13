@@ -688,5 +688,146 @@ class StableIdCacheStorageTests(unittest.TestCase):
         self.assertEqual(split_module._candidate_stable_id_names(only_cache), ["stable_id"])
 
 
+class _CountingVertices:
+    def __init__(self, coords):
+        self.coords = np.asarray(coords, dtype=np.float32)
+        self.foreach_get_calls = 0
+
+    def __len__(self):
+        return len(self.coords)
+
+    def foreach_get(self, _attr, output):
+        self.foreach_get_calls += 1
+        output[:] = self.coords.reshape(-1)
+
+
+class _KeyBlock:
+    def __init__(self, name, coords):
+        self.name = name
+        self.coords = np.asarray(coords, dtype=np.float32).copy()
+        self.data = self
+
+    def foreach_set(self, _attr, values):
+        self.coords = np.asarray(values, dtype=np.float32).reshape(-1, 3).copy()
+
+    def foreach_get(self, _attr, output):
+        output[:] = self.coords.reshape(-1)
+
+
+class _KeyBlocks(list):
+    def get(self, name):
+        for block in self:
+            if block.name == name:
+                return block
+        return None
+
+
+class _CoordMesh:
+    def __init__(self, coords):
+        self.vertices = _CountingVertices(coords)
+        self.shape_keys = None
+
+    def update(self):
+        pass
+
+
+class _CoordObject:
+    def __init__(self, name, coords):
+        self.name = name
+        self.type = "MESH"
+        self.data = _CoordMesh(coords)
+
+    def shape_key_add(self, name, from_mix=False):
+        del from_mix
+        if self.data.shape_keys is None:
+            basis = _KeyBlock("Basis", self.data.vertices.coords)
+            self.data.shape_keys = types.SimpleNamespace(
+                key_blocks=_KeyBlocks([basis]),
+                reference_key=basis,
+            )
+        block = _KeyBlock(name, self.data.vertices.coords)
+        self.data.shape_keys.key_blocks.append(block)
+        return block
+
+
+class ShapeKeyCoordCacheTests(unittest.TestCase):
+    """优化3：同一 base 上连续建键时复用坐标缓存，结果与每键重读逐元素相同。"""
+
+    @staticmethod
+    def _context():
+        props = _FakeProps(vertex_mapping_mode="INDEX")
+        return types.SimpleNamespace(
+            scene=types.SimpleNamespace(atp_props=props),
+            evaluated_depsgraph_get=lambda: object(),
+        )
+
+    @staticmethod
+    def _operator():
+        operator = split_module.ATP_OT_SplitFramesToShapeKeyMulti()
+        operator.report = lambda *_args, **_kwargs: None
+        return operator
+
+    def test_two_keys_use_cached_base_coords_and_match_reread_values(self):
+        base_coords = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+        target1_coords = base_coords + np.array([0, 1, 0], dtype=np.float32)
+        target2_coords = base_coords + np.array([0, 2, 0], dtype=np.float32)
+
+        operator = self._operator()
+        base = _CoordObject("Base", base_coords)
+        target1 = _CoordObject("T1", target1_coords)
+        target2 = _CoordObject("T2", target2_coords)
+        context = self._context()
+
+        self.assertTrue(operator.create_shape_key_from_objects(context, base, target1, "K1"))
+        self.assertTrue(operator.create_shape_key_from_objects(context, base, target2, "K2"))
+
+        # base 只在第一次读；target 各自读一次
+        self.assertEqual(base.data.vertices.foreach_get_calls, 1)
+        self.assertEqual(target1.data.vertices.foreach_get_calls, 1)
+        self.assertEqual(target2.data.vertices.foreach_get_calls, 1)
+        np.testing.assert_array_equal(base.data.shape_keys.key_blocks.get("K1").coords, target1_coords)
+        np.testing.assert_array_equal(base.data.shape_keys.key_blocks.get("K2").coords, target2_coords)
+
+    def test_continuous_base_reuses_cached_target_coords(self):
+        base_coords = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
+        target1_coords = base_coords + np.array([0, 1, 0], dtype=np.float32)
+        target2_coords = base_coords + np.array([0, 3, 0], dtype=np.float32)
+
+        operator = self._operator()
+        base = _CoordObject("Base", base_coords)
+        target1 = _CoordObject("T1", target1_coords)
+        target2 = _CoordObject("T2", target2_coords)
+        context = self._context()
+
+        self.assertTrue(operator.create_shape_key_from_objects(context, base, target1, "K1"))
+        self.assertTrue(
+            operator.create_shape_key_from_objects(
+                context, base, target2, "K2", continuous_base_obj=target1
+            )
+        )
+
+        # target1 先作为 target 读一次，第二次作为 continuous_base 命中缓存
+        self.assertEqual(target1.data.vertices.foreach_get_calls, 1)
+        expected = base_coords + (target2_coords - target1_coords)
+        np.testing.assert_array_equal(base.data.shape_keys.key_blocks.get("K2").coords, expected)
+
+    def test_coord_cache_invalidates_on_rename_and_mesh_replacement(self):
+        operator = self._operator()
+        obj = _CoordObject("X", [[0, 0, 0], [1, 0, 0]])
+
+        first = operator._read_vertices_coords_cached(obj)
+        self.assertEqual(obj.data.vertices.foreach_get_calls, 1)
+
+        obj.name = "Y"
+        second = operator._read_vertices_coords_cached(obj)
+        self.assertEqual(obj.data.vertices.foreach_get_calls, 2)
+        np.testing.assert_array_equal(first, second)
+
+        obj.data = _CoordMesh([[2, 0, 0], [3, 0, 0]])
+        third = operator._read_vertices_coords_cached(obj)
+        self.assertEqual(obj.data.vertices.foreach_get_calls, 1)
+        np.testing.assert_array_equal(third, np.array([[2, 0, 0], [3, 0, 0]], dtype=np.float32))
+
+
 if __name__ == "__main__":
     unittest.main()

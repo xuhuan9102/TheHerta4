@@ -596,6 +596,7 @@ class ATP_OT_SplitFramesToShapeKeyMulti(bpy.types.Operator):
         self._intermediate_objs = None
         self._current_intermediate_index = 0
         self._baseline_mesh_names = set(bpy.data.meshes.keys())
+        self._coord_cache = {}
         
         if not self._selected_objects:
             self.report({'ERROR'}, "未选择任何网格物体")
@@ -1504,6 +1505,43 @@ class ATP_OT_SplitFramesToShapeKeyMulti(bpy.types.Operator):
         
         return None
     
+    _coord_cache_limit = 8
+
+    def _read_vertices_coords_cached(self, obj):
+        """按对象缓存顶点坐标，避免每对重复 foreach_get 同一 base 的坐标。
+
+        失效条件：对象名、顶点数或 mesh 数据块指针变化（重建 / 换 mesh / 改名）。
+        LRU 上限 8 份，避免连续模式把每个快照的坐标都常驻内存。
+        """
+        mesh = obj.data
+        vtx_count = len(mesh.vertices)
+        cache = getattr(self, "_coord_cache", None)
+        if cache is None:
+            cache = {}
+            self._coord_cache = cache
+
+        as_pointer = getattr(mesh, "as_pointer", None)
+        try:
+            mesh_token = as_pointer() if callable(as_pointer) else id(mesh)
+        except Exception:
+            mesh_token = id(mesh)
+
+        key = (obj.name, vtx_count)
+        entry = cache.get(key)
+        if entry is not None and entry[0] == mesh_token:
+            cache.pop(key, None)
+            cache[key] = entry  # 命中挪到末尾（LRU）
+            return entry[1]
+
+        coords = np.zeros(vtx_count * 3, dtype=np.float32)
+        mesh.vertices.foreach_get('co', coords)
+        coords = coords.reshape(-1, 3)
+        cache[key] = (mesh_token, coords)
+        limit = max(int(getattr(self, "_coord_cache_limit", 8)), 1)
+        while len(cache) > limit:
+            cache.pop(next(iter(cache)))
+        return coords
+
     def create_shape_key_from_objects(self, context, base_obj, target_obj, shape_key_name, continuous_base_obj=None):
         """基于两个物体创建形态键（形状差异转形态键）
         
@@ -1546,24 +1584,16 @@ class ATP_OT_SplitFramesToShapeKeyMulti(bpy.types.Operator):
         else:
             shape_key = base_obj.shape_key_add(name=shape_key_name)
         
-        vtx_count = len(base_obj.data.vertices)
-        
-        basis_coords = np.zeros(vtx_count * 3, dtype=np.float32)
-        base_obj.data.vertices.foreach_get('co', basis_coords)
-        basis_coords = basis_coords.reshape(-1, 3)
-        
-        target_coords = np.zeros(vtx_count * 3, dtype=np.float32)
-        target_obj.data.vertices.foreach_get('co', target_coords)
-        target_coords = target_coords.reshape(-1, 3)
-        
+        basis_coords = self._read_vertices_coords_cached(base_obj)
+
+        target_coords = self._read_vertices_coords_cached(target_obj)
+
         # 将目标帧的顶点按映射重排到 base 顶点顺序
         remapped_target_coords = np.empty_like(basis_coords)
         remapped_target_coords[mapping] = target_coords
-        
+
         if continuous_base_obj:
-            continuous_base_coords = np.zeros(vtx_count * 3, dtype=np.float32)
-            continuous_base_obj.data.vertices.foreach_get('co', continuous_base_coords)
-            continuous_base_coords = continuous_base_coords.reshape(-1, 3)
+            continuous_base_coords = self._read_vertices_coords_cached(continuous_base_obj)
             
             # 同样把 continuous_base 重排到 base 顶点顺序（若 continuous_base 自带稳定ID）
             cb_mapping, _cb_mode, _cb_msg = _build_target_to_base_mapping(base_obj, continuous_base_obj, props)
