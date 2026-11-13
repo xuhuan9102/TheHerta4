@@ -6,6 +6,7 @@ from mathutils import Matrix, Vector
 import numpy as np
 import math
 import ast
+import os
 
 try:
     from ..utils.shapekey_rebase_utils import rebase_shape_key_coordinates
@@ -130,6 +131,61 @@ def _build_position_nearest_mapping(base_coords, target_coords):
     return mapping, collisions
 
 
+# 稳定ID采样校验：默认关闭，只有 ATP_STABLE_ID_DEBUG=1 才启用。
+# 判据是「映射正确」——target 顶点 i 的 ID 必须等于 base 顶点 mapping[i] 的 ID；
+# 不能拿「属性等于 0..N-1」当判据，因为用户可以通过几何节点写入任意稳定ID。
+_STABLE_ID_DEBUG_ENV = "ATP_STABLE_ID_DEBUG"
+_STABLE_ID_DEBUG_SAMPLES = 16
+
+
+def _stable_id_debug_enabled():
+    raw = os.environ.get(_STABLE_ID_DEBUG_ENV, "")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _verify_stable_id_mapping_sampled(mapping, base_ids, target_ids,
+                                      sample_limit=_STABLE_ID_DEBUG_SAMPLES):
+    """debug 模式下抽样校验 target→base 映射与两侧稳定ID是否一致。
+
+    默认零成本：ATP_STABLE_ID_DEBUG 未开启时第一行就返回。
+    抽样点用 np.linspace 等距取（含首尾），样本固定、可复现；
+    V < 16 时全抽。失败抛 RuntimeError，消息带采样下标、mapping 值、两侧 ID。
+    """
+    if not _stable_id_debug_enabled():
+        return
+
+    target_count = int(len(target_ids))
+    base_count = int(len(base_ids))
+    if target_count == 0 or base_count == 0:
+        return
+    if len(mapping) != target_count:
+        raise RuntimeError(
+            f"稳定ID采样校验失败：mapping 长度 {len(mapping)} 与 target 顶点数 {target_count} 不一致"
+        )
+
+    sample_count = min(int(sample_limit), target_count)
+    if sample_count >= target_count:
+        sample_indices = range(target_count)
+    else:
+        sample_indices = np.linspace(0, target_count - 1, sample_count).astype(np.int64)
+
+    for raw_index in sample_indices:
+        index = int(raw_index)
+        base_index = int(mapping[index])
+        target_id = int(target_ids[index])
+        if base_index < 0 or base_index >= base_count:
+            raise RuntimeError(
+                f"稳定ID采样校验失败：target[{index}] 的 ID {target_id} 映射到非法 base 索引 "
+                f"{base_index}（mapping[{index}]={base_index}）"
+            )
+        base_id = int(base_ids[base_index])
+        if base_id != target_id:
+            raise RuntimeError(
+                f"稳定ID采样校验失败：target[{index}].id={target_id} != "
+                f"base[{base_index}].id={base_id}（mapping[{index}]={base_index}）"
+            )
+
+
 def _build_target_to_base_mapping(base_obj, target_obj, props):
     """构建 target 顶点 index → base 顶点 index 的映射数组。
 
@@ -170,6 +226,9 @@ def _build_target_to_base_mapping(base_obj, target_obj, props):
                     mapping[t_idx] = base_idx
             if missing == 0:
                 attr_label = base_attr or target_attr or "stable_id"
+                # 调试开关下的抽样自检：确认 mapping 把每个 target 顶点指向了
+                # 同一个稳定 ID 的 base 顶点。默认关闭，不改变正常运行行为。
+                _verify_stable_id_mapping_sampled(mapping, base_ids, target_ids)
                 return mapping, "STABLE_ID", f"基于稳定ID属性 '{attr_label}' 建立顶点映射"
             stable_id_diag = f"稳定ID属性匹配失败：{missing}/{target_count} 个目标顶点未找到对应ID"
         else:
@@ -337,12 +396,19 @@ def _ensure_stable_id_on_original_mesh(obj, candidate_names):
             and getattr(existing, "data_type", None) in {'INT', 'INT32'}
             and len(existing.data) == vtx_count
         ):
-            # 校验内容是否还是 0..N-1（GN 中途若没做改动则一定是），否则保留原值。
+            # 结构检查（域/类型/长度）通过就复用。属性内容可能是用户通过几何节点
+            # 写入的任意 ID，不能假设 0..N-1；内容是否可用由映射阶段的
+            # ATP_STABLE_ID_DEBUG 采样校验负责（默认零成本，见
+            # _verify_stable_id_mapping_sampled）。
+            # 这里只读 3 个点做“读得动吗”的探针，保留老代码 foreach_get 抛错时
+            # 删掉属性重建的错误路径。注意：Attribute.data.foreach_get 要求目标
+            # 数组长度恰好等于 V（Blender 5.0.1 实测短数组抛 RuntimeError），
+            # 所以探针用逐元素索引读，而不是喂 3 个元素的 foreach_get。
             try:
-                buf = np.zeros(vtx_count, dtype=np.int32)
-                existing.data.foreach_get("value", buf)
-                if buf.size == vtx_count:
-                    needs_rebuild = False
+                if vtx_count:
+                    for probe_index in {0, vtx_count // 2, vtx_count - 1}:
+                        _ = existing.data[probe_index].value
+                needs_rebuild = False
             except Exception:
                 needs_rebuild = True
         if needs_rebuild:

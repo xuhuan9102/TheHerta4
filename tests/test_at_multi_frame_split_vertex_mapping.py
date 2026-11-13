@@ -1,9 +1,11 @@
 """测试多帧拆分到形态键时，基于稳定ID/位置最近邻的顶点映射逻辑"""
 import importlib.util
+import os
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -114,16 +116,24 @@ class _FakeAttr:
         self.domain = domain
         self.data_type = data_type
         self._values = np.asarray(values)
+        self.read_indices = []
 
         class _Data:
             def __init__(inner_self, arr_ref):
                 inner_self._owner = arr_ref
+                inner_self._broken_read = False
 
             def foreach_get(inner_self, _attr, output):
                 output[:] = inner_self._owner._values.reshape(-1)
 
             def foreach_set(inner_self, _attr, values):
                 inner_self._owner._values = np.asarray(values)
+
+            def __getitem__(inner_self, index):
+                if inner_self._broken_read:
+                    raise RuntimeError("unreadable attribute")
+                inner_self._owner.read_indices.append(int(index))
+                return types.SimpleNamespace(value=inner_self._owner._values[index])
 
             def __len__(inner_self):
                 return int(inner_self._owner._values.size)
@@ -334,6 +344,110 @@ class EnsureStableIdOnOriginalMeshTests(unittest.TestCase):
         mesh.attributes.get("stable_id").data.foreach_get("value", buf)
         # 已存在的值未被覆盖
         self.assertEqual(list(buf), [7, 8, 9])
+
+    def test_existing_attribute_is_reused_without_reading_all_values(self):
+        # 零成本路径：只读 3 个点做探针，不再 foreach_get 全部 V 个 int。
+        existing = _FakeAttr("stable_id", "POINT", "INT", np.arange(20, dtype=np.int32))
+        mesh = _FakeMesh(np.zeros((20, 3), dtype=np.float32), attrs=[existing])
+        obj = _FakeObject("Source", mesh)
+
+        attr_name, was_created = split_module._ensure_stable_id_on_original_mesh(obj, ["stable_id"])
+
+        self.assertEqual(attr_name, "stable_id")
+        self.assertFalse(was_created)
+        self.assertEqual(sorted(existing.read_indices), [0, 10, 19])
+
+    def test_unreadable_existing_attribute_is_rebuilt(self):
+        # 老语义：foreach_get 读失败时会删掉属性重建；探针读失败也必须走重建。
+        existing = _FakeAttr("stable_id", "POINT", "INT", np.arange(3, dtype=np.int32))
+        existing.data._broken_read = True
+        mesh = _FakeMesh(np.zeros((3, 3), dtype=np.float32), attrs=[existing])
+        obj = _FakeObject("Source", mesh)
+
+        attr_name, was_created = split_module._ensure_stable_id_on_original_mesh(obj, ["stable_id"])
+
+        self.assertEqual(attr_name, "stable_id")
+        self.assertTrue(was_created)
+        stored = mesh.attributes.get("stable_id")
+        self.assertIsNotNone(stored)
+        buf = np.zeros(3, dtype=np.int32)
+        stored.data.foreach_get("value", buf)
+        self.assertEqual(list(buf), [0, 1, 2])
+
+
+class StableIdDebugVerificationTests(unittest.TestCase):
+    """ATP_STABLE_ID_DEBUG=1 时的稳定ID采样校验（默认关闭时零成本）。"""
+
+    @staticmethod
+    def _debug_on():
+        return mock.patch.dict(os.environ, {split_module._STABLE_ID_DEBUG_ENV: "1"})
+
+    def test_debug_check_raises_when_mapping_point_is_wrong(self):
+        base_ids = np.arange(20, dtype=np.int64) + 100
+        target_ids = base_ids.copy()
+        mapping = np.arange(20, dtype=np.int64)
+        mapping[0] = 1  # target[0] 的 ID=100 应映射到 base[0]，故意错成 base[1]（ID=101）
+
+        with self._debug_on():
+            with self.assertRaises(RuntimeError) as ctx:
+                split_module._verify_stable_id_mapping_sampled(mapping, base_ids, target_ids)
+
+        message = str(ctx.exception)
+        self.assertIn("target[0]", message)
+        self.assertIn("mapping[0]=1", message)
+        self.assertIn("100", message)  # target ID
+        self.assertIn("101", message)  # 错误 base 顶点上的 ID
+
+    def test_debug_check_is_noop_when_disabled(self):
+        # 同一处故意改错，开关关闭时不读、不抛。
+        base_ids = np.arange(4, dtype=np.int64)
+        target_ids = base_ids.copy()
+        mapping = np.array([1, 0, 2, 3], dtype=np.int64)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            split_module._verify_stable_id_mapping_sampled(mapping, base_ids, target_ids)
+
+    def test_debug_check_accepts_arbitrary_non_contiguous_ids(self):
+        # 判据是映射正确，不是「属性等于 0..N-1」：用户经 GN 写入的 ID 可以是任意值。
+        base_ids = np.array([1000, 7, 42, 999, 3], dtype=np.int64)
+        target_ids = np.array([42, 1000, 3, 999, 7], dtype=np.int64)
+        mapping = np.array([2, 0, 4, 3, 1], dtype=np.int64)
+
+        with self._debug_on():
+            split_module._verify_stable_id_mapping_sampled(mapping, base_ids, target_ids)
+
+    def test_build_mapping_invokes_debug_check_after_stable_id_mapping(self):
+        base_ids = np.array([10, 20, 30], dtype=np.int32)
+        target_ids = np.array([30, 10, 20], dtype=np.int32)
+        base_mesh = _FakeMesh(
+            np.zeros((3, 3), dtype=np.float32),
+            attrs=[_FakeAttr("stable_id", "POINT", "INT", base_ids)],
+        )
+        target_mesh = _FakeMesh(
+            np.ones((3, 3), dtype=np.float32),
+            attrs=[_FakeAttr("stable_id", "POINT", "INT", target_ids)],
+        )
+        calls = []
+
+        def _record(mapping, checked_base_ids, checked_target_ids, sample_limit=16):
+            del sample_limit
+            calls.append((
+                np.asarray(mapping).tolist(),
+                np.asarray(checked_base_ids).tolist(),
+                np.asarray(checked_target_ids).tolist(),
+            ))
+
+        with self._debug_on():
+            with mock.patch.object(split_module, "_verify_stable_id_mapping_sampled", _record):
+                mapping, mode, _msg = split_module._build_target_to_base_mapping(
+                    _FakeObject("Base", base_mesh),
+                    _FakeObject("Target", target_mesh),
+                    _FakeProps(),
+                )
+
+        self.assertEqual(mode, "STABLE_ID")
+        self.assertEqual(list(mapping), [2, 0, 1])
+        self.assertEqual(calls, [([2, 0, 1], [10, 20, 30], [30, 10, 20])])
 
 
 if __name__ == "__main__":
