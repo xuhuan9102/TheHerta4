@@ -6,6 +6,11 @@ import copy
 
 import bpy
 
+try:
+    from ...common.ttl_protocol import build_transparency_draw_lines
+except ImportError:  # 单测按文件路径装载本模块时包结构不完整，退回顶层导入
+    from common.ttl_protocol import build_transparency_draw_lines
+
 from ...common.draw_call_model import DrawCallModel
 from ...common.global_config import GlobalConfig
 from ...common.global_key_count_helper import GlobalKeyCountHelper
@@ -2201,26 +2206,13 @@ class ExportZZMI(ExportUnity):
         info = getattr(drawcall, 'transparency_info', None)
         if info is None:
             return None
-        lines = []
-        if info['mode'] == 'TEXTURE':
-            resource = self._get_transparency_diffuse_resource(drawcall)
-            lines.append(r"Resource\TTL\TransparencyTex = ref " + resource)
-        else:
-            lines.append(r"Resource\TTL\TransparencyTex = null")
-        lines.extend([
-            r"$\TTL\mask_channel = " + str(info['mask_channel']),
-            r"$\TTL\mask_invert = " + str(int(info['mask_invert'])),
-        ])
-        if info['mode'] != 'TEXTURE':
-            lines.append(r"$\TTL\alpha = " + str(info['alpha']))
-        lines.extend([
-            r"$\TTL\V = " + str(info['brightness']),
-            r"$\TTL\_1 = " + str(index_count),
-            r"$\TTL\_2 = " + str(index_offset),
-            r"$\TTL\_3 = " + str(base_vertex),
-            r"run = CommandList\TTL\Draw",
-        ])
-        return lines
+        resource = (
+            self._get_transparency_diffuse_resource(drawcall)
+            if info['mode'] == 'TEXTURE' else ""
+        )
+        return build_transparency_draw_lines(
+            info, resource, index_count, index_offset, base_vertex
+        )
 
     def _append_drawindexed_lines(self, section, drawcall_list, draw_offset_dict, base_vertex=0):
         kwargs = {'obj_name_draw_offset_dict': draw_offset_dict}

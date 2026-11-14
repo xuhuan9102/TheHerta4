@@ -2,7 +2,7 @@
 
 import unittest
 
-from common.ttl_protocol import parse_ttl_draw_args
+from common.ttl_protocol import build_transparency_draw_lines, parse_ttl_draw_args
 
 
 class ParseTtlDrawArgsTests(unittest.TestCase):
@@ -58,3 +58,40 @@ class ParseTtlDrawArgsTests(unittest.TestCase):
             self.assertNotIn("def _parse_ttl_draw_args", source, name)
             self.assertIn("from ..common.ttl_protocol import parse_ttl_draw_args", source, name)
             self.assertIn("parse_ttl_draw_args(lines, line_index", source, name)
+
+
+class BuildTransparencyDrawLinesTests(unittest.TestCase):
+    """「透明贴图」节点的 TTL 参数组。"""
+
+    def _info(self, mode, **overrides):
+        info = {
+            "mode": mode,
+            "mask_channel": 3,
+            "mask_invert": True,
+            "alpha": 0.5,
+            "brightness": 1.5,
+        }
+        info.update(overrides)
+        return info
+
+    def test_texture_mode_writes_alpha_one(self):
+        lines = build_transparency_draw_lines(
+            self._info("TEXTURE"), "Resource_Diffuse_A", 100, 20, 3,
+        )
+        self.assertIn(r"$\TTL\alpha = 1", lines)
+        self.assertLess(
+            lines.index(r"$\TTL\mask_invert = 1"),
+            lines.index(r"$\TTL\alpha = 1"),
+        )
+        self.assertLess(
+            lines.index(r"$\TTL\alpha = 1"),
+            lines.index(r"$\TTL\V = 1.5"),
+        )
+        self.assertEqual(lines[-1], r"run = CommandList\TTL\Draw")
+
+    def test_alpha_mode_uses_node_value(self):
+        lines = build_transparency_draw_lines(
+            self._info("ALPHA", alpha=0.25), "", 100, 20, 0,
+        )
+        self.assertIn(r"$\TTL\alpha = 0.25", lines)
+        self.assertIn(r"Resource\TTL\TransparencyTex = null", lines)
