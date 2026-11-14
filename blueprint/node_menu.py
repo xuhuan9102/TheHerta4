@@ -22,7 +22,9 @@ def _is_result_output_node(node):
 
 
 def _is_dynamic_socket_node(node):
-    return getattr(node, "bl_idname", "") == 'SSMTNode_Object_Group' or _is_result_output_node(node)
+    return getattr(node, "bl_idname", "") in {
+        'SSMTNode_Object_Group', 'SSMTNode_Transparency',
+    } or _is_result_output_node(node)
 
 
 def _get_active_blueprint_tree(context):
@@ -1379,6 +1381,7 @@ class SSMT_MT_NodeMenu_Blueprint(bpy.types.Menu):
         _add_node_entry(layout, "蓝图嵌套", 'NODETREE', "SSMTNode_Blueprint_Nest")
         _add_node_entry(layout, "跨IB节点", 'ARROW_LEFTRIGHT', "SSMTNode_CrossIB")
         _add_node_entry(layout, "着色器替换节点", 'SHADERFX', "SSMTNode_ShaderReplace")
+        _add_node_entry(layout, "透明贴图", 'MATERIAL', "SSMTNode_Transparency")
         _add_node_entry(layout, "多文件导出", 'FILE', "SSMTNode_MultiFile_Export")
 
 

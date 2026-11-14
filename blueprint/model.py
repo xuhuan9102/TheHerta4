@@ -26,6 +26,7 @@ _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT = 'SSMTNode_VertexGroupMappingInput'
 _NODE_TYPE_BLUEPRINT_NEST = 'SSMTNode_Blueprint_Nest'
 _NODE_TYPE_CROSS_IB = 'SSMTNode_CrossIB'
 _NODE_TYPE_SHADER_REPLACE = 'SSMTNode_ShaderReplace'
+_NODE_TYPE_TRANSPARENCY = 'SSMTNode_Transparency'
 _NODE_TYPE_MULTI_FILE_EXPORT = 'SSMTNode_MultiFile_Export'
 _NODE_TYPE_POSTPROCESS_DRAG_INTERACTION = 'SSMTNode_PostProcess_DragInteraction'
 
@@ -67,6 +68,7 @@ _KNOWN_NODE_TYPES = {
     _NODE_TYPE_BLUEPRINT_NEST,
     _NODE_TYPE_CROSS_IB,
     _NODE_TYPE_SHADER_REPLACE,
+    _NODE_TYPE_TRANSPARENCY,
     _NODE_TYPE_MULTI_FILE_EXPORT,
 }
 
@@ -262,6 +264,7 @@ class ProcessingChain:
     vertex_group_process_nodes: List[bpy.types.Node] = field(default_factory=list)
     vertex_group_mapping_nodes: List[bpy.types.Node] = field(default_factory=list)
     shader_replace_info_list: List[dict] = field(default_factory=list)
+    transparency_info: Optional[dict] = None
     export_object_name_override: str = ""
 
     reached_output: bool = False
@@ -368,6 +371,12 @@ class ProcessingChain:
             shader_count = len(getattr(node, 'shader_list', []))
             params.append(f"shaders={shader_count}")
             return f"ShaderReplace[{','.join(params)}]"
+
+        elif node_type == 'Transparency':
+            info = node.get_transparency_info()
+            return "Transparency[" + ",".join(
+                f"{key}={info[key]}" for key in sorted(info)
+            ) + "]"
 
         elif node_type == 'MultiFile_Export':
             params = []
@@ -493,6 +502,7 @@ class ProcessingChain:
         new_chain.vertex_group_process_nodes = list(self.vertex_group_process_nodes)
         new_chain.vertex_group_mapping_nodes = list(self.vertex_group_mapping_nodes)
         new_chain.shader_replace_info_list = list(self.shader_replace_info_list)
+        new_chain.transparency_info = copy.deepcopy(self.transparency_info, memo)
         new_chain.export_object_name_override = self.export_object_name_override
         new_chain.reached_output = self.reached_output
         new_chain.is_valid = self.is_valid
@@ -516,6 +526,7 @@ class ProcessingChain:
         obj_model.work_key_list = copy.deepcopy(self.shapekey_params)
         obj_model.shader_replace_info_list = list(self.shader_replace_info_list)
         obj_model.shader_replace_info_resolved = True
+        obj_model.transparency_info = copy.deepcopy(self.transparency_info)
 
         return obj_model
 

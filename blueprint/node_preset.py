@@ -309,6 +309,12 @@ class SSMT_OT_LoadNodePreset(Operator):
                 
                 if node_data.get('label'):
                     node.label = node_data['label']
+
+                if node.bl_idname == 'SSMTNode_Transparency':
+                    properties = node_data.get('properties', {})
+                    for prop_name in ('mode', 'mask_channel', 'mask_invert', 'alpha', 'brightness'):
+                        if prop_name in properties:
+                            setattr(node, prop_name, properties[prop_name])
                 
                 created_nodes[node_data['index']] = node
                 
@@ -320,7 +326,7 @@ class SSMT_OT_LoadNodePreset(Operator):
     def _create_connections(self, node_tree, created_nodes, preset_data):
         dynamic_classes = set()
         for node in created_nodes.values():
-            if node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output'):
+            if node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output', 'SSMTNode_Transparency'):
                 cls = type(node)
                 dynamic_classes.add(cls)
         
@@ -371,7 +377,7 @@ class SSMT_OT_LoadNodePreset(Operator):
                 cls.update = original_update
             
             for node in created_nodes.values():
-                if node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output'):
+                if node.bl_idname in ('SSMTNode_Object_Group', 'SSMTNode_Result_Output', 'SSMTNode_Transparency'):
                     try:
                         node.update()
                     except:

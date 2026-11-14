@@ -1684,7 +1684,7 @@ class HIMIStubDrawCall:
     comment_alias_name: str = field(init=False, repr=False, default="")
     #: 站位件没有按键条件 / 着色器替换信息（真实现里这两个也是 `init=False` 的空容器）
     work_key_list: list = field(init=False, repr=False, default_factory=list)
-    shader_replace_info_list: list = field(init=False, repr=False, default_factory=list)
+    shader_replace_info_list: list = field(init=False, repr=False, default_factory=list); transparency_info: Optional[dict] = None
     shader_replace_info_resolved: bool = field(init=False, repr=False, default=False)
 
     def __post_init__(self) -> None:

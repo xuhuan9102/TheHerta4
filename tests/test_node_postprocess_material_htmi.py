@@ -3531,3 +3531,84 @@ class TtlAlphaPerTextureExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TtlMutualExclusionTests(HTMIMaterialPostProcessTests):
+    """处理链里有「透明贴图」节点时，材质转资源节点的 TTL 段整体让位。"""
+
+    BS = chr(92)
+
+    def _transparency_tree(self):
+        return types.SimpleNamespace(
+            name="测试蓝图",
+            nodes=[
+                types.SimpleNamespace(
+                    bl_idname="SSMTNode_Transparency", mute=False,
+                )
+            ],
+        )
+
+    def _build_sections(self, temp_dir, with_ttl_material):
+        materials = [("DiffuseMap_衣服", _write_png(temp_dir, "diffuse.png"))]
+        if with_ttl_material:
+            materials.append(("TTLMap_0.75_遮罩", _write_png(temp_dir, "ttl.png")))
+        mesh_name = "LOD0.241deac5-56376-0.中文中文_copy"
+        obj = _FakeObject(mesh_name, {}, materials)
+        _fake_bpy.data.objects[obj.name] = obj
+
+        section_name = "[TextureOverride_LOD0.241deac5_56376_0]"
+        sections = OrderedDict([
+            (section_name, [
+                "hash = 241deac5",
+                "match_first_index = 0",
+                f"Resource{self.BS}ZZMI{self.BS}Diffuse = ref Resource-241deac5-56376-0-DiffuseMap",
+                f"run = CommandList{self.BS}ZZMI{self.BS}SetTextures",
+                f"; [mesh:{mesh_name}] [vertex_count:15618]",
+                "drawindexed = 56376, 0, 3",
+            ]),
+            ("_config_path", temp_dir),
+        ])
+        return section_name, sections
+
+    def test_ttl_skipped_when_transparency_node_present(self):
+        """B：两者同时存在 ⇒ 材质节点零 TTL 符号，且元数据写明让位原因。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            section_name, sections = self._build_sections(temp_dir, with_ttl_material=True)
+            node = _ttl_node()
+            node.id_data = self._transparency_tree()
+
+            _run_process(node, sections, section_name)
+
+            dumped = _dump_sections(sections)
+            self.assertNotIn(f"Resource{self.BS}TTL{self.BS}TransparencyTex", dumped)
+            self.assertNotIn(f"${self.BS}TTL{self.BS}mask_channel", dumped)
+            self.assertNotIn(f"${self.BS}TTL{self.BS}layer_index", dumped)
+            self.assertNotIn(f"run = CommandList{self.BS}TTL{self.BS}Draw", dumped)
+            self.assertEqual(node.ttl_skipped_reason, "transparency_node_present")
+
+    def test_ttl_still_written_without_transparency_node(self):
+        """A：只有材质转资源节点 ⇒ TTL 段照旧写出。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            section_name, sections = self._build_sections(temp_dir, with_ttl_material=True)
+            node = _ttl_node()
+            node.id_data = types.SimpleNamespace(name="测试蓝图", nodes=[])
+
+            _run_process(node, sections, section_name)
+
+            dumped = _dump_sections(sections)
+            self.assertIn(f"Resource{self.BS}TTL{self.BS}TransparencyTex", dumped)
+            self.assertIn(f"run = CommandList{self.BS}TTL{self.BS}Draw", dumped)
+            self.assertEqual(getattr(node, "ttl_skipped_reason", ""), "")
+
+    def test_ttl_skip_without_ttl_material_does_not_raise(self):
+        """C：只有透明贴图节点（没有 TTLMap 材质）⇒ 材质节点不报错、不写 TTL。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            section_name, sections = self._build_sections(temp_dir, with_ttl_material=False)
+            node = _ttl_node()
+            node.id_data = self._transparency_tree()
+
+            _run_process(node, sections, section_name)
+
+            dumped = _dump_sections(sections)
+            self.assertNotIn(f"Resource{self.BS}TTL{self.BS}TransparencyTex", dumped)
+            self.assertEqual(node.ttl_skipped_reason, "transparency_node_present")

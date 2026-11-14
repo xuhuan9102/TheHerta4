@@ -48,6 +48,8 @@ _MARK_RE = re.compile(r"^;MARK", re.IGNORECASE)
 
 #: 绘制命令（含 instanced 变体）。
 _DRAW_RE = re.compile(r"^(?:drawindexed(?:instanced)?|draw(?:instanced)?)\s*=", re.IGNORECASE)
+#: TTL 库调用完成这一笔绘制；只用于单元边界，保持通用 run 分类不变。
+_TTL_DRAW_CALL_RE = re.compile(r"^run\s*=\s*CommandList\\TTL\\Draw\s*(?:;.*)?$", re.IGNORECASE)
 #: 命令列表调用（合并骨架 attach 等副作用，复制到多个块会重复执行）。
 _RUN_RE = re.compile(r"^run\s*=", re.IGNORECASE)
 #: 缓冲/着色器绑定行。
@@ -248,7 +250,7 @@ def iter_draw_units(lines, is_target=None):
     2. 包裹该单元的最内层 ``if`` 块的 ``endif`` 行之前；
     3. 同深度或更外层的 ``;MARK:`` 行之前（导出期段标记留在最外层）；
     4. 同深度或更外层的 ``else`` / ``elseif`` 行之前（分支切换不属于本单元）；
-    5. **单元内已出现同深度绘制命令之后**，新开的同深度 ``if`` 行之前。这一条
+    5. **单元内已出现同深度绘制命令（含 TTL Draw 调用）之后**，新开的同深度 ``if`` 行之前。这一条
        保留既有语义：目标绘制之后的独立条件块不应被跟着拖走（置顶 / 拆块时
        会把它当成新的代码范围起点）。
 
@@ -301,7 +303,7 @@ def iter_draw_units(lines, is_target=None):
                 if _IF_START_RE.match(stripped) and seen_same_depth_draw:
                     end = scan
                     break
-            if scan_depth == unit_depth and _DRAW_RE.match(stripped):
+            if scan_depth == unit_depth and (_DRAW_RE.match(stripped) or _TTL_DRAW_CALL_RE.match(stripped)):
                 seen_same_depth_draw = True
             scan += 1
 

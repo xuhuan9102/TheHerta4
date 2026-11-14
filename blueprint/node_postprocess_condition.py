@@ -61,7 +61,8 @@
 - 每个目标段（导出期登记里属于这些 draw_ib 的段）的**可门控行 / 块**
   分别包进 ``if $cond_<ns>_cond_active == 1``（一个段可以产生多对门控块）；
   ``run =`` / ``vs-t0 =`` / ``$变量`` 赋值 / ``ResourceZZPalette*`` 捕获
-  与未识别行**一律留在门控 if 之外**，因为本 3DMigoto fork 的加载期优化
+  与未识别行留在门控 if 之外；TTL 的实际 Draw 调用及其逐笔参数例外，必须
+  与遮罩绑定一起门控。其它调用保留顶层，因为本 3DMigoto fork 的加载期优化
   会让 if 体内的 ``run`` 不执行、把只在 if 内赋值的 ``$变量`` 按初值静态
   折叠（合并骨架 attach 不执行 -> 骨架为空 -> 模型崩坏，实测踩坑）；
   匹配键行（``hash`` / ``match_first_index`` / ``match_index_count`` /
@@ -619,7 +620,15 @@ def _find_sections(lines):
     return sections
 
 
-#: 段体内**必须保持顶层**（绝不放进门控 ``if`` 体内）的行判定。
+#: TTL 的 Draw 是实际绘制入口，逐笔参数必须与它一起门控；其它 run / 变量
+#: 仍按下方原有顶层规则处理，避免改动骨架 attach 等副作用调用。
+_TTL_GATEABLE_PATTERNS = (
+    re.compile(r"^Resource\\TTL\\TransparencyTex\s*=", re.IGNORECASE),
+    re.compile(r"^run\s*=\s*CommandList\\TTL\\Draw\s*(?:;.*)?$", re.IGNORECASE),
+    re.compile(r"^\$\\TTL\\[A-Za-z_][A-Za-z0-9_]*\s*=", re.IGNORECASE),
+)
+
+#: 段体内**必须保持顶层**的行判定（以上 TTL 绘制入口及其参数除外）。
 #:
 #: 这几类是实测踩坑得到的硬约束，违反即模型崩坏：
 #: - ``run =`` 在本 3DMigoto fork 的 if 体内不执行 -> 合并骨架 attach 不发生
@@ -674,7 +683,7 @@ _ENDIF_RE = re.compile(r"^endif\b", re.IGNORECASE)
 def _classify_line(stripped):
     """把段体内一行分类成 ``"top"`` / ``"gate"`` / ``"neutral"``。
 
-    - ``top``：必须留在门控 if 之外（``run`` / ``vs-t0`` / ``$变量`` /
+    - ``top``：必须留在门控 if 之外（TTL 绘制及参数以外的 ``run`` / ``$变量`` /
       ``ResourceZZPalette*`` / 未识别行 —— 保守处理，避免误伤状态机）；
     - ``gate``：可以放进 ``if`` 体内；
     - ``neutral``：空行 / 纯注释行，不参与判定，跟随相邻片段。
@@ -696,6 +705,9 @@ def _classify_line(stripped):
     if _MATCH_KEY_RE.match(text):
         # 段根匹配键：必须留在最外层
         return "top"
+    for pattern in _TTL_GATEABLE_PATTERNS:
+        if pattern.match(text):
+            return "gate"
     for pattern, _label in _TOP_ONLY_PATTERNS:
         if pattern.match(text):
             return "top"
@@ -739,7 +751,7 @@ def _segment_raw(body_lines):
 
     - 块内**只有**可门控行（+ 空行 / 注释）-> 整块标成 ``gate``（保留块内原有
       if/endif，形成合法的嵌套）；
-    - 块内混有 ``run`` / ``vs-t0`` / ``$变量`` / ``Palette`` / 未识别行 ->
+    - 块内混有非 TTL 的 ``run`` / ``$变量`` / ``Palette`` / 未识别行 ->
       块本身保持顶层（``if`` / ``endif`` 两行原样），**递归**切分块内内容，
       只把其中可门控的连续片段门控（这样 if 块内的 ``run`` 仍在门控 if 之外）。
     """
@@ -1244,7 +1256,7 @@ def _wrap_target_sections(lines, ns, target_names, newline, condition_expr=None)
     ``    if $cond_<ns>_cond_active == 1``；多条件时由
     :func:`_condition_expression` 传入 ``&&`` 连接的一行表达式。
 
-    必须保持顶层的行（``run`` / ``vs-t0`` / ``$变量`` / ``ResourceZZPalette``
+    必须保持顶层的行（非 TTL 的 ``run`` / ``$变量`` / ``ResourceZZPalette``
     / 未识别行）原样留在门控 if 之外；一个段可以产生多对 begin/end。
 
     返回 ``(new_lines, wrapped, skipped, auto_closed, stray_endif, auto_close_count)``：

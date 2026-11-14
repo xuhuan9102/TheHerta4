@@ -1,4 +1,8 @@
 import bpy
+try:
+    from ..common.ttl_protocol import parse_ttl_draw_args
+except ImportError:  # 单测按文件路径装载本模块时包结构不完整，退回顶层导入
+    from common.ttl_protocol import parse_ttl_draw_args
 import os
 import glob
 import re
@@ -1147,6 +1151,17 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
             if not run_target_name:
                 continue
 
+            if run_target_name.casefold() == r"commandlist\ttl\draw":
+                draw_params = parse_ttl_draw_args(lines, line_index)
+                if draw_params is not None:
+                    return {
+                        "draw_params": draw_params,
+                        "draw_section_name": section_name,
+                        "draw_line_index": line_index,
+                        "run_path": current_run_path,
+                    }
+                continue
+
             target_section_name = self._resolve_run_section_name(section_lookup, run_target_name)
             if not target_section_name:
                 continue
@@ -1176,6 +1191,17 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
 
             run_target_name = self._extract_run_target_name(lines[line_index])
             if not run_target_name:
+                continue
+
+            if run_target_name.casefold() == r"commandlist\ttl\draw":
+                draw_params = parse_ttl_draw_args(lines, line_index, mesh_line_index + 1)
+                if draw_params is not None:
+                    return {
+                        "draw_params": draw_params,
+                        "draw_section_name": section_name,
+                        "draw_line_index": line_index,
+                        "run_path": [],
+                    }
                 continue
 
             target_section_name = self._resolve_run_section_name(section_lookup, run_target_name)

@@ -1,5 +1,8 @@
 import json
 import os
+import hashlib
+import re
+import copy
 
 import bpy
 
@@ -2134,6 +2137,114 @@ class ExportZZMI(ExportUnity):
     def _get_submesh_ib_key(self, submesh_model, draw_ib):
         return f"{draw_ib}_{submesh_model.match_first_index}"
 
+    @staticmethod
+    def _transparency_section_suffix(drawcall):
+        info = getattr(drawcall, 'transparency_info', None)
+        if info is None:
+            return ""
+        payload = json.dumps(info, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return "_TTL_" + hashlib.sha256(payload).hexdigest()[:16]
+
+    def _get_transparency_diffuse_resource(self, drawcall):
+        """Resolve the source IB's diffuse, including cross-IB target draws."""
+        draw_ib = str(drawcall.match_draw_ib or '')
+        first_index = str(drawcall.match_first_index)
+        identity = (
+            f"物体 '{drawcall.obj_name}' (IB {draw_ib}, first_index {first_index})"
+        )
+        candidates = []
+        for model in getattr(self, 'drawib_model_list', []) or []:
+            if str(getattr(model, 'draw_ib', '')).casefold() != draw_ib.casefold():
+                continue
+            for submesh in getattr(model, 'submesh_model_list', []) or []:
+                if str(submesh.match_first_index) == first_index:
+                    candidates.append((model, submesh))
+        exact = [
+            pair for pair in candidates
+            if str(getattr(pair[1], 'unique_str', '')) in {
+                drawcall.get_unique_str(), drawcall.get_workspace_unique_str()
+            }
+        ]
+        if exact:
+            candidates = exact
+        else:
+            matching_count = [
+                pair for pair in candidates
+                if str(getattr(pair[1], 'match_index_count', '')) == str(drawcall.match_index_count)
+            ]
+            if matching_count:
+                candidates = matching_count
+        if len(candidates) != 1:
+            raise RuntimeError(f"[ZZMI透明节点] {identity} 无法唯一确定自身 IB 的 DiffuseMap 资源")
+        model, submesh = candidates[0]
+        diffuse = [
+            texture for texture in model.get_submesh_texture_markup_info_list(submesh)
+            if str(getattr(texture, 'mark_name', '')).casefold() == ZZMITextureMarkName.DiffuseMap.casefold()
+        ]
+        resources = []
+        for texture in diffuse:
+            if str(getattr(texture, 'mark_type', '')).casefold() == 'hash':
+                if not str(getattr(texture, 'mark_hash', '')).strip():
+                    continue
+                resource = "Resource_Texture_" + str(texture.mark_hash)
+            else:
+                if not str(getattr(texture, 'mark_filename', '')).strip():
+                    continue
+                resource = texture.get_resource_name()
+            if resource not in resources:
+                resources.append(resource)
+        if len(resources) != 1:
+            raise RuntimeError(f"[ZZMI透明节点] {identity} 缺少或存在多个自身 IB 的 DiffuseMap 资源")
+        return resources[0]
+
+    def _get_transparency_draw_lines(self, drawcall, index_count, index_offset, base_vertex):
+        info = getattr(drawcall, 'transparency_info', None)
+        if info is None:
+            return None
+        lines = []
+        if info['mode'] == 'TEXTURE':
+            resource = self._get_transparency_diffuse_resource(drawcall)
+            lines.append(r"Resource\TTL\TransparencyTex = ref " + resource)
+        else:
+            lines.append(r"Resource\TTL\TransparencyTex = null")
+        lines.extend([
+            r"$\TTL\mask_channel = " + str(info['mask_channel']),
+            r"$\TTL\mask_invert = " + str(int(info['mask_invert'])),
+        ])
+        if info['mode'] != 'TEXTURE':
+            lines.append(r"$\TTL\alpha = " + str(info['alpha']))
+        lines.extend([
+            r"$\TTL\V = " + str(info['brightness']),
+            r"$\TTL\_1 = " + str(index_count),
+            r"$\TTL\_2 = " + str(index_offset),
+            r"$\TTL\_3 = " + str(base_vertex),
+            r"run = CommandList\TTL\Draw",
+        ])
+        return lines
+
+    def _append_drawindexed_lines(self, section, drawcall_list, draw_offset_dict, base_vertex=0):
+        kwargs = {'obj_name_draw_offset_dict': draw_offset_dict}
+        if base_vertex:
+            kwargs['base_vertex'] = base_vertex
+        lines = M_IniHelper.get_drawindexed_str_list(drawcall_list, **kwargs)
+        if not any(getattr(dc, 'transparency_info', None) is not None for dc in drawcall_list):
+            for line in lines:
+                section.append(line)
+            return
+        drawcalls = iter(drawcall_list)
+        for line in lines:
+            match = re.match(r'^(\s*)drawindexed\s*=\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*$', line, re.IGNORECASE)
+            if match:
+                drawcall = next(drawcalls)
+                replacements = self._get_transparency_draw_lines(
+                    drawcall, *[int(value) for value in match.groups()[1:]]
+                )
+                if replacements is not None:
+                    for replacement in replacements:
+                        section.append(match.group(1) + replacement)
+                    continue
+            section.append(line)
+
     def _append_drawindexed_with_shader_replace(
         self, section, drawcall_list, draw_offset_dict, base_vertex=0
     ):
@@ -2143,11 +2254,7 @@ class ExportZZMI(ExportUnity):
         因此重定向绘制也会生成 mesh 注释、条件块和 shader-replace 逻辑。
         """
         if not self.has_shader_replace:
-            drawindexed_kwargs = {"obj_name_draw_offset_dict": draw_offset_dict}
-            if base_vertex:
-                drawindexed_kwargs["base_vertex"] = base_vertex
-            for drawindexed_str in M_IniHelper.get_drawindexed_str_list(drawcall_list, **drawindexed_kwargs):
-                section.append(drawindexed_str)
+            self._append_drawindexed_lines(section, drawcall_list, draw_offset_dict, base_vertex)
             return
 
         resolved_drawcalls = [
@@ -2164,11 +2271,7 @@ class ExportZZMI(ExportUnity):
         ]
         for dc, obj_infos in resolved_drawcalls:
             if not obj_infos:
-                drawindexed_kwargs = {"obj_name_draw_offset_dict": draw_offset_dict}
-                if base_vertex:
-                    drawindexed_kwargs["base_vertex"] = base_vertex
-                for drawindexed_str in M_IniHelper.get_drawindexed_str_list([dc], **drawindexed_kwargs):
-                    section.append(drawindexed_str)
+                self._append_drawindexed_lines(section, [dc], draw_offset_dict, base_vertex)
                 continue
 
             draw_offset = dc.index_offset
@@ -2192,6 +2295,7 @@ class ExportZZMI(ExportUnity):
                     dc.index_count,
                     draw_offset,
                     base_vertex,
+                    section_suffix=self._transparency_section_suffix(dc),
                 )
                 for line in run_lines:
                     section.append(f"{indent}{line}")
@@ -3462,6 +3566,64 @@ class ExportZZMI(ExportUnity):
                 runs.append((owner, triangle_start, 3))
         return runs
 
+    def _append_merged_transparency_run(self, section, host_ib, run_start, run_count):
+        """Intersect a merged source run with path-local draws only when TTL is used."""
+        models = [
+            model for model in self.drawib_model_list
+            if str(getattr(model, 'draw_ib', '')) == str(host_ib)
+        ]
+        if not any(
+            getattr(drawcall, 'transparency_info', None) is not None
+            for model in models for submesh in model.submesh_model_list
+            for drawcall in submesh.drawcall_model_list
+        ):
+            return False
+        unique_str = self._merged_index_unique_str(host_ib)
+        matches = [
+            (model, submesh) for model in models for submesh in model.submesh_model_list
+            if submesh.unique_str == unique_str
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(f"[ZZMI透明节点] 合并 IB {host_ib} 无法唯一匹配索引资源 '{unique_str}'")
+        model, submesh = matches[0]
+        if not any(getattr(dc, 'transparency_info', None) is not None for dc in submesh.drawcall_model_list):
+            return False
+        run_end = run_start + run_count
+        segments = []
+        for drawcall in submesh.drawcall_model_list:
+            offset = model.obj_name_draw_offset.get(drawcall.obj_name, drawcall.index_offset)
+            start = max(run_start, offset)
+            end = min(run_end, offset + drawcall.index_count)
+            if start >= end:
+                continue
+            segments.append((start, end, drawcall))
+        events = list(segments)
+        cursor = run_start
+        for start, end, _drawcall in sorted(segments, key=lambda item: item[:2]):
+            if start > cursor:
+                events.append((cursor, start, None))
+            cursor = max(cursor, end)
+        if cursor < run_end:
+            events.append((cursor, run_end, None))
+        for start, end, drawcall in sorted(events, key=lambda item: item[0]):
+            if drawcall is None:
+                section.append("drawindexed = %d, %d, 0" % (end - start, start))
+                continue
+            segment = copy.copy(drawcall)
+            segment.index_offset = start
+            segment.index_count = end - start
+            # These records only generate shader sections; they never enter buffer export.
+            if self.has_shader_replace:
+                extra = getattr(self, '_transparency_split_shader_drawcalls', None)
+                if extra is None:
+                    extra = []
+                    self._transparency_split_shader_drawcalls = extra
+                extra.append(segment)
+            self._append_drawindexed_with_shader_replace(
+                section, [segment], {segment.obj_name: start}, base_vertex=0
+            )
+        return True
+
     def _append_merged_render_split_draws(self, section, draw_ib) -> bool:
         """跨组拆分绘制：合并网格保持一份，但**按来源分成多次 `drawindexed`**，
         每次绘制前换 `vs-cb1`，让每个来源用自己的对象变换。
@@ -3559,6 +3721,8 @@ class ExportZZMI(ExportUnity):
             section.append("vs-cb1 = " + self._merged_cb1_name(int(skeleton_group)))
             for run_start, run_count in own_runs:
                 if run_count <= 0:
+                    continue
+                if self._append_merged_transparency_run(section, host_ib, run_start, run_count):
                     continue
                 section.append(
                     "drawindexed = %d, %d, 0" % (run_count, run_start)
@@ -8301,6 +8465,8 @@ class ExportZZMI(ExportUnity):
             self._cleanup_stub_objects()
 
     def _export_impl(self):
+        if hasattr(self, '_transparency_split_shader_drawcalls'):
+            self._transparency_split_shader_drawcalls = []
         # 骨骼引用缓存按本次导出的几何状态重算（导出流程内顶点组只读；缓存条目
         # 自身也带结构签名，见 `_collect_drawib_referenced_bone_ids`）。
         self._zzmi_drawib_bone_refs_cache = {}
@@ -8417,11 +8583,16 @@ class ExportZZMI(ExportUnity):
                 ini_builder=ini_builder,
                 shader_replace_info_list=self.shader_replace_info_list,
                 shader_replace_object_names=self.shader_replace_object_names,
-                draw_call_models=self.blueprint_model.ordered_draw_obj_data_model_list,
+                draw_call_models=(
+                    self.blueprint_model.ordered_draw_obj_data_model_list
+                    + getattr(self, '_transparency_split_shader_drawcalls', [])
+                ),
                 mod_export_path=GlobalConfig.path_generate_mod_folder(),
                 shader_replace_object_info_map=self.shader_replace_object_info_map,
                 draw_call_offset_map=M_IniHelper.build_draw_call_offset_map(self.drawib_model_list),
                 draw_call_base_vertex_map=self._build_shader_replace_base_vertex_map(),
+                draw_call_command_provider=self._get_transparency_draw_lines,
+                draw_call_section_suffix_provider=self._transparency_section_suffix,
             )
 
         if self.has_merged_skeleton:

@@ -73,6 +73,7 @@ _MODULE_REGISTRY = [
     {"name": "node_nest", "required": False},
     {"name": "node_cross_ib", "required": False},
     {"name": "node_shader_replace", "required": False},
+    {"name": "node_transparency", "required": False},
     {"name": "node_multifile_export", "required": False},
     {"name": "node_postprocess_base", "required": False},
     {"name": "node_postprocess_shapekey", "required": False},

@@ -1150,6 +1150,8 @@ class M_IniHelper:
         shader_replace_object_info_map: dict = None,
         draw_call_offset_map: dict = None,
         draw_call_base_vertex_map: dict = None,
+        draw_call_command_provider=None,
+        draw_call_section_suffix_provider=None,
     ):
         """生成着色器替换相关的 INI 段。
 
@@ -1167,6 +1169,8 @@ class M_IniHelper:
             use_instanced_draw: 是否生成 drawindexedinstanced 绘制命令
             draw_call_offset_map: DrawCall 对象身份到最终 IB 绘制偏移的映射
             draw_call_base_vertex_map: DrawCall 对象身份到重定向 base_vertex 的映射
+            draw_call_command_provider: 可选逐 DrawCall 绘制行生成器；None 保持原绘制
+            draw_call_section_suffix_provider: 可选逐 DrawCall 段名后缀，隔离不同绘制配置
         """
         if not shader_replace_info_list:
             return
@@ -1348,6 +1352,15 @@ class M_IniHelper:
                     )
                 else:
                     drawindexed_str = f"drawindexed = {index_count},{index_offset},{base_vertex}"
+                draw_lines = None
+                if draw_call_command_provider is not None:
+                    draw_lines = draw_call_command_provider(dm, index_count, index_offset, base_vertex)
+                if draw_lines is None:
+                    draw_lines = [drawindexed_str]
+                section_suffix = (
+                    draw_call_section_suffix_provider(dm)
+                    if draw_call_section_suffix_provider is not None else ""
+                )
 
                 # 为每个变体生成 CustomShader 段
                 for shader in shaders:
@@ -1357,7 +1370,7 @@ class M_IniHelper:
                     section_name = cls._build_custom_shader_section_name(
                         prefix, ib_hash, first_index, component,
                         index_count, index_offset, base_vertex, variant_id
-                    )
+                    ) + section_suffix
                     if section_name in generated_section_names:
                         continue
                     generated_section_names.add(section_name)
@@ -1373,7 +1386,8 @@ class M_IniHelper:
                             )
                         cs_section.append(f"ps = ./Shaders/{filename}")
                     cs_section.append("handling = skip")
-                    cs_section.append(drawindexed_str)
+                    for draw_line in draw_lines:
+                        cs_section.append(draw_line)
                     cs_section.new_line()
                     ini_builder.append_section(cs_section)
 
@@ -1381,18 +1395,19 @@ class M_IniHelper:
                 normal_name = cls._build_custom_shader_section_name(
                     prefix, ib_hash, first_index, component,
                     index_count, index_offset, base_vertex, "Normal"
-                )
+                ) + section_suffix
                 if normal_name not in generated_section_names:
                     generated_section_names.add(normal_name)
                     normal_section = M_IniSection(M_SectionType.ShaderReplace)
                     normal_section.SectionName = normal_name
                     normal_section.append("handling = skip")
-                    normal_section.append(drawindexed_str)
+                    for draw_line in draw_lines:
+                        normal_section.append(draw_line)
                     normal_section.new_line()
                     ini_builder.append_section(normal_section)
 
     @classmethod
-    def get_shader_replace_run_logic(cls, info, ib_hash, first_index, component, index_count, index_offset, base_vertex=0):
+    def get_shader_replace_run_logic(cls, info, ib_hash, first_index, component, index_count, index_offset, base_vertex=0, section_suffix=""):
         """生成替换 drawindexed 的条件运行逻辑行列表。
 
         返回 None 表示无需替换。
@@ -1407,7 +1422,7 @@ class M_IniHelper:
             normal_name = cls._build_custom_shader_section_name(
                 prefix, ib_hash, first_index, component,
                 index_count, index_offset, base_vertex, "Normal"
-            )
+            ) + section_suffix
             groups = {}
             for shader in shaders:
                 groups.setdefault(shader['group_index'], []).append(shader)
@@ -1420,7 +1435,7 @@ class M_IniHelper:
                     section_name = cls._build_custom_shader_section_name(
                         prefix, ib_hash, first_index, component,
                         index_count, index_offset, base_vertex, variant_id
-                    )
+                    ) + section_suffix
                     inner_keyword = "if" if variant_position == 0 else "else if"
                     lines.append(f"    {inner_keyword} {env_a_var} == {shader['env_value']}")
                     lines.append(f"        run = {section_name}")
@@ -1431,7 +1446,7 @@ class M_IniHelper:
             normal_name = cls._build_custom_shader_section_name(
                 prefix, ib_hash, first_index, component,
                 index_count, index_offset, base_vertex, "Normal"
-            )
+            ) + section_suffix
             lines.append(f"if {ps_replace_var} == 1")
             lines.append(f"    run = {normal_name}")
 

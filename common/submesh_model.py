@@ -1357,6 +1357,9 @@ class SubMeshModel:
         for dcm in self.drawcall_model_list:
             condition_str = dcm.get_condition_str()
             draw_key = (dcm.index_offset, dcm.index_count, condition_str)
+            transparency_info = getattr(dcm, 'transparency_info', None)
+            if transparency_info is not None:
+                draw_key += (tuple(sorted(transparency_info.items())),)
             if condition_str or draw_key not in seen_keys:
                 seen_keys.add(draw_key)
                 deduped.append(dcm)

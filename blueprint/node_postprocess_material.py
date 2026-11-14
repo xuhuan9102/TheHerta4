@@ -2206,9 +2206,55 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         """
         return lambda candidate: bool(self.find_matching_materials(candidate, "TTLMap"))
 
+    def _transparency_node_present(self):
+        """处理链所在蓝图（含嵌套）里是否有未禁用的「透明贴图」节点。"""
+        tree = getattr(self, "id_data", None)
+        visited = set()
+
+        def visit(current):
+            if current is None:
+                return False
+            name = str(getattr(current, "name", "") or "")
+            if name and name in visited:
+                return False
+            if name:
+                visited.add(name)
+            for node in getattr(current, "nodes", None) or []:
+                if bool(getattr(node, "mute", False)):
+                    continue
+                bl_idname = str(getattr(node, "bl_idname", "") or "")
+                if bl_idname == "SSMTNode_Transparency":
+                    return True
+                if bl_idname == "SSMTNode_Blueprint_Nest":
+                    nested = bpy.data.node_groups.get(
+                        str(getattr(node, "blueprint_name", "") or "")
+                    )
+                    if visit(nested):
+                        return True
+            return False
+
+        return visit(tree)
+
+    def _skip_ttl_for_transparency_node(self):
+        # 处理链里存在「透明贴图」节点时，TTL 段整体让位给它接管（主人 2026-11-14 定）：
+        # 两套 TTL 写同一组 INI 符号，同时生效会让同一笔绘制被接管两次。
+        if not self._transparency_node_present():
+            return False
+        self.ttl_skipped_reason = "transparency_node_present"
+        if not getattr(self, "_ttl_skip_logged", False):
+            self._ttl_skip_logged = True
+            from ..utils.log_utils import LOG as _LOG
+            _LOG.info(
+                "ttl_skipped reason=transparency_node_present object="
+                + str(getattr(getattr(self, "id_data", None), "name", "") or "")
+            )
+        return True
+
     def _process_ttl_sections(self, section_name, lines, all_sections, material_group_to_swapkey,
                               swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder):
         from ..utils.log_utils import LOG as _LOG
+        if self._skip_ttl_for_transparency_node():
+            return next_swap_key_num
         # 旧版把 TTL 排在段尾；重导出时先摘掉那几组，免得和就地替换叠成两份绘制。
         self._strip_ttl_groups(lines)
         mesh_lines_info = [(i, self.extract_mesh_name(line)) for i, line in enumerate(lines) if self.extract_mesh_name(line)]
@@ -3584,6 +3630,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         self._reset_texture_progress()
         # 自动层号算不出的物体名清单，供导出报告读取；每次导出重新收集。
         self._ttl_auto_layer_skipped = []
+        # TTL 让位原因（供面板/报告读取），每次导出重置。
+        self.ttl_skipped_reason = ""
+        self._ttl_skip_logged = False
 
         total_found = 0
         total_matched = 0

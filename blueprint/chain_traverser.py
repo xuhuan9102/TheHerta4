@@ -4,6 +4,8 @@ from typing import List, Dict, Optional, Set, Tuple
 
 from ..utils.log_utils import LOG
 from ..common.m_key import M_Key
+from ..common.global_config import GlobalConfig
+from ..common.logic_name import LogicName
 from ..common.object_prefix_helper import ObjectPrefixHelper
 from .export_helper import BlueprintExportHelper
 from .model import ProcessingChain, _get_node_unique_key
@@ -23,6 +25,7 @@ _NODE_TYPE_VERTEX_GROUP_MAPPING_INPUT = 'SSMTNode_VertexGroupMappingInput'
 _NODE_TYPE_BLUEPRINT_NEST = 'SSMTNode_Blueprint_Nest'
 _NODE_TYPE_CROSS_IB = 'SSMTNode_CrossIB'
 _NODE_TYPE_SHADER_REPLACE = 'SSMTNode_ShaderReplace'
+_NODE_TYPE_TRANSPARENCY = 'SSMTNode_Transparency'
 _NODE_TYPE_MULTI_FILE_EXPORT = 'SSMTNode_MultiFile_Export'
 
 _KNOWN_NODE_TYPES = {
@@ -41,6 +44,7 @@ _KNOWN_NODE_TYPES = {
     _NODE_TYPE_BLUEPRINT_NEST,
     _NODE_TYPE_CROSS_IB,
     _NODE_TYPE_SHADER_REPLACE,
+    _NODE_TYPE_TRANSPARENCY,
     _NODE_TYPE_MULTI_FILE_EXPORT,
 }
 
@@ -60,6 +64,60 @@ class ChainTraverser:
         self._model = blueprint_model
         self._tree = blueprint_model._tree
         self._duplicate_counter: Dict[str, int] = {}
+        self._zzmi_transparency_enabled = GlobalConfig.logic_name == LogicName.ZZMI
+        self._transparency_parent_nodes = (
+            self._collect_transparency_parent_nodes() if self._zzmi_transparency_enabled else None
+        )
+
+    def _collect_transparency_parent_nodes(self):
+        """Index only exported nest references; keep legacy traversal without TTL."""
+        parents = {}
+        visited_trees = set()
+        has_transparency = False
+
+        def visit_tree(tree):
+            nonlocal has_transparency
+            if not tree or tree.name in visited_trees:
+                return
+            visited_trees.add(tree.name)
+            output_node = BlueprintExportHelper.get_result_output_node(tree)
+            if not output_node:
+                return
+            pending = [output_node]
+            visited_nodes = set()
+            while pending:
+                node = pending.pop()
+                key = _get_node_unique_key(node)
+                if key in visited_nodes:
+                    continue
+                visited_nodes.add(key)
+                if node.bl_idname == _NODE_TYPE_TRANSPARENCY and not node.mute:
+                    has_transparency = True
+                if node.bl_idname == _NODE_TYPE_BLUEPRINT_NEST:
+                    if node.mute:
+                        continue
+                    nested_tree = bpy.data.node_groups.get(getattr(node, 'blueprint_name', ''))
+                    if not BlueprintExportHelper._is_valid_blueprint_tree(nested_tree):
+                        continue
+                    parents.setdefault(nested_tree.name, []).append(node)
+                    visit_tree(nested_tree)
+                    continue
+                sockets = [
+                    socket for socket in getattr(node, 'inputs', [])
+                    if socket.is_linked and getattr(socket, 'bl_idname', '') == 'SSMTSocketObject'
+                ]
+                if not sockets:
+                    # Reroute sockets adopt the connected type in real Blender.
+                    sockets = [socket for socket in getattr(node, 'inputs', []) if socket.is_linked]
+                sources = []
+                for socket in sockets:
+                    for link in socket.links:
+                        if link.from_node != node:
+                            sources.append(link.from_node)
+                pending.extend(reversed(sources))
+
+        visit_tree(self._tree)
+        return parents if has_transparency else None
 
     def traverse_all_chains(self, tree: bpy.types.NodeTree, output_node: bpy.types.Node) -> List[ProcessingChain]:
         ordered_start_nodes = BlueprintExportHelper.collect_connected_start_nodes(tree)
@@ -394,6 +452,13 @@ class ChainTraverser:
             chain.node_path.append(current_node)
             chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
 
+        elif node_type == _NODE_TYPE_TRANSPARENCY:
+            if self._zzmi_transparency_enabled:
+                chain.node_path.append(current_node)
+                chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
+                if chain.transparency_info is None:
+                    chain.transparency_info = copy.deepcopy(current_node.get_transparency_info())
+
         elif node_type == 'NodeReroute':
             pass
 
@@ -403,6 +468,20 @@ class ChainTraverser:
 
         elif BlueprintExportHelper.is_result_output_node(current_node):
             node_tree_of_output = current_node.id_data
+            if self._transparency_parent_nodes is not None:
+                if node_tree_of_output == self._tree:
+                    chain.reached_output = True
+                    completed_chains.append(chain)
+                    return
+                parents = self._transparency_parent_nodes.get(node_tree_of_output.name, [])
+                chain.node_path.append(current_node)
+                chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
+                branches = [chain] + [copy.deepcopy(chain) for _ in parents[1:]]
+                for index, (parent, branch) in enumerate(zip(parents, branches)):
+                    if index:
+                        self._duplicate_chain_object(branch, index)
+                    self._traverse_forward(branch, parent, visited_nodes_copy, completed_chains, current_group_name)
+                return
             parent_nest_node = self._find_parent_nest_node(node_tree_of_output)
 
             if parent_nest_node is not None:

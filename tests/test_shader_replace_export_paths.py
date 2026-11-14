@@ -252,7 +252,7 @@ class ShaderReplaceExportPathTests(unittest.TestCase):
         _install_module(
             f"{self.pkg}.common.m_ini_helper",
             M_IniHelper=types.SimpleNamespace(
-                get_drawindexed_str_list=lambda drawcall_list, obj_name_draw_offset_dict=None, base_vertex=0: [
+                get_drawindexed_str_list=lambda drawcall_list, obj_name_draw_offset_dict=None, base_vertex=0, **kwargs: [
                     line
                     for item in drawcall_list
                     for line in (
@@ -268,7 +268,7 @@ class ShaderReplaceExportPathTests(unittest.TestCase):
                     f"drawindexedinstanced = {item.obj_name}" for item in drawcall_list
                 ],
                 get_draw_call_shader_replace_info_list=_resolve_draw_call_shader_infos,
-                get_shader_replace_run_logic=lambda info, ib_hash, first_index, component, index_count, index_offset, base_vertex=0: [
+                get_shader_replace_run_logic=lambda info, ib_hash, first_index, component, index_count, index_offset, base_vertex=0, **kwargs: [
                     f"if ${info['name_prefix']}_ps_replace == 1",
                     f"    run = CustomShader_{info['name_prefix']}_{ib_hash}_{first_index}_{component}_{index_count}_{index_offset}_{base_vertex}_World",
                     "else",
