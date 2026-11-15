@@ -12,6 +12,9 @@ uint Hash(int3 p){return ((asuint(p.x)*73856093u)^(asuint(p.y)*19349663u)^(asuin
 [numthreads(64,1,1)]void main(uint3 id:SV_DispatchThreadID)
 {
     uint i=id.x,phase=(uint)IniParams[116].x;
+    if(FrameState[9].y<.5 && IniParams[127].y<.5)return;
+    if(FrameState[ClothSleepRow()].x>.5)return;
+    if(GarmentAmount(FrameState[0].xy)<1e-5 && GarmentAmount(float2(FrameState[8].x,FrameState[10].x))<1e-5)return;
     if(phase==10){if(i<HASH_SIZE)Heads[i]=0xffffffffu;return;}
     if(FrameState[23].w<.5)return;
     uint snapshotCount,stride;Snapshot.GetDimensions(snapshotCount,stride);

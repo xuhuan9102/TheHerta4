@@ -1,4 +1,5 @@
 struct Vertex {float3 position;float3 normal;float4 tangent;};
+Texture1D<float4> IniParams : register(t120);
 StructuredBuffer<Vertex> Bind : register(t24);
 StructuredBuffer<Vertex> Native : register(t95);
 Buffer<float4> OriginalBlend : register(t86);
@@ -40,6 +41,8 @@ void main(uint3 dispatch:SV_DispatchThreadID)
     }
     float rms1=sqrt(error1/max(samples,1)),rms2=sqrt(error2/max(samples,1));
     float selected=rms1<=rms2?1:2;
+    float hint=round(IniParams[118].w);
+    if((hint==1 || hint==2) && abs(rms1-rms2)<=1e-7)selected=hint;
     bool valid=samples>=16 && min(rms1,rms2)<.01 && (selected<1.5?maximum1:maximum2)<.05;
     Decision[0]=float4(selected,rms1,rms2,valid?1:0);
     Decision[1]=float4(maximum1,maximum2,samples,1);

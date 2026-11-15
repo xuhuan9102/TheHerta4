@@ -10,6 +10,19 @@ import numpy as np
 INVALID = np.uint32(0xFFFFFFFF)
 
 
+def shorts_skin_mix(points, faces, lateral, height):
+    """Continuous leg ownership across the garment's connected centre seam."""
+    left = np.asarray(lateral) < 0
+    edges = np.asarray(list(_edges(faces)), dtype=np.int64).reshape(-1, 2)
+    seam = np.unique(edges[left[edges[:, 0]] != left[edges[:, 1]]])
+    if not len(seam):
+        return left.astype(np.float32)
+    distance = opening_distances(points, faces, [seam])
+    width = max(float(height) * 0.15, 1e-6)
+    t = np.clip(0.5 + np.where(left, 1, -1) * distance / (2 * width), 0, 1)
+    return (t * t * (3 - 2 * t)).astype(np.float32)
+
+
 def _unit(v, fallback=None):
     length = np.linalg.norm(v)
     if length > 1e-12:
@@ -109,8 +122,9 @@ def _closest(p, triangles):
 
 
 class _BVH:
-    def __init__(self, points, faces):
+    def __init__(self, points, faces, normals=None):
         self.triangles = np.asarray(points, float)[faces]
+        self.normals = normals
         self.lo = self.triangles.min(1)
         self.hi = self.triangles.max(1)
         self.nodes = []
@@ -135,8 +149,8 @@ class _BVH:
 
         build(np.arange(len(faces)))
 
-    def nearest(self, p):
-        best = np.inf
+    def nearest(self, p, normal=None, max_distance=None):
+        best = np.inf if max_distance is None else max_distance * max_distance
         result = None
         queue = [(0.0, 0)]
         while queue:
@@ -145,6 +159,10 @@ class _BVH:
                 continue
             _lo, _hi, ids, left, right = self.nodes[node]
             if ids is not None:
+                if normal is not None and self.normals is not None:
+                    ids = ids[self.normals[ids] @ normal > 0.1]
+                    if not len(ids):
+                        continue
                 q, bary, distances = _closest(p, self.triangles[ids])
                 at = int(np.argmin(distances))
                 if distances[at] < best:
@@ -333,10 +351,8 @@ def _colors(items, count):
     return order, np.cumsum([0] + [len(group) for group in groups]).astype(np.uint32)
 
 
-def _hem(faces, points, up, side, forward):
+def _boundary_loops(faces):
     boundary = [edge for edge, entries in _edges(faces).items() if len(entries) == 1]
-    if not boundary:
-        raise ValueError("上下拖拽：未识别到衣物开口，请保留袜口或裤腰边界")
     graph = defaultdict(set)
     for a, b in boundary:
         graph[a].add(b)
@@ -354,10 +370,20 @@ def _hem(faces, points, up, side, forward):
             stack.extend(graph[v] - group)
         remaining -= group
         loops.append(np.array(sorted(group), int))
-    top = max(float((points[ids] @ up).mean()) for ids in loops)
+    return boundary, loops
+
+
+def _hem(faces, points, up, side, forward, *, lower=False, budget=128, min_width=0.2):
+    boundary, loops = _boundary_loops(faces)
+    if not loops:
+        raise ValueError("上下拖拽：未识别到衣物开口，请保留袜口或裤腰边界")
+    direction = -up if lower else up
+    top = max(float((points[ids] @ direction).mean()) for ids in loops)
     span = float(np.ptp(points @ up))
     candidates = [
-        ids for ids in loops if float((points[ids] @ up).mean()) >= top - span * 0.2
+        ids
+        for ids in loops
+        if float((points[ids] @ direction).mean()) >= top - span * 0.2
     ]
 
     def perimeter(ids):
@@ -375,17 +401,435 @@ def _hem(faces, points, up, side, forward):
     order = np.argsort(angle, kind="stable")
     ids = ids[order]
     # Very dense cuffs do not need one pin per render vertex.
-    if len(ids) > 128:
-        ids = ids[np.linspace(0, len(ids) - 1, 128).astype(int)]
+    if len(ids) > budget:
+        ids = ids[np.linspace(0, len(ids) - 1, budget).astype(int)]
     if len(ids) < 3:
         raise ValueError("上下拖拽：衣物开口不足三个有效顶点")
     cuff_width = max(
         float(np.ptp(points[ids] @ side)), float(np.ptp(points[ids] @ forward))
     )
     cloth_width = max(float(np.ptp(points @ side)), float(np.ptp(points @ forward)))
-    if cuff_width < cloth_width * 0.2:
+    if cuff_width < cloth_width * min_width:
         raise ValueError("上下拖拽：只找到小孔或裂缝，未识别到有效袜口/裤腰")
     return ids
+
+
+def bake_body_seeds(
+    positions,
+    normals,
+    body_faces,
+    representatives,
+    config,
+    owners,
+    surface,
+    groups=None,
+):
+    """Initial adhesion on the bind surface; runtime follows its adjacency."""
+    p = np.asarray(positions, float)
+    n = np.asarray(normals, float)
+    normal = n[body_faces].sum(1)
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+    owner = int(config[12, 3])
+    manual = config[15, 3] > 0.5 and not 1.5 < config[14, 3] < 2.5
+    if groups is None:
+        groups = np.full(len(representatives), owner or (3 if manual else 0), int)
+        if not owner and not manual:
+            side = (p[representatives] - config[8, :3]) @ config[7, :3]
+            groups = np.where(
+                abs(side) < config[6, 3] * 0.004, 3, np.where(side < 0, 1, 2)
+            )
+    seeds = np.empty(len(representatives), np.uint32)
+    for group in np.unique(groups):
+        mask = np.asarray(surface) > 0
+        if group == 3 and 1.5 < config[14, 3] < 2.5:
+            mask &= owners > 0
+        elif group in (4, 5):
+            # Shoulder transition points may originally touch the torso.
+            # Choose that reference surface once rather than forcing them
+            # onto an arm through the sleeve's control-field classification.
+            mask &= (owners == group) | (owners == 3)
+        elif group == 3 and not manual:
+            pass
+        elif group:
+            mask &= owners == group
+        ids = np.flatnonzero(mask)
+        if not len(ids):
+            raise ValueError("衣物没有匹配的初始身体贴合面")
+        tree = _BVH(p, body_faces[ids], normal[ids])
+        for at in np.flatnonzero(groups == group):
+            row = representatives[at]
+            closest = tree.nearest(p[row])
+            limit = max(np.linalg.norm(closest[2] - p[row]) * 1.5, 0.01)
+            compatible = tree.nearest(p[row], n[row], max_distance=limit)
+            hit = (
+                compatible
+                if compatible is not None
+                and np.linalg.norm(compatible[2] - p[row])
+                <= max(np.linalg.norm(closest[2] - p[row]) * 1.5, 0.01)
+                else closest
+            )
+            seeds[at] = ids[hit[0]]
+    return seeds
+
+
+def body_channels(positions, body_faces, config, owners, samples=256, levels=None):
+    """Reference cross-section centres, never precomputed garment poses."""
+    up = config[6, :3]
+    height = config[6, 3]
+    triangles = positions[body_faces]
+    h = (
+        (triangles - config[8, :3]) @ up / height
+        if levels is None
+        else levels[body_faces]
+    )
+    lo, hi = float(h.min()), float(h.max())
+    sections = np.linspace(lo, hi, samples)
+    result = np.zeros((1 + samples * 3, 4), np.float32)
+    result[0] = [lo, hi, samples, 1]
+    side, forward = config[7, :3], config[9, :3]
+    for group in (1, 2, 3):
+        selected = owners == group
+        t, heights = triangles[selected], h[selected]
+        centers = np.full((samples, 3), np.nan)
+        for i, level in enumerate(sections):
+            active = (heights.min(1) <= level) & (heights.max(1) >= level)
+            if not active.any():
+                continue
+            q, z = t[active], heights[active]
+            cuts = []
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                valid = ((z[:, a] - level) * (z[:, b] - level) <= 0) & (
+                    abs(z[:, a] - z[:, b]) > 1e-9
+                )
+                fraction = (level - z[valid, a]) / (z[valid, b] - z[valid, a])
+                cuts.extend(
+                    q[valid, a] + (q[valid, b] - q[valid, a]) * fraction[:, None]
+                )
+            if not cuts:
+                continue
+            cuts = np.asarray(cuts)
+            x, y = cuts @ side, cuts @ forward
+            centers[i] = (
+                (cuts.min(0) + cuts.max(0)) * 0.5
+                if levels is not None
+                else (
+                    side * (x.min() + x.max()) * 0.5
+                    + forward * (y.min() + y.max()) * 0.5
+                    + up * (level * height + config[8, :3] @ up)
+                )
+            )
+        valid = np.flatnonzero(np.isfinite(centers[:, 0]))
+        if len(valid):
+            for axis in range(3):
+                centers[:, axis] = np.interp(
+                    np.arange(samples), valid, centers[valid, axis]
+                )
+            result[1 + (group - 1) * samples : 1 + group * samples, :3] = centers
+    return result
+
+
+def body_channel_center(channels, group, level):
+    lo, hi, samples, _ = channels[0]
+    samples = int(samples)
+    at = float(np.clip((level - lo) / max(hi - lo, 1e-8), 0, 1) * (samples - 1))
+    index = min(int(at), samples - 2)
+    start = 1 + (int(group) - 1) * samples
+    return channels[start + index, :3] * (1 - (at - index)) + channels[
+        start + index + 1, :3
+    ] * (at - index)
+
+
+def body_directions(
+    positions, normals, body_faces, reps, config, owners, seeds, channels=None
+):
+    if channels is None:
+        channels = body_channels(positions, body_faces, config, owners)
+    up = config[6, :3]
+    height = config[6, 3]
+    out = np.zeros((len(reps), 4), np.float32)
+    for i, row in enumerate(reps):
+        group = max(int(owners[seeds[i]]), 1)
+        if group > 3:
+            out[i, :3] = _unit(normals[row], config[7, :3])
+            continue
+        level = (positions[row] - config[8, :3]) @ up / height
+        center = body_channel_center(channels, group, level)
+        radial = positions[row] - center
+        radial -= up * (radial @ up)
+        out[i, 3] = float(radial @ config[9, :3]) / height
+        fallback = normals[row] - up * (normals[row] @ up)
+        out[i, :3] = _unit(radial, _unit(fallback, config[7, :3]))
+    return out
+
+
+def opening_distances(points, faces, openings):
+    graph = [[] for _ in points]
+    for a, b in _edges(faces):
+        length = float(np.linalg.norm(points[a] - points[b]))
+        graph[a].append((b, length))
+        graph[b].append((a, length))
+    distance = np.full(len(points), np.inf)
+    queue = []
+    for ring in openings:
+        for i in ring:
+            distance[i] = 0
+            heapq.heappush(queue, (0, int(i)))
+    while queue:
+        d, i = heapq.heappop(queue)
+        if d != distance[i]:
+            continue
+        for j, length in graph[i]:
+            value = d + length
+            if value < distance[j]:
+                distance[j] = value
+                heapq.heappush(queue, (value, j))
+    return distance
+
+
+def opening_mobility(points, faces, openings, controlled, height):
+    distance = opening_distances(
+        points,
+        faces,
+        [ring for ring in openings if not np.intersect1d(ring, controlled).size],
+    )
+    t = np.clip((distance / height - 0.12) / 0.13, 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def attachment_influence(points, faces, controlled, anchors):
+    """Harmonic travel influence, with independent cuff/collar boundaries."""
+    edge = np.array(list(_edges(faces)), int)
+    a, b = edge.T
+    weights = 1 / np.maximum(np.linalg.norm(points[a] - points[b], axis=1), 1e-8)
+    diagonal = np.bincount(a, weights, minlength=len(points)) + np.bincount(
+        b, weights, minlength=len(points)
+    )
+    free = np.ones(len(points), bool)
+    free[np.concatenate(anchors)] = False
+    free[controlled] = False
+    result = np.zeros(len(points))
+    result[controlled] = 1
+    if not free.any():
+        return result.astype(np.float32)
+    if np.any(diagonal[free] <= 0) or not np.isfinite(diagonal[free]).all():
+        raise ValueError("衣物控制拓扑包含孤立或退化顶点")
+
+    def laplacian(value):
+        return (
+            diagonal * value
+            - np.bincount(a, weights * value[b], minlength=len(points))
+            - np.bincount(b, weights * value[a], minlength=len(points))
+        )
+
+    def multiply(value):
+        full = np.zeros(len(points))
+        full[free] = value
+        return laplacian(full)[free]
+
+    rhs = -laplacian(result)[free]
+    tolerance = max(np.linalg.norm(rhs) * 1e-10, 1e-9)
+    x = np.zeros(free.sum())
+    residual = rhs.copy()
+    z = residual / diagonal[free]
+    direction = z.copy()
+    product = float(residual @ z)
+    for _ in range(min(len(points) * 4, 4096)):
+        if np.linalg.norm(residual) <= tolerance:
+            break
+        step = multiply(direction)
+        alpha = product / max(float(direction @ step), 1e-30)
+        x += alpha * direction
+        residual -= alpha * step
+        z = residual / diagonal[free]
+        updated = float(residual @ z)
+        direction = z + direction * (updated / product)
+        product = updated
+    if not np.isfinite(residual).all() or np.linalg.norm(residual) > tolerance:
+        raise ValueError("衣物开口的控制影响未能收敛，请检查衣物拓扑")
+    result[free] = np.clip(x, 0, 1)
+    return result.astype(np.float32)
+
+
+def surface_track_component(
+    positions,
+    body_faces,
+    adjacency,
+    candidates,
+    cuff,
+    low,
+    up,
+    height,
+    target,
+    levels=None,
+):
+    """Flood the contacted body sheet inside the explicitly authored travel band."""
+    tri = positions[body_faces]
+    h = (tri - low) @ up / height if levels is None else levels[body_faces]
+    mask = candidates & (h.min(1) <= 1.03) & (h.max(1) >= target - 0.015)
+    ids = np.flatnonzero(mask)
+    if not len(ids):
+        raise ValueError("箭头行程没有连续身体表面")
+    tree = _BVH(positions, body_faces[ids])
+    seeds = {int(ids[tree.nearest(point)[0]]) for point in cuff}
+    visited = set()
+    stack = list(seeds)
+    while stack:
+        face = stack.pop()
+        if face in visited or not mask[face]:
+            continue
+        visited.add(face)
+        stack.extend(
+            int(other)
+            for other in adjacency[face]
+            if other != INVALID and int(other) not in visited
+        )
+    result = np.zeros(len(body_faces), bool)
+    result[list(visited)] = True
+    return result
+
+
+def torso_surface_partition(
+    positions, normals, body_faces, adjacency, torso_points, arm_points
+):
+    """Reference-topology Voronoi partition; touching surfaces do not join it."""
+    triangles = positions[body_faces]
+    centers = triangles.mean(1)
+    normal = np.cross(
+        triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+    )
+    normal[np.sum(normal * normals[body_faces].sum(1), axis=1) < 0] *= -1
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+    tree = _BVH(positions, body_faces)
+    torso = {int(tree.nearest(point)[0]) for point in torso_points}
+    arm = {int(tree.nearest(point)[0]) for point in arm_points}
+    torso -= arm
+    if not torso or not arm:
+        raise ValueError("上衣无法建立独立的躯干/袖管贴合种子")
+
+    def distances(seeds):
+        distance = np.full(len(body_faces), np.inf)
+        queue = []
+        for face in seeds:
+            distance[face] = 0
+            heapq.heappush(queue, (0, face))
+        while queue:
+            d, face = heapq.heappop(queue)
+            if d != distance[face]:
+                continue
+            for other in adjacency[face]:
+                if other >= len(body_faces) or normal[face] @ normal[other] < 0:
+                    continue
+                value = d + float(np.linalg.norm(centers[face] - centers[other]))
+                if value < distance[other]:
+                    distance[other] = value
+                    heapq.heappush(queue, (value, int(other)))
+        return distance
+
+    return distances(torso) < distances(arm)
+
+
+def intrinsic_levels(positions, body_faces, surface, low, up, height):
+    """Smooth longitudinal material coordinate on the reference skin.
+
+    Dirichlet values outside the garment span preserve its existing units.
+    Inside the span, the harmonic field has no artificial height-slice extrema
+    at a breast overhang or a bent elbow.
+    """
+    faces = np.asarray(body_faces)[np.asarray(surface) != 0]
+    rows = np.unique(faces)
+    local = np.searchsorted(rows, faces)
+    points = np.asarray(positions, float)[rows]
+    edge = np.asarray(list(_edges(local)), np.int64)
+    a, b = edge.T
+    weight = 1 / np.maximum(np.linalg.norm(points[a] - points[b], axis=1), 1e-8)
+    diagonal = np.bincount(a, weight, minlength=len(rows)) + np.bincount(
+        b, weight, minlength=len(rows)
+    )
+    raw = (points - low) @ up / height
+    free = (raw > 0.01) & (raw < 0.99)
+
+    def laplace(value):
+        return (
+            diagonal * value
+            - np.bincount(a, weight * value[b], minlength=len(rows))
+            - np.bincount(b, weight * value[a], minlength=len(rows))
+        )
+
+    base = raw.copy()
+    base[free] = 0
+    rhs = -laplace(base)[free]
+
+    def multiply(value):
+        full = np.zeros(len(rows))
+        full[free] = value
+        return laplace(full)[free]
+
+    x = raw[free].copy()
+    residual = rhs - multiply(x)
+    z = residual / np.maximum(diagonal[free], 1e-12)
+    direction = z.copy()
+    product = float(residual @ z)
+    tolerance = max(float(np.linalg.norm(rhs)) * 1e-9, 1e-8)
+    for _ in range(min(len(rows) * 4, 4096)):
+        if np.linalg.norm(residual) <= tolerance:
+            break
+        at = multiply(direction)
+        denominator = float(direction @ at)
+        if denominator <= 1e-30:
+            break
+        alpha = product / denominator
+        x += alpha * direction
+        residual -= alpha * at
+        z = residual / np.maximum(diagonal[free], 1e-12)
+        following = float(residual @ z)
+        direction = z + direction * (following / max(product, 1e-30))
+        product = following
+    if not np.isfinite(x).all() or np.linalg.norm(residual) > tolerance * 2:
+        raise ValueError("身体表面行程坐标未收敛，请检查身体分区拓扑")
+    result = (np.asarray(positions) - low) @ up / height
+    result = result.astype(np.float32)
+    base[free] = x
+    result[rows] = base
+    return result
+
+
+def bind_skin_partition(positions, body_faces, weights, indices, cuff, side):
+    """Body skin support identifies arms without using sleeve opening seeds.
+
+    The controlled torso cuff supplies the trunk scale. Membership uses only
+    the body's bind positions and skin weights, so deleting sleeves cannot
+    turn chest points into arm attachments.
+    """
+    if weights is None or indices is None:
+        return None
+    rows = np.unique(body_faces)
+    weight = np.asarray(weights, float)[rows]
+    bone = np.asarray(indices, np.uint32)[rows]
+    valid = weight > 0
+    ids, compact = np.unique(bone[valid], return_inverse=True)
+    mass = np.bincount(compact, weight[valid], minlength=len(ids))
+    samples = np.broadcast_to(np.asarray(positions)[rows, None], (*weight.shape, 3))[
+        valid
+    ]
+    centers = np.stack(
+        [
+            np.bincount(compact, weight[valid] * samples[:, axis], minlength=len(ids))
+            / np.maximum(mass, 1e-12)
+            for axis in range(3)
+        ],
+        axis=1,
+    )
+    center = np.asarray(cuff).mean(0)
+    radius = float(np.quantile(abs((cuff - center) @ side), 0.98))
+    lateral = (centers - center) @ side
+    selected = (abs(lateral) > max(radius, 0.005)) & (mass >= 1)
+    if not np.any(selected & (lateral < 0)) or not np.any(selected & (lateral > 0)):
+        return None
+    score = np.sum(np.asarray(weights) * np.isin(indices, ids[selected]), axis=1)
+    fraction = float(np.mean(score[rows] > 0.5))
+    if not 0.01 < fraction < 0.65:
+        return None
+    return np.asarray(score[body_faces].mean(1) < 0.5), score
 
 
 def bake_garments(
@@ -398,9 +842,25 @@ def bake_garments(
     budget=2450,
     up_axis="AUTO",
     exterior=True,
+    two_ended_rows=None,
+    body_surface=None,
+    manual_paths=(),
+    blend_weights=None,
+    blend_indices=None,
+    body_domain=None,
+    body_branch_weights=None,
+    body_skin_faces=0,
+    reference_body_faces=None,
 ):
     """Return one independently controlled runtime per welded cloth component."""
     positions = np.asarray(positions, float)
+    directional = (
+        np.zeros(len(positions), np.uint8)
+        if two_ended_rows is None
+        else np.asarray(two_ended_rows, np.uint8)
+    )
+    if directional.shape != (len(positions),):
+        raise ValueError("双端穿脱的顶点标记必须与位置缓冲行数一致")
     normals = np.asarray(normals, float)
     cloth_faces = np.asarray(cloth_faces, np.int64).reshape(-1, 3)
     body_faces = np.asarray(body_faces, np.int64).reshape(-1, 3)
@@ -457,11 +917,35 @@ def bake_garments(
     faces = faces[np.sort(indices)]
     _, _, axes = np.linalg.svd(points - points.mean(0), full_matrices=False)
     up = axes[0]
-    if up_axis != "AUTO":
+    if manual_paths:
+        first_path = manual_paths[0][2]
+        up = _unit(first_path[0] - first_path[1])
+        for _, _, path in manual_paths:
+            if abs(_unit(path[1] - path[0]) @ up) < 0.98:
+                raise ValueError(
+                    "同一连通衣物的多个穿脱箭头须沿同一轴；不同衣物可使用不同方向"
+                )
+    elif up_axis == "AUTO":
+        _, openings = _boundary_loops(faces)
+        if openings:
+            ring = max(
+                openings, key=lambda ids: np.linalg.norm(np.ptp(points[ids], axis=0))
+            )
+            _, spread, ring_axes = np.linalg.svd(
+                points[ring] - points[ring].mean(0), full_matrices=False
+            )
+            if (
+                spread[1] > 1e-8
+                and spread[2] < spread[1] * 0.3
+                and abs(up @ ring_axes[2]) < 0.75
+            ):
+                up = ring_axes[2]
+    if not manual_paths and up_axis != "AUTO":
         up = np.zeros(3)
         up["XYZ".index(up_axis[-1])] = -1 if up_axis.startswith("-") else 1
     if (
-        up_axis == "AUTO"
+        not manual_paths
+        and up_axis == "AUTO"
         and (up[2] if abs(up[2]) > 0.2 else up[np.argmax(abs(up))]) < 0
     ):
         up = -up
@@ -477,7 +961,9 @@ def bake_garments(
     body_topology = body_weld[np.searchsorted(body_rows, body_faces)]
     body_feet = _lower_centers(positions[body_rows[body_first]], body_topology, up)
     cloth_feet = _lower_centers(points, faces, up)
-    candidates = cloth_feet if len(cloth_feet) >= 2 else body_feet
+    # A shorts crotch can join its two lower cloth bands and leave front/back
+    # islands. The body's separated feet provide the anatomical left/right axis.
+    candidates = body_feet if len(body_feet) >= 2 else cloth_feet
     side = np.array([1.0, 0, 0])
     side -= up * (side @ up)
     if np.linalg.norm(side) < 0.2:
@@ -507,16 +993,22 @@ def bake_garments(
     body_center = body.mean(1) - bottom
     bh = body_center @ up / max(global_height, 1e-8)
     bs = (body - bottom) @ side / max(global_height, 1e-8)
-    valid = (bh > -0.1) & (bh < 1.08) & (np.abs(bs.mean(1)) < 0.25)
+    # Clothing height is not a leg radius. A lateral crop by that height
+    # discards the outer half of short socks' body cross-sections.
+    valid = (bh > -0.1) & (bh < 1.08)
     owners = np.where(
         valid,
         np.where(np.all(bs < 0, axis=1), 1, np.where(np.all(bs >= 0, axis=1), 2, 3)),
         0,
     ).astype(np.uint32)
     surface = (
-        _surface_mask(positions, body_faces, normals)
-        if exterior
-        else np.ones(len(body_faces), np.uint32)
+        np.asarray(body_surface, np.uint32)
+        if body_surface is not None
+        else (
+            _surface_mask(positions, body_faces, normals)
+            if exterior
+            else np.ones(len(body_faces), np.uint32)
+        )
     )
     # Weld body seams before constructing adjacency; preserve normal-compatible sheets.
     adj = np.full((len(body_faces), 3), INVALID, np.uint32)
@@ -546,36 +1038,361 @@ def bake_garments(
         local = np.full(len(points), -1, int)
         local[component] = np.arange(len(component))
         cf = local[cf]
+        owned_rows = rows[np.isin(weld, component)]
+        paths = [
+            (zone, path)
+            for zone, selected_rows, path in manual_paths
+            if np.any(selected_rows[owned_rows])
+        ]
+        two_ended = bool(np.any(directional[owned_rows]))
+        lower_required = bool(np.any(directional[owned_rows] >= 2))
         p, f, reps = _simplify(
             points[component],
             cf,
             representatives[component],
             min(2450, max(32, int(budget))),
         )
-        cuff = _hem(f, p, up, side, forward)
-        top = p[cuff].mean(0)
-        low = p[(p @ up) <= np.quantile(p @ up, 0.08)].mean(0)
+        _, openings = _boundary_loops(f)
+        if not openings:
+            raise ValueError("上下拖拽：未识别到衣物开口，请保留衣物边界")
+        opening_height = np.array([float((p[ring] @ up).mean()) for ring in openings])
+        span = float(np.ptp(p @ up))
+        width = float(np.ptp(p @ side))
+        bottom_openings = [
+            ring
+            for ring, h in zip(openings, opening_height)
+            if h < opening_height.min() + span * 0.25
+        ]
+        sleeves = [
+            ring
+            for ring, h in zip(openings, opening_height)
+            if opening_height.min() + span * 0.25
+            < h
+            < opening_height.max() - span * 0.15
+            and abs(float((p[ring].mean(0) - p.mean(0)) @ side)) > width * 0.25
+        ]
+        branched = len(openings) >= 4 and len(sleeves) >= 2 and lower_required
+        sliding = (
+            len(openings) == 3 and len(bottom_openings) == 2 and not lower_required
+        )
+        if paths:
+            two_ended = len(paths) > 1 and any(
+                (path[1] - path[0]) @ up > 0 for _, path in paths
+            )
+            lower_required = two_ended
+            branched = False
+        if sliding:
+            two_ended = False
+        upper_cuff = _hem(
+            f,
+            p,
+            up,
+            side,
+            forward,
+            budget=64 if two_ended else 128,
+            min_width=0 if paths else (0.08 if branched else 0.2),
+        )
+        if paths:
+            negative_paths = [
+                (zone, path) for zone, path in paths if (path[1] - path[0]) @ up < 0
+            ]
+            if not negative_paths:
+                raise ValueError("衣物箭头未指向衣物内部，请检查起点与端点")
+            upper_cuff = min(
+                openings,
+                key=lambda ring: float(
+                    np.linalg.norm(p[ring].mean(0) - negative_paths[0][1][0])
+                ),
+            )
+            center = p[upper_cuff].mean(0)
+            xy = np.c_[
+                (p[upper_cuff] - center) @ side, (p[upper_cuff] - center) @ forward
+            ]
+            upper_cuff = upper_cuff[
+                np.argsort(np.arctan2(xy[:, 1], xy[:, 0]), kind="stable")
+            ]
+            if len(upper_cuff) > 64:
+                upper_cuff = upper_cuff[
+                    np.linspace(0, len(upper_cuff) - 1, 64).astype(int)
+                ]
+        lower_cuff = np.empty(0, int)
+        if two_ended:
+            try:
+                lower_cuff = _hem(f, p, up, side, forward, lower=True, budget=64)
+            except ValueError:
+                if lower_required:
+                    raise
+        distinct = len(lower_cuff) and not (
+            len(np.intersect1d(upper_cuff, lower_cuff))
+            or float((p[upper_cuff].mean(0) - p[lower_cuff].mean(0)) @ up)
+            < 0.5 * float(np.ptp(p @ up))
+        )
+        if two_ended and not distinct and lower_required:
+            raise ValueError("双端穿脱需要衣物两端各有一个独立开口，当前未识别到下开口")
+        if two_ended and not distinct:
+            two_ended = False
+            upper_cuff = _hem(f, p, up, side, forward)
+            lower_cuff = np.empty(0, int)
+        cuff = np.r_[upper_cuff, lower_cuff]
+        top = p[upper_cuff].mean(0)
+        low = (
+            p[lower_cuff].mean(0)
+            if two_ended
+            else p[(p @ up) <= np.quantile(p @ up, 0.08)].mean(0)
+        )
         height = float((top - low) @ up)
         if height <= 1e-6:
             raise ValueError("上下拖拽：衣物开口不是长轴上端，请调整拖拽轴")
+        for _, path in paths:
+            opening = top if (path[1] - path[0]) @ up < 0 else low
+            if abs(float((path[0] - opening) @ up)) > max(height * 0.1, 0.01):
+                raise ValueError(
+                    "穿脱箭头起点应放在衣物开口平面附近；请移动起点后重新生成"
+                )
         hn = (p - low) @ up / height
+        branch_height = (
+            max(
+                0.1,
+                min(float(((p[ring] - low) @ up).min()) / height for ring in sleeves)
+                - 0.03,
+            )
+            if branched
+            else 1.0
+        )
         lat = (p - bottom) @ side
         rest = np.zeros((len(p) * 2, 4), np.float32)
         rest[::2, :3] = p
-        rest[::2, 3] = hn >= 0.065
+        rest[::2, 3] = 1 if two_ended else hn >= 0.065
+        if branched:
+            rest[::2, 3] = hn < branch_height
+        elif sliding:
+            rest[::2, 3] = 1
+        manual_anchor = None
+        manual_target = None
+        fold_branch = False
+        side_openings = []
+        collar_openings = []
+        attachment_roles = np.zeros(len(p), np.uint32)
+        torso_sheet = None
+        skin_partition = None
+        if paths and not two_ended:
+            travel = float(np.linalg.norm(paths[0][1][1] - paths[0][1][0]))
+            manual_target = 1 - travel / height
+            if not sliding:
+                manual_anchor = (
+                    max(0.02, manual_target - 0.05)
+                    if len(openings) > 2
+                    else min(0.07, manual_target * 0.2)
+                )
+                side_openings = [
+                    ring
+                    for ring in openings
+                    if not np.intersect1d(ring, upper_cuff).size
+                    and abs(float((p[ring].mean(0) - p.mean(0)) @ side)) > width * 0.25
+                    and 0.05 < float(hn[ring].mean()) < 0.9
+                ]
+                if len(side_openings) >= 2:
+                    # An authored endpoint changes travel, never which sleeves
+                    # remain attached. The free panel may roll past this seam.
+                    manual_anchor = 0.02
+                    fold_branch = True
+                    collar_openings = [
+                        ring
+                        for ring in openings
+                        if not np.intersect1d(ring, upper_cuff).size
+                        and not any(ring is sleeve for sleeve in side_openings)
+                    ]
+                    if manual_target < 2 * manual_anchor - 1:
+                        raise ValueError("穿脱箭头超过衣片的可折返长度，请缩短行程")
+                elif manual_target <= 0.03:
+                    raise ValueError(
+                        "穿脱箭头超过衣物可压缩长度；请缩短行程或使用可沿身体整体滑移的裤装"
+                    )
+                rest[::2, 3] = hn > manual_anchor
+        if fold_branch:
+            skin_partition = (
+                (np.ones(len(body_faces), bool), np.zeros(len(positions)))
+                if body_domain is not None
+                else bind_skin_partition(
+                    positions,
+                    body_faces,
+                    blend_weights,
+                    blend_indices,
+                    p[upper_cuff],
+                    side,
+                )
+            )
+            if skin_partition is not None:
+                torso_sheet, skin_score = skin_partition
+                manual_anchor = max(0.02, min(0.9, manual_target + 0.05))
         rest[1::2, 2] = hn
         rest[1::2, 3] = lat
+        rest[1::2, 0] = 1
+        if paths and not sliding and not two_ended and len(openings) > 2:
+            if skin_partition is not None:
+                distance = opening_distances(p, f, side_openings + collar_openings)
+                t = np.clip((distance - 0.001) / 0.025, 0, 1)
+                mobility = t * t * (3 - 2 * t)
+                rest[1::2, 1] = hn * mobility
+                attachment_roles[skin_score[reps] > 0.5] = 1
+                native = (hn <= manual_anchor) | (mobility < 1e-4)
+                attachment_roles[native & (attachment_roles == 0)] = 2
+                rest[::2, 3] = 1
+                if collar_openings:
+                    rest[np.concatenate(collar_openings) * 2, 3] = 0
+            elif fold_branch:
+                mobility = opening_mobility(
+                    p, f, side_openings + [upper_cuff], upper_cuff, height
+                )
+                distance = opening_distances(p, f, collar_openings)
+                t = np.clip((distance / height - 0.005) / 0.055, 0, 1)
+                mobility = np.minimum(mobility, t * t * (3 - 2 * t))
+                rest[1::2, 1] = attachment_influence(
+                    p,
+                    f,
+                    upper_cuff,
+                    [
+                        ring
+                        for ring in openings
+                        if not np.intersect1d(ring, upper_cuff).size
+                    ],
+                )
+                if collar_openings:
+                    collar = np.unique(np.concatenate(collar_openings))
+                    collar_influence = attachment_influence(
+                        p, f, collar, [upper_cuff] + side_openings
+                    )
+                    torso_influence = np.clip(rest[1::2, 1] + collar_influence, 0, 1)
+                    attachment_roles[torso_influence < 0.65] = 1
+                    torso_sheet = torso_surface_partition(
+                        positions,
+                        normals,
+                        body_faces,
+                        adj,
+                        p[torso_influence >= 0.65],
+                        p[np.concatenate(side_openings)],
+                    )
+            else:
+                mobility = opening_mobility(p, f, openings, upper_cuff, height)
+                fade = np.clip((hn - manual_anchor) / 0.10, 0, 1)
+                mobility *= fade * fade * (3 - 2 * fade)
+            rest[1::2, 0] = mobility
+            if skin_partition is None:
+                rest[::2, 3] *= mobility > 1e-4
+            if skin_partition is None and fold_branch and np.any(attachment_roles):
+                free = attachment_roles == 1
+                pin_distance = opening_distances(
+                    p,
+                    f,
+                    [
+                        ring
+                        for ring in openings
+                        if not np.intersect1d(ring, upper_cuff).size
+                    ],
+                )
+                rest[np.flatnonzero(free) * 2, 3] = pin_distance[free] > 0.005 * height
         rest[cuff * 2 + 1, 0] = 1
+        body_levels = (positions - low) @ up / height
+        intrinsic = body_domain is not None and (fold_branch or body_domain in (1, 2))
+        if intrinsic:
+            body_levels = intrinsic_levels(
+                positions, body_faces, surface, low, up, height
+            )
+            normal = normals[body_faces].sum(1)
+            normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+            skin_ids = np.flatnonzero(surface)
+            tree = _BVH(positions, body_faces[skin_ids], normal[skin_ids])
+            for row in owned_rows:
+                closest = tree.nearest(positions[row])
+                compatible = tree.nearest(
+                    positions[row],
+                    normals[row],
+                    max_distance=max(
+                        np.linalg.norm(closest[2] - positions[row]) * 1.5, 0.01
+                    ),
+                )
+                tri, bary, _ = compatible if compatible is not None else closest
+                body_levels[row] = float(body_levels[body_faces[skin_ids[tri]]] @ bary)
+            rest[1::2, 2] = body_levels[reps]
+            rest[cuff * 2 + 1, 2] = 1
+            if fold_branch:
+                rest[1::2, 1] = rest[1::2, 2] * rest[1::2, 0]
+                attachment_roles[:] = 0
+                native = (rest[1::2, 2] <= manual_anchor) | (rest[1::2, 0] < 1e-4)
+                attachment_roles[native] = 2
+        if body_domain is not None:
+            if body_branch_weights is not None:
+                other = np.argmax(body_branch_weights[reps], axis=1) != body_domain
+                attachment_roles[other] = 3
+                rest[np.flatnonzero(other) * 2, 3] = 0
+            native = (rest[::2, 3] < 0.5) & (attachment_roles == 0)
+            attachment_roles[native] = 2
+        reference_rows = np.zeros((len(p), 3), np.uint32)
+        reference_binding = np.zeros((len(p), 4), np.float32)
+        if (
+            body_domain is not None
+            and reference_body_faces is not None
+            and body_branch_weights is not None
+        ):
+            reference_domains = np.argmax(
+                body_branch_weights[reference_body_faces].mean(1), axis=1
+            )
+            for domain in (0, 1, 2):
+                nodes = np.flatnonzero(
+                    (attachment_roles == 3)
+                    & (np.argmax(body_branch_weights[reps], axis=1) == domain)
+                )
+                if not len(nodes):
+                    continue
+                selected = np.asarray(reference_body_faces)[reference_domains == domain]
+                normal = normals[selected].sum(1)
+                normal /= np.maximum(
+                    np.linalg.norm(normal, axis=1, keepdims=True), 1e-12
+                )
+                tree = _BVH(positions, selected, normal)
+                for node in nodes:
+                    row = reps[node]
+                    closest = tree.nearest(positions[row])
+                    compatible = tree.nearest(
+                        positions[row],
+                        normals[row],
+                        max_distance=max(
+                            np.linalg.norm(closest[2] - positions[row]) * 1.5, 0.01
+                        ),
+                    )
+                    tri, bary, q = compatible if compatible is not None else closest
+                    ids = selected[tri]
+                    n = _unit(np.sum(normals[ids] * bary[:, None], axis=0))
+                    reference_rows[node] = ids + vertex_base
+                    reference_binding[node] = [
+                        *bary,
+                        max(float((positions[row] - q) @ n), 0),
+                    ]
         hem_map = np.full(len(p), INVALID, np.uint32)
         hem_map[cuff] = np.arange(len(cuff))
-        xy = np.c_[(p[cuff] - top) @ side, (p[cuff] - top) @ forward]
-        xy /= np.maximum(np.linalg.norm(xy, axis=1, keepdims=True), 1e-12)
-        hem_params = np.c_[xy, (p[cuff] - top) @ up, cuff].astype(np.float32)
-        previous = xy + np.roll(xy, 1, axis=0)
-        following = xy + np.roll(xy, -1, axis=0)
-        previous /= np.maximum(np.linalg.norm(previous, axis=1, keepdims=True), 1e-12)
-        following /= np.maximum(np.linalg.norm(following, axis=1, keepdims=True), 1e-12)
-        lines = np.c_[previous, following].astype(np.float32)
+        params, support_lines, hem_arcs = [], [], []
+        for ring in (upper_cuff, lower_cuff):
+            if not len(ring):
+                continue
+            center = p[ring].mean(0)
+            lengths = np.linalg.norm(p[ring] - np.roll(p[ring], 1, axis=0), axis=1)
+            hem_arcs.append(
+                np.r_[0, np.cumsum(lengths[1:])] / max(float(lengths.sum()), 1e-12)
+            )
+            xy = np.c_[(p[ring] - center) @ side, (p[ring] - center) @ forward]
+            xy /= np.maximum(np.linalg.norm(xy, axis=1, keepdims=True), 1e-12)
+            params.append(np.c_[xy, (p[ring] - center) @ up, ring])
+            previous = xy + np.roll(xy, 1, axis=0)
+            following = xy + np.roll(xy, -1, axis=0)
+            previous /= np.maximum(
+                np.linalg.norm(previous, axis=1, keepdims=True), 1e-12
+            )
+            following /= np.maximum(
+                np.linalg.norm(following, axis=1, keepdims=True), 1e-12
+            )
+            support_lines.append(np.c_[previous, following])
+        hem_params = np.concatenate(params).astype(np.float32)
+        lines = np.concatenate(support_lines).astype(np.float32)
         if np.any(abs(lines[:, 0] * lines[:, 3] - lines[:, 1] * lines[:, 2]) < 1e-6):
             raise ValueError("上下拖拽：袜口方向退化，请检查重叠边界")
         mesh_edges = _edges(f)
@@ -602,7 +1419,6 @@ def bake_garments(
             np.argsort(f.ravel(), kind="stable")
         ]
         face_adj = np.r_[offsets, refs].astype(np.uint32)
-        owned_rows = rows[np.isin(weld, component)]
         display = np.full((runtime_count, 3), INVALID, np.uint32)
         weights = np.zeros((runtime_count, 4), np.float32)
         mapping = np.full(runtime_count, INVALID, np.uint32)
@@ -623,7 +1439,9 @@ def bake_garments(
                 weights[row + vertex_base, :3] = bary
                 mapping[row + vertex_base] = ids[int(np.argmax(bary))]
         weights[owned_rows + vertex_base, 3] = (
-            (positions[owned_rows] - low) @ up / height
+            body_levels[owned_rows]
+            if intrinsic
+            else (positions[owned_rows] - low) @ up / height
         )
         lower = set(np.flatnonzero(hn < 0.2).tolist())
         lower_graph = {i: set() for i in lower}
@@ -664,7 +1482,11 @@ def bake_garments(
                 owner = 1
             elif abs(center - right) < (right - left) * 0.4:
                 owner = 2
-        config = np.zeros((16, 4), np.float32)
+        if branched or sliding:
+            single, owner = False, 0
+        if body_domain in (1, 2):
+            owner = 0
+        config = np.zeros((17, 4), np.float32)
         config[0] = [len(p), runtime_count, len(f), 1]
         config[1] = [
             len(edges),
@@ -681,6 +1503,14 @@ def bake_garments(
         config[8] = [*low, 0]
         config[9] = [*forward, 0]
         config[10] = [0, 1, 0.02, 0]
+        if skin_partition is not None:
+            config[10, 3] = 0.15
+            config[16, 0] = 1
+        if body_domain is not None:
+            config[10, 3] = 0.15 if fold_branch else 1
+            config[16] = [1, body_skin_faces, body_domain, 1]
+            if intrinsic:
+                config[16, 3] = 2
         config[11] = [1, 0.002, 0.04, 0]
         config[12] = [
             center_side if single else 0,
@@ -688,9 +1518,150 @@ def bake_garments(
             int(single),
             owner,
         ]
+        if two_ended:
+            config[13] = [len(upper_cuff), len(lower_cuff), 1, 0.05]
+        local_owners = owners
+        if branched or sliding:
+            reach = max(width * 0.55, height * 0.2)
+            body_sides = (body - bottom) @ side
+            local_owners = np.where(
+                abs(body_sides.mean(1)) <= reach,
+                np.where(
+                    np.all(body_sides < 0, 1),
+                    1,
+                    np.where(np.all(body_sides >= 0, 1), 2, 3),
+                ),
+                0,
+            ).astype(np.uint32)
+            config[7, 3] = reach
+        if branched:
+            config[14] = [branch_height - config[13, 3], 1, branch_height, 1]
+        elif sliding:
+            # Keep both leg openings free and translate the shorts along the
+            # full selected body, rather than gathering into their own crotch.
+            bh = positions[body_rows] @ up
+            ankle = float(bh.min() + np.ptp(bh) * 0.06)
+            config[4, 0] = min(0.0, (ankle - low @ up) / height + 1)
+            config[14, 3] = 2
+        path_controls = {}
+        if paths:
+            config[15, 3] = 1
+            config[15, 1:3] = 1
+            if sliding and len(body_foot_sides) >= 2:
+                config[15, 0] = (max(body_foot_sides) - min(body_foot_sides)) * 0.5
+            if manual_target is not None:
+                config[4, 0] = manual_target
+                if not sliding:
+                    config[14] = [int(fold_branch), int(fold_branch), manual_anchor, 3]
+            if not sliding:
+                # Keep a sock's fixed leg ownership. A transverse sleeve track
+                # cannot inherit this classifier from the full body's feet.
+                body_axis = np.linalg.svd(
+                    positions[body_rows] - positions[body_rows].mean(0),
+                    full_matrices=False,
+                )[2][0]
+                if not owner or abs(up @ body_axis) < 0.75:
+                    config[12] = 0
+                    reach = max(float(np.ptp(p[upper_cuff] @ side)) * 0.6, height * 0.2)
+                    local_owners = np.where(
+                        abs((body.mean(1) - low) @ side) <= reach, 3, 0
+                    ).astype(np.uint32)
+                config[7, 3] = max(
+                    float(np.ptp(p[upper_cuff] @ side)) * 0.6, height * 0.2
+                )
+            for zone, path in paths:
+                code = 1 if (path[1] - path[0]) @ up < 0 else 2
+                maximum = (
+                    float(np.linalg.norm(path[1] - path[0]))
+                    / height
+                    / (1 - config[13, 3])
+                    if two_ended
+                    else 1.0
+                )
+                path_controls[zone] = (code, maximum)
+            if manual_target is not None and not sliding and config[12, 3] < 0.5:
+                connected = surface_track_component(
+                    positions,
+                    body_faces,
+                    adj,
+                    (local_owners == 3)
+                    & (surface > 0)
+                    & (torso_sheet if torso_sheet is not None else True),
+                    p[upper_cuff],
+                    low,
+                    up,
+                    height,
+                    min(manual_anchor, manual_target),
+                    levels=body_levels if intrinsic else None,
+                )
+                if fold_branch:
+                    body_h = (
+                        (body[connected] - low) @ up / height
+                        if not intrinsic
+                        else body_levels[body_faces[connected]]
+                    )
+                    if not np.any(
+                        (body_h.min(1) <= manual_target + 1e-6)
+                        & (body_h.max(1) >= manual_target - 1e-6)
+                    ):
+                        raise ValueError(
+                            "穿脱行程没有连通的身体端点截面，请将端点放回碰撞体覆盖范围"
+                        )
+                local_owners = np.where(connected, 3, 0).astype(np.uint32)
+            elif manual_target is not None and sliding:
+                connected = surface_track_component(
+                    positions,
+                    body_faces,
+                    adj,
+                    (local_owners > 0) & (surface > 0),
+                    p[upper_cuff],
+                    low,
+                    up,
+                    height,
+                    manual_target - 1 + float(hn.min()),
+                )
+                local_owners = np.where(connected, local_owners, 0).astype(np.uint32)
+        attachment_groups = None
+        if torso_sheet is not None:
+            # Collision membership is defined in reference topology, never by
+            # the closest moving surface at the armpit.
+            arm_faces = (~torso_sheet) & (surface > 0)
+            arm_side = (body.mean(1) - low) @ side
+            local_owners = np.where(
+                arm_faces, np.where(arm_side < 0, 4, 5), local_owners
+            ).astype(np.uint32)
+            attachment_groups = np.where(
+                attachment_roles == 1,
+                np.where(lat < 0, 4, 5),
+                np.where(attachment_roles >= 2, 0, 3),
+            )
+        contact_seeds = bake_body_seeds(
+            positions,
+            normals,
+            body_faces,
+            reps,
+            config,
+            local_owners,
+            surface,
+            groups=attachment_groups,
+        )
+        channels = body_channels(
+            positions,
+            body_faces,
+            config,
+            local_owners,
+            levels=body_levels if intrinsic else None,
+        )
+        runtime_levels = np.zeros(runtime_count or len(positions), np.float32)
+        runtime_levels[vertex_base : vertex_base + len(positions)] = body_levels
         result.append(
             {
                 "rest": rest,
+                "attachment_roles": attachment_roles,
+                "skin_mix": (
+                    shorts_skin_mix(p, f, lat, height)
+                    if sliding else np.zeros(len(p), np.float32)
+                ),
                 "config": config,
                 "map": mapping,
                 "representatives": (reps + vertex_base).astype(np.uint32),
@@ -703,11 +1674,37 @@ def bake_garments(
                 "hem_map": hem_map,
                 "hem_params": hem_params,
                 "hem_lines": lines,
+                "hem_arc": np.concatenate(hem_arcs).astype(np.float32),
                 "body_adjacency": adj.ravel(),
                 "surface_mask": surface,
-                "body_regions": owners,
+                "collision_mask": (
+                    (np.arange(len(body_faces)) < body_skin_faces).astype(np.uint32)
+                    if body_domain is not None
+                    else (
+                        torso_sheet.astype(np.uint32)
+                        if skin_partition is not None
+                        else np.ones(len(body_faces), np.uint32)
+                    )
+                ),
+                "body_regions": local_owners,
+                "body_levels": runtime_levels,
+                "reference_rows": reference_rows.ravel(),
+                "reference_binding": reference_binding,
                 "display_triangles": display.ravel(),
                 "display_weights": weights,
+                "path_controls": path_controls,
+                "body_seeds": contact_seeds,
+                "body_channels": channels,
+                "body_directions": body_directions(
+                    positions,
+                    normals,
+                    body_faces,
+                    reps,
+                    config,
+                    local_owners,
+                    contact_seeds,
+                    channels,
+                ),
             }
         )
     if not result:

@@ -10,6 +10,10 @@ Buffer<uint> Faces : register(t79);
 Buffer<uint> FaceAdjacency : register(t80);
 Buffer<uint> Representatives : register(t85);
 Buffer<float4> PaletteDecision : register(t96);
+StructuredBuffer<Blend> SkinWeights : register(t97);
+Buffer<float4> FrozenDisplay : register(t99);
+Buffer<float4> Skeleton1 : register(t2);
+Buffer<float4> Skeleton2 : register(t3);
 RWBuffer<float> Output : register(u0);
 
 float3 ParticleNormal(uint particle)
@@ -30,7 +34,7 @@ float3 ParticleNormal(uint particle)
 [numthreads(256,1,1)]void main(uint3 dispatch:SV_DispatchThreadID)
 {
     uint row=dispatch.x,count,particles,pstride,sourceCount,sourceStride;
-    if(PaletteDecision[0].w<.5 || State[23].w<.5 || State[0].x<1e-5)return;
+    if(PaletteDecision[0].w<.5 || State[23].w<.5 || GarmentAmount(State[0].xy)<1e-5)return;
     Output.GetDimensions(count);Particles.GetDimensions(particles,pstride);Source.GetDimensions(sourceCount,sourceStride);
     if(count!=(uint)Config[0].y*VERTEX_FLOATS || particles!=PARTICLE_COUNT || pstride!=32 ||
        sourceCount!=(uint)Config[0].y || sourceStride!=VERTEX_STRIDE || row>=sourceCount)return;
@@ -49,7 +53,29 @@ float3 ParticleNormal(uint particle)
     float3 oldU=Source[Representatives[ids.y]].position-Source[Representatives[ids.x]].position;
     float3 oldV=Source[Representatives[ids.z]].position-Source[Representatives[ids.x]].position;
     float aa=dot(oldU,oldU),ab=dot(oldU,oldV),bb=dot(oldV,oldV),den=aa*bb-ab*ab;
-    if(den>1e-18)
+    float4 frozen=FrozenDisplay[row];
+    if(abs(frozen.w)==State[2].x && frozen.w!=0)
+    {
+        if(frozen.w>0)
+        {
+            float3 u=Particles[ids.y].current.xyz-Particles[ids.x].current.xyz;
+            float3 v=Particles[ids.z].current.xyz-Particles[ids.x].current.xyz;
+            residual=u*frozen.x+v*frozen.y+SafeUnit(cross(u,v),vertex.normal)*frozen.z;
+        }
+        else
+        {
+            Blend skin=SkinWeights[particle];float3 value=0;bool second=PaletteDecision[0].x>1.5;
+            [unroll]for(uint bone=0;bone<4;++bone)
+            {
+                uint at=skin.indices[bone]*3;float4 a,b,c;
+                if(second){a=Skeleton2[at];b=Skeleton2[at+1];c=Skeleton2[at+2];}
+                else{a=Skeleton1[at];b=Skeleton1[at+1];c=Skeleton1[at+2];}
+                value+=skin.weights[bone]*float3(dot(a.xyz,frozen.xyz),dot(b.xyz,frozen.xyz),dot(c.xyz,frozen.xyz));
+            }
+            residual=value;
+        }
+    }
+    else if(den>1e-18)
     {
         float u=(bb*dot(residual,oldU)-ab*dot(residual,oldV))/den;
         float v=(aa*dot(residual,oldV)-ab*dot(residual,oldU))/den;
@@ -60,11 +86,12 @@ float3 ParticleNormal(uint particle)
     }
     else
     {
-        float2 gather=GatherProfile(weights.w,lerp(1,Config[4].x,State[0].x));
+        float2 gather=MaterialProfile(weights.w,State[0].xy);
         residual-=State[5].xyz*dot(residual,State[5].xyz)*(1-gather.y);
     }
     p+=residual;
-    if(!all(isfinite(p)) || distance(p,vertex.position)>Config[6].w*State[8].z*1.7)return;
+    float travel=Sliding()?abs(1-Config[4].x):0;
+    if(!all(isfinite(p)) || distance(p,vertex.position)>Config[6].w*State[8].z*(1.7+travel))return;
     vertex.position=p;vertex.normal=SafeUnit(normal,vertex.normal);
     vertex.tangent.xyz=SafeUnit(vertex.tangent.xyz-vertex.normal*dot(vertex.tangent.xyz,vertex.normal),vertex.tangent.xyz);
     uint base=row*VERTEX_FLOATS;

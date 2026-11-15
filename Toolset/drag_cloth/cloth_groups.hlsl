@@ -2,6 +2,8 @@
 #include "common.hlsli"
 Buffer<float4> Rest : register(t75);
 Buffer<uint> Representatives : register(t85);
+Buffer<uint> BodySeeds : register(t121);
+Buffer<uint> AttachmentRoles : register(t126);
 Buffer<uint> WearMap : register(t94);
 Buffer<uint> Faces : register(t79);
 Buffer<uint> FaceColors : register(t100);
@@ -11,6 +13,7 @@ Buffer<uint> FaceOffsets : register(t115);
 Buffer<uint> HemMap : register(t116);
 Buffer<float4> HemParams : register(t117);
 Buffer<float4> HemLines : register(t107);
+Buffer<float> HemArc : register(t123);
 Buffer<float4> HullPoints : register(t118);
 Buffer<uint> HullCount : register(t119);
 Buffer<float4> OriginalBlend : register(t86);
@@ -31,21 +34,36 @@ groupshared float Position[PARTICLE_COUNT*3];
 groupshared float4 Planes[64];
 groupshared float HemTargets[HEM_COUNT*3];
 groupshared float4 FootAndHeight,UpAxis,SideAxis,ForwardAxis,HemCenter;
+groupshared float4 LowerHemCenter;
+groupshared float3 UpperHullShift,LowerHullShift;
+groupshared float HullPerimeter;
 groupshared float4 Parameters;
 groupshared uint Cold;
+groupshared uint RepairSkip;
+groupshared uint WorkIterations;
 
 float3 P(uint i){return float3(Position[i*3],Position[i*3+1],Position[i*3+2]);}
 void SetP(uint i,float3 p){Position[i*3]=p.x;Position[i*3+1]=p.y;Position[i*3+2]=p.z;}
 float3 Hem(uint i){return float3(HemTargets[i*3],HemTargets[i*3+1],HemTargets[i*3+2]);}
 void SetHem(uint i,float3 p){HemTargets[i*3]=p.x;HemTargets[i*3+1]=p.y;HemTargets[i*3+2]=p.z;}
-float Mass(uint i){return HemMap[i]<HEM_COUNT || Rest[i*2].w<.5 ? 0:1;}
+float Mass(uint i){return (!IntrinsicSurface() && HemMap[i]<HEM_COUNT && IniParams[126].z<.5) || Rest[i*2].w<.5 ? 0:1;}
+float ContactMass(uint i){return SheetCollision()?(AttachmentRoles[i]==3?0:1):(HemMap[i]<HEM_COUNT?0:(Config[15].w>.5?Mass(i):1));}
 uint NodeRegion(uint i)
 {
-    if(HemMap[i]<HEM_COUNT)return 0;
+    if(Sliding())return Rest[i*2+1].w<0?1:2;
+    if(HemMap[i]<HEM_COUNT && !ManualSurface() && !Sliding())return 0;
     if(Config[12].w>.5)return (uint)Config[12].w;
+    if(ManualSurface())return 3;
+    if(HemMap[i]<HEM_COUNT)return Sliding()?3:0;
     float side=Rest[i*2+1].w/max(Config[6].w,1e-6);
     return abs(side)<.004?3:(side<0?1:2);
 }
+uint ContactSeed(uint i)
+{
+ if(ManualAnchored() && Config[14].x>.5 && AttachmentRoles[i]!=0)return BodySeeds[i];
+ return asuint(Contacts[i*3+2].x);
+}
+
 void Rows(Blend v,out float4 a,out float4 b,out float4 c)
 {
     a=0;b=0;c=0;bool second=PaletteDecision[0].x>1.5;uint count;
@@ -106,7 +124,7 @@ void Support(uint direction)
 {
  float angle=6.28318530718*direction/64;float3 n=SideAxis.xyz*cos(angle)+ForwardAxis.xyz*sin(angle);float h=-1e20;
  uint count=HullCount[0];[loop]for(uint k=0;k<count;++k)h=max(h,dot(HullPoints[k].xyz,n));
- Planes[direction]=float4(n,max(h,.005)+Config[4].w);
+ Planes[direction]=float4(n,max(h,.005)+max(Config[4].w,ClothGap()));
 }
 void Edge(uint index,float dt,uint iteration)
 {
@@ -121,10 +139,13 @@ void Edge(uint index,float dt,uint iteration)
         if(e.w<.5 || material.w<=0 || len>=rest*material.w){Lambdas[index]=0;return;}
         rest*=material.w;
     }
-    float lambda=(-(len-rest)-alpha*old)/(mass+alpha);Lambdas[index]=old+lambda;
-    float3 correction=d*(lambda/len);
-    if(e.w<.5 && len>rest*Config[5].w)correction-=d*((len-rest*Config[5].w)/len)/mass;
-    float maximum=.004*Parameters.z,c=length(correction);if(c>maximum)correction*=maximum/c;
+    float lambda=(-(len-rest)-alpha*old)/(mass+alpha);
+    // The stretch inequality bounds the elastic projection; adding both
+    // projections can move the endpoints past one another and invert faces.
+    if(e.w<.5 && len>rest*Config[5].w)lambda=min(lambda,-(len-rest*Config[5].w)/mass);
+    lambda=clamp(lambda,-max(len-rest,0)/mass,max(rest-len,0)/mass);
+    float maximum=.004*Parameters.z;lambda=clamp(lambda,-maximum,maximum);
+    Lambdas[index]=old+lambda;float3 correction=d*(lambda/len);
     SetP(a,pa+correction*wa);SetP(b,pb-correction*wb);
 }
 bool Hit(float3 p,float3 end,float3 a,float3 b,float3 c)
@@ -136,7 +157,9 @@ bool Hit(float3 p,float3 end,float3 a,float3 b,float3 c)
 void FaceGlobal(uint face)
 {
     uint3 ids=uint3(Faces[face*3],Faces[face*3+1],Faces[face*3+2]);float3 p[3];p[0]=Particles[ids.x].current.xyz;p[1]=Particles[ids.y].current.xyz;p[2]=Particles[ids.z].current.xyz;
-    float3 old[3];old[0]=p[0];old[1]=p[1];old[2]=p[2];float3 mass=float3(1,1,1);
+    float3 old[3];old[0]=p[0];old[1]=p[1];old[2]=p[2];float3 mass=float3(ContactMass(ids.x),ContactMass(ids.y),ContactMass(ids.z));
+    if(dot(mass,1.0)<.5)return;
+    FaceCenterContact(p[0],p[1],p[2],mass,State[8].z,ContactSeed(ids.x));
     float3 lo=min(p[0],min(p[1],p[2])),hi=max(p[0],max(p[1],p[2]));uint node=1,count,leaves=(uint)IniParams[115].y;BodyOrder.GetDimensions(count);
     [loop]while(node>0)
     {
@@ -155,7 +178,7 @@ void FaceGlobal(uint face)
                     uint next=(edge+1)%3;
                     if(Hit(p[edge],p[next],q[0],q[1],q[2]))
                     {
-                        float x=Config[2].z-dot(p[edge]-a.position,n),y=Config[2].z-dot(p[next]-a.position,n);
+                        float x=ClothGap()*State[8].z-dot(p[edge]-a.position,n),y=ClothGap()*State[8].z-dot(p[next]-a.position,n);
                         if(x>0 && mass[edge]>.5)p[edge]+=n*min(x,.002*State[8].z);
                         if(y>0 && mass[next]>.5)p[next]+=n*min(y,.002*State[8].z);
                     }
@@ -166,7 +189,7 @@ void FaceGlobal(uint face)
                     float3 g=SafeUnit(cross(p[1]-p[0],p[2]-p[0]),n);if(dot(g,n)<0)g=-g;
                     [unroll]for(uint v=0;v<3;++v)
                     {
-                        float3 closest,bary;ClosestTriangle(q[v],p[0],p[1],p[2],closest,bary);float depth=dot(q[v]-closest,g)+Config[2].z;
+                        float3 closest,bary;ClosestTriangle(q[v],p[0],p[1],p[2],closest,bary);float depth=dot(q[v]-closest,g)+ClothGap()*State[8].z;
                         if(depth>0 && distance(q[v],closest)<.05*State[8].z)
                         {
                             float denominator=max(dot(bary*bary,mass),1e-6);float amount=min(depth,.002*State[8].z)/denominator;
@@ -219,6 +242,19 @@ void Control()
 
 [numthreads(THREADS,1,1)]void main(uint lane:SV_GroupIndex)
 {
+ if(lane==0)
+ {
+  bool skip=ClosedDomain() && IniParams[119].w>.5 && State[3][(uint)clamp(round(IniParams[118].w),1,2)-1]>.5;
+  if(AdaptiveCloth())
+  {
+   skip=skip || (IniParams[119].z>.5 && IniParams[119].x>=ClothSubsteps(State[ClothWorkRow()]));
+   skip=skip || (IniParams[119].w>.5 && IniParams[125].z>.5 && State[ClothWorkRow()].z<.5);
+  }
+  else skip=skip || IniParams[125].z>.5;
+  skip=skip || (State[9].y<.5 && IniParams[127].y<.5);
+  RepairSkip=skip?1:0;
+ }
+ GroupMemoryBarrierWithGroupSync();if(RepairSkip!=0)return;
  uint phase=(uint)IniParams[116].x;
  uint sourceCount,stride,particleCount,pstride,edges,faceCount,hemCount,ec,fc,bc,order;
  Source.GetDimensions(sourceCount,stride);Particles.GetDimensions(particleCount,pstride);Constraints.GetDimensions(edges);
@@ -233,33 +269,99 @@ void Control()
  uint adjacencyCount,surfaceCount;BodyAdjacency.GetDimensions(adjacencyCount);SurfaceMask.GetDimensions(surfaceCount);valid=valid && adjacencyCount==order*3 && surfaceCount==order;
  uint ownerCount;BodyOwners.GetDimensions(ownerCount);valid=valid && ownerCount==order;
  uint hullCount,hullPoints;HullCount.GetDimensions(hullCount);HullPoints.GetDimensions(hullPoints);
- uint hemLines;HemLines.GetDimensions(hemLines);valid=valid && hullCount==1 && hullPoints>=order*3 && hemLines==HEM_COUNT;
+ uint ends=TwoEnded()?2:1;
+ uint hemLines;HemLines.GetDimensions(hemLines);valid=valid && hullCount==ends && hullPoints>=order*3*ends && hemLines==HEM_COUNT;
  if(lane==0 && !valid)State[23]=float4(PARTICLE_COUNT,edges,order,0);if(!valid)return;
  if(lane==0)
  {
-  Cold=State[23].w>=.5 && (phase!=2 || HullCount[0]>0)?1:0;
-  if(Cold==0){float4 health=State[23];health.w=0;State[23]=health;}
+  bool active=GarmentAmount(State[0].xy)>=1e-5 || GarmentAmount(float2(State[8].x,State[10].x))>=1e-5;
+  bool sleeping=State[ClothSleepRow()].x>.5;
+  Cold=active && !sleeping && State[23].w>=.5 && (IntrinsicSurface() || phase!=2 || ((Branched() || HullCount[0]>0) && (!TwoEnded() || HullCount[1]>0)))?1:0;
+  if(Cold==0 && active && !sleeping){float4 health=State[23];health.w=0;State[23]=health;}
  }
  GroupMemoryBarrierWithGroupSync();
  if(Cold==0)return;
  if(phase!=2 && phase!=3)return;
- if(lane==0){Parameters=State[8];FootAndHeight=State[4];UpAxis=State[5];SideAxis=State[6];ForwardAxis=State[7];State[21]=ClothMaterial();State[22]=ClothFolds();}
- GroupMemoryBarrierWithGroupSync();float dt=Parameters.w/max(Config[3].y,1);uint iterations=(uint)Config[3].x;
- if(phase==2)
+ if(lane==0)
  {
-  float alpha=lerp(Parameters.x,Parameters.y,(IniParams[119].x+1)/max(Config[3].y,1));
-  if(lane==0)HemCenter=float4(FootAndHeight.xyz+UpAxis.xyz*FootAndHeight.w*lerp(1,Config[4].x,alpha),alpha);
-  GroupMemoryBarrierWithGroupSync();
-  if(lane<HEM_COUNT)
+  Parameters=State[8];FootAndHeight=State[4];UpAxis=State[5];SideAxis=State[6];ForwardAxis=State[7];State[21]=ClothMaterial();State[22]=ClothFolds();
+  WorkIterations=(uint)Config[3].x;
+  if(phase==3 && (Sliding() || (ManualAnchored() && Config[14].x>.5)))WorkIterations=max(WorkIterations,8u);
+  if(AdaptiveCloth() && State[ClothWorkRow()].z>.5 && IniParams[119].w<.5)WorkIterations=min(WorkIterations,(uint)State[ClothWorkRow()].y);
+  if(IniParams[126].z>.5)WorkIterations=6;
+ }
+ GroupMemoryBarrierWithGroupSync();float dt=Parameters.w/max(Config[3].y,1);uint iterations=WorkIterations;
+ if(phase==2 && IntrinsicSurface())
+ {
+  float fraction=(IniParams[119].x+1)/ClothSubsteps(State[ClothWorkRow()]);
+  float2 progress=float2(lerp(Parameters.x,Parameters.y,fraction),lerp(State[10].x,State[10].y,fraction));
+  float2 interval=GarmentInterval(progress);
+  [loop]for(uint hem=lane;hem<HEM_COUNT;hem+=THREADS)
   {
-   float4 h=HemLines[lane];float3 n0=SideAxis.xyz*h.x+ForwardAxis.xyz*h.y,n1=SideAxis.xyz*h.z+ForwardAxis.xyz*h.w;
-   float a=-1e20,b=-1e20;uint count=HullCount[0];
-   [loop]for(uint hullIndex=0;hullIndex<count;++hullIndex){float3 p=HullPoints[hullIndex].xyz;a=max(a,dot(p,n0));b=max(b,dot(p,n1));}
-   a=max(a,.005)+Config[4].w;b=max(b,.005)+Config[4].w;
-   float det=h.x*h.w-h.y*h.z;float x=(a*h.w-h.y*b)/det,y=(h.x*b-a*h.z)/det;
-   SetHem(lane,HemCenter.xyz+SideAxis.xyz*x+ForwardAxis.xyz*y);
+   uint node=(uint)HemParams[hem].w;float level=TwoEnded() && hem>=(uint)Config[13].x?interval.x:interval.y;
+   float3 q,b,n;uint tri;float sd;float3 target=Particles[node].current.xyz;
+   if(FollowBodyLevel(target,ContactSeed(node),NodeRegion(node),level,q,b,n,tri,sd))
+   {
+    target=q+n*ClothGap()*Parameters.z;float3 outside;
+    if(BodyContactTarget(target,tri,ClothGap()*Parameters.z,.08*Parameters.z,outside))target=outside;
+   }
+   SetHem(hem,target);
   }
   GroupMemoryBarrierWithGroupSync();
+ }
+ if(phase==2 && !IntrinsicSurface())
+ {
+  float fraction=(IniParams[119].x+1)/ClothSubsteps(State[ClothWorkRow()]);
+  float2 progress=float2(lerp(Parameters.x,Parameters.y,fraction),lerp(State[10].x,State[10].y,fraction));
+  float2 interval=GarmentInterval(progress);
+  if(lane==0)
+  {
+   UpperHullShift=0;LowerHullShift=0;
+   uint upperCount=HullCount[0];[loop]for(uint k=0;k<upperCount;++k)UpperHullShift+=HullPoints[k].xyz;UpperHullShift/=max(upperCount,1);
+   if(TwoEnded()){uint lowerCount=HullCount[1];[loop]for(uint k=0;k<lowerCount;++k)LowerHullShift+=HullPoints[order*3+k].xyz;LowerHullShift/=max(lowerCount,1);}
+   HemCenter=float4(FootAndHeight.xyz+UpAxis.xyz*FootAndHeight.w*interval.y+UpperHullShift,GarmentAmount(progress));
+   LowerHemCenter=float4(FootAndHeight.xyz+UpAxis.xyz*FootAndHeight.w*interval.x+LowerHullShift,0);
+  }
+  GroupMemoryBarrierWithGroupSync();
+  uint ends=TwoEnded()?2:1;
+  [loop]for(uint end=0;end<ends;++end)
+  {
+   uint begin=end==0?0:(uint)Config[13].x,finish=end==0?(TwoEnded()?(uint)Config[13].x:HEM_COUNT):HEM_COUNT;
+   float startAngle=atan2(HemParams[begin].y,HemParams[begin].x)-3.14159265359/64;
+   if(lane<64)
+   {
+    float angle=startAngle+6.28318530718*lane/64;float2 direction=float2(cos(angle),sin(angle));
+    float3 normal=SideAxis.xyz*direction.x+ForwardAxis.xyz*direction.y;float support=-1e20,height=0;uint count=HullCount[end];
+    [loop]for(uint k=0;k<count;++k){float3 value=HullPoints[end*order*3+k].xyz-(end==0?UpperHullShift:LowerHullShift);float d=dot(value,normal);if(d>support){support=d;height=dot(value,UpAxis.xyz);}}
+    Planes[lane]=float4(direction,max(support,.005*Parameters.z)+max(Config[4].w,ClothGap())*Parameters.z,height);
+   }
+   GroupMemoryBarrierWithGroupSync();
+   if(lane==0)
+   {
+    float4 firstPlane=Planes[0];
+    [loop]for(uint polyIndex=0;polyIndex<64;++polyIndex)
+    {
+     uint nextIndex=(polyIndex+1)%64;
+     float4 a=Planes[polyIndex],b=polyIndex==63?firstPlane:Planes[nextIndex];float det=a.x*b.y-a.y*b.x;
+     float x=(a.z*b.y-a.y*b.z)/det,y=(a.x*b.z-a.z*b.x)/det;
+     Planes[polyIndex]=float4(SideAxis.xyz*x+ForwardAxis.xyz*y+UpAxis.xyz*(Config[15].w>.5?(a.w+b.w)*.5:0),0);
+    }
+    float lengthSum=0;[loop]for(uint arcIndex=1;arcIndex<64;++arcIndex){lengthSum+=distance(Planes[arcIndex].xyz,Planes[arcIndex-1].xyz);float4 v=Planes[arcIndex];v.w=lengthSum;Planes[arcIndex]=v;}
+    HullPerimeter=lengthSum+distance(Planes[63].xyz,Planes[0].xyz);
+   }
+   GroupMemoryBarrierWithGroupSync();
+   if(lane>=begin && lane<finish)
+   {
+    if(Branched() && end==0)SetHem(lane,Source[Representatives[(uint)HemParams[lane].w]].position);
+    else
+    {
+     float target=HemArc[lane]*HullPerimeter;float3 value=Planes[0].xyz;
+     [loop]for(uint sampleIndex=0;sampleIndex<64;++sampleIndex){uint next=(sampleIndex+1)%64;float endLength=sampleIndex==63?HullPerimeter:Planes[next].w;if(target<=endLength){float t=saturate((target-Planes[sampleIndex].w)/max(endLength-Planes[sampleIndex].w,1e-8));value=lerp(Planes[sampleIndex].xyz,Planes[next].xyz,t);break;}}
+     SetHem(lane,(end==0?HemCenter.xyz:LowerHemCenter.xyz)+value);
+    }
+   }
+   GroupMemoryBarrierWithGroupSync();
+  }
  }
  [loop]for(uint j=lane;j<PARTICLE_COUNT;j+=THREADS)
  {
@@ -268,12 +370,18 @@ void Control()
   {
    float3 velocity=(next-p.previous.xyz)*ClothMaterial().z;float speed=length(velocity),limit=Config[4].y*Parameters.z*dt;if(speed>limit)velocity*=limit/speed;
    p.previous.xyz=next;next+=velocity+UpAxis.xyz*Config[2].x*Parameters.z*dt*dt;
-   uint hem=HemMap[j];if(hem<HEM_COUNT){next=Hem(hem);p.previous.xyz=next;}
+   uint hem=HemMap[j];if(hem<HEM_COUNT)
+   {
+    next=IntrinsicSurface()?lerp(next,Hem(hem),saturate(Config[10].w)):Hem(hem);p.previous.xyz=next;
+   }
    else if(Rest[j*2].w<.5)
    {
-    next=Source[Representatives[j]].position;float3 q,b,n;uint tri;float sd;
-    ClosestBodyGroup(next,asuint(Contacts[j*3+2].x),NodeRegion(j),q,b,n,tri,sd);
-    if(sd<Config[2].z*Parameters.z)next+=n*(Config[2].z*Parameters.z-sd);
+    next=SheetCollision()?p.current.xyz:Source[Representatives[j]].position;float3 q,b,n;uint tri;float sd;
+    if(!ManualSurface())
+    {
+     ClosestBodyGroup(next,asuint(Contacts[j*3+2].x),NodeRegion(j),q,b,n,tri,sd);
+     if(sd<ClothGap()*Parameters.z)next+=n*(ClothGap()*Parameters.z-sd);
+    }
     p.previous.xyz=next;
    }
    Particles[j]=p;
@@ -290,5 +398,10 @@ void Control()
    GroupMemoryBarrierWithGroupSync();
   }
  }
- [loop]for(uint outNode=lane;outNode<PARTICLE_COUNT;outNode+=THREADS){Particle p=Particles[outNode];p.current=float4(P(outNode),1);Particles[outNode]=p;}
+ [loop]for(uint outNode=lane;outNode<PARTICLE_COUNT;outNode+=THREADS)
+ {
+  Particle p=Particles[outNode];float3 next=P(outNode);
+  if(SheetCollision())next=KeepOutside(p.current.xyz,next,ClothGap()*Parameters.z);
+  p.previous.xyz+=next-P(outNode);p.current=float4(next,1);Particles[outNode]=p;
+ }
 }

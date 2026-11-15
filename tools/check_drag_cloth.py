@@ -134,11 +134,20 @@ class Resource:
 
 
 class GeneratedCloth:
-    def __init__(self, root, sections, comp, namespace="unit", hardware=False):
+    def __init__(
+        self,
+        root,
+        sections,
+        comp,
+        namespace="unit",
+        hardware=False,
+        legacy_region_copy=True,
+    ):
         self.root = Path(root)
         self.sections = sections
         self.comp = comp
         self.ns = namespace
+        self.legacy_region_copy = legacy_region_copy
         self.gpu = GPU(hardware=hardware)
         self.resources = {}
         self.shaders = {}
@@ -150,6 +159,7 @@ class GeneratedCloth:
         self.variables = {
             "time": 0,
             "$cursorY": 600,
+            "$cursorX": 800,
             "$screenH": 1080,
             "$isMouseButtonDown": 0,
         }
@@ -167,6 +177,15 @@ class GeneratedCloth:
         self.variables["$screenH"] = 1080
         self.variables[self.prefix + "enabled"] = 1
         self.variables["$ssmtdrag_drag_enabled_" + namespace] = 2
+        # Solver replays explicitly opt into an already grabbed garment.
+        # Cold-idle tests clear this flag to exercise the native passthrough.
+        if comp.get("cloth"):
+            activity = f"$ssmtcloth_{namespace}_{comp['comp_name']}_"
+            self.variables[activity + "activated"] = 1
+            self.variables[activity + "activation_reset"] = self.variables.get(
+                self.prefix + "reset", 0
+            )
+        self.force_full_solver = True
 
     def close(self):
         self.gpu.release()
@@ -185,9 +204,23 @@ class GeneratedCloth:
         self.resources[name] = value
         return value
 
-    def resource(self, name, copy_size=None):
+    def resource(self, name, copy_size=None, copy_source=None):
         if name in self.resources:
-            return self.resources[name]
+            current = self.resources[name]
+            if not copy_size:
+                return current
+            declaration = self._declaration(name)
+            if (
+                copy_size
+                and current.size != copy_size
+                and not declaration.get("array")
+                and not declaration.get("filename")
+            ):
+                # The loader recreates dynamic copies when the native SO
+                # allocation changes between character instances.
+                del self.resources[name]
+            else:
+                return current
         decl = self._declaration(name)
         if not decl:
             raise ValueError("Undeclared generated resource: " + name)
@@ -196,6 +229,12 @@ class GeneratedCloth:
         )
         stride = int(decl.get("stride", element))
         structured = "structured" in decl.get("type", "").lower()
+        if (
+            copy_source is not None
+            and copy_source.structured
+            and decl.get("misc_flags") != "none"
+        ):
+            structured = True
         writable = "rw" in decl.get(
             "type", ""
         ).lower() or "unordered_access" in decl.get("bind_flags", "")
@@ -243,25 +282,34 @@ class GeneratedCloth:
 
     def _eval(self, text):
         text = text.strip()
-        if "===" in text:
-            a, b = map(str.strip, text.split("===", 1))
-            return self.resources.get(a) is self.resources.get(b) or (
+        if "===" in text or "!==" in text:
+            symbol = "!==" if "!==" in text else "==="
+            a, b = map(str.strip, text.split(symbol, 1))
+            same = self.resources.get(a) is self.resources.get(b) or (
                 a in self.resources
                 and b in self.resources
                 and self.resources[a].pointer == self.resources[b].pointer
             )
-        expression = re.sub(
-            r"\$[\w]+",
-            lambda m: (
-                "V" + str(list(self.variables).index(m.group()))
-                if m.group() in self.variables
-                else "0"
-            ),
-            text,
-        )
+            return not same if symbol == "!==" else same
+        if text in self.variables:
+            return self.variables[text]
+        if text and text[0] in "-.0123456789":
+            try:
+                return float(text) if "." in text or "e" in text.lower() else int(text)
+            except ValueError:
+                pass
+        values = {"time": self.variables["time"]}
+
+        def substitute(match):
+            name = match.group()
+            if name not in self.variables:
+                return "0"
+            alias = "V" + str(len(values))
+            values[alias] = self.variables[name]
+            return alias
+
+        expression = re.sub(r"\$[\w]+", substitute, text)
         expression = expression.replace("&&", " and ").replace("||", " or ")
-        values = {"V" + str(i): v for i, v in enumerate(self.variables.values())}
-        values["time"] = self.variables["time"]
         binary = {
             ast.Add: operator.add,
             ast.Sub: operator.sub,
@@ -301,7 +349,11 @@ class GeneratedCloth:
                 )
             raise ValueError("Unsupported generated expression: " + text)
 
-        return evaluate(ast.parse(expression, mode="eval").body)
+        if not hasattr(self, "_expression_cache"):
+            self._expression_cache = {}
+        if expression not in self._expression_cache:
+            self._expression_cache[expression] = ast.parse(expression, mode="eval").body
+        return evaluate(self._expression_cache[expression])
 
     def execute(self, name, depth=0):
         if depth > 12:
@@ -354,6 +406,9 @@ class GeneratedCloth:
                     self.shaders[path] = self.gpu.shader(path)
                 self.current_shader = self.shaders[path]
             elif key.casefold() == "dispatch":
+                # Explicit solver replays keep exercising the solver even
+                # without synthetic pointer input. Production always writes 0.
+                self.params[127, 1] = float(self.force_full_solver)
                 self.gpu.method(
                     self.gpu.context,
                     48,
@@ -427,6 +482,9 @@ class GeneratedCloth:
                 parts = value.split()
                 mode = parts[0]
                 source = parts[1] if mode in ("copy", "ref") else parts[0]
+                region = re.fullmatch(r"(.+)->Region\((\d+),(\d+)\)", source)
+                if region:
+                    source = region[1]
                 if source not in self.resources:
                     try:
                         self.resource(source)
@@ -436,9 +494,46 @@ class GeneratedCloth:
                         raise
                 src = self.resources[source]
                 if mode == "copy":
-                    target = self.resource(key, src.size)
-                    if target.size != src.size:
+                    size = int(region[3]) if region else src.size
+                    target = self.resource(key, size, copy_source=src)
+                    if target.size != size:
                         raise ValueError("Generated copy size mismatch: " + line)
+                    if region:
+                        offset = int(region[2])
+                        if offset + size > src.size:
+                            raise ValueError(
+                                "Generated region outside native capacity: " + line
+                            )
+                        if self.legacy_region_copy and (offset or size != src.size):
+                            raise ValueError(
+                                "Loaded legacy backend issues CopyResource for Region views: "
+                                + line
+                            )
+                        box = (ct.c_uint * 6)(offset, 0, 0, offset + size, 1, 1)
+                        self.gpu.method(
+                            self.gpu.context,
+                            46,
+                            [
+                                ct.c_void_p,
+                                ct.c_uint,
+                                ct.c_uint,
+                                ct.c_uint,
+                                ct.c_uint,
+                                ct.c_void_p,
+                                ct.c_uint,
+                                ct.c_void_p,
+                            ],
+                            target.pointer,
+                            0,
+                            0,
+                            0,
+                            0,
+                            src.pointer,
+                            0,
+                            ct.byref(box),
+                            result=None,
+                        )
+                        continue
                     self.gpu.method(
                         self.gpu.context,
                         47,
@@ -493,24 +588,46 @@ class GeneratedCloth:
             section = next(
                 section for section, _, i, _, _ in meta["skin_writes"] if i == slot
             )
-            names = tuple(
-                prefix + f"{name}_s{slot} = " for name in ("SkinSource", "SkinPalette")
-            ) + (self.prefix + self.comp["comp_name"] + f"_ready_s{slot} = ",)
-            self.sections[command] = [
-                line
-                for line in self.sections[section]
-                if line.strip().startswith(names)
-            ][:3]
+            lines = self.sections[section]
+            at = next(
+                i
+                for i, line in enumerate(lines)
+                if line.strip().startswith(prefix + f"SkinSource_s{slot} = ")
+            )
+            first = max(i for i in range(at) if "SSMT CLOTH DRAW BEGIN" in lines[i])
+            last = next(
+                i for i in range(at, len(lines)) if "SSMT CLOTH DRAW END" in lines[i]
+            )
+            self.sections[command] = lines[first + 1 : last]
             self.resources["so0"] = self.resources[
                 f'{meta["native_family"]}_G{meta["group"]}_s{slot}'
             ]
+            self.resources["cs-u0"] = self.resources["so0"]
             self.execute(command.strip("[]"))
         del self.sections[command]
 
-    def frame(self, cursor=600, held=False, hit_row=None, slot=1):
-        self.variables["time"] += 1 / 60
+    def frame(
+        self,
+        cursor=600,
+        held=False,
+        hit_row=None,
+        slot=1,
+        zone=0,
+        cursor_x=None,
+        camera_basis=None,
+        advance_time=True,
+    ):
+        # Deferred command-list execution or another diagnostic dispatch can
+        # reset context bindings. Each replay frame owns its INI view.
+        self.gpu.bind(120, self.ini_view)
+        if advance_time:
+            self.variables["time"] += 1 / 60
+        if self.force_full_solver:
+            self.variables[f"$ssmtcloth_{self.ns}_{self.comp['comp_name']}_solve_until"] = self.variables["time"] + 1
         self.variables["$cursorY"] = cursor
         self.variables["$isMouseButtonDown"] = int(held)
+        if cursor_x is not None:
+            self.variables["$cursorX"] = cursor_x
         self.variables["$zz_ms_occ_" + str(self.comp["cloth"]["occ"])] = slot
         meta = self.comp["cloth"]
         self.resources["vb0"] = self.resources[
@@ -527,6 +644,18 @@ class GeneratedCloth:
             data = np.zeros((value.size // 16, 4), np.float32)
             data[0, 0] = 0
             data[3] = [hit_row, hit_row, hit_row, 0]
+            data[7, 3] = zone
+            if camera_basis is not None:
+                basis = np.asarray(camera_basis, np.float32)
+                if basis.shape == (2, 4):
+                    data[8:10] = basis
+                elif basis.shape == (2, 3):
+                    data[8:10, :3] = basis
+                    data[8, 3] = data[9, 3] = 1
+                else:
+                    raise ValueError(
+                        "camera_basis must contain two float3 or float4 rows"
+                    )
             self.gpu.method(
                 self.gpu.context,
                 48,

@@ -1,0 +1,181 @@
+"""Audit exported INI/resources without Blender; optionally compile active cloth CS.
+
+    python tools/check_drag_cloth_export.py MOD --compile --report audit.json
+
+This checks the generated package contract. It does not certify collision-free
+geometry or replace an in-game test or a replay of the generated command lists.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def audit(root, *, compile_shaders=False):
+    root = Path(root).resolve()
+    if not root.is_dir():
+        raise ValueError(f"Mod directory does not exist: {root}")
+    sections, commands, shaders = {}, [], set()
+    inis = [p for p in root.rglob("*.ini") if "Backups" not in p.relative_to(root).parts]
+    if not inis:
+        raise ValueError("No exported INI found")
+    files = 0
+    for ini in sorted(inis):
+        current = None
+        for raw in ini.read_text("utf-8-sig").splitlines():
+            line = raw.strip()
+            if line.startswith(";"):
+                continue
+            if re.fullmatch(r"\[.+\]", line):
+                current = line[1:-1]
+                if current in sections:
+                    raise ValueError(f"Duplicate INI section: {current}")
+                sections[current] = {}
+                continue
+            if current is None or "=" not in line:
+                continue
+            key, value = (v.strip() for v in line.split("=", 1))
+            sections[current][key.lower()] = value
+            commands.append(line)
+            if key.lower() not in ("filename", "cs") or value.lower() == "null":
+                continue
+            path = Path(value.strip('"'))
+            path = path if path.is_absolute() else ini.parent / path
+            path = path.resolve()
+            if not path.is_file():
+                raise ValueError(f"Missing {key} file: {path}")
+            files += 1
+            if key.lower() == "cs" and "drag_cloth" in path.parts:
+                shaders.add(path)
+
+    assets = 0
+    for manifest in (root / "res/drag_cloth").glob("*/manifest.json"):
+        data = json.loads(manifest.read_text("utf8"))
+        for name, wanted in data["files"].items():
+            path = (manifest.parent / name).resolve()
+            if not path.is_relative_to(manifest.parent.resolve()):
+                raise ValueError(f"Manifest path escapes its directory: {name}")
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != wanted:
+                raise ValueError(f"Manifest hash mismatch: {path}")
+            assets += 1
+    command_text = "\n".join(commands)
+    declared = {name.casefold() for name in sections}
+    cloth_references = set()
+    for line in commands:
+        if re.match(r"(?:filename|cs)\s*=", line, re.IGNORECASE):
+            continue
+        cloth_references.update(re.findall(r"\b(?:Resource|CommandList|CustomShader)SSMTCloth\w+", line))
+    undefined = sorted(ref for ref in cloth_references if ref.casefold() not in declared)
+    if undefined:
+        raise ValueError("Undefined cloth reference: " + ", ".join(undefined))
+
+    def require(name, **fields):
+        if name not in sections:
+            raise ValueError(f"Missing resource: {name}")
+        for field, wanted in fields.items():
+            if sections[name].get(field) != str(wanted):
+                raise ValueError(f"Resource {name}: expected {field} = {wanted}")
+        return sections[name]
+
+    garments, components, shorts = [], set(), 0
+    for name, fields in list(sections.items()):
+        match = re.fullmatch(r"(ResourceSSMTCloth_.+)_G(\d+)_Config", name)
+        if not match:
+            continue
+        component, group = match.groups()
+        prefix = f"{component}_G{group}_"
+        path = Path(fields["filename"])
+        path = path if path.is_absolute() else root / path
+        config = np.fromfile(path, "<f4").reshape(-1, 4)
+        if len(config) < 16 or not np.isfinite(config).all():
+            raise ValueError(f"Invalid garment config: {name}")
+        p, v = (int(x) for x in config[0, :2])
+        if not (0 < p <= 2450 and v >= p):
+            raise ValueError(f"Invalid proxy/display counts: {name}")
+        mix = require(prefix + "SkinMix", format="R32_FLOAT")
+        mix_path = Path(mix["filename"])
+        mix_path = mix_path if mix_path.is_absolute() else root / mix_path
+        values = np.fromfile(mix_path, "<f4")
+        if len(values) != p or not np.isfinite(values).all() or np.any((values < 0) | (values > 1)):
+            raise ValueError(f"Invalid leg mix field: {prefix}")
+        sliding = bool(config[14, 3] == 2)
+        shorts += int(sliding)
+        for slot in (1, 2):
+            for tag, count in (("FrozenMesh", p), ("FrozenDisplay", v)):
+                require(prefix + f"{tag}_s{slot}", array=count, format="R32G32B32A32_FLOAT")
+            if sliding:
+                require(prefix + f"ShortsBinding_s{slot}", array=p*17, format="R32G32B32A32_FLOAT")
+            for tag in ("Particles", "Weights"):
+                require(prefix + f"{tag}_s{slot}", array=p, stride=32, type="RWStructuredBuffer")
+        garments.append(dict(group=int(group), particles=p, vertices=v, shorts=sliding))
+        if component in components:
+            continue
+        components.add(component)
+        for slot in (1, 2):
+            output = component + f"_Output_s{slot}"
+            fields = require(output, array=v, bind_flags="unordered_access vertex_buffer", misc_flags="none")
+            stride = int(fields["stride"])
+            require(component + "_NativeInput", type="StructuredBuffer", stride=stride)
+            require(component + "_DetectInput", type="StructuredBuffer", stride=16)
+            for tag, fmt in (("Write", "R32_FLOAT"), ("SeedWrite", "R32_UINT")):
+                alias = component + f"_{tag}_s{slot}"
+                require(alias, stride=4, format=fmt)
+                pattern = rf"(?im)^{re.escape(alias)}\s*=\s*(\w+)\s+{re.escape(output)}\s*$"
+                modes = re.findall(pattern, command_text)
+                assignments = re.findall(rf"(?im)^{re.escape(alias)}\s*=\s*(\w+)\b", command_text)
+                if not modes or any(mode.lower() != "ref" for mode in assignments):
+                    raise ValueError(f"Output alias must reference the draw buffer: {alias}")
+    if garments and not assets:
+        raise ValueError("Cloth resources have no ownership manifest")
+    compiled = 0
+    if compile_shaders:
+        if sys.platform != "win32":
+            raise ValueError("D3D11 shader compilation requires Windows")
+        from tools.check_drag_cloth import GPU
+
+        gpu = GPU()
+        try:
+            for path in sorted(shaders):
+                gpu.shader(path)
+                compiled += 1
+        finally:
+            gpu.release()
+    return dict(
+        passed=True, ini_files=len(inis), referenced_files=files,
+        owned_assets=assets, components=len(components), garments=garments,
+        cloth_references=len(cloth_references),
+        shorts=shorts, active_cloth_shaders=len(shaders), compiled_shaders=compiled,
+        geometry_certified=False,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mod", type=Path)
+    parser.add_argument("--compile", action="store_true", dest="compile_shaders")
+    parser.add_argument("--report", type=Path)
+    args = parser.parse_args()
+    try:
+        result = audit(args.mod, compile_shaders=args.compile_shaders)
+    except (ValueError, OSError, KeyError, RuntimeError) as error:
+        result = dict(passed=False, error=str(error))
+    text = json.dumps(result, ensure_ascii=False, indent=2)
+    if args.report:
+        args.report.write_text(text + "\n", "utf8")
+    print(text)
+    return 0 if result["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

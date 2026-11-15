@@ -1,4 +1,5 @@
 #include "common.hlsli"
+Buffer<float4> FrameState : register(t77);
 RWBuffer<uint> Contacts : register(u0);
 uint Region(uint3 ids)
 {
@@ -15,11 +16,14 @@ bool SegmentHit(float3 p,float3 end,float3 a,float3 b,float3 c)
 [numthreads(128,1,1)]void main(uint3 id:SV_DispatchThreadID)
 {
     uint i=id.x,count;BodyOrder.GetDimensions(count);if(i>=count)return;
+    if(FrameState[9].y<.5 && IniParams[127].y<.5)return;
+    if(FrameState[ClothSleepRow()].x>.5)return;
+    if((ManualSurface() && Config[12].w<.5) || GarmentAmount(FrameState[0].xy)<1e-5){Contacts[i]=0;return;}
     uint3 ids=uint3(BodyVertices[i*3],BodyVertices[i*3+1],BodyVertices[i*3+2]);uint region=Region(ids);
     if(region==0){Contacts[i]=0;return;}
     if(!Exterior(i)){Contacts[i]=1;return;}
     float3 p[3];p[0]=Source[ids.x].position;p[1]=Source[ids.y].position;p[2]=Source[ids.z].position;
-    float gap=Config[2].z*2;float3 lo=min(p[0],min(p[1],p[2]))-gap,hi=max(p[0],max(p[1],p[2]))+gap;bool hit=false;
+    float gap=ClothGap()*FrameState[8].z*2;float3 lo=min(p[0],min(p[1],p[2]))-gap,hi=max(p[0],max(p[1],p[2]))+gap;bool hit=false;
     uint node=1,leaves=(uint)IniParams[115].y;
     [loop]while(node>0 && !hit)
     {

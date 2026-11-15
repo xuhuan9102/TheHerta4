@@ -341,6 +341,26 @@ class SSMT_DragZoneSettings(bpy.types.PropertyGroup):
         ),
         default=False,
     )
+    cloth_direction: bpy.props.EnumProperty(
+        name="穿脱方向",
+        description="按衣物轴设置开口移动方向。向上穿脱需要独立下开口；向下也兼容原来的闭合脚部丝袜",
+        items=[
+            ('AUTO', "默认穿脱", "沿用旧版上沿向下穿脱；双端模式中按抓取位置选择开口"),
+            ('NEGATIVE', "向下（沿衣物轴负向）", "控制上开口向下收拢，反向拖动可展开"),
+            ('POSITIVE', "向上（沿衣物轴正向）", "控制下开口向上收拢，反向拖动可展开"),
+        ],
+        default='AUTO',
+    )
+    cloth_path_start: bpy.props.PointerProperty(
+        name="穿脱箭头起点", type=bpy.types.Object,
+        description="衣物开口的起始位置；与端点一起明确指定穿脱方向和最大行程，优先于自动方向",
+        poll=lambda self, obj: obj.type == 'EMPTY',
+    )
+    cloth_path_end: bpy.props.PointerProperty(
+        name="穿脱箭头端点", type=bpy.types.Object,
+        description="开口最多移动到此处；在视口移动端点即可调整方向与行程",
+        poll=lambda self, obj: obj.type == 'EMPTY',
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +801,98 @@ class SSMT_OT_DragZoneColliderRemove(bpy.types.Operator):
 # 主节点
 # ---------------------------------------------------------------------------
 
+class SSMT_OT_DragClothPath(bpy.types.Operator):
+    bl_idname = "ssmt.drag_cloth_path"
+    bl_label = "穿脱行程箭头"
+    bl_description = "创建或选中穿脱起点/端点；移动端点决定拉动方向与最大距离"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    empty_name: bpy.props.StringProperty()
+    action: bpy.props.EnumProperty(items=[('CREATE', '创建', ''), ('START', '起点', ''), ('END', '端点', '')])
+
+    def execute(self, context):
+        from .drag_cloth_path import suggest_path
+
+        zone = bpy.data.objects.get(self.empty_name)
+        if zone is None:
+            self.report({'ERROR'}, "拖拽区域不存在")
+            return {'CANCELLED'}
+        settings = zone.ssmt_drag_zone
+        start, end = settings.cloth_path_start, settings.cloth_path_end
+        if self.action == 'CREATE' and start is None and end is None:
+            points, faces, bodies = [], [], []
+            depsgraph = context.evaluated_depsgraph_get()
+            try:
+                for refs, is_body in ((settings.include_objects, False), (settings.collider_objects, True)):
+                    for ref in refs:
+                        obj = ref.object
+                        if obj is None or obj.type != 'MESH':
+                            continue
+                        evaluated = obj.evaluated_get(depsgraph)
+                        mesh = evaluated.to_mesh()
+                        try:
+                            mesh.calc_loop_triangles()
+                            world = np.asarray(evaluated.matrix_world, float)
+                            p = np.array([(*v.co, 1) for v in mesh.vertices]) @ world.T
+                            if is_body:
+                                bodies.append(p[:, :3])
+                            else:
+                                offset = sum(len(item) for item in points)
+                                points.append(p[:, :3])
+                                faces.append(np.array([tuple(t.vertices) for t in mesh.loop_triangles], int) + offset)
+                        finally:
+                            evaluated.to_mesh_clear()
+                if not points:
+                    raise ValueError("请先在区域包含物体中选择衣物")
+                p = np.concatenate(points)
+                _, first, inverse = np.unique(np.rint(p / 1e-6).astype(np.int64), axis=0, return_index=True, return_inverse=True)
+                f = inverse[np.concatenate(faces)]
+                path = suggest_path(p[first], f, np.asarray(zone.matrix_world, float)[:3, 3],
+                                    settings.cloth_direction, np.concatenate(bodies) if bodies else None)
+            except (ValueError, IndexError) as exc:
+                self.report({'ERROR'}, str(exc))
+                return {'CANCELLED'}
+            collection = bpy.data.collections.get("SSMT_穿脱行程")
+            if collection is None:
+                collection = bpy.data.collections.new("SSMT_穿脱行程")
+                context.scene.collection.children.link(collection)
+            start = bpy.data.objects.new(zone.name + "_穿脱起点", None)
+            end = bpy.data.objects.new(zone.name + "_穿脱端点", None)
+            for obj, point in ((start, path[0]), (end, path[1])):
+                collection.objects.link(obj)
+                obj.location = point
+                obj.show_in_front = True
+                obj.show_name = True
+                obj.hide_render = True
+                obj.lock_scale = (True, True, True)
+                obj.lock_rotation = (True, True, True)
+            start.empty_display_type = 'SINGLE_ARROW'
+            end.empty_display_type = 'SPHERE'
+            end.empty_display_size = max(float(np.linalg.norm(path[1]-path[0])) * .04, .008)
+            constraint = start.constraints.new('DAMPED_TRACK')
+            constraint.target = end
+            constraint.track_axis = 'TRACK_Z'
+            driver = start.driver_add('empty_display_size').driver
+            variable = driver.variables.new()
+            variable.name = 'travel'
+            variable.type = 'LOC_DIFF'
+            variable.targets[0].id = start
+            variable.targets[1].id = end
+            driver.expression = 'travel'
+            settings.cloth_path_start, settings.cloth_path_end = start, end
+        target = start if self.action == 'START' else end
+        if target is None:
+            self.report({'ERROR'}, "箭头缺少起点或端点，请补齐对象引用")
+            return {'CANCELLED'}
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        target.hide_set(False)
+        target.select_set(True)
+        context.view_layer.objects.active = target
+        self.report({'INFO'}, "按 G 移动端点调整行程；起点放在衣物开口，端点为停止位置")
+        return {'FINISHED'}
+
+
 class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     bl_idname = 'SSMTNode_PostProcess_DragInteraction'
     bl_label = '拖拽交互'
@@ -1019,11 +1131,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     cloth_runtime_enabled: bpy.props.BoolProperty(name="运行时默认开启", default=False)
     cloth_toggle_key: bpy.props.StringProperty(name="穿脱切换键", default="ctrl alt U")
     cloth_reset_key: bpy.props.StringProperty(name="穿脱复位键", default="ctrl alt VK_BACK")
-    cloth_collection: bpy.props.PointerProperty(name="穿脱衣物集合（可选）", type=bpy.types.Collection,
-        description="留空沿用区域包含物体；指定后只把此集合内的网格生成穿脱，其他区域仍可普通拖拽")
-    cloth_collider_collection: bpy.props.PointerProperty(name="身体碰撞集合（可选）", type=bpy.types.Collection,
-        description="留空沿用区域碰撞体；独立于普通碰撞开关，用于衣物表面滑移")
     cloth_drag_sensitivity: bpy.props.FloatProperty(name="穿脱灵敏度", default=2.0, min=.1, max=5.0)
+    cloth_surface_gap_mm: bpy.props.FloatProperty(name="贴合间隙（毫米）", description="活动衣片与身体表面的间隙，1毫米对应当前导出模型的0.001单位", default=1.0, min=0, max=30, soft_max=10, precision=2)
+    cloth_sleep_enabled: bpy.props.BoolProperty(name="拖动时稳定检测", description="影响拖动求解中的稳定检测；停住或松手后始终冻结形状，仅保留骨骼随动", default=True)
+    cloth_adaptive_quality: bpy.props.BoolProperty(name="动态计算精度", description="仅在有效拖动时按移动距离分配子步与材料迭代，碰撞或拉伸未通过时追加修正；停住后不再校准", default=True)
+    cloth_self_collision: bpy.props.BoolProperty(name="衣物自碰撞", description="生成粒子自分离约束；关闭后允许衣物褶皱相互重叠，仍保留与所选身体分区的碰撞", default=False)
     cloth_stretch_compliance: bpy.props.FloatProperty(name="拉伸柔度（越小越硬）", default=.00003, min=.000001, max=.01, precision=6)
     cloth_bend_compliance: bpy.props.FloatProperty(name="弯曲柔度（越小越硬）", default=.0008, min=.000001, max=.1, precision=6)
     cloth_velocity_retention: bpy.props.FloatProperty(name="速度保留率（越小阻尼越强）", default=.85, min=0, max=.999)
@@ -1031,7 +1143,14 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     cloth_fold_height: bpy.props.FloatProperty(name="褶皱高度", default=.012, min=0, max=.025)
     cloth_fold_spacing: bpy.props.FloatProperty(name="褶皱间距", default=.075, min=.04, max=.2)
     cloth_gather_strength: bpy.props.FloatProperty(name="有序收拢强度", default=.8, min=0, max=1)
-    cloth_min_height_ratio: bpy.props.FloatProperty(name="最低袜口高度比例", default=.22, min=.1, max=.9)
+    cloth_min_height_ratio: bpy.props.FloatProperty(
+        name="单端最低袜口高度", default=.22, min=.1, max=.9,
+        description="默认单端穿脱的最低高度；双端模式使用双端最小保留长度",
+    )
+    cloth_min_span_ratio: bpy.props.FloatProperty(
+        name="双端最小保留长度", default=.05, min=.01, max=.5,
+        description="两个开口收拢后保留的材料长度比例。到达此长度后，继续拖动会带着另一端一起移动",
+    )
     cloth_proxy_budget: bpy.props.IntProperty(name="物理代理点预算", default=2450, min=64, max=2450,
         description="超出预算时自动简化物理代理，渲染网格保留原顶点")
     cloth_up_axis: bpy.props.EnumProperty(name="衣物向上轴", default='AUTO',
@@ -1213,14 +1332,12 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         if self._cloth_enabled() and cloth_supported:
             cloth_box = feature_box.box()
             cloth_box.label(text="实时贴身穿脱（ZZMI 合并骨架）", icon='MOD_CLOTH')
-            cloth_box.prop(self, "cloth_collection")
-            cloth_box.prop(self, "cloth_collider_collection")
-            cloth_box.label(text="集合留空时，区域包含物体=衣物，碰撞体=身体", icon='INFO')
-            cloth_box.label(text="连通衣物同步，分开的袜子独立；脚部固定", icon='INFO')
-            for prop in ('cloth_runtime_enabled','cloth_toggle_key','cloth_reset_key','cloth_drag_sensitivity',
+            cloth_box.label(text="各区域：包含物体=衣物，碰撞体=身体", icon='INFO')
+            cloth_box.label(text="区域独立；连通衣物同步，分开的袜子独立", icon='INFO')
+            for prop in ('cloth_runtime_enabled','cloth_toggle_key','cloth_reset_key','cloth_drag_sensitivity','cloth_surface_gap_mm','cloth_sleep_enabled','cloth_adaptive_quality','cloth_self_collision',
                          'cloth_fold_height','cloth_fold_spacing','cloth_gather_strength','cloth_stretch_compliance',
                          'cloth_bend_compliance','cloth_velocity_retention','cloth_bend_min_ratio',
-                         'cloth_min_height_ratio','cloth_proxy_budget','cloth_up_axis'):
+                         'cloth_min_height_ratio','cloth_min_span_ratio','cloth_proxy_budget','cloth_up_axis'):
                 cloth_box.prop(self, prop)
 
         # ---- 形态键驱动输出（开关已并入上方「功能开关·启用形态键联动」，此 box 仅余输出配置）----
@@ -1324,9 +1441,24 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 sub.prop(obj.ssmt_drag_zone, "damping")
                 sub.prop(obj.ssmt_drag_zone, "grabbable")
                 sub.prop(obj.ssmt_drag_zone, "drag_along_normal")
+                if self._cloth_enabled():
+                    path_box = sub.box()
+                    path_box.label(text="穿脱行程：起点 → 停止位置", icon='EMPTY_ARROWS')
+                    path_box.prop(obj.ssmt_drag_zone, "cloth_path_start")
+                    path_box.prop(obj.ssmt_drag_zone, "cloth_path_end")
+                    path_row = path_box.row(align=True)
+                    for action, text in (('CREATE', '创建/显示箭头'), ('START', '选起点'), ('END', '选端点')):
+                        op = path_row.operator(SSMT_OT_DragClothPath.bl_idname, text=text)
+                        op.empty_name, op.action = obj.name, action
+                    start, end = obj.ssmt_drag_zone.cloth_path_start, obj.ssmt_drag_zone.cloth_path_end
+                    if start is not None and end is not None:
+                        length = (end.matrix_world.translation - start.matrix_world.translation).length
+                        path_box.label(text=f"最大行程 {length:.4f}；按 G 移动起点/端点", icon='INFO')
+                    else:
+                        path_box.prop(obj.ssmt_drag_zone, "cloth_direction")
                 # 包含物体列表（留空 = 全部物体）
                 inc_box = sub.box()
-                inc_box.label(text="包含物体（留空=全部）", icon='OBJECT_DATA')
+                inc_box.label(text="包含物体（穿脱衣物须指定）" if self._cloth_enabled() else "包含物体（留空=全部）", icon='OBJECT_DATA')
                 inc_row = inc_box.row(align=True)
                 add_inc = inc_row.operator(SSMT_OT_DragZoneIncludeAdd.bl_idname, text="添加选中物体", icon='ADD')
                 add_inc.empty_name = obj.name
@@ -4476,15 +4608,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             if included and colliders:
                 cloth.update(_blender_object_key(name) for name in included)
                 body.update(_blender_object_key(name) for name in colliders)
-        for attr, result in (('cloth_collection', cloth), ('cloth_collider_collection', body)):
-            collection = getattr(self, attr, None)
-            if collection is not None:
-                result.clear()
-                for obj in getattr(collection, 'all_objects', ()):
-                    if getattr(obj, 'type', None) == 'MESH':
-                        result.add(_blender_object_key(obj.name))
         if required and (not cloth or not body):
-            raise ValueError("上下拖拽：请明确选择衣物和身体碰撞体（可用专用集合，或区域的包含物体/碰撞体列表）")
+            raise ValueError("上下拖拽：请在区域的包含物体中选择衣物，在碰撞体列表中选择身体")
         return cloth, body
 
     def _collect_click_export_drivers(self):
@@ -7954,6 +8079,7 @@ classes = (
     SSMT_OT_DragZoneIncludeRemove,
     SSMT_OT_DragZoneColliderAdd,
     SSMT_OT_DragZoneColliderRemove,
+    SSMT_OT_DragClothPath,
     SSMTNode_PostProcess_DragInteraction,
 )
 
