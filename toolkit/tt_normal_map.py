@@ -532,14 +532,17 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
         output_dir = Path(bpy.path.abspath(props.output_dir))
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        selected_objects = [obj for obj in context.selected_objects if obj.type == "MESH"]
-        if not selected_objects:
-            self.report({"ERROR"}, "请选择至少一个网格物体")
-            return {"CANCELLED"}
-
         active_rules = [rule for rule in props.composite_rules if rule.enabled]
         if not active_rules:
             self.report({"ERROR"}, "请至少添加一条启用的合成规则")
+            return {"CANCELLED"}
+
+        selected_objects = [obj for obj in context.selected_objects if obj.type == "MESH"]
+        solid_rules = [rule for rule in active_rules if self._is_solid_color_rule(rule)]
+        composite_rules = [rule for rule in active_rules if not self._is_solid_color_rule(rule)]
+
+        if not selected_objects and not solid_rules:
+            self.report({"ERROR"}, "请选择至少一个网格物体")
             return {"CANCELLED"}
 
         processor = ChannelProcessor()
@@ -562,28 +565,55 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
             if obj not in material_map[material]:
                 material_map[material].append(obj)
 
-        if not material_map:
+        if composite_rules and selected_objects and not material_map:
             self.report({"ERROR"}, "选中物体上没有找到有效材质")
             return {"CANCELLED"}
 
-        for material, objects in material_map.items():
-            base_texture = self._find_base_color_texture(material)
-            base_pixels = None
-            width = 0
-            height = 0
-            if base_texture:
-                base_pixels, width, height = processor.load_image_pixels(base_texture)
-
-            if base_pixels is None:
-                # 纯色规则不依赖基础颜色贴图：材质没有任何图像节点也照样出图。
-                # 非纯色规则没有输入源，会在规则循环里按既有的「missing input source」分支跳过。
-                skipped_materials.append(
-                    f"{material.name}: no base color texture"
-                    if not base_texture
-                    else f"{material.name}: failed to read pixels from {base_texture.name}"
-                )
-                if not any(self._is_solid_color_rule(rule) for rule in active_rules):
+        # 纯色规则先出图：一次执行每档只出一张，与选中几个物体、几个材质无关
+        solid_outputs = []
+        for rule in solid_rules:
+            try:
+                result_path, hex_code = self._apply_solid_color_rule(rule=rule, output_dir=output_dir)
+                if not result_path:
                     continue
+                solid_outputs.append((rule, result_path, hex_code))
+                processed_count += 1
+            except Exception as exc:
+                failed_rules.append(f"{rule.rule_name}: {exc}")
+                print(f"[TT Channel Composite] Failed: {rule.rule_name}: {exc}")
+                traceback.print_exc()
+
+        # 所有选中物体共用同一个材质、同一张图 datablock
+        if props.normal_map_create_materials and selected_objects:
+            for rule, result_path, hex_code in solid_outputs:
+                try:
+                    shared_material, created_new = self._create_composite_material(
+                        f"{rule.output_name_prefix}{hex_code}", result_path)
+                    if created_new:
+                        created_materials_count += 1
+                    for obj in selected_objects:
+                        if any(
+                            slot.material and slot.material.name == shared_material.name
+                            for slot in obj.material_slots
+                        ):
+                            continue
+                        obj.data.materials.append(shared_material)
+                except Exception as exc:
+                    failed_rules.append(f"{rule.rule_name}: {exc}")
+                    print(f"[TT Channel Composite] Failed: {rule.rule_name}: {exc}")
+                    traceback.print_exc()
+
+        # 没有非纯色规则时不进材质循环：纯色档与材质无关，也不该打出误导性的 skip 日志
+        for material, objects in (material_map.items() if composite_rules else ()):
+            base_texture = self._find_base_color_texture(material)
+            if not base_texture:
+                skipped_materials.append(f"{material.name}: no base color texture")
+                continue
+
+            base_pixels, width, height = processor.load_image_pixels(base_texture)
+            if base_pixels is None:
+                skipped_materials.append(f"{material.name}: failed to read pixels from {base_texture.name}")
+                continue
 
             outputs_by_rule = {}
             last_pixels = base_pixels
@@ -591,52 +621,40 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
             last_height = height
             generated_paths = []
 
-            for rule in active_rules:
+            for rule in composite_rules:
                 try:
-                    is_solid_rule = self._is_solid_color_rule(rule)
-                    if is_solid_rule:
-                        result_path, result_pixels, result_width, result_height = self._apply_solid_color_rule(
-                            rule=rule,
-                            material=material,
-                            output_dir=output_dir,
-                        )
-                    else:
-                        input_pixels = self._resolve_rule_input_pixels(
-                            rule=rule,
-                            outputs_by_rule=outputs_by_rule,
-                            base_pixels=base_pixels,
-                            width=width,
-                            height=height,
-                            fallback_pixels=last_pixels,
-                            fallback_width=last_width,
-                            fallback_height=last_height,
-                        )
-                        if input_pixels is None:
-                            skipped_materials.append(f"{material.name}/{rule.rule_name}: missing input source")
-                            continue
+                    input_pixels = self._resolve_rule_input_pixels(
+                        rule=rule,
+                        outputs_by_rule=outputs_by_rule,
+                        base_pixels=base_pixels,
+                        width=width,
+                        height=height,
+                        fallback_pixels=last_pixels,
+                        fallback_width=last_width,
+                        fallback_height=last_height,
+                    )
+                    if input_pixels is None:
+                        skipped_materials.append(f"{material.name}/{rule.rule_name}: missing input source")
+                        continue
 
-                        input_pixels, input_width, input_height = input_pixels
-                        result_path, result_pixels = self._apply_composite_rule(
-                            rule=rule,
-                            material=material,
-                            base_pixels=input_pixels,
-                            width=input_width,
-                            height=input_height,
-                            processor=processor,
-                            output_dir=output_dir,
-                        )
-                        result_width, result_height = input_width, input_height
+                    input_pixels, input_width, input_height = input_pixels
+                    result_path, result_pixels = self._apply_composite_rule(
+                        rule=rule,
+                        material=material,
+                        base_pixels=input_pixels,
+                        width=input_width,
+                        height=input_height,
+                        processor=processor,
+                        output_dir=output_dir,
+                    )
                     if not result_path:
                         continue
 
-                    if not is_solid_rule:
-                        outputs_by_rule[rule.rule_name] = (result_pixels, result_width, result_height)
-                        last_pixels = result_pixels
-                        last_width = result_width
-                        last_height = result_height
-                        generated_paths.append(Path(result_path))
-                    # 纯色图是最终产物：不进 outputs_by_rule（256×256 与其他贴图尺寸不同，
-                    # 不能给 NAMED_OUTPUT 当上游），也不进 generated_paths（那份列表只用于清理中间文件）。
+                    outputs_by_rule[rule.rule_name] = (result_pixels, input_width, input_height)
+                    last_pixels = result_pixels
+                    last_width = input_width
+                    last_height = input_height
+                    generated_paths.append(Path(result_path))
                     processed_count += 1
 
                     if props.normal_map_create_materials:
@@ -784,21 +802,20 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
             for ch in getattr(rule, "output_channels", [])
         )
 
-    def _apply_solid_color_rule(self, rule, material, output_dir):
-        """纯色规则：不分通道，整张 256×256 贴图由 rule.solid_color 填充，手写 PNG 绕开色彩管理"""
+    def _apply_solid_color_rule(self, rule, output_dir):
+        """纯色规则：一次执行只出一张 256×256 图，文件名用最终写进 PNG 的 sRGB 十六进制
+
+        与选中物体、材质都无关；同色重跑同名同内容（每次都照写，mtime 会变），换色出新文件、旧图保留。
+        返回 (路径, 六位大写 hex)。
+        """
         color = tuple(float(c) for c in getattr(rule, "solid_color", (1.0, 1.0, 1.0, 1.0)))
+        rgba_bytes = solid_color_to_rgba_bytes(color)
+        hex_code = "".join(f"{value:02X}" for value in rgba_bytes[:3])
         size = SOLID_COLOR_TEXTURE_SIZE
 
-        safe_mat_name = "".join(c for c in material.name if c.isalnum() or c in ("-", "_", ".")).rstrip()
-        output_name = f"{rule.output_name_prefix}{safe_mat_name}"
-        output_path = output_dir / f"{output_name}.png"
-
-        png_bytes = encode_rgba_png(solid_color_to_rgba_bytes(color), size, size)
-        output_path.write_bytes(png_bytes)
-
-        output = np.empty((size, size, 4), dtype=np.float32)
-        output[:, :, :] = np.array(color, dtype=np.float32)
-        return str(output_path), output, size, size
+        output_path = output_dir / f"{rule.output_name_prefix}{hex_code}.png"
+        output_path.write_bytes(encode_rgba_png(rgba_bytes, size, size))
+        return str(output_path), hex_code
 
     def _apply_composite_rule(self, rule, material, base_pixels, width, height, processor, output_dir):
         output = self._compose_rule_pixels(rule, base_pixels, width, height, processor)

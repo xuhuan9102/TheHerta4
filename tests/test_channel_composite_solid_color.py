@@ -1,17 +1,24 @@
 """通道合成器纯色档（光照贴图 / 材质贴图）测试
 
-覆盖：预设、来源枚举、纯色属性、256×256 写盘字节、无基础贴图材质照样出图、
-面板在纯色规则下不绘制任何通道行。
+语义（2026-11-16 改版）：纯色规则一次执行只出一张图，按颜色命名、与选中物体/材质无关，
+所有物体共用同一个材质与同一张图 datablock。
+
+覆盖：预设、来源枚举、纯色属性、256×256 写盘字节（两次颜色）、多物体只出两张、
+同色幂等（sha 不变/mtime 变）、换色保留旧图、0 物体、共享材质、非纯色命名不变、
+面板纯色规则不画通道行。
 """
 
+import hashlib
 import importlib.util
 import struct
 import sys
 import tempfile
+import time
 import types
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -84,7 +91,7 @@ def _hex_to_linear_rgba(red, green, blue, alpha=255):
 
 
 def _decode_rgba_png(path):
-    """独立解码 8-bit RGBA PNG：返回 (width, height, rows)，rows 为每行原始字节"""
+    """独立解码 8-bit RGBA PNG：返回 (width, height, bit_depth, color_type, rows)"""
     data = Path(path).read_bytes()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise AssertionError("不是 PNG 文件")
@@ -115,6 +122,95 @@ def _decode_rgba_png(path):
         rows.append(raw[offset + 1:offset + 1 + stride])
         offset += 1 + stride
     return width, height, bit_depth, color_type, rows
+
+
+def _five_points(path, expected):
+    width, height, bit_depth, color_type, rows = _decode_rgba_png(path)
+    assert (width, height) == (256, 256), (width, height)
+    assert (bit_depth, color_type) == (8, 6), (bit_depth, color_type)
+    last = height - 1
+    for x, y in ((0, 0), (0, last), (last, 0), (last, last), (last // 2, last // 2)):
+        offset = x * 4
+        assert tuple(rows[y][offset:offset + 4]) == expected, (x, y, rows[y][offset:offset + 4])
+    return True
+
+
+class _Material:
+    def __init__(self, name):
+        self.name = name
+        self.use_nodes = False
+
+
+class _MaterialList(list):
+    """模拟 obj.data.materials：append 后物体的 material_slots 也看得到"""
+
+    def __init__(self, owner, materials):
+        super().__init__(materials)
+        self._owner = owner
+
+    def append(self, material):
+        super().append(material)
+        self._owner.material_slots.append(types.SimpleNamespace(material=material))
+
+
+class _FakeObject:
+    def __init__(self, name, materials=()):
+        self.type = "MESH"
+        self.name = name
+        self.material_slots = [types.SimpleNamespace(material=material) for material in materials]
+        self.data = types.SimpleNamespace(materials=_MaterialList(self, materials))
+
+
+def _solid_rule(prefix="LightMap_", color=(1.0, 1.0, 1.0, 1.0), name="SolidRule"):
+    return types.SimpleNamespace(
+        rule_name=name,
+        input_source_mode="BASE_COLOR",
+        input_rule_name="",
+        output_name_prefix=prefix,
+        output_channels=[
+            types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
+            types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
+            types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
+            types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
+        ],
+        solid_color=color,
+        enabled=True,
+    )
+
+
+def _constant_rule(name="ConstantRule", prefix="Constant_", input_mode="BASE_COLOR", input_rule_name=""):
+    return types.SimpleNamespace(
+        rule_name=name,
+        input_source_mode=input_mode,
+        input_rule_name=input_rule_name,
+        output_name_prefix=prefix,
+        output_channels=[
+            types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.1),
+            types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.2),
+            types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.3),
+            types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=1.0),
+        ],
+        enabled=True,
+    )
+
+
+def _run(operator, rules, objects, output_dir, create_materials=False):
+    reports = []
+    operator.report = lambda level, message: reports.append((set(level), message))
+    props = types.SimpleNamespace(
+        output_dir=str(output_dir),
+        composite_rules=list(rules),
+        normal_map_create_materials=create_materials,
+    )
+    context = types.SimpleNamespace(
+        selected_objects=list(objects),
+        scene=types.SimpleNamespace(texture_tools_props=props),
+    )
+    return operator.execute(context), reports
+
+
+def _sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class SolidColorPresetTests(unittest.TestCase):
@@ -172,194 +268,255 @@ class SolidColorPresetTests(unittest.TestCase):
         self.assertEqual(definition["default"], (1.0, 1.0, 1.0, 1.0))
 
 
-class SolidColorComposeTests(unittest.TestCase):
-    """执行与写盘"""
-
-    @staticmethod
-    def _solid_rule(prefix="LightMap_", color=(1.0, 1.0, 1.0, 1.0), name="SolidRule"):
-        return types.SimpleNamespace(
-            rule_name=name,
-            input_source_mode="BASE_COLOR",
-            input_rule_name="",
-            output_name_prefix=prefix,
-            output_channels=[
-                types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
-                types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
-                types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
-                types.SimpleNamespace(source_type="SOLID_COLOR", invert=False),
-            ],
-            solid_color=color,
-            enabled=True,
-        )
-
-    def test_solid_png_bytes_match_picked_hex(self):
-        """#FF8000 → PNG 五点字节 (255,128,0,255)"""
+class SolidColorNamingTests(unittest.TestCase):
+    """D2/C1/C3：单张出图、按颜色命名、字节精确"""
+    def test_solid_png_named_by_hex_and_bytes_match(self):
         operator = tt_normal_map.TT_OT_execute_channel_composite()
-        material = types.SimpleNamespace(name="Mat A")
-
         with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir)
-            path, pixels, width, height = operator._apply_solid_color_rule(
-                rule=self._solid_rule(color=_hex_to_linear_rgba(255, 128, 0)),
-                material=material,
-                output_dir=output_dir,
+            path, hex_code = operator._apply_solid_color_rule(
+                rule=_solid_rule(color=_hex_to_linear_rgba(255, 128, 0)),
+                output_dir=Path(temp_dir),
             )
-            # 命名沿用 _apply_composite_rule 的清洗规则：空格被剔除
-            self.assertEqual(Path(path).name, "LightMap_MatA.png")
-            self.assertEqual((width, height), (256, 256))
-            self.assertEqual(pixels.shape, (256, 256, 4))
-
-            file_width, file_height, bit_depth, color_type, rows = _decode_rgba_png(path)
-            self.assertEqual((file_width, file_height), (256, 256))
-            self.assertEqual(bit_depth, 8)
-            self.assertEqual(color_type, 6)
-
-            for row_index in (0, 127, 255):
-                row = rows[row_index]
-                for column_index in (0, 127, 255):
-                    offset = column_index * 4
-                    self.assertEqual(
-                        tuple(row[offset:offset + 4]),
-                        (255, 128, 0, 255),
-                        f"像素 ({row_index},{column_index}) 颜色不符",
-                    )
+            self.assertEqual(hex_code, "FF8000")
+            self.assertEqual(Path(path).name, "LightMap_FF8000.png")
+            self.assertTrue(_five_points(path, (255, 128, 0, 255)))
 
     def test_solid_png_second_color(self):
         operator = tt_normal_map.TT_OT_execute_channel_composite()
-        material = types.SimpleNamespace(name="MatC")
-
         with tempfile.TemporaryDirectory() as temp_dir:
-            path, _pixels, _width, _height = operator._apply_solid_color_rule(
-                rule=self._solid_rule(prefix="MaterialMap_", color=_hex_to_linear_rgba(51, 102, 204)),
-                material=material,
+            path, hex_code = operator._apply_solid_color_rule(
+                rule=_solid_rule(prefix="MaterialMap_", color=_hex_to_linear_rgba(51, 102, 204)),
                 output_dir=Path(temp_dir),
             )
-            _w, _h, _depth, _ctype, rows = _decode_rgba_png(path)
-            self.assertEqual(tuple(rows[0][0:4]), (51, 102, 204, 255))
+            self.assertEqual(hex_code, "3366CC")
+            self.assertEqual(Path(path).name, "MaterialMap_3366CC.png")
+            self.assertTrue(_five_points(path, (51, 102, 204, 255)))
 
-    def test_execute_outputs_solid_texture_without_any_image_node(self):
-        """材质没有任何图像节点时，纯色规则照样出图（判据④）"""
+
+class SharedSolidTextureTests(unittest.TestCase):
+    """D1/D2/D3/D4：多物体共享、幂等、换色保留、0 物体"""
+
+    def test_D1_multiple_objects_produce_only_two_files(self):
         operator = tt_normal_map.TT_OT_execute_channel_composite()
-        operator.report = lambda *_args, **_kwargs: None
+        objects = [
+            _FakeObject("ObjA", [_Material("MatA"), _Material("MatA2")]),
+            _FakeObject("ObjB", [_Material("MatB")]),
+            _FakeObject("ObjC", [_Material("MatC")]),
+        ]
+        rules = [
+            _solid_rule(color=_hex_to_linear_rgba(255, 128, 0)),
+            _solid_rule(prefix="MaterialMap_", name="材质贴图", color=_hex_to_linear_rgba(255, 128, 0)),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, _reports = _run(operator, rules, objects, temp_dir)
+            self.assertEqual(result, {"FINISHED"})
+            names = sorted(item.name for item in Path(temp_dir).glob("*.png"))
+            self.assertEqual(names, ["LightMap_FF8000.png", "MaterialMap_FF8000.png"])
+            material_names = ("MatA", "MatA2", "MatB", "MatC")
+            self.assertFalse([name for name in names if any(item in name for item in material_names)])
 
-        class _Material:
-            def __init__(self, name):
-                self.name = name
-                self.use_nodes = False
+    def test_D2_same_color_rerun_is_byte_identical_and_touches_mtime(self):
+        operator = tt_normal_map.TT_OT_execute_channel_composite()
+        objects = [_FakeObject("ObjA", [_Material("MatA")])]
+        rules = [_solid_rule(color=_hex_to_linear_rgba(255, 128, 0))]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _run(operator, rules, objects, temp_dir)
+            target = Path(temp_dir) / "LightMap_FF8000.png"
+            first_sha, first_mtime = _sha256(target), target.stat().st_mtime_ns
 
-        material = _Material("MatB")
-        obj = types.SimpleNamespace(
-            type="MESH",
-            material_slots=[types.SimpleNamespace(material=material)],
-            data=types.SimpleNamespace(materials=[]),
-        )
-        props = types.SimpleNamespace(
-            output_dir="",
-            composite_rules=[self._solid_rule(color=_hex_to_linear_rgba(255, 128, 0))],
-            normal_map_create_materials=False,
-        )
-        context = types.SimpleNamespace(
-            selected_objects=[obj],
-            scene=types.SimpleNamespace(texture_tools_props=props),
-        )
+            time.sleep(0.02)
+            _run(operator, rules, objects, temp_dir)
+            second_sha, second_mtime = _sha256(target), target.stat().st_mtime_ns
+
+            self.assertEqual(first_sha, second_sha)
+            self.assertGreater(second_mtime, first_mtime)
+            self.assertEqual(len(list(Path(temp_dir).glob("*.png"))), 1)
+
+    def test_D3_color_change_keeps_old_files(self):
+        operator = tt_normal_map.TT_OT_execute_channel_composite()
+        objects = [_FakeObject("ObjA", [_Material("MatA")])]
+        rules = [
+            _solid_rule(color=_hex_to_linear_rgba(255, 128, 0)),
+            _solid_rule(prefix="MaterialMap_", name="材质贴图", color=_hex_to_linear_rgba(255, 128, 0)),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _run(operator, rules, objects, temp_dir)
+            for rule in rules:
+                rule.solid_color = _hex_to_linear_rgba(51, 102, 204)
+            _run(operator, rules, objects, temp_dir)
+            names = sorted(item.name for item in Path(temp_dir).glob("*.png"))
+            self.assertEqual(names, [
+                "LightMap_3366CC.png",
+                "LightMap_FF8000.png",
+                "MaterialMap_3366CC.png",
+                "MaterialMap_FF8000.png",
+            ])
+            self.assertTrue(_five_points(Path(temp_dir) / "LightMap_3366CC.png", (51, 102, 204, 255)))
+            self.assertTrue(_five_points(Path(temp_dir) / "LightMap_FF8000.png", (255, 128, 0, 255)))
+
+    def test_D4_no_selected_objects_still_outputs_two_files(self):
+        operator = tt_normal_map.TT_OT_execute_channel_composite()
+        rules = [
+            _solid_rule(color=_hex_to_linear_rgba(255, 128, 0)),
+            _solid_rule(prefix="MaterialMap_", name="材质贴图", color=_hex_to_linear_rgba(255, 128, 0)),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, reports = _run(operator, rules, [], temp_dir)
+            self.assertEqual(result, {"FINISHED"})
+            self.assertEqual([entry for entry in reports if "ERROR" in entry[0]], [])
+            names = sorted(item.name for item in Path(temp_dir).glob("*.png"))
+            self.assertEqual(names, ["LightMap_FF8000.png", "MaterialMap_FF8000.png"])
+
+
+class SharedMaterialTests(unittest.TestCase):
+    """D5：一条纯色规则只建一个共享材质，append 到每个选中物体且不重复"""
+
+    def test_D5_one_shared_material_per_rule_appended_to_every_object(self):
+        operator = tt_normal_map.TT_OT_execute_channel_composite()
+        objects = [
+            _FakeObject("ObjA", [_Material("MatA")]),
+            _FakeObject("ObjB", [_Material("MatB")]),
+            _FakeObject("ObjC", [_Material("MatC")]),
+        ]
+        rules = [
+            _solid_rule(color=_hex_to_linear_rgba(255, 128, 0)),
+            _solid_rule(prefix="MaterialMap_", name="材质贴图", color=_hex_to_linear_rgba(255, 128, 0)),
+        ]
+        created = {}
+        created_seen = set()
+
+        def fake_create(self, material_name, image_path):
+            is_new = material_name not in created_seen
+            created_seen.add(material_name)
+            material = created.setdefault(material_name, types.SimpleNamespace(name=material_name))
+            return material, is_new
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            props.output_dir = temp_dir
-            self.assertEqual(operator.execute(context), {"FINISHED"})
-            files = sorted(Path(temp_dir).glob("*.png"))
-            self.assertEqual([item.name for item in files], ["LightMap_MatB.png"])
-            file_width, file_height, _depth, _ctype, rows = _decode_rgba_png(files[0])
-            self.assertEqual((file_width, file_height), (256, 256))
-            self.assertEqual(tuple(rows[0][0:4]), (255, 128, 0, 255))
+            with mock.patch.object(tt_normal_map.TT_OT_execute_channel_composite,
+                                   "_create_composite_material", new=fake_create):
+                _run(operator, rules, objects, temp_dir, create_materials=True)
+                for obj in objects:
+                    names = [slot.material.name for slot in obj.material_slots]
+                    self.assertEqual(names.count("LightMap_FF8000"), 1)
+                    self.assertEqual(names.count("MaterialMap_FF8000"), 1)
+
+                # 再跑一次：共享材质仍只有一个，不会重复 append
+                _run(operator, rules, objects, temp_dir, create_materials=True)
+                for obj in objects:
+                    names = [slot.material.name for slot in obj.material_slots]
+                    self.assertEqual(names.count("LightMap_FF8000"), 1)
+                    self.assertEqual(names.count("MaterialMap_FF8000"), 1)
+
+            self.assertEqual(sorted(created), ["LightMap_FF8000", "MaterialMap_FF8000"])
+
+
+class NonSolidRuleTests(unittest.TestCase):
+    """D6/C8：非纯色规则命名与上游语义不变"""
+
+    def test_D6_non_solid_presets_keep_material_names(self):
+        operator = tt_normal_map.TT_OT_execute_channel_composite()
+        objects = [
+            _FakeObject("ObjA", [_Material("MatA")]),
+            _FakeObject("ObjB", [_Material("MatB")]),
+        ]
+        rules = []
+        for preset in tt_normal_map.COMPOSITE_PRESETS[:4]:
+            rules.append(types.SimpleNamespace(
+                rule_name=preset["name"],
+                input_source_mode="BASE_COLOR",
+                input_rule_name="",
+                output_name_prefix=preset["prefix"],
+                output_channels=[types.SimpleNamespace(
+                    source_type=channel["source_type"],
+                    source_channel=channel.get("source_channel", "R"),
+                    constant_value=channel.get("constant_value", 1.0),
+                    invert=False,
+                ) for channel in preset["channels"]],
+                enabled=True,
+            ))
+
+        base_pixels = np.zeros((2, 2, 4), dtype=np.float32)
+        base_pixels[:, :, 3] = 1.0
+
+        def fake_apply(self, rule, material, base_pixels, width, height, processor, output_dir):
+            safe = "".join(c for c in material.name if c.isalnum() or c in ("-", "_", ".")).rstrip()
+            path = Path(output_dir) / f"{rule.output_name_prefix}{safe}.png"
+            path.write_bytes(b"stub")
+            return str(path), np.zeros((height, width, 4), dtype=np.float32)
+
+        def fake_material(self, material_name, composite_image_path):
+            return types.SimpleNamespace(name=material_name), True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(tt_normal_map.TT_OT_execute_channel_composite,
+                                   "_find_base_color_texture", return_value=object()), \
+                 mock.patch.object(tt_normal_map.ChannelProcessor, "load_image_pixels",
+                                   return_value=(base_pixels, 2, 2)), \
+                 mock.patch.object(tt_normal_map.TT_OT_execute_channel_composite,
+                                   "_apply_composite_rule", new=fake_apply), \
+                 mock.patch.object(tt_normal_map.TT_OT_execute_channel_composite,
+                                   "_create_composite_material", new=fake_material):
+                result, _reports = _run(operator, rules, objects, temp_dir, create_materials=True)
+
+            self.assertEqual(result, {"FINISHED"})
+            names = sorted(item.name for item in Path(temp_dir).glob("*.png"))
+            expected = sorted(
+                f"{preset['prefix']}{material_name}.png"
+                for preset in tt_normal_map.COMPOSITE_PRESETS[:4]
+                for material_name in ("MatA", "MatB"))
+            self.assertEqual(names, expected)
 
     def test_non_solid_rule_still_skipped_without_base_texture(self):
-        """同一份无图像材质上，非纯色规则保持原有跳过行为"""
         operator = tt_normal_map.TT_OT_execute_channel_composite()
-        operator.report = lambda *_args, **_kwargs: None
-
-        class _Material:
-            def __init__(self, name):
-                self.name = name
-                self.use_nodes = False
-
-        material = _Material("MatD")
-        obj = types.SimpleNamespace(
-            type="MESH",
-            material_slots=[types.SimpleNamespace(material=material)],
-            data=types.SimpleNamespace(materials=[]),
-        )
-        normal_rule = types.SimpleNamespace(
-            rule_name="NormalRule",
-            input_source_mode="BASE_COLOR",
-            input_rule_name="",
-            output_name_prefix="NormalMap_",
-            output_channels=[
-                types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.5),
-                types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.5),
-                types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.5),
-                types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=1.0),
-            ],
-            enabled=True,
-        )
-        props = types.SimpleNamespace(
-            output_dir="",
-            composite_rules=[normal_rule],
-            normal_map_create_materials=False,
-        )
-        context = types.SimpleNamespace(
-            selected_objects=[obj],
-            scene=types.SimpleNamespace(texture_tools_props=props),
-        )
-
+        objects = [_FakeObject("ObjD", [_Material("MatD")])]
         with tempfile.TemporaryDirectory() as temp_dir:
-            props.output_dir = temp_dir
-            self.assertEqual(operator.execute(context), {"FINISHED"})
+            result, _reports = _run(operator, [_constant_rule()], objects, temp_dir)
+            self.assertEqual(result, {"FINISHED"})
             self.assertEqual(sorted(Path(temp_dir).glob("*.png")), [])
 
-    def test_solid_rule_is_not_registered_as_upstream_output(self):
-        """纯色规则不出现在 outputs_by_rule 里，NAMED_OUTPUT 引用它必须落空"""
+    def test_no_solid_rule_and_no_objects_still_errors(self):
         operator = tt_normal_map.TT_OT_execute_channel_composite()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, reports = _run(operator, [_constant_rule()], [], temp_dir)
+            self.assertEqual(result, {"CANCELLED"})
+            self.assertIn(("ERROR", "请选择至少一个网格物体"),
+                          [(next(iter(level)), message) for level, message in reports])
+
+    def test_solid_rule_is_not_upstream_for_previous_or_named_output(self):
+        """C8：纯色图不进上游；PREVIOUS_OUTPUT 仍拿原图，NAMED_OUTPUT 引用纯色规则跳过不崩"""
+        operator = tt_normal_map.TT_OT_execute_channel_composite()
+        objects = [_FakeObject("ObjE", [_Material("MatE")])]
+        solid = _solid_rule(color=_hex_to_linear_rgba(255, 128, 0))
+        previous = _constant_rule(name="Prev", prefix="Prev_", input_mode="PREVIOUS_OUTPUT")
+        named = _constant_rule(name="Named", prefix="Named_", input_mode="NAMED_OUTPUT",
+                               input_rule_name="SolidRule")
+
+        base_pixels = np.zeros((2, 2, 4), dtype=np.float32)
+        base_pixels[:, :, 0] = 0.25
+        base_pixels[:, :, 3] = 1.0
+        recorded = []
+
+        def fake_apply(self, rule, material, base_pixels, width, height, processor, output_dir):
+            recorded.append((rule.rule_name, base_pixels.copy(), width, height))
+            path = Path(output_dir) / f"{rule.output_name_prefix}{material.name}.png"
+            path.write_bytes(b"stub")
+            return str(path), base_pixels
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            operator.report = lambda *_args, **_kwargs: None
-            solid_rule = self._solid_rule(name="LightMap")
-            downstream = types.SimpleNamespace(
-                rule_name="Downstream",
-                input_source_mode="NAMED_OUTPUT",
-                input_rule_name="LightMap",
-                output_name_prefix="Down_",
-                output_channels=[
-                    types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.5),
-                    types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.5),
-                    types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=0.5),
-                    types.SimpleNamespace(source_type="CONSTANT", invert=False, constant_value=1.0),
-                ],
-                enabled=True,
-            )
+            with mock.patch.object(tt_normal_map.TT_OT_execute_channel_composite,
+                                   "_find_base_color_texture", return_value=object()), \
+                 mock.patch.object(tt_normal_map.ChannelProcessor, "load_image_pixels",
+                                   return_value=(base_pixels, 2, 2)), \
+                 mock.patch.object(tt_normal_map.TT_OT_execute_channel_composite,
+                                   "_apply_composite_rule", new=fake_apply):
+                result, _reports = _run(operator, [solid, previous, named], objects, temp_dir)
 
-            class _Material:
-                def __init__(self, name):
-                    self.name = name
-                    self.use_nodes = False
-
-            material = _Material("MatE")
-            obj = types.SimpleNamespace(
-                type="MESH",
-                material_slots=[types.SimpleNamespace(material=material)],
-                data=types.SimpleNamespace(materials=[]),
-            )
-            props = types.SimpleNamespace(
-                output_dir=temp_dir,
-                composite_rules=[solid_rule, downstream],
-                normal_map_create_materials=False,
-            )
-            context = types.SimpleNamespace(
-                selected_objects=[obj],
-                scene=types.SimpleNamespace(texture_tools_props=props),
-            )
-            self.assertEqual(operator.execute(context), {"FINISHED"})
-            self.assertEqual(sorted(item.name for item in Path(temp_dir).glob("*.png")),
-                             ["LightMap_MatE.png"])
+            self.assertEqual(result, {"FINISHED"})
+            self.assertEqual([entry[0] for entry in recorded], ["Prev"])
+            self.assertTrue(np.allclose(recorded[0][1], base_pixels))
+            self.assertEqual((recorded[0][2], recorded[0][3]), (2, 2))
+            names = sorted(item.name for item in Path(temp_dir).glob("*.png"))
+            self.assertEqual(names, ["LightMap_FF8000.png", "Prev_MatE.png"])
 
 
 class _RecordingUI:
@@ -394,7 +551,7 @@ class _RecordingUI:
 
 
 class SolidColorPanelTests(unittest.TestCase):
-    """面板：纯色分支只画一行取色器 + 一行固定尺寸"""
+    """D7/C5：面板纯色规则只画一个颜色框 + 一行固定尺寸"""
 
     @staticmethod
     def _draw(rule):
@@ -406,7 +563,7 @@ class SolidColorPanelTests(unittest.TestCase):
         panel.draw(context)
         return log
 
-    def test_solid_rule_draws_no_channel_rows(self):
+    def test_D7_solid_rule_draws_one_color_box_and_size_label(self):
         channels = [types.SimpleNamespace(source_type="SOLID_COLOR", invert=False) for _ in range(4)]
         rule = types.SimpleNamespace(
             enabled=True,
@@ -432,7 +589,7 @@ class SolidColorPanelTests(unittest.TestCase):
         self.assertEqual(solid_props[0][3].get("text"), "纯色")
 
         labels = [entry[2] for entry in log if entry[0] == "label"]
-        self.assertIn("256×256（固定）", labels)
+        self.assertEqual(labels.count("256×256（固定）"), 1)
         for row_label in ("R:", "G:", "B:", "A:"):
             self.assertNotIn(row_label, labels)
 
