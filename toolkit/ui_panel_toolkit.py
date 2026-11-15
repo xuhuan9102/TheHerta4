@@ -798,6 +798,8 @@ class TT_ChannelCompositePanel(bpy.types.Panel):
         col.operator("toolkit.tt_channel_composite_add_preset", text="ORM贴图").preset_index = 1
         col.operator("toolkit.tt_channel_composite_add_preset", text="粗糙度贴图").preset_index = 2
         col.operator("toolkit.tt_channel_composite_add_preset", text="通道分离").preset_index = 3
+        col.operator("toolkit.tt_channel_composite_add_preset", text="光照贴图").preset_index = 4
+        col.operator("toolkit.tt_channel_composite_add_preset", text="材质贴图").preset_index = 5
         
         rules_box = layout.box()
         rules_box.label(text="合成规则列表", icon='SETTINGS')
@@ -823,28 +825,33 @@ class TT_ChannelCompositePanel(bpy.types.Panel):
                 
                 rule_box.separator(factor=0.3)
                 
-                for ch_idx in range(min(4, len(rule.output_channels))):
-                    ch = rule.output_channels[ch_idx]
-                    
-                    ch_row = rule_box.row(align=True)
-                    ch_row.label(text=f"{['R','G','B','A'][ch_idx]}:")
-                    ch_row.prop(ch, "source_type", text="")
-                    
-                    if ch.source_type == 'IMAGE_CHANNEL':
-                        ch_row.prop(ch, "source_image_name", text="图像")
-                        ch_row.prop(ch, "source_channel", text="")
-                    elif ch.source_type == 'CONSTANT':
-                        ch_row.prop(ch, "constant_value", text="", slider=True)
-                    elif ch.source_type == 'GENERATED_NORMAL':
-                        ch_row.prop(rule, "normal_strength", slider=True, text="强度")
-                        ch_row.prop(rule, "normal_blur_radius", slider=True, text="模糊")
-                    elif ch.source_type == 'GENERATED_AO':
-                        ch_row.prop(rule, "ao_radius", text="半径")
-                        ch_row.prop(rule, "ao_height_scale", slider=True, text="高度比例")
-                        ch_row.prop(rule, "ao_power", slider=True, text="对比度")
-                    
-                    ch_row.prop(ch, "invert", toggle=True, text="反转")
-                
+                if any(ch.source_type == 'SOLID_COLOR' for ch in rule.output_channels):
+                    # 纯色规则不分通道：只画一个取色器，四个通道行一律不画
+                    rule_box.prop(rule, "solid_color", text="纯色")
+                    rule_box.label(text="256×256（固定）", icon='IMAGE_DATA')
+                else:
+                    for ch_idx in range(min(4, len(rule.output_channels))):
+                        ch = rule.output_channels[ch_idx]
+
+                        ch_row = rule_box.row(align=True)
+                        ch_row.label(text=f"{['R','G','B','A'][ch_idx]}:")
+                        ch_row.prop(ch, "source_type", text="")
+
+                        if ch.source_type == 'IMAGE_CHANNEL':
+                            ch_row.prop(ch, "source_image_name", text="图像")
+                            ch_row.prop(ch, "source_channel", text="")
+                        elif ch.source_type == 'CONSTANT':
+                            ch_row.prop(ch, "constant_value", text="", slider=True)
+                        elif ch.source_type == 'GENERATED_NORMAL':
+                            ch_row.prop(rule, "normal_strength", slider=True, text="强度")
+                            ch_row.prop(rule, "normal_blur_radius", slider=True, text="模糊")
+                        elif ch.source_type == 'GENERATED_AO':
+                            ch_row.prop(rule, "ao_radius", text="半径")
+                            ch_row.prop(rule, "ao_height_scale", slider=True, text="高度比例")
+                            ch_row.prop(rule, "ao_power", slider=True, text="对比度")
+
+                        ch_row.prop(ch, "invert", toggle=True, text="反转")
+
                 while len(rule.output_channels) < 4:
                     rule.output_channels.add()
         

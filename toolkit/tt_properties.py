@@ -33,6 +33,7 @@ class TT_ChannelSource(bpy.types.PropertyGroup):
             ('GENERATED_SPECULAR', "高光强度", "镜面反射强度"),
             ('GENERATED_EMISSION', "自发光", "检测过亮的自发光区域"),
             ('GENERATED_DETAIL', "细节/凹凸", "增强高频细节纹理"),
+            ('SOLID_COLOR', "纯色", "整张贴图由「纯色」颜色填充"),
         ],
         default='IMAGE_CHANNEL'
     )
@@ -132,6 +133,14 @@ class TT_CompositeRule(bpy.types.PropertyGroup):
         default=1.0,
         min=0.1,
         max=4.0
+    )
+    solid_color: bpy.props.FloatVectorProperty(
+        name="纯色",
+        subtype='COLOR',
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0)
     )
 
 

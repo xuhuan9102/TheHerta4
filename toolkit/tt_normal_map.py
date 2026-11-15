@@ -1,4 +1,6 @@
+import struct
 import traceback
+import zlib
 from pathlib import Path
 
 import bpy
@@ -55,7 +57,66 @@ COMPOSITE_PRESETS = [
             {"source_type": "IMAGE_CHANNEL", "source_channel": "A"},
         ],
     },
+    {
+        "name": "光照贴图",
+        "prefix": "LightMap_",
+        "channels": [
+            {"source_type": "SOLID_COLOR"},
+            {"source_type": "SOLID_COLOR"},
+            {"source_type": "SOLID_COLOR"},
+            {"source_type": "SOLID_COLOR"},
+        ],
+    },
+    {
+        "name": "材质贴图",
+        "prefix": "MaterialMap_",
+        "channels": [
+            {"source_type": "SOLID_COLOR"},
+            {"source_type": "SOLID_COLOR"},
+            {"source_type": "SOLID_COLOR"},
+            {"source_type": "SOLID_COLOR"},
+        ],
+    },
 ]
+
+
+SOLID_COLOR_TEXTURE_SIZE = 256
+
+
+def srgb_encode(value):
+    """线性浮点 → sRGB 编码浮点，与 Blender 保存 8-bit PNG 时使用的传递函数一致"""
+    v = min(max(float(value), 0.0), 1.0)
+    if v <= 0.0031308:
+        return v * 12.92
+    return 1.055 * (v ** (1.0 / 2.4)) - 0.055
+
+
+def solid_color_to_rgba_bytes(color):
+    """rule.solid_color（subtype='COLOR'，线性 RNA 值）→ 写进 PNG 的 8-bit RGBA 字节"""
+    rgba = list(color) + [1.0] * (4 - len(color))
+    red, green, blue = (int(round(srgb_encode(rgba[i]) * 255.0)) for i in range(3))
+    alpha = int(round(min(max(float(rgba[3]), 0.0), 1.0) * 255.0))
+    return (red, green, blue, alpha)
+
+
+def encode_rgba_png(rgba, width, height):
+    """手写 8-bit RGBA PNG（每行 filter 0），绕开 Blender 色彩管理，写盘字节完全可控"""
+    rgba = np.asarray(rgba, dtype=np.uint8).reshape(4)
+    rows = np.zeros((height, width * 4 + 1), dtype=np.uint8)
+    rows[:, 1:] = np.tile(rgba, (1, width))
+    compressed = zlib.compress(rows.tobytes(), 9)
+
+    def _chunk(tag, data):
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", compressed)
+        + _chunk(b"IEND", b"")
+    )
 
 
 class ChannelProcessor:
@@ -507,14 +568,22 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
 
         for material, objects in material_map.items():
             base_texture = self._find_base_color_texture(material)
-            if not base_texture:
-                skipped_materials.append(f"{material.name}: no base color texture")
-                continue
+            base_pixels = None
+            width = 0
+            height = 0
+            if base_texture:
+                base_pixels, width, height = processor.load_image_pixels(base_texture)
 
-            base_pixels, width, height = processor.load_image_pixels(base_texture)
             if base_pixels is None:
-                skipped_materials.append(f"{material.name}: failed to read pixels from {base_texture.name}")
-                continue
+                # 纯色规则不依赖基础颜色贴图：材质没有任何图像节点也照样出图。
+                # 非纯色规则没有输入源，会在规则循环里按既有的「missing input source」分支跳过。
+                skipped_materials.append(
+                    f"{material.name}: no base color texture"
+                    if not base_texture
+                    else f"{material.name}: failed to read pixels from {base_texture.name}"
+                )
+                if not any(self._is_solid_color_rule(rule) for rule in active_rules):
+                    continue
 
             outputs_by_rule = {}
             last_pixels = base_pixels
@@ -524,38 +593,50 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
 
             for rule in active_rules:
                 try:
-                    input_pixels = self._resolve_rule_input_pixels(
-                        rule=rule,
-                        outputs_by_rule=outputs_by_rule,
-                        base_pixels=base_pixels,
-                        width=width,
-                        height=height,
-                        fallback_pixels=last_pixels,
-                        fallback_width=last_width,
-                        fallback_height=last_height,
-                    )
-                    if input_pixels is None:
-                        skipped_materials.append(f"{material.name}/{rule.rule_name}: missing input source")
-                        continue
+                    is_solid_rule = self._is_solid_color_rule(rule)
+                    if is_solid_rule:
+                        result_path, result_pixels, result_width, result_height = self._apply_solid_color_rule(
+                            rule=rule,
+                            material=material,
+                            output_dir=output_dir,
+                        )
+                    else:
+                        input_pixels = self._resolve_rule_input_pixels(
+                            rule=rule,
+                            outputs_by_rule=outputs_by_rule,
+                            base_pixels=base_pixels,
+                            width=width,
+                            height=height,
+                            fallback_pixels=last_pixels,
+                            fallback_width=last_width,
+                            fallback_height=last_height,
+                        )
+                        if input_pixels is None:
+                            skipped_materials.append(f"{material.name}/{rule.rule_name}: missing input source")
+                            continue
 
-                    input_pixels, input_width, input_height = input_pixels
-                    result_path, result_pixels = self._apply_composite_rule(
-                        rule=rule,
-                        material=material,
-                        base_pixels=input_pixels,
-                        width=input_width,
-                        height=input_height,
-                        processor=processor,
-                        output_dir=output_dir,
-                    )
+                        input_pixels, input_width, input_height = input_pixels
+                        result_path, result_pixels = self._apply_composite_rule(
+                            rule=rule,
+                            material=material,
+                            base_pixels=input_pixels,
+                            width=input_width,
+                            height=input_height,
+                            processor=processor,
+                            output_dir=output_dir,
+                        )
+                        result_width, result_height = input_width, input_height
                     if not result_path:
                         continue
 
-                    outputs_by_rule[rule.rule_name] = (result_pixels, input_width, input_height)
-                    last_pixels = result_pixels
-                    last_width = input_width
-                    last_height = input_height
-                    generated_paths.append(Path(result_path))
+                    if not is_solid_rule:
+                        outputs_by_rule[rule.rule_name] = (result_pixels, result_width, result_height)
+                        last_pixels = result_pixels
+                        last_width = result_width
+                        last_height = result_height
+                        generated_paths.append(Path(result_path))
+                    # 纯色图是最终产物：不进 outputs_by_rule（256×256 与其他贴图尺寸不同，
+                    # 不能给 NAMED_OUTPUT 当上游），也不进 generated_paths（那份列表只用于清理中间文件）。
                     processed_count += 1
 
                     if props.normal_map_create_materials:
@@ -658,8 +739,12 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
     def _resolve_rule_input_pixels(self, rule, outputs_by_rule, base_pixels, width, height, fallback_pixels, fallback_width, fallback_height):
         mode = getattr(rule, "input_source_mode", "BASE_COLOR") or "BASE_COLOR"
         if mode == "BASE_COLOR":
+            if base_pixels is None:
+                return None
             return base_pixels, width, height
         if mode == "PREVIOUS_OUTPUT":
+            if fallback_pixels is None:
+                return None
             return fallback_pixels, fallback_width, fallback_height
         if mode == "NAMED_OUTPUT":
             ref_name = str(getattr(rule, "input_rule_name", "") or "").strip()
@@ -669,6 +754,8 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
             if not matched:
                 return None
             return matched
+        if base_pixels is None:
+            return None
         return base_pixels, width, height
 
     def _compose_rule_pixels(self, rule, base_pixels, width, height, processor):
@@ -688,6 +775,30 @@ class TT_OT_execute_channel_composite(bpy.types.Operator):
         for i in range(4):
             output[:, :, i] = channels_data[i] if channels_data[i] is not None else 1.0
         return output
+
+    @staticmethod
+    def _is_solid_color_rule(rule):
+        """规则是否走纯色分支：任一个输出通道的来源是 SOLID_COLOR 即算"""
+        return any(
+            getattr(ch, "source_type", "") == "SOLID_COLOR"
+            for ch in getattr(rule, "output_channels", [])
+        )
+
+    def _apply_solid_color_rule(self, rule, material, output_dir):
+        """纯色规则：不分通道，整张 256×256 贴图由 rule.solid_color 填充，手写 PNG 绕开色彩管理"""
+        color = tuple(float(c) for c in getattr(rule, "solid_color", (1.0, 1.0, 1.0, 1.0)))
+        size = SOLID_COLOR_TEXTURE_SIZE
+
+        safe_mat_name = "".join(c for c in material.name if c.isalnum() or c in ("-", "_", ".")).rstrip()
+        output_name = f"{rule.output_name_prefix}{safe_mat_name}"
+        output_path = output_dir / f"{output_name}.png"
+
+        png_bytes = encode_rgba_png(solid_color_to_rgba_bytes(color), size, size)
+        output_path.write_bytes(png_bytes)
+
+        output = np.empty((size, size, 4), dtype=np.float32)
+        output[:, :, :] = np.array(color, dtype=np.float32)
+        return str(output_path), output, size, size
 
     def _apply_composite_rule(self, rule, material, base_pixels, width, height, processor, output_dir):
         output = self._compose_rule_pixels(rule, base_pixels, width, height, processor)
