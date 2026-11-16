@@ -75,6 +75,41 @@ class ClothExportAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "FrozenMesh_s1: expected array"):
                 audit(root)
 
+    def test_ordinary_draw_buffer_cannot_pin_the_native_copy_capacity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ini, _ = self.export(root)
+            text = ini.read_text("utf8") + (
+                "\n[ResourceDragJiggleSolved_native]\n"
+                "type = RWStructuredBuffer\nstride = 40\n"
+                "array = 100\n"
+                "bind_flags = shader_resource unordered_access\n"
+                "[ResourceDragJiggleWrite_native]\n"
+                "type = Buffer\nstride = 4\nformat = R32_FLOAT\n"
+                "[CustomShaderDragPublishnative]\n"
+                "cs-t24 = ref ResourceDragJiggleSolved_native\n"
+                "cs-u0 = ref ResourceDragJiggleWrite_native\n"
+                "cs-u0 = null\ncs-t24 = null\n"
+                "[CommandListPublishNative]\n"
+                "ResourceDragJiggleWrite_native = ref ResourceDragJiggleTempVB0_native\n"
+                "[ResourceDragJiggleSeedWrite_native]\n"
+                "type = Buffer\nstride = 4\nformat = R32_UINT\n"
+                "[CustomShaderDragSeednative]\nx115 = 1000\n"
+                "cs-t0 = ref ResourceDragJiggleNative_native\n"
+                "cs-u0 = ref ResourceDragJiggleSeedWrite_native\n"
+                "\n[ResourceDragJiggleTempVB0_native]\n"
+                "type = Buffer\nstride = 40\narray = 100\n"
+                "bind_flags = unordered_access vertex_buffer\nmisc_flags = none\n"
+                "[ResourceDragJiggleNative_native]\n"
+                "type = Buffer\nstride = 4\nformat = R32_UINT\nmisc_flags = none\n"
+            )
+            ini.write_text(text, "utf8")
+            self.assertTrue(audit(root)["passed"])
+            for override in ("array = 100", "byte_width = 4000"):
+                ini.write_text(text + override + "\n", "utf8")
+                with self.assertRaisesRegex(ValueError, "inherit native capacity"):
+                    audit(root)
+
 
 if __name__ == "__main__":
     unittest.main()

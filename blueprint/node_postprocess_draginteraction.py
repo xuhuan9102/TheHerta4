@@ -155,6 +155,8 @@ SHADER_FILES = (
     "rzm_pin_detected.hlsl",
     "rzm_jiggle_screen_state.hlsl",
     "rzm_jiggle_interaction.hlsl",
+    "rzm_jiggle_publish.hlsl",
+    "rzm_jiggle_seed.hlsl",
     "rzm_vis_publish.hlsl",
 )
 SHADER_COLLISION_FILES = ("rzm_drag_collision_bounds.hlsl", "rzm_drag_collision_surface.hlsl")
@@ -1655,10 +1657,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         `[ResourceDragJiggleShadowVB_*]`（R9 常驻影子缓冲，已回退）。读入旧 ini 时
         按两种前缀整体剔除，由发射侧按当前形态重建（资源段为 setdefault 语义，
         不剔除会让 ShadowVB 时代残留与新段并存）。
-        新 jiggle 段（CustomShaderDragJiggle）内容由生成器无条件重发，无需在此清。
+        Seed/Solved/Write 段也按当前布局重建，避免动态复制时代的声明残留。
+        Jiggle/Seed/Publish 计算段由生成器无条件重发，无需在此清。
         """
         for section_name in [name for name in sections if name.startswith((
-                "[ResourceDragJiggleTempVB0_", "[ResourceDragJiggleShadowVB_"))]:
+                "[ResourceDragJiggleTempVB0_", "[ResourceDragJiggleShadowVB_",
+                "[ResourceDragJiggleSolved_", "[ResourceDragJiggleNative_",
+                "[ResourceDragJiggleWrite_", "[ResourceDragJiggleSeedWrite_"))]:
             del sections[section_name]
 
     @staticmethod
@@ -5092,9 +5097,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         cn = comp["comp_name"]
         stem = comp["base_name"]
         res_dir = self._buffer_dir(sections, comp)
-        # 逐顶点缓冲的行数契约：一律取该部件自己的顶点数（VLR 的 override_vertex_count）。
-        # 缺省时退到与 dispatch 相同的 100000 假设：宁大勿小——偏大只是多占内存，
-        # 偏小会让真实索引到的顶点永远写不进去（见下方 TempVB0 注）。
+        # 逐顶点状态取该部件的顶点数；绘制暂存则继承当次原生缓冲的完整容量。
+        # 缺省时退到与 dispatch 相同的 100000 假设。
         _vc = int(comp.get("vertex_count", 0) or 0) or 100000
         comp_resources = {
             f"[ResourceDragDetect{cn}ObjectMap_{ns}]": [
@@ -5113,14 +5117,30 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             ],
             f"[ResourceDragComponentZoneOut_{cn}_{ns}]": ["type = RWBuffer", "format = R32_FLOAT", "array = 1"],
             f"[ResourceDragJiggleState_{cn}_{ns}]": ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 10"],
-            # u5 is a separate structured scratch copy. Copying it back must
-            # clear its structured misc flag before the result can be a VB.
+            # Never CopyResource native SO into this fixed draw allocation.
+            # Initialize its visible prefix with a uint CS, then publish only
+            # solved positions. This matches the cloth output/view protocol.
             f"[ResourceDragJiggleTempVB0_{cn}_{ns}]": [
                 "type = Buffer",
                 f"stride = {self._get_vertex_attribute_layout('position')[0]}",
                 f"array = {_vc}",
-                "bind_flags = vertex_buffer",
+                "bind_flags = unordered_access vertex_buffer",
                 "misc_flags = none",
+            ],
+            f"[ResourceDragJiggleSolved_{cn}_{ns}]": [
+                "type = RWStructuredBuffer",
+                f"stride = {self._get_vertex_attribute_layout('position')[0]}",
+                f"array = {_vc}",
+                "bind_flags = shader_resource unordered_access",
+            ],
+            f"[ResourceDragJiggleNative_{cn}_{ns}]": [
+                "type = Buffer", "stride = 4", "format = R32_UINT", "misc_flags = none",
+            ],
+            f"[ResourceDragJiggleSeedWrite_{cn}_{ns}]": [
+                "type = Buffer", "stride = 4", "format = R32_UINT",
+            ],
+            f"[ResourceDragJiggleWrite_{cn}_{ns}]": [
+                "type = Buffer", "stride = 4", "format = R32_FLOAT",
             ],
         }
         comp_resources[f"[ResourceDragJiggleZoneIDs_{cn}_{ns}]"] = [
@@ -5635,9 +5655,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         lines.append(f"x115 = {1 if surface else 0}")
         lines.extend([
             "",
-            f"ResourceDragJiggleTempVB0_{cn}_{ns} = vb0",
+            f"ResourceDragJiggleNative_{cn}_{ns} = copy vb0",
+            f"ResourceDragJiggleSeedWrite_{cn}_{ns} = ref ResourceDragJiggleTempVB0_{cn}_{ns}",
+            f"run = CustomShaderDragSeed{cn}_{ns}",
+            f"cs = {RES_SHADER_DIR}/rzm_jiggle_interaction.hlsl",
+            f"x115 = {1 if surface else 0}",
             "cs-t24 = vb0",
-            f"cs-u5 = copy ResourceDragJiggleTempVB0_{cn}_{ns}",
+            f"cs-u5 = ref ResourceDragJiggleSolved_{cn}_{ns}",
             "",
             f"Dispatch = {dispatch_n}, 1, 1",
             "",
@@ -5651,8 +5675,10 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             lines.append(f"ResourceDragJiggleBlendVB_{cn}_{ns} = copy ResourceDragJiggleBlendOut_{cn}_{ns}")
         lines.extend([
             "vb0 = null",
-            f"ResourceDragJiggleTempVB0_{cn}_{ns} = copy cs-u5",
-            "cs-u5 = null", "cs-u6 = null", "cs-t71 = null",
+            "cs-u5 = null",
+            f"ResourceDragJiggleWrite_{cn}_{ns} = ref ResourceDragJiggleTempVB0_{cn}_{ns}",
+            f"run = CustomShaderDragPublish{cn}_{ns}",
+            "cs-u6 = null", "cs-t71 = null",
             "cs-u3 = null", "cs-u2 = null", "cs-t88 = null",
             "",
             "post x69 = $back_x69", "post y69 = $back_y69",
@@ -5665,6 +5691,25 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             "post z73 = $back_z73", "post w73 = $back_w73",
         ])
         sections[sec] = lines
+        stride = self._get_vertex_attribute_layout('position')[0]
+        words = vertex_count * stride // 4
+        sections[f"[CustomShaderDragSeed{cn}_{ns}]"] = [
+            f"cs = {RES_SHADER_DIR}/rzm_jiggle_seed.hlsl", f"x115 = {words}",
+            f"cs-t0 = ref ResourceDragJiggleNative_{cn}_{ns}",
+            f"cs-u0 = ref ResourceDragJiggleSeedWrite_{cn}_{ns}",
+            f"Dispatch = {(words+255)//256}, 1, 1", "cs-u0 = null", "cs-t0 = null",
+        ]
+        position_offset = self._get_vertex_attribute_layout('position')[1]
+        if position_offset is None or position_offset % 4:
+            raise ValueError("普通拖拽发布需要4字节对齐的位置属性")
+        sections[f"[CustomShaderDragPublish{cn}_{ns}]"] = [
+            f"cs = {RES_SHADER_DIR}/rzm_jiggle_publish.hlsl",
+            f"x115 = {position_offset // 4}", f"y115 = {vertex_count}",
+            f"cs-t24 = ref ResourceDragJiggleSolved_{cn}_{ns}",
+            f"cs-u0 = ref ResourceDragJiggleWrite_{cn}_{ns}",
+            f"Dispatch = {dispatch_n}, 1, 1",
+            "cs-u0 = null", "cs-t24 = null",
+        ]
 
     # ---- PinComponent{Comp} ----
 

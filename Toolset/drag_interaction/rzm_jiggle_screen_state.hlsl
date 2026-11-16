@@ -320,7 +320,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     // that pipeline branches on held-vs-released.
     bool simulateLocked = lockedCapture || pokeActive;
 
-    bool basisValid = right.w > 0.5 && down.w > 0.5;
+    // slot 8.w is the validity flag; slot 9.w is the detector's
+    // conditioning measure, accepted by BuildScreenBasis above 1e-5.
+    bool basisValid = right.w > 0.5 && down.w > 1e-5;
     float2 screenSize = max(CURRENT_CURSOR.zw, float2(1.0, 1.0));
     float screenReference = max(min(screenSize.x, screenSize.y), 1.0);
     float2 delta = (CURRENT_CURSOR.xy - CAPTURED_CURSOR.xy) / screenReference;

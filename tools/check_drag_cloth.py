@@ -119,6 +119,11 @@ FORMATS = {
     "R32_UINT": (42, 4),
     "R32_FLOAT": (41, 4),
     "R32G32B32A32_FLOAT": (2, 16),
+    "R32G32B32A32_UINT": (3, 16),
+    "R32G32B32_FLOAT": (6, 12),
+    "R32G32B32_UINT": (7, 12),
+    "R32G32_FLOAT": (16, 8),
+    "R32G32_UINT": (17, 8),
     "UNKNOWN": (0, 0),
 }
 
@@ -244,6 +249,18 @@ class GeneratedCloth:
         filename = decl.get("filename")
         if filename:
             raw = np.fromfile(self.root / filename.replace("\\", "/"), np.uint8)
+        elif "data" in decl:
+            values = re.split(r"[\s,]+", decl["data"].strip())
+            if decl.get("format", "").endswith("UINT"):
+                parsed = [int(v, 16) if v.lower().startswith("0x") else int(v) for v in values]
+                payload = np.asarray(parsed, "<u4").view(np.uint8)
+            else:
+                payload = np.asarray([float(v) for v in values], "<f4").view(np.uint8)
+            size = int(decl.get("array", "0")) * stride or payload.nbytes
+            if payload.nbytes > size:
+                raise ValueError("Inline resource data exceeds capacity: " + name)
+            raw = np.zeros(size, np.uint8)
+            raw[:payload.nbytes] = payload
         else:
             size = int(decl.get("array", "0")) * stride or copy_size
             if not size:
@@ -448,16 +465,21 @@ class GeneratedCloth:
                 view = None
                 if value != "null":
                     mode, _, reference = value.partition(" ")
+                    source_name = reference if mode in ("copy", "ref") else value
                     source = self.resource(
-                        reference if mode in ("copy", "ref") else value
+                        source_name
                     )
+                    if mode not in ("copy", "ref"):
+                        same_register_type = bool(re.fullmatch(r"cs-[tu][0-9]+", source_name)) and source_name[3] == key[3]
+                        mode = "ref" if source_name.startswith("Resource") or same_register_type else "copy"
                     bound = source
                     if mode == "copy":
                         identity = f"{name}:{index}:{key}"
-                        if identity not in self.resources:
-                            structured = source.structured or (
-                                source.fmt == 0 and source.stride > 0
-                            )
+                        structured = source.structured or (
+                            source.fmt == 0 and source.stride > 0
+                        )
+                        cached = self.resources.get(identity)
+                        if cached is None or (cached.size, cached.stride, cached.fmt, cached.structured) != (source.size, source.stride, source.fmt, structured):
                             self.external(
                                 identity,
                                 np.zeros(source.size, np.uint8),
@@ -479,9 +501,14 @@ class GeneratedCloth:
                     view = self.view(bound, writable)
                 self.gpu.bind(slot, view, writable)
             elif key.startswith("Resource") or key in ("vb0", "vb2"):
+                if value == "null":
+                    self.resources.pop(key, None)
+                    continue
                 parts = value.split()
                 mode = parts[0]
                 source = parts[1] if mode in ("copy", "ref") else parts[0]
+                if key.startswith("Resource") and mode not in ("copy", "ref"):
+                    mode = "copy"
                 region = re.fullmatch(r"(.+)->Region\((\d+),(\d+)\)", source)
                 if region:
                     source = region[1]

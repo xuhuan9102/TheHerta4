@@ -26,7 +26,7 @@ def audit(root, *, compile_shaders=False):
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError(f"Mod directory does not exist: {root}")
-    sections, commands, shaders = {}, [], set()
+    sections, commands, shaders, section_commands = {}, [], set(), {}
     inis = [p for p in root.rglob("*.ini") if "Backups" not in p.relative_to(root).parts]
     if not inis:
         raise ValueError("No exported INI found")
@@ -42,12 +42,14 @@ def audit(root, *, compile_shaders=False):
                 if current in sections:
                     raise ValueError(f"Duplicate INI section: {current}")
                 sections[current] = {}
+                section_commands[current] = []
                 continue
             if current is None or "=" not in line:
                 continue
             key, value = (v.strip() for v in line.split("=", 1))
             sections[current][key.lower()] = value
             commands.append(line)
+            section_commands[current].append(line)
             if key.lower() not in ("filename", "cs") or value.lower() == "null":
                 continue
             path = Path(value.strip('"'))
@@ -89,6 +91,36 @@ def audit(root, *, compile_shaders=False):
         return sections[name]
 
     garments, components, shorts = [], set(), 0
+    for name, fields in sections.items():
+        if not name.startswith("ResourceDragJiggleTempVB0_"):
+            continue
+        require(name, type="Buffer", bind_flags="unordered_access vertex_buffer", misc_flags="none")
+        suffix = name.removeprefix("ResourceDragJiggleTempVB0_")
+        visible = int(fields.get("array", "0"))
+        if visible <= 0:
+            raise ValueError("Jiggle draw buffer must declare its seeded visible capacity: " + name)
+        native = "ResourceDragJiggleNative_" + suffix
+        raw = require(native, type="Buffer", stride=4, format="R32_UINT", misc_flags="none")
+        if any(field in raw for field in ("array", "byte_width", "filename")):
+            raise ValueError("Jiggle native snapshot must inherit native capacity: " + native)
+        seed_writer = "ResourceDragJiggleSeedWrite_" + suffix
+        require(seed_writer, stride=4, format="R32_UINT")
+        seed = "CustomShaderDragSeed" + suffix
+        require(seed, x115=visible*int(fields["stride"])//4)
+        for binding in ("cs-t0 = ref " + native, "cs-u0 = ref " + seed_writer):
+            if binding not in section_commands[seed]:
+                raise ValueError("Jiggle seed missing binding: " + binding)
+        solved = "ResourceDragJiggleSolved_" + suffix
+        writer = "ResourceDragJiggleWrite_" + suffix
+        require(solved, type="RWStructuredBuffer", stride=fields["stride"], array=visible, bind_flags="shader_resource unordered_access")
+        require(writer, stride=4, format="R32_FLOAT")
+        publisher = "CustomShaderDragPublish" + suffix
+        require(publisher)
+        for binding in ("cs-t24 = ref " + solved, "cs-u0 = ref " + writer):
+            if binding not in section_commands[publisher]:
+                raise ValueError(f"Jiggle publisher missing binding: {binding}")
+        if not re.search(rf"(?im)^{re.escape(writer)}\s*=\s*ref\s+{re.escape(name)}\s*$", command_text):
+            raise ValueError("Jiggle publisher must write the draw buffer: " + name)
     for name, fields in list(sections.items()):
         match = re.fullmatch(r"(ResourceSSMTCloth_.+)_G(\d+)_Config", name)
         if not match:

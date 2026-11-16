@@ -1733,31 +1733,32 @@ class DragNodeEmitTests(unittest.TestCase):
             "$ssmtdrag_drag_enabled_testns = 0,1,2",
         ])
 
-    def test_jiggle_temp_vb0_empty_declaration_and_copy_roundtrip(self):
-        # The structured u5 scratch is copied into a plain draw buffer.
-        # Copy-out must explicitly clear the inherited structured misc flag.
+    def test_jiggle_named_solver_and_gpu_publication_bind_the_draw_buffer(self):
+        # The plain output inherits native capacity and uses typed UAV
+        # publication from the named structured solver output.
         _, sections, _ = self._emit()
         self.assertEqual(
             sections["[ResourceDragJiggleTempVB0_abc123_43191_testns]"],
             ["type = Buffer", "stride = 40", "array = 14078",
-             "bind_flags = vertex_buffer", "misc_flags = none"],
+             "bind_flags = unordered_access vertex_buffer", "misc_flags = none"],
         )
         self.assertNotIn("[ResourceDragJiggleShadowVB_abc123_43191_testns]", sections)
         jig = "\n".join(sections["[CustomShaderDragJiggleabc123_43191_testns]"])
         # 自愈链：copy-in → u5=copy → vb0=null → copy-out（CS 不写也有完整网格）
-        self.assertIn("ResourceDragJiggleTempVB0_abc123_43191_testns = vb0", jig)
+        self.assertIn("ResourceDragJiggleNative_abc123_43191_testns = copy vb0", jig)
+        self.assertIn("run = CustomShaderDragSeedabc123_43191_testns", jig)
         self.assertIn("cs-t24 = vb0", jig)
-        self.assertIn("cs-u5 = copy ResourceDragJiggleTempVB0_abc123_43191_testns", jig)
+        self.assertIn("cs-u5 = ref ResourceDragJiggleSolved_abc123_43191_testns", jig)
         self.assertIn("vb0 = null", jig)
-        self.assertIn("ResourceDragJiggleTempVB0_abc123_43191_testns = copy cs-u5", jig)
+        self.assertNotIn("ResourceDragJiggleTempVB0_abc123_43191_testns = copy cs-u5", jig)
+        self.assertIn("run = CustomShaderDragPublishabc123_43191_testns", jig)
         self.assertNotIn("ShadowVB", jig)
         self.assertIn("Dispatch = 55, 1, 1", jig)  # ceil(14078/256)
 
-    def test_jiggle_temp_vb0_array_tracks_component_vertex_count(self):
-        # 回归（洛克茜 d5e1e7ff 实机爆炸）：array 曾写死 19039，而该部件真实顶点数
-        # 是 262153 ⇒ 变形 CS 只写前 19039 行，其余行在换绑成绘制 vb0 后被索引到、
-        # 读到 0 ⇒ 整片网格塌到原点。契约：array == 该部件 vertex_count，
-        # 且与该段 Dispatch 出自同一个数（同一部件不得有两个顶点数来源）。
+    def test_jiggle_native_snapshot_inherits_capacity_and_seed_covers_visible_count(self):
+        # Keep the complete SO allocation; CopyResource cannot copy it into
+        # a buffer pinned to either an old constant or the visible row count.
+        # The dispatch still covers the component's actual visible vertices.
         node = _make_node(self.mod)
         sections = _base_sections(vertex_count=262153)
         comps = node._locate_components(sections, ["abc123"])
@@ -1765,9 +1766,11 @@ class DragNodeEmitTests(unittest.TestCase):
         self.assertEqual(comps[0]["vertex_count"], 262153)
         vb0 = sections["[ResourceDragJiggleTempVB0_abc123_43191_testns]"]
         self.assertIn("array = 262153", vb0)
-        self.assertNotIn("array = 19039", vb0)
+        snapshot = sections["[ResourceDragJiggleNative_abc123_43191_testns]"]
+        self.assertFalse(any(line.startswith("array =") for line in snapshot))
         jig = "\n".join(sections["[CustomShaderDragJiggleabc123_43191_testns]"])
-        self.assertIn("Dispatch = 1025, 1, 1", jig)  # ceil(262153/256)，与 array 同源
+        self.assertIn("Dispatch = 1025, 1, 1", jig)  # ceil(262153/256)
+        self.assertIn("x115 = 2621530", sections["[CustomShaderDragSeedabc123_43191_testns]"])
 
     def test_legacy_jiggle_vb0_sections_stripped_on_read(self):
         # 迁移：历代命名（TempVB0 空声明段 / ShadowVB 真声明段）在重读时都被剔除，
@@ -1778,9 +1781,13 @@ class DragNodeEmitTests(unittest.TestCase):
         sections["[ResourceDragJiggleShadowVB_abc123_43191_testns]"] = [
             "type = RWStructuredBuffer", "stride = 40", "array = 14078",
         ]
+        for family in ("Solved", "Native", "Write", "SeedWrite"):
+            sections[f"[ResourceDragJiggle{family}_abc123_43191_testns]"] = ["type = Buffer", "array = 19039"]
         node._remove_existing_legacy_jiggle_vb0_sections(sections)
         self.assertNotIn("[ResourceDragJiggleTempVB0_abc123_43191_testns]", sections)
         self.assertNotIn("[ResourceDragJiggleShadowVB_abc123_43191_testns]", sections)
+        for family in ("Solved", "Native", "Write", "SeedWrite"):
+            self.assertNotIn(f"[ResourceDragJiggle{family}_abc123_43191_testns]", sections)
 
     def test_jiggle_reemit_overwrites_shadowvb_form(self):
         # 迁移：R9 ShadowVB 时代段落在重导出时整体替换为 TempVB0 copy 形态
@@ -1798,8 +1805,8 @@ class DragNodeEmitTests(unittest.TestCase):
         comps = node._locate_components(sections, ["abc123"])
         node._emit_sections(sections, comps, "testns")
         jig = "\n".join(sections["[CustomShaderDragJiggleabc123_43191_testns]"])
-        self.assertIn("cs-u5 = copy ResourceDragJiggleTempVB0_abc123_43191_testns", jig)
-        self.assertIn("ResourceDragJiggleTempVB0_abc123_43191_testns = copy cs-u5", jig)
+        self.assertIn("cs-u5 = ref ResourceDragJiggleSolved_abc123_43191_testns", jig)
+        self.assertIn("run = CustomShaderDragPublishabc123_43191_testns", jig)
         self.assertNotIn("ShadowVB", jig)
         self.assertNotIn("[ResourceDragJiggleShadowVB_abc123_43191_testns]", sections)
 
