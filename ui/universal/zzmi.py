@@ -4430,9 +4430,13 @@ class ExportZZMI(ExportUnity):
                 "copy vs-t0 unless_null"
             )
             if owner:
+                so_name = (
+                    self._merged_absorbed_so_name(skeleton_group, target_slot, draw_ib)
+                    if group_plan is None
+                    else self._merged_redirect_so_name(skeleton_group, target_slot)
+                )
                 section.append(
-                    f"{indent}{self._merged_redirect_so_name(skeleton_group, target_slot)}"
-                    " = ref so0"
+                    f"{indent}{so_name} = ref so0"
                 )
                 # O3：登记 referent 捕获点（只计数，不改产物文本）。键块里两个槽
                 # 各发一次（if/else 两条结果路径），与旧出现次分支的登记口径一致。
@@ -4497,7 +4501,7 @@ class ExportZZMI(ExportUnity):
         section.append("endif")
 
     def _merged_group_so_capturer_component_ids(self, skeleton_group: int) -> list[int]:
-        """本组 `ResourceZZRedirectSO_G<g>_s<k>` 别名的捕获者组件号（通常恰 1 个）。
+        """本组各 SO 别名的捕获者组件号。
 
         重定向路径 = 计划的 `so_owner_ib`（载体）；直连路径 = 合并宿主
         （`_merged_group_absorbed_hosts`，它们在**自己的** deform 段顶层把本轮
@@ -4761,11 +4765,9 @@ class ExportZZMI(ExportUnity):
                     # O3：登记 referent 捕获点（只计数，不改产物文本）
                     self._merged_reuse_capture_site(skeleton_group, slot)
                 if is_absorbed_host or is_cross_group_host:
-                    # 直连路径的合并宿主（组内被吸收 / 跨组被吸收）：把本轮自己的 SO
-                    # 引用捕获下来（与重定向路径同名资源、同语义），任何兼容挂点闭合
-                    # 守卫后都能把合并几何写进去。
+                    # 每个直连宿主保留自己的 SO；兼容挂点只重放到该宿主的别名。
                     capture_lines.append(
-                        f"    {self._merged_redirect_so_name(skeleton_group, slot)} = ref so0"
+                        f"    {self._merged_absorbed_so_name(skeleton_group, slot, draw_ib)} = ref so0"
                     )
                     self._merged_reuse_capture_site(skeleton_group, slot)
             if len(slots) > 1:
@@ -5319,6 +5321,15 @@ class ExportZZMI(ExportUnity):
             return False
         return not self._merged_component_geometry_absorbed(skeleton_group, draw_ib)
 
+    def _merged_absorbed_so_name(
+        self, skeleton_group: int, slot: int, host_ib: str
+    ) -> str:
+        """直连宿主的原生 SO 别名；同组多个宿主分别捕获，避免互相覆盖。"""
+        hosts = self._merged_group_absorbed_hosts(skeleton_group)
+        if len(hosts) > 1 and any(str(host["draw_ib"]) == str(host_ib) for host in hosts):
+            return f"ResourceZZRedirectSO_G{skeleton_group}_{host_ib}_s{slot}"
+        return self._merged_redirect_so_name(skeleton_group, slot)
+
     def _merged_group_absorbed_hosts(self, skeleton_group: int) -> list[dict]:
         """本组「几何被吸收」的挂点：跨部件的合并几何就挂在这些 DrawIB 的导出 VB 上。
 
@@ -5428,8 +5439,8 @@ class ExportZZMI(ExportUnity):
     ) -> None:
         """组级守卫的合并几何重放：把宿主导出的合并几何写进它捕获的 SO。
 
-        宿主在自己的 deform 段顶层把本轮 SO 引用捕获到
-        `ResourceZZRedirectSO_s<k>`；本块的守卫条件保证**该宿主**当帧在该槽已
+        宿主在自己的 deform 段顶层把本轮 SO 引用捕获到自己的别名；
+        本块的守卫条件保证**该宿主**当帧在该槽已
         到达（`_merged_so_ready_condition`，别名一定是本帧刷新的）+ 组内期望集合
         已到齐，因此任何布局兼容的挂点闭合守卫后都能写。
         """
@@ -5462,7 +5473,7 @@ class ExportZZMI(ExportUnity):
         )
         section.append(f"    vs-t0 = {self._merged_deform_palette_name(host['draw_ib'], skeleton_group, slot)}")
         section.append(
-            f"    so0 = ref {self._merged_redirect_so_name(skeleton_group, slot)}"
+            f"    so0 = ref {self._merged_absorbed_so_name(skeleton_group, slot, host['draw_ib'])}"
         )
         section.append(f"    vb2 = Resource{host['draw_ib']}Blend")
         section.append(f"    vb0 = Resource{host['draw_ib']}Position")
@@ -5559,9 +5570,11 @@ class ExportZZMI(ExportUnity):
 
         if own_host is not None:
             for slot in slots:
-                self._append_merged_absorbed_replay(
-                    section, own_host, skeleton_group, slot, consumer_ib=draw_ib
-                )
+                for host in hosts:
+                    if self._merged_absorbed_replay_compatible(draw_ib, str(host["draw_ib"])):
+                        self._append_merged_absorbed_replay(
+                            section, host, skeleton_group, slot, consumer_ib=draw_ib
+                        )
             group_component_ids = self._merged_group_component_ids(skeleton_group)
             if len(group_component_ids) > 1 and not any(
                 self._merged_absorbed_replay_compatible(
@@ -6724,6 +6737,8 @@ class ExportZZMI(ExportUnity):
                         continue
                     for submesh_model in drawib_model.submesh_model_list:
                         merged_vertices += self._submesh_exported_vertex_count(submesh_model)
+                if merged_vertices <= 0:
+                    continue
                 carriers.append({
                     "draw_ib": component["draw_ib"],
                     "vertex_count": merged_vertices,
@@ -6817,6 +6832,13 @@ class ExportZZMI(ExportUnity):
                         "reason": "target-layout-not-anchor",
                         "target": last.get("unique_str") or "",
                     }
+                continue
+
+            # Render 的 vb0 属于各 DrawIB 自己的 SO，不能让多个可见部件共用
+            # target 的拼接输出。只有单个 carrier + 纯占位 target 时，SO owner
+            # 与可见 carrier 相同；其它组合由直连路径重放到各宿主自己的 SO，
+            # 保持原生容量、零顶点基址与原始 UV 布局。
+            if target_has_real_geometry or len(carriers) > 1:
                 continue
 
             # NOTE: 下面沿用既有口径计算 prefix / base_vertex / so_total；
@@ -7519,15 +7541,23 @@ class ExportZZMI(ExportUnity):
                     )
         for skeleton_group in groups:
             for slot in slots:
-                section.append(
-                    f"[{self._merged_redirect_so_name(skeleton_group, slot)}]"
-                )
-                section.append("type = Buffer")
-                section.append(
-                    "stride = "
-                    + str(int(so_stride_by_group_slot.get((int(skeleton_group), int(slot)), 40)))
-                )
-                section.new_line()
+                so_resources = {
+                    self._merged_redirect_so_name(skeleton_group, slot): int(
+                        so_stride_by_group_slot.get((int(skeleton_group), int(slot)), 40)
+                    )
+                }
+                if self._merged_group_redirect_plan(skeleton_group) is None:
+                    for host in self._merged_group_absorbed_hosts(skeleton_group):
+                        host_ib = str(host["draw_ib"])
+                        position_layout = self._drawib_category_layout(host_ib, "Position") or {}
+                        so_resources[self._merged_absorbed_so_name(
+                            skeleton_group, slot, host_ib
+                        )] = int(position_layout.get("stride", 40) or 40)
+                for resource_name, stride in so_resources.items():
+                    section.append(f"[{resource_name}]")
+                    section.append("type = Buffer")
+                    section.append(f"stride = {stride}")
+                    section.new_line()
 
         # 自建蒙皮输出（`ResourceZZSkinOut_G<g>_s<k>`）：跨组蒙皮 CS 的 UAV 写目标，
         # 同时是跨组拆分绘制的 `vb0`。**必须是自建缓冲**——写游戏 SO 的别名
@@ -8514,9 +8544,8 @@ class ExportZZMI(ExportUnity):
             # 跨组别引用守卫（开关关闭 = 无校准模式：引用其它组骨骼 = 运行时塌陷，大声报警；
             # 开关开启 = F1 写进宿主组缓冲 + F2 渲染 cb1 校准）
             self._warn_cross_group_bone_references()
-            # 合并网格自动重定向计划先按现有实现计算；RedirectSO 这条路径在
-            # 部分 ZZMIv1 帧序下会让完整合并物体整块消失，因此默认关闭。
-            # 关闭时仍保留原始 DrawIB/Blend 布局和合并骨架，只走组内宿主直连重放。
+            # 仅为 SO owner 与可见载体一致的组合构建自动重定向计划。
+            # 关闭实验开关时保留原始 DrawIB/Blend 布局和合并骨架，走宿主直连重放。
             self._redirect_carrier_map, self._redirect_target_map, unredirected = (
                 self._build_merged_mesh_redirect_plan()
             )
@@ -8526,7 +8555,7 @@ class ExportZZMI(ExportUnity):
                 self._redirect_carrier_map = {}
                 self._redirect_target_map = {}
                 print(
-                    "[ZZMI骨骼合并] RedirectSO 自动重定向默认关闭；"
+                    "[ZZMI骨骼合并] RedirectSO 自动重定向已关闭；"
                     "保留单一合并对象，改走组内宿主直连重放。"
                     "如需复核跨 DrawIB 重定向，请打开实验开关。"
                 )

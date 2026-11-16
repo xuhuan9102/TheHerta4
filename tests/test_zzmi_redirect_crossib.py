@@ -357,12 +357,12 @@ class ZZMICrossIbRedirectTests(unittest.TestCase):
         self.assertEqual(unredirected["b20f90ea"]["reason"], "cross-ib")
         self.assertEqual(unredirected["b20f90ea"]["target"], "LOD0.a23aa8a3-42759-0")
 
-    def test_no_cross_ib_carrier_is_redirected_into_target(self):
-        """对照：无跨 IB 时同一 carrier 正常重定向到 target，不进 unredirected。"""
+    def test_no_cross_ib_keeps_visible_parts_on_native_sos(self):
+        """无跨 IB 且 target 有导出几何时，直连重放保留各自 SO，不报跨 IB 错误。"""
         exporter = self._components_exporter(cross_ib_info_dict={})
         carrier_map, target_map, unredirected = exporter._build_merged_mesh_redirect_plan()
-        self.assertIn("b20f90ea", carrier_map)
-        self.assertEqual(carrier_map["b20f90ea"]["target"], "a23aa8a3")
+        self.assertEqual(carrier_map, {})
+        self.assertEqual(target_map, {})
         self.assertNotIn("b20f90ea", unredirected)
 
     def test_warn_merged_mesh_timing_reports_cross_ib(self):

@@ -3686,16 +3686,15 @@ class ZZSIMergedMeshRedirectTests(_ZZMIGroup3RedirectFixture, unittest.TestCase)
         self.assertEqual(carrier_map, {})
         self.assertEqual(unredirected["b20f90ea"]["reason"], "cross-ib")
 
-    def test_redirect_target_with_own_geometry_offsets(self):
-        """target（a23aa8a3）自身还有真实几何：合并网格 base_vertex = 其 SO 偏移。"""
+    def test_target_with_own_geometry_keeps_native_sos(self):
+        """target 自身可见时，各 DrawIB 保留自己的 SO 和零顶点基址。"""
         exporter, _models = self._group3_exporter(
             merged_vertex_count=18776, target_real_vertices=12314,
             target_registered=True,
         )
         carrier_map, target_map, unredirected = self._build_and_apply_plan(exporter)
-        self.assertEqual(carrier_map["b20f90ea"]["base_vertex"], 12314)
-        self.assertEqual(target_map["a23aa8a3"]["so_vertex_count"], 12314 + 18776)
-        self.assertEqual(target_map["a23aa8a3"]["target_own_vertices"], 12314)
+        self.assertEqual(carrier_map, {})
+        self.assertEqual(target_map, {})
         self.assertEqual(unredirected, {})
 
     def test_redirect_vb_sections(self):

@@ -489,35 +489,15 @@ class ZZMIPaletteConvSoOwnerSpaceTests(base._ZZMIGroup3RedirectFixture, unittest
         self.assertEqual(stats["sections"], 9)
         self.assertEqual(stats["conv_sections"], 3)
 
-    def test_target_with_real_geometry_keeps_the_target_space(self):
-        """对照（硬约束 3）：target 有真实几何 ⇒ so_owner == target，口径不变。
-
-        此时 _merged_so_space_palette_ib 必须退化成旧代码手里的那个 target_ib，
-        于是重放/皮肤仍绑 C0 —— 与改动前的产物逐字节一致（哈希对照见交付报告）。
-        把它固化成断言，防止以后有人把这个辅助函数改成「无条件取 owner」。
-        """
+    def test_real_parts_replay_in_the_visible_hosts_space(self):
+        """多个可见部件走直连重放，合并几何使用自己的空间和原生 SO。"""
         exporter, vb_text, skeleton = self._generate(real_target=True)
-        plan = exporter._redirect_target_map["a23aa8a3"]
-        self.assertTrue(plan["target_has_real_geometry"])
-        self.assertEqual(plan["so_owner_ib"], "a23aa8a3")
-        self.assertEqual(
-            exporter._merged_so_space_palette_ib(plan, "a23aa8a3"), "a23aa8a3"
-        )
-        self.assertEqual(self._replay_binds(vb_text), [("0", "1"), ("0", "2")] * 3)
-        self.assertIn("cs-t2 = ref ResourceZZPaletteConv_C0_s1", skeleton)
-        self.assertIn("cs-t2 = ref ResourceZZPaletteConv_C0_s2", skeleton)
-        self.assertEqual(
-            exporter._merged_deform_conv_component_ids(
-                "b30db54e", 2, 3, group_target="a23aa8a3"
-            ),
-            exporter._merged_deform_conv_component_ids(
-                "b30db54e",
-                2,
-                3,
-                group_target="a23aa8a3",
-                palette_owner_ib="a23aa8a3",
-            ),
-        )
+        self.assertEqual(exporter._redirect_carrier_map, {})
+        self.assertEqual(exporter._redirect_target_map, {})
+        self.assertEqual(self._replay_binds(vb_text), [("1", "1"), ("1", "2")] * 3)
+        self.assertNotIn("[CustomShaderZZMISkin_", skeleton)
+        problems, _stats, _evidence = audit_palette_conv_order(vb_text)
+        self.assertEqual(problems, [])
 
 
 if __name__ == "__main__":
