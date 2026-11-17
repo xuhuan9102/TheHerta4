@@ -51,6 +51,7 @@ bool finite3(float3 p){return all(isfinite(p)) && all(abs(p)<100);}
 #ifdef PHASE_STATE
 [numthreads(SLOT_COUNT,1,1)]
 void main(uint3 id:SV_DispatchThreadID){
+ if(!slotComputeOn(id.x))return;
  uint fs=id.x*4;
  float oldOpening=updatedState[fs+2].w>.5?updatedState[fs+2].x:1;
  float pressure=nozzlePressure(slotDrive(id.x),pulse[2].x);
@@ -90,15 +91,14 @@ bool loadTile(uint first,uint lane){
  return tileAny!=0;
 }
 #endif
-[numthreads(64,1,1)]
-void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
- // Dispatches cover PRIMARY_COUNT exactly; the neighbor phases must not
- // return before their group barriers.
- uint i=dispatch.x;
+void simulateParticle(uint i,uint slot,uint lane){
  FluidParticle p=source[i];
  // Each slot simulates its own block of particles relative to its own root.
- uint slot=primarySlot(i),inSlot=i%PRIMARY_PER_SLOT,segment=slot*PRIMARY_PER_SLOT,fs=slot*4;
+ uint inSlot=i%PRIMARY_PER_SLOT,segment=slot*PRIMARY_PER_SLOT,fs=slot*4;
 #ifdef PHASE_PREDICT
+ // A freed/reassigned slot must not revive particles from its old owner.
+ // The nozzle-valid flag is published only after both substeps finish.
+ if(STEP.z<.5 && frameState[fs+2].w<.5)p=(FluidParticle)0;
  // Stratified, irregular births: fixed timestamps never stretch the age of live fluid.
  // nhd-pick: per-emitter lifetime ($fluid_emitter_lifetime_N); 0 keeps 1.1 s.
  float lifetime=slotLifetime(slot);
@@ -514,5 +514,16 @@ void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
  }
 #endif
  target[i]=p;
+}
+[numthreads(64,1,1)]
+void main(uint3 dispatch:SV_DispatchThreadID,uint lane:SV_GroupIndex){
+ // x65 is set only for an enabled emitter by CommandListFluidSubstep.
+ // Every lane in a group follows the same slot loop and enters the same
+ // barrier-bearing solver. Multiple instances of one emitter stay separate.
+ uint emitter=(uint)IniParams[65].x;
+ [loop]for(uint slot=0;slot<SLOT_COUNT;slot++){
+  if(slotComputeOn(slot)&&slotEmitterId(slot)==emitter)
+   simulateParticle(slot*PRIMARY_PER_SLOT+dispatch.x,slot,lane);
+ }
 }
 #endif

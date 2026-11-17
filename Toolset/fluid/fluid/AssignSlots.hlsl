@@ -27,6 +27,15 @@ void main(uint3 tid:SV_DispatchThreadID){
  float now=IniParams[239].y+IniParams[239].x;
  uint count=min((uint)candidates[0].x,CANDIDATE_CAPACITY);
  uint active=clamp((uint)IniParams[253].z,1,SLOT_COUNT);
+ // Release disabled owners before matching, so they consume no slot and
+ // re-enabling cannot inherit their old nozzle, primary or splash state.
+ [unroll]for(uint old=0;old<SLOT_COUNT;old++){
+  if(slotLive(old)&&!slotEmitOn(old)){
+   slots[old*SLOT_ROWS+SLOT_ROOT]=0;
+   slots[old*SLOT_ROWS+SLOT_PREVIOUS_ROOT]=0;
+   frameState[old*4]=0;frameState[old*4+2]=0;
+  }
+ }
  uint match[SLOT_COUNT];
  bool taken[CANDIDATE_CAPACITY];
  [unroll]for(uint c=0;c<CANDIDATE_CAPACITY;c++)taken[c]=false;
@@ -43,7 +52,7 @@ void main(uint3 tid:SV_DispatchThreadID){
     float3 expected=expectedRoot(slot);
     float id=slotAnchor(slot,4).y;
     [loop]for(uint candidate=0;candidate<count;candidate++){
-     if(taken[candidate]||(phase==0&&candidateId(candidate)!=id))continue;
+     if(taken[candidate]||!emitterEnabled((uint)candidateId(candidate))||(phase==0&&candidateId(candidate)!=id))continue;
      float3 offset=candidateRoot(candidate)-expected;
      float distance2=dot(offset,offset);
      if(phase==1&&distance2>FOLLOW_RADIUS*FOLLOW_RADIUS)continue;
@@ -57,7 +66,7 @@ void main(uint3 tid:SV_DispatchThreadID){
 
  // Characters no slot followed take the empty slots; the rest wait for one.
  [loop]for(uint fresh=0;fresh<count;fresh++){
-  if(taken[fresh])continue;
+  if(taken[fresh]||!emitterEnabled((uint)candidateId(fresh)))continue;
   [loop]for(uint empty=0;empty<active;empty++){
    if(slotLive(empty)||match[empty]!=NONE)continue;
    match[empty]=fresh;taken[fresh]=true;break;

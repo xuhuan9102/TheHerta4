@@ -699,15 +699,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
     bl_label = '流体探针'
     bl_description = '部署独立的 LiquidGravityProbe 前置：屏幕空间 PBF 流体 + 角色门控'
 
-    #: 碰撞/可见性「排除列表」：每项一个物体（或手填 hash:first_index:count）。
-    #: 面板上的「选择槽」：选好物体后点「添加」才进列表（列表只存引用，
-    #: hash/first_index/count 在**导出时**对着宿主 ini 展开）。
-    #: 「关了就别留尾」：默认全开 = 不写 `x60`，产物与旧版逐字节相同。
-    hard_off_emit: bpy.props.BoolProperty(
-        name='关闭立即清空该槽', default=True,
-        description='= $fluid_emit_flags（IniParams[60].x 的 bit0）。开着时某个发射器'
-                    '一关，它的主粒子/子滴/水洼下一帧就清空（没有 2.4 秒的尾巴）；'
-                    '重开时从零开始。关掉 = 旧行为（等粒子自己走完寿命）。')
     tail_emission: bpy.props.BoolProperty(
         name='尾流', default=True,
         description='= $fluid_emit_flags 的 bit1。开着时散射/缠流阶段会额外出 1/5 的细尾流；'
@@ -1111,10 +1102,8 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         # 全局力场倍率（$force_scale → IniParams[41].y）：乘在所有力场的强度上。
         # 它是**全局**的东西，所以画在全局外观里，不进每个发射器的力场组。
         box.prop(self, 'force_scale', text='力场总增益（全局，乘在所有力场强度上）')
-        # 排除列表：按物体选（导出时解析成 hash + first_index + count），手填行是逃生口。
         col = box.column(align=True)
-        row = col.row(align=True)
-        col.prop(self, 'hard_off_emit')
+        col.label(text='关闭发射器即停止该发射器的全部计算')
         col.prop(self, 'tail_emission')
         col.prop(self, 'splash_enable')
         col.prop(self, 'stage_probe')
@@ -1710,6 +1699,11 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         slot_warnings = []
         text = fluid_ini_merge.apply_slot_count(
             text, len(self.emitters), warnings=slot_warnings)
+        # Unused controls must stay off, including exports with no emitters.
+        for unused in range(len(self.emitters), fluid_ini_merge.EMITTER_CAPACITY):
+            text = re.sub(
+                r"(?m)^(global \$fluid_emit_%d\s*=\s*)[^\s;]+" % unused,
+                lambda match: match[1] + "0", text)
         for message in slot_warnings:
             print("[FluidProbe][WARN] " + message)
 
@@ -1787,7 +1781,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         # 「关了就别留尾」：两个开关全默认时不写 x60（产物与旧版逐字节相同）。
         text, flag_warnings = fluid_ini_merge.apply_emit_flags(
             text,
-            hard_off=bool(getattr(self, "hard_off_emit", True)),
+            hard_off=True,
             tail=bool(getattr(self, "tail_emission", True)),
         )
         for message in flag_warnings:
@@ -2082,6 +2076,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         src_root = _toolset_fluid_dir()
         dst_root = os.path.join(mod_export_path, *DEPLOY_SUBDIR.split("/"))
         written = total = dropped_bins = 0
+        shader_sources_changed = False
 
         # 0) 发射器 profile：本次导出的数据源。
         #    file_id 同时决定 ProfileLoader.ini 里 `filename = ../Profiles/<id>.json`
@@ -2130,18 +2125,26 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 content = _read_text(src_file)
                 if self.remap_ini_params and low.endswith(".hlsl"):
                     new_text = self._remap_hlsl(content)
-                    changed = new_text != content
                     total += 1
                     if write_text_if_changed(dst_file, new_text):
                         written += 1
-                    if changed:
-                        dropped_bins += self._drop_stale_bins(
-                            dst_dir, name.rsplit(".", 1)[0]
-                        )
+                        shader_sources_changed = True
                 else:
                     total += 1
                     if copy_file_if_changed(src_file, dst_file):
                         written += 1
+                        shader_sources_changed |= low.endswith('.hlsl')
+
+        # Entry-point caches also depend on shared headers (FluidSolver, Slots,
+        # Splash). Migoto may validate only the tiny entry file's timestamp.
+        if shader_sources_changed:
+            for sub in SUBDIRS:
+                dst_dir = os.path.join(dst_root, sub)
+                if not os.path.isdir(dst_dir):
+                    continue
+                for name in os.listdir(dst_dir):
+                    if name.lower().endswith('.hlsl'):
+                        dropped_bins += self._drop_stale_bins(dst_dir, name.rsplit('.', 1)[0])
 
         # 3) 两份子 ini
         for rel in ("fluid/Composite.ini", "surface/ProfileLoader.ini"):
@@ -2396,6 +2399,8 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             mesh_draws = scan_mesh_draws(text)
             has_mesh_comment = any(d[0] for d in mesh_draws)
             for idx, em in enumerate(self.emitters):
+                if idx >= fluid_ini_merge.EMITTER_CAPACITY:
+                    break
                 fi = resolve_first_index(int(getattr(em, 'poly_index', -1)), getattr(em, 'object_name', ''), int(getattr(em, 'first_index', -1)), getattr(em, 'ib_file', ''), mesh_draws)
                 if fi is None:
                     if int(getattr(em, "poly_index", -1)) >= 0:
@@ -2432,12 +2437,14 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 pos, indent = hit
                 bv = int(getattr(em, "base_vertex", 0))
                 block = (
-                    "\n{i}; nhd-pick {idx} begin\n"
+                    "{i}; nhd-pick {idx} begin\n"
+                    "{i}if $\\{ns}\\fluid_emit_{idx} > 0.5\n"
                     "{i}{xk} = {idx}\n"
                     "{i}{yk} = {fi}\n"
                     "{i}{zk} = {bv}\n"
                     "{i}run = CommandList\\{ns}\\MarkPresent\n"
                     "{i}run = CommandList\\{ns}\\CaptureSurface\n"
+                    "{i}endif\n"
                     "{i}; nhd-pick {idx} end"
                 ).format(i=indent, xk=xk, yk=yk, zk=zk, idx=idx, fi=fi, bv=bv, ns=ns)
                 # 插在 draw 行**之前**：3Dmigoto 的 ini 优化器会把排在最后一次

@@ -194,7 +194,7 @@ class EngineGateTests(unittest.TestCase):
         self.assertIn(merge.ENGINE_GATE_VAR, out)
 
     def test_template_carries_the_undefined_gate_variable(self):
-        """新版参考实现的 7 处门控全挂在 ``$costume_mods`` 上，而它从未被赋值。
+        """运行入口的角色门控使用可由节点统一改写的变量。
 
         3Dmigoto 对未定义变量求值为 0 ⇒ 整条链跳过。节点在 ``_rewrite`` 里把它换成
         ``$fluid_present``，这条测试保证「换得到东西」——模板若改名，替换会
@@ -205,7 +205,10 @@ class EngineGateTests(unittest.TestCase):
         ``[CommandListInjectWorld]`` 又把「写 IniParams + dispatch」包进了门里。
         """
         raw = _TEMPLATE_PATH.read_text(encoding="utf-8")
-        self.assertEqual(raw.count("$costume_mods"), 7)
+        sections = merge.parse_sections(raw)
+        for entry in ('CommandListDrawWorld', 'CommandListInjectWorld',
+                      'CommandListCaptureSurface', 'CommandListCaptureSurfaceBody', 'Present'):
+            self.assertIn('$costume_mods', '\n'.join(sections[entry]), entry)
         self.assertNotIn(merge.EFMI_GATE_VAR, raw)
 
     def test_other_variables_untouched(self):

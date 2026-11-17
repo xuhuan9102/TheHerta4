@@ -56,6 +56,9 @@ Varying main(uint id:SV_VertexID){
  uint i=id/6;bool primary=i<PRIMARY_COUNT;uint poolIndex=primary?i:i-PRIMARY_COUNT;
  FluidParticle p;if(primary)p=particles[poolIndex];else p=splashes[poolIndex];
  uint owner=primary?primarySlot(poolIndex):splashSlot(p.velocityAlive.w);
+ if(!slotComputeOn(owner)){
+  Varying hidden=(Varying)0;hidden.position=float4(2,2,2,1);return hidden;
+ }
  float visualScale=lerp(.75,1,smoothstep(.28,1.69,slotDrive(owner)));
  float width=primary?slotWidth(owner):1;
  float radius=surfaceRadius()*width*(primary&&p.densityBirth.w>=16?birthRadiusScale(p.densityBirth.w):visualScale*(primary?1:max(p.densityBirth.z,.1)));

@@ -72,6 +72,14 @@ uint childCount(CollisionEvent e){
 [numthreads(64,1,1)]
 void main(uint3 id:SV_DispatchThreadID){
  uint i=id.x;if(i>=SPLASH_COUNT)return;FluidParticle p=source[i];float dt=IniParams[239].x*2;
+ // Reject a closed/freed/reassigned owner before collision, adhesion or puddle
+ // work. This also removes old children before an empty slot can be reused.
+ if(p.velocityAlive.w>.5){
+  uint oldOwner=splashSlot(p.velocityAlive.w);
+  if(!slotComputeOn(oldOwner)||frameState[oldOwner*4+2].w<.5){
+   p=(FluidParticle)0;
+  }
+ }
 #ifdef SPLASH_UPDATE
  if(p.velocityAlive.w>.5){
   uint owner=splashSlot(p.velocityAlive.w),fs=owner*4;
@@ -232,6 +240,7 @@ void main(uint3 id:SV_DispatchThreadID){
   bool spraying=nozzleSpray && IniParams[237].x>.5 && pulse[3].w>.5 && pulse[5].x>.75;
   uint emitterCount=0,sprayOwner=0,sprayChild=0;
   [unroll]for(uint s=0;s<SLOT_COUNT;s++){
+   if(!slotComputeOn(s))continue;
    bool tk=slotTrickle(s);
    float tkAge=IniParams[241].z;
    if(slotVisOn(s))continue;
@@ -249,7 +258,9 @@ void main(uint3 id:SV_DispatchThreadID){
    uint count=childCount(events[eventId]);if(child<count)break;child-=count;
   }
   }
-  if(splashEnabled() && events[eventId].slot.y>.5 && slot>=emitterCount && eventId<min(eventCounter[0],EVENT_CAPACITY)){
+  bool impactReady=splashEnabled() && slot>=emitterCount && eventId<min(eventCounter[0],EVENT_CAPACITY);
+  if(impactReady)impactReady=events[eventId].slot.y>.5 && slotComputeOn((uint)events[eventId].slot.x);
+  if(impactReady){
    CollisionEvent e=events[eventId];float3 n=e.normalRadius.xyz;
    uint owner=(uint)e.slot.x;
    uint seed=(uint)e.incoming.w&0xffffu,count=childCount(e),channel=child*13;

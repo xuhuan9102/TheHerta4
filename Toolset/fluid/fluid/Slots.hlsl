@@ -57,11 +57,14 @@ bool slotEmitterValid(uint s){
  float raw=slots[s*SLOT_ROWS+4].y;
  return raw>=0.0 && raw<IniParams[253].z;
 }
-bool slotEmitOn(uint s){
- if(!slotEmitterValid(s))return false;
- uint id=slotEmitterId(s);
+bool emitterEnabled(uint id){
+ if(id>=SLOT_COUNT || float(id)>=IniParams[253].z)return false;
  float4 g=(id<4u)?IniParams[42]:IniParams[43];
  return g[id&3u]>0.5;
+}
+bool slotEmitOn(uint s){
+ if(!slotEmitterValid(s))return false;
+ return emitterEnabled(slotEmitterId(s));
 }
 // Per-emitter launch speed in m/s: 45 packs emitters 0-3 and 48 packs 4-7
 // ($fluid_emitter_speed_N). Zero, or a lane this export never wrote, keeps the
@@ -82,6 +85,7 @@ float slotLifetime(uint s){
  return fluidLifetimeOf(float4(v[id&3u],0,0,0));
 }
 bool slotLive(uint s){return slots[s*SLOT_ROWS+SLOT_ROOT].w>.5;}
+bool slotComputeOn(uint s){return slotLive(s)&&slotEmitOn(s);}
 float3 slotRoot(uint s){return slots[s*SLOT_ROWS+SLOT_ROOT].xyz;}
 uint primarySlot(uint i){return i/PRIMARY_PER_SLOT;}
 // The nozzle setting the slot emits with: the global strength level (253.y)
