@@ -1656,13 +1656,12 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             mask_channel_line = f"${BS}TTL{BS}mask_channel = 3"
             mask_line = f"${BS}TTL{BS}mask_invert = 1"
             alpha_line = f"${BS}TTL{BS}alpha = $TTLAlpha0_75"
-            layer_line = f"${BS}TTL{BS}layer_index = 0"
             brightness_line = f"${BS}TTL{BS}V = 1.5"
             index_count_line = f"${BS}TTL{BS}_1 = 56376"
             first_index_line = f"${BS}TTL{BS}_2 = 0"
             base_vertex_line = f"${BS}TTL{BS}_3 = 3"
-            self.assertEqual(block[-10:], [
-                ttl_ref_line, mask_channel_line, mask_line, alpha_line, layer_line, brightness_line,
+            self.assertEqual(block[-9:], [
+                ttl_ref_line, mask_channel_line, mask_line, alpha_line, brightness_line,
                 index_count_line, first_index_line, base_vertex_line, TTL_DRAW_RUN,
             ])
 
@@ -1732,7 +1731,6 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                 f"${BS}TTL{BS}mask_channel = 3",
                 f"${BS}TTL{BS}mask_invert = 1",
                 f"${BS}TTL{BS}alpha = $TTLAlpha0_75",
-                f"${BS}TTL{BS}layer_index = 0",
                 f"${BS}TTL{BS}V = 1.5",
                 f"${BS}TTL{BS}_1 = 56376",
                 f"${BS}TTL{BS}_2 = 0",
@@ -1740,13 +1738,13 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                 f"run = CommandList{BS}TTL{BS}Draw",
             ]
             # 参数行落在同一个 if 分支里，缩进跟原绘制行一致
-            self.assertEqual(block[-10:], ["  " + line for line in expected])
+            self.assertEqual(block[-9:], ["  " + line for line in expected])
             anchor = _anchor_index(lines, mesh_name)
             if_index = lines.index("if $swapkey0 == 0 && $swapkey1 == 0")
             endif_index = lines.index("endif")
             self.assertLess(if_index, anchor)
             self.assertLess(anchor, endif_index)
-            for line in block[-10:]:
+            for line in block[-9:]:
                 self.assertLess(anchor, lines.index(line))
                 self.assertLess(lines.index(line), endif_index)
             # 旧形态的接管注释不再产生
@@ -1880,7 +1878,6 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                 f"${BS}TTL{BS}mask_channel = 3",
                 f"${BS}TTL{BS}mask_invert = 1",
                 f"${BS}TTL{BS}alpha = $TTLAlpha1_0",
-                f"${BS}TTL{BS}layer_index = 0",
                 f"${BS}TTL{BS}V = 1.5",
                 f"${BS}TTL{BS}_1 = 3",
                 f"${BS}TTL{BS}_2 = 0",
@@ -2030,12 +2027,11 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertEqual(shared.count(f"  [mesh:{transparent_mesh}]"), 1)
 
             block = _inline_block(shared, transparent_mesh)
-            self.assertEqual(block[-10:], [
+            self.assertEqual(block[-9:], [
                 f"  Resource{BS}TTL{BS}TransparencyTex = ref Resource_TTLMap_Rkydfsmefl",
                 f"  ${BS}TTL{BS}mask_channel = 3",
                 f"  ${BS}TTL{BS}mask_invert = 1",
                 f"  ${BS}TTL{BS}alpha = $TTLAlpha0_5",
-                f"  ${BS}TTL{BS}layer_index = 0",
                 f"  ${BS}TTL{BS}V = 1.5",
                 f"  ${BS}TTL{BS}_1 = 200",
                 f"  ${BS}TTL{BS}_2 = 100",
@@ -2078,7 +2074,6 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             lines = sections[section_name]
             self.assertEqual(lines[:len(header)], header)
             alpha_line = f"${BS}TTL{BS}alpha = $TTLAlpha0_75"
-            layer_line = f"${BS}TTL{BS}layer_index = 0"
             self.assertEqual(lines.count(alpha_line), 2)
             # 同一段两块各自独立取参
             block_a = _inline_block(lines, mesh_a)
@@ -2151,7 +2146,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertEqual(lines[:len(header)], header)
             block = _inline_block(lines, mesh_name)
             # 这个网格只有 TTLMap 材质：块里就是那 9 行，没有可重绑的不透明贴图
-            self.assertEqual(len(block), 10)
+            self.assertEqual(len(block), 9)
             self.assertEqual(block[0], f"Resource{BS}TTL{BS}TransparencyTex = ref Resource_TTLMap_Rkydfsmefl")
             self.assertIn(f"${BS}TTL{BS}_1 = 56376", block)
             self.assertEqual([line for line in lines if line.strip() == "else"], [])

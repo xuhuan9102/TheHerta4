@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""TTL 层号（A 的生成端）与层权重（C）的导出测试。
+"""TTL 手动层号与层权重的导出测试。
 
 不依赖 Blender：用与 ``test_node_postprocess_material_htmi.py`` 相同的
 fake-bpy 桩把 ``blueprint/node_postprocess_material.py`` 当纯逻辑模块加载。
@@ -8,15 +8,11 @@ fake-bpy 桩把 ``blueprint/node_postprocess_material.py`` 当纯逻辑模块加
 
 - 物体名后缀 ``_TTL层N``（N 为 0..4 的整数，共 5 层）与 ``_TTL权重W``（0..1 浮点）；
 - 两个后缀可并存、顺序无关；一个物体多张 TTLMap 共用同一组层号/权重；
-- 无后缀但有 TTLMap：优先检测实际表面内外关系；无有效网格时按 r 升序，
-  相邻差 <=0.005m 聚成同一层；手写后缀优先，不参与推断；
-- 自动层写 ``; auto-layer: N (r=...m, gap=... from prev)``（首个 ``gap=-``；层 0
-  也写，便于和手动 0/算不出区分）；表面推断写 ``(surface; r=...m)``；
-- ``$\\TTL\\layer_index = N`` 每段都写（含 0），手动/自动/算不出都一样；
+- 有 ``_TTL层N`` 才输出 ``$\\TTL\\layer_index = N``，手动 0 也写；
+- 无层号后缀不检查几何、不生成自动层号，交给 TTLib 按深度处理；
+- 重处理已有 TTL 块时清除旧自动层信息，并按物体名同步手动层号；
 - 无 TTLMap 材质的工程不产生 TTL 段，产物逐字节不变；
-- 自动算不出（无 bound_box、r 超可信范围）落 0、无注释，物体名进
-  ``_ttl_auto_layer_skipped``；聚类层号 >4 落 4、WARN、同样进清单；
-  手写层号越界/非整数抛 ``ValueError``，导出失败；
+- 手写层号越界/非整数抛 ``ValueError``，导出失败；
 - 权重把 ``_ttl_alpha_for_material`` 的结果乘 W 后再落 ``$TTLAlpha*`` 常量。
 """
 import importlib.util
@@ -158,19 +154,13 @@ class _FakeObject(dict):
         for material_name, texture_path in materials:
             self.material_slots.append(_FakeMaterialSlot(_FakeMaterial(material_name, texture_path)))
         self["modimp_texture_slots"] = json.dumps(texture_slots or {})
-        # 自动层号用的几何信息；默认全空，走「算不出 → 第 0 层」回退。
+        # 几何信息用于验证 TTL 导出不会据此生成层号。
         self.bound_box = bound_box
         self.matrix_world = matrix_world
         self.armature = armature
 
     def find_armature(self):
         return self.armature
-
-
-class _FakeArmature:
-    def __init__(self, matrix_world, name="Armature"):
-        self.name = name
-        self.matrix_world = matrix_world
 
 
 def _identity_matrix():
@@ -245,6 +235,86 @@ def _reset_fake_scene():
 
 
 class TTLLayerExportTests(unittest.TestCase):
+    def test_manual_only_plain_mesh_omits_layer(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            ttl_path = _write_png(work_dir, "ttl.png")
+            obj = _FakeObject(
+                "Body", [("TTLMap_Generic", ttl_path)],
+                bound_box=_bound_box_with_radius(0.35),
+                matrix_world=_identity_matrix(),
+            )
+            _fake_bpy.data.objects[obj.name] = obj
+            body = _export_bytes(work_dir, _section_text("TextureOverride_Body", obj.name))
+        self.assertIn(b"run = CommandList\\TTL\\Draw", body)
+        self.assertNotIn(b"layer_index", body)
+        self.assertNotIn(b"auto-layer", body)
+
+    def test_manual_only_export_does_not_inspect_geometry(self):
+        class NoGeometryAccess(_FakeObject):
+            def __getattribute__(self, name):
+                if name in {"bound_box", "matrix_world", "find_armature"}:
+                    raise AssertionError("TTL export must not infer a geometry layer")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as work_dir:
+            ttl_path = _write_png(work_dir, "ttl.png")
+            obj = NoGeometryAccess("Body", [("TTLMap_Generic", ttl_path)])
+            _fake_bpy.data.objects[obj.name] = obj
+            body = _export_bytes(work_dir, _section_text("TextureOverride_Body", obj.name))
+        self.assertNotIn(b"layer_index", body)
+
+    def test_existing_auto_layer_is_removed(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            ttl_path = _write_png(work_dir, "ttl.png")
+            obj = _FakeObject("Body", [("TTLMap_Generic", ttl_path)])
+            _fake_bpy.data.objects[obj.name] = obj
+            params = "\n".join([
+                "; auto-layer: 4 (surface; r=0.212m)",
+                r"$\TTL\layer_index = 4",
+                r"$\TTL\_1 = 100",
+                r"$\TTL\_2 = 5",
+                r"$\TTL\_3 = 0",
+                r"run = CommandList\TTL\Draw",
+            ])
+            ini = _section_text("TextureOverride_Body", obj.name).replace("drawindexed = 100, 5, 0", params)
+            body = _export_bytes(work_dir, ini).decode("utf-8")
+        self.assertNotIn("layer_index", body)
+        self.assertNotIn("auto-layer", body)
+        self.assertIn(r"$\TTL\_3 = 0" + "\n" + r"run = CommandList\TTL\Draw", body)
+        self.assertEqual(body.count(r"run = CommandList\TTL\Draw"), 1)
+
+    def test_existing_call_adds_manual_layer_before_draw_arguments(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            ttl_path = _write_png(work_dir, "ttl.png")
+            obj = _FakeObject("Body_TTL层0", [("TTLMap_Generic", ttl_path)])
+            _fake_bpy.data.objects[obj.name] = obj
+            params = "\n".join([
+                r"$\TTL\_1 = 100",
+                r"$\TTL\_2 = 5",
+                r"$\TTL\_3 = 0",
+                r"run = CommandList\TTL\Draw",
+            ])
+            ini = _section_text("TextureOverride_Body", obj.name).replace("drawindexed = 100, 5, 0", params)
+            body = _export_bytes(work_dir, ini).decode("utf-8")
+            repeated = _export_bytes(work_dir, body).decode("utf-8")
+        self.assertEqual(body, repeated)
+        self.assertIn(r"$\TTL\layer_index = 0" + "\n" + params, body)
+
+    def test_existing_call_updates_manual_layer_without_moving_it(self):
+        node = _ttl_node()
+        original = [r"$\TTL\layer_index = 4", r"$\TTL\V = 1.5",
+                    r"$\TTL\_1 = 100", r"$\TTL\_2 = 5", r"$\TTL\_3 = 0",
+                    r"run = CommandList\TTL\Draw"]
+        updated = node._ttl_update_existing_layers(original, 2)
+        self.assertEqual(updated, [r"$\TTL\layer_index = 2", *original[1:]])
+
+    def test_existing_call_keeps_layer_comments(self):
+        node = _ttl_node()
+        lines = [r"  $\TTL\layer_index = 4 ; author note", r"run = CommandList\TTL\Draw"]
+        updated = node._ttl_update_existing_layers(lines, 2)
+        self.assertEqual(updated, [r"  $\TTL\layer_index = 2 ; author note", lines[1]])
+        self.assertEqual(node._ttl_update_existing_layers(updated, 2), updated)
+
     def setUp(self):
         _reset_fake_scene()
 
@@ -312,8 +382,7 @@ class TTLLayerExportTests(unittest.TestCase):
         a_start = forward.index(f"[mesh:{layered.name}]")
         b_start = forward.index(f"[mesh:{plain.name}]")
         self.assertIn(layer_line, forward[a_start:b_start])
-        # 无后缀的 B 走自动判定但 r 不可算 → 落 0，仍显式写 0（每段自包含）。
-        self.assertIn(f"${BS}TTL{BS}layer_index = 0", forward[b_start:])
+        self.assertNotIn("layer_index", forward[b_start:])
 
     def test_old_project_matches_frozen_golden(self):
         """无后缀老工程（只有 TTLMap、无层号/权重）的导出文本逐字节冻结。"""
@@ -334,7 +403,6 @@ class TTLLayerExportTests(unittest.TestCase):
             f"${BS}TTL{BS}mask_channel = 3",
             f"${BS}TTL{BS}mask_invert = 1",
             f"${BS}TTL{BS}alpha = $TTLAlpha1_0",
-            f"${BS}TTL{BS}layer_index = 0",
             f"${BS}TTL{BS}V = 1.5",
             f"${BS}TTL{BS}_1 = 100",
             f"${BS}TTL{BS}_2 = 5",
@@ -363,222 +431,9 @@ class TTLLayerExportTests(unittest.TestCase):
         self.assertNotIn(b"layer_index", exported)
         self.assertNotIn(b"auto-layer", exported)
 
-    def test_auto_matches_manual_layer(self):
-        """全局聚类到第 2 层的物体，和手写 `_TTL层2` 得到同一条 layer_index。"""
-        with tempfile.TemporaryDirectory() as work_dir:
-            ttl_path = _write_png(work_dir, "ttl.png")
-            armature = _FakeArmature(_identity_matrix())
-            auto_objects = []
-            for name, radius in (
-                ("BodySmall", 0.10), ("BodyMid", 0.20), ("BodyTarget", 0.40),
-            ):
-                obj = _FakeObject(
-                    name,
-                    [("TTLMap_Generic", ttl_path)],
-                    bound_box=_bound_box_with_radius(radius),
-                    matrix_world=_identity_matrix(),
-                    armature=armature,
-                )
-                _fake_bpy.data.objects[name] = obj
-                auto_objects.append((name, obj))
-            ini_text = "\n".join(
-                _section_text(f"TextureOverride_Auto{i}", name)
-                for i, (name, _obj) in enumerate(auto_objects)
-            )
-            auto_body = _export_bytes(work_dir, ini_text).decode("utf-8")
-
-            manual_dir = os.path.join(work_dir, "manual")
-            os.makedirs(manual_dir)
-            _reset_fake_scene()
-            manual_obj = _FakeObject("BodyTarget_TTL层2", [("TTLMap_Generic", ttl_path)])
-            _fake_bpy.data.objects[manual_obj.name] = manual_obj
-            manual_body = _export_bytes(
-                manual_dir, _section_text("TextureOverride_Manual", manual_obj.name)
-            ).decode("utf-8")
-
-        layer_line = f"${BS}TTL{BS}layer_index = 2"
-        auto_lines = auto_body.splitlines()
-        manual_lines = manual_body.splitlines()
-        self.assertEqual(auto_lines.count(layer_line), 1)
-        self.assertEqual(manual_lines.count(layer_line), 1)
-        comment = "; auto-layer: 2 (r=0.400m, gap=0.200 from prev)"
-        self.assertEqual(auto_lines.count(comment), 1)
-        self.assertEqual(auto_lines[auto_lines.index(layer_line) - 1], comment)
-        self.assertFalse(any("auto-layer" in line for line in manual_lines))
-        # 聚类单调：0.10→0、0.20→1、0.40→2。
-        self.assertIn(f"${BS}TTL{BS}layer_index = 0", auto_body)
-        self.assertIn(f"${BS}TTL{BS}layer_index = 1", auto_body)
-
-    def test_auto_layer_clusters(self):
-        """全局排序 + 相邻聚类：r=0.10/0.102/0.20/0.202/0.40 → 0/0/1/1/2。"""
-        cluster = node_postprocess_material.SSMTNode_PostProcess_Material._ttl_auto_cluster_layers
-        result = cluster([
-            (0.40, "E"), (0.102, "B"), (0.202, "D"), (0.10, "A"), (0.20, "C"),
-        ])
-        self.assertEqual([item[0] for item in result], ["A", "B", "C", "D", "E"])
-        self.assertEqual([item[1] for item in result], [0, 0, 1, 1, 2])
-        self.assertIsNone(result[0][2])
-        for item, expected in zip(result[1:], (0.002, 0.098, 0.002, 0.198)):
-            self.assertAlmostEqual(item[2], expected, places=9)
-        self.assertFalse(any(item[3] for item in result))
-
-        # gap 正好 0.005：<= 归同一层（浮点尾差也要吃掉）。
-        boundary = cluster([(0.10, "A"), (0.105, "B")])
-        self.assertEqual([item[1] for item in boundary], [0, 0])
-        self.assertAlmostEqual(boundary[1][2], 0.005, places=9)
-        above_boundary = cluster([(0.10, "A"), (0.105001, "B")])
-        self.assertEqual([item[1] for item in above_boundary], [0, 1])
-
-    def test_auto_close_planes_export_to_separate_layers(self):
-        """相邻半径差 9~37mm 的四个平面，在同一绘制段中分别生成四层。"""
-        scene = [
-            ("LOD0.9040e2c4-41253-0.Plane_copy", 0.145, 0),
-            ("LOD0.9040e2c4-41253-0.Plane.001_copy", 0.192, 2),
-            ("LOD0.9040e2c4-41253-0.Plane.002_copy", 0.182, 1),
-            ("LOD0.9040e2c4-41253-0.Plane.003_copy", 0.201, 3),
-        ]
-        with tempfile.TemporaryDirectory() as work_dir:
-            ttl_path = _write_png(work_dir, "ttl.png")
-            ini_lines = [
-                "[TextureOverride_Planes]",
-                "hash = 9040e2c4",
-                "match_first_index = 0",
-                "ib = Resource_Planes_Index",
-                "run = CommandListSkinTexture",
-            ]
-            for index, (name, radius, _layer) in enumerate(scene):
-                _fake_bpy.data.objects[name] = _FakeObject(
-                    name,
-                    [("TTLMap_Generic", ttl_path)],
-                    bound_box=_bound_box_with_radius(radius),
-                    matrix_world=_identity_matrix(),
-                )
-                ini_lines.extend([
-                    f"; [mesh:{name}] [vertex_count:4]",
-                    f"drawindexed = 6, {41253 + index * 6}, 0",
-                ])
-            body = _export_bytes(work_dir, "\n".join(ini_lines) + "\n").decode("utf-8")
-
-        self.assertEqual(body.count("layer_index"), len(scene))
-        for index, (name, _radius, layer) in enumerate(scene):
-            start = body.index(f"[mesh:{name}]")
-            end = body.index(f"[mesh:{scene[index + 1][0]}]") if index + 1 < len(scene) else len(body)
-            self.assertIn(f"${BS}TTL{BS}layer_index = {layer}", body[start:end])
-
-    def test_auto_layer_overflow(self):
-        """6 个间隔 >0.005 的物体：第 6 个聚类层 >4 → WARN + 落 4 + 进清单。"""
-        with tempfile.TemporaryDirectory() as work_dir:
-            ttl_path = _write_png(work_dir, "ttl.png")
-            names = []
-            for index in range(6):
-                name = f"Layer{index}"
-                obj = _FakeObject(
-                    name,
-                    [("TTLMap_Generic", ttl_path)],
-                    bound_box=_bound_box_with_radius(0.10 + index * 0.10),
-                    matrix_world=_identity_matrix(),
-                )
-                _fake_bpy.data.objects[name] = obj
-                names.append(name)
-            ini_text = "\n".join(
-                _section_text(f"TextureOverride_Layer{index}", name)
-                for index, name in enumerate(names)
-            )
-            log_utils = sys.modules[f"{PKG}.utils.log_utils"]
-            original_warning = log_utils.LOG.warning
-            warnings = []
-            log_utils.LOG.warning = lambda message: warnings.append(str(message))
-            try:
-                node = _ttl_node()
-                body = _export_bytes(work_dir, ini_text, node=node).decode("utf-8")
-            finally:
-                log_utils.LOG.warning = original_warning
-
-        self.assertIn(names[-1], node._ttl_auto_layer_skipped)
-        self.assertTrue(any(names[-1] in message for message in warnings))
-        self.assertTrue(any("超过" in message for message in warnings))
-        block = body[body.index(f"[mesh:{names[-1]}]"):]
-        self.assertIn(f"${BS}TTL{BS}layer_index = 4", block)
-        self.assertIn("; auto-layer: 4 (r=0.600m, gap=0.100 from prev)", block)
-        layers = [
-            int(line.split("=")[-1])
-            for line in body.splitlines() if "layer_index" in line
-        ]
-        self.assertEqual(layers, [0, 1, 2, 3, 4, 4])
-
-    def test_auto_layer_order_independent(self):
-        """section 顺序打乱，层号映射不变。"""
-        names_radii = [("A", 0.10), ("B", 0.102), ("C", 0.20), ("D", 0.202)]
-        objects = []
-        for name, radius in names_radii:
-            obj = _FakeObject(
-                name,
-                [("TTLMap_Generic", "")],
-                bound_box=_bound_box_with_radius(radius),
-                matrix_world=_identity_matrix(),
-            )
-            _fake_bpy.data.objects[name] = obj
-            objects.append(obj)
-
-        def sections_in(order):
-            sections = OrderedDict(
-                (f"[TextureOverride_{name}]", [f"; [mesh:{name}]"])
-                for name in order
-            )
-            # 同一物体在多个 section 只算一次。
-            sections["[TextureOverride_Dupe]"] = ["; [mesh:A]"]
-            return sections
-
-        def mapping(order):
-            node_postprocess_material.clear_name_mapping_cache()
-            node = _ttl_node()
-            node._ttl_prepare_auto_layers(sections_in(order))
-            self.assertEqual(
-                len(node._ttl_auto_layer_assignments), len(objects)
-            )
-            return {
-                obj.name: node._ttl_auto_layer_assignments[id(obj)][0]
-                for obj in objects
-            }
-
-        forward = mapping(["A", "B", "C", "D"])
-        backward = mapping(["D", "C", "B", "A"])
-        self.assertEqual(forward, backward)
-        self.assertEqual(forward, {"A": 0, "B": 0, "C": 1, "D": 1})
-
-    def test_auto_uncomputable_falls_back_zero(self):
-        """没有 bound_box 或 r 超出可信范围：落 0（显式写 0）、无注释、物体名进清单。"""
-        with tempfile.TemporaryDirectory() as work_dir:
-            ttl_path = _write_png(work_dir, "ttl.png")
-            no_box = _FakeObject("BodyNoBox", [("TTLMap_Generic", ttl_path)])
-            _fake_bpy.data.objects[no_box.name] = no_box
-            node = _ttl_node()
-            body = _export_bytes(
-                work_dir, _section_text("TextureOverride_NoBox", no_box.name), node=node
-            ).decode("utf-8")
-        self.assertIn(f"${BS}TTL{BS}layer_index = 0", body)
-        self.assertNotIn("auto-layer", body)
-        self.assertEqual(node._ttl_auto_layer_skipped, ["BodyNoBox"])
-
-        with tempfile.TemporaryDirectory() as work_dir:
-            ttl_path = _write_png(work_dir, "ttl.png")
-            _reset_fake_scene()
-            too_far = _FakeObject(
-                "BodyFar",
-                [("TTLMap_Generic", ttl_path)],
-                bound_box=_bound_box_with_radius(4.0),
-                matrix_world=_identity_matrix(),
-            )
-            _fake_bpy.data.objects[too_far.name] = too_far
-            node = _ttl_node()
-            body = _export_bytes(
-                work_dir, _section_text("TextureOverride_Far", too_far.name), node=node
-            ).decode("utf-8")
-        self.assertIn(f"${BS}TTL{BS}layer_index = 0", body)
-        self.assertEqual(node._ttl_auto_layer_skipped, ["BodyFar"])
 
     def test_layer_off_emits_no_new_lines(self):
-        """无后缀 + 算不出时落 0，layer_index = 0 仍显式写（每段自包含）。"""
+        """没有手动后缀时不输出层号。"""
         with tempfile.TemporaryDirectory() as work_dir:
             ttl_path = _write_png(work_dir, "ttl.png")
             obj = _FakeObject("Body", [("TTLMap_0.5_遮罩", ttl_path)])
@@ -587,8 +442,8 @@ class TTLLayerExportTests(unittest.TestCase):
                 work_dir, _section_text("TextureOverride_Body", "Body")
             ).decode("utf-8")
 
-        self.assertIn(f"${BS}TTL{BS}layer_index = 0", body)
-        self.assertNotIn("auto-layer", body)  # 算不出，没有自动注释
+        self.assertNotIn("layer_index", body)
+        self.assertNotIn("auto-layer", body)
 
     def test_five_layers_each_written(self):
         """5 层（0..4）各写各的：每层一条（含 0），alpha 常量互不覆盖。"""
@@ -721,7 +576,7 @@ class TTLLayerExportTests(unittest.TestCase):
         self.assertTrue(warning)
 
         node = _ttl_node()
-        self.assertEqual(node._ttl_layer_settings_for_mesh("Body"), (0, 1.0))
+        self.assertEqual(node._ttl_layer_settings_for_mesh("Body"), (None, 1.0))
         self.assertEqual(
             node._ttl_layer_settings_for_mesh("Body_TTL层1_TTL权重0.6"), (1, 0.6)
         )
