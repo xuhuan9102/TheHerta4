@@ -10,6 +10,7 @@ from bpy.props import StringProperty
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 from .anim_driver_base import SSMTNode_AnimDriver_Base
 from .anim_driver_collector import AnimationDriverCollector
+from .fluid_ini_merge import mark_emitter_gate_writes
 from ..common.global_config import GlobalConfig
 
 _ANIM_DRIVER_SECTION_MARKER_START = "; --- ANIMATION DRIVER SECTION ---"
@@ -392,7 +393,7 @@ class SSMTNode_PostProcess_AnimDriver(SSMTNode_PostProcess_Base):
         ]
 
         for paragraph in paragraphs:
-            para_content = paragraph["ini_content"]
+            para_content = mark_emitter_gate_writes(paragraph["ini_content"], include_local=False)
             if para_content:
                 lines.append(self._gate_present_content(para_content))
                 lines.append("")

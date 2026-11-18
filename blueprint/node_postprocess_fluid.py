@@ -1875,7 +1875,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             "global $strength_level = " + fluid_ini_merge._fmt_float(level_value),
             text,
         )
-        return fluid_ini_merge.prefix_variables(text)
+        return fluid_ini_merge.apply_emitter_gate_cache(fluid_ini_merge.prefix_variables(text))
 
 
 
@@ -2391,6 +2391,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
 
             original = text
             text = clear_re.sub("", text)
+            text = fluid_ini_merge.mark_emitter_gate_writes(text, include_local=False)
             cleared = text != original
             # 清完块之后这份 ini 可能已经没有 draw 行（例如块是它唯一的流体内容）。
             # 只要本轮**删掉过**块，就必须写回；否则条件退化成「有东西才写」，

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from collections import OrderedDict
 
 TAIL_START = "; --- AUTO-APPENDED FLUID PROBE MODULE ---"
@@ -1001,8 +1002,148 @@ def build_emitter_key_block(entries, warnings=None):
         out.append("    key = %s" % key)
         out.append("    type = cycle")
         out.append("    $%semit_%d = 1,0" % (VARIABLE_PREFIX, slot_i))
+        out.append("    run = CommandListMarkFluidEmitterGateDirty,CommandListMarkFluidEmitterGateDirty")
         out.append("")
     return "\n".join(out).rstrip("\n")
+
+
+_GATE_INPUT = re.compile(r"(?P<scope>\$(?:\\[^\s\\=,]+\\)?)fluid_(?:emit_[0-7]|slot_count)$", re.I)
+_GATE_ASSIGN = re.compile(r"^(\s*)((?:pre |post )?)(\$[^\s=,]+)\s*=\s*(.*)$", re.I)
+_GATE_STORE = re.compile(r"^(\s*)((?:pre |post )?)store\s*=\s*(\$[^\s,]+),", re.I)
+
+
+def mark_emitter_gate_writes(text, include_local=True):
+    """Mark actual input writes dirty; cycle callbacks run after value changes.
+
+    Transitions/hold keys retain uncached consumption because one callback
+    cannot observe every interpolated/released value. Other INI namespaces
+    receive their own dirty flag, never the caller's flag.
+    """
+    blocks = re.split(r"(?m)^([ \t]*\[[^\r\n]+\][ \t]*\r?\n)", text)
+    callbacks = []
+
+    def scope_of(target):
+        match = _GATE_INPUT.fullmatch(target)
+        return match['scope'] if match and (include_local or match['scope'] != '$') else None
+
+    for index in range(1, len(blocks), 2):
+        section = blocks[index].strip()[1:-1]
+        if section.casefold() == 'constants':
+            continue
+        lines = blocks[index + 1].splitlines()
+        writes = [(m, scope_of(m[3])) for line in lines if (m := _GATE_ASSIGN.match(line))]
+        writes = [(m, scope) for m, scope in writes if scope]
+        if section.casefold().startswith('key') and writes:
+            scopes = sorted({scope for _m, scope in writes})
+            settings = {m[1].casefold(): m[2].strip() for line in lines
+                        if (m := re.match(r'^\s*(\w+)\s*=\s*([^;]*)', line))}
+            unsafe = settings.get('type', '').casefold() != 'cycle'
+            for key, value in settings.items():
+                if 'transition' in key:
+                    try:
+                        unsafe |= float(value) != 0
+                    except ValueError:
+                        unsafe = True
+            old = settings.get('run', '').split(',') if settings.get('run') else []
+            if old and all(name.strip().startswith('CommandListFluidGateKey_') for name in old):
+                continue
+            if scopes == ['$'] and not unsafe and old and all(
+                    name.strip() == 'CommandListMarkFluidEmitterGateDirty' for name in old):
+                continue
+            count = max([len(m[4].split(',')) for m, _scope in writes] + [len(old), 1])
+            if scopes == ['$'] and not unsafe and not old and '[CommandListMarkFluidEmitterGateDirty]' in text:
+                lines.append('run = ' + ','.join(['CommandListMarkFluidEmitterGateDirty'] * count))
+                blocks[index + 1] = '\n'.join(lines) + '\n'
+                continue
+            new = []
+            for state in range(count):
+                original = old[state].strip() if state < len(old) else ''
+                identity = repr((section, scopes, state, original, unsafe)).encode('utf-8')
+                name = 'CommandListFluidGateKey_' + hashlib.sha256(identity).hexdigest()[:12]
+                new.append(name)
+                body = ['[' + name + ']']
+                if original:
+                    body.append('run = ' + original)
+                for scope in scopes:
+                    if unsafe:
+                        body.append('post ' + scope + 'fluid_emitter_gate_cache_safe = 0')
+                    body.append('post ' + scope + 'fluid_emitter_gate_dirty = 1')
+                callbacks.append('\n'.join(body))
+            replacement = 'run = ' + ','.join(new)
+            if 'run' in settings:
+                lines = [replacement if re.match(r'^\s*run\s*=', line, re.I) else line for line in lines]
+            else:
+                lines.append(replacement)
+        else:
+            output, pending = [], {}
+
+            def flush():
+                for scope, (indent, phase) in pending.items():
+                    output.append(indent + phase + scope + 'fluid_emitter_gate_dirty = 1')
+                pending.clear()
+
+            for line in lines:
+                match = _GATE_ASSIGN.match(line) or _GATE_STORE.match(line)
+                scope = scope_of(match[3]) if match else None
+                if scope:
+                    if pending and (match[1], match[2]) not in pending.values():
+                        flush()
+                    output.append(line)
+                    pending[scope] = (match[1], match[2])
+                    continue
+                for scope, (indent, phase) in list(pending.items()):
+                    if re.fullmatch(re.escape(phase + scope + 'fluid_emitter_gate_dirty') + r'\s*=\s*1', line.strip()):
+                        del pending[scope]
+                flush()
+                output.append(line)
+            flush()
+            lines = output
+        blocks[index + 1] = '\n'.join(lines) + ('\n' if blocks[index + 1].endswith('\n') else '')
+    out = ''.join(blocks)
+    if callbacks:
+        out = out.rstrip() + '\n\n' + '\n\n'.join(callbacks) + '\n'
+    return out
+
+
+def apply_emitter_gate_cache(text):
+    """Install the measured high-frequency cache; low-frequency refresh remains."""
+    for name in ('dirty', 'cache_safe'):
+        variable = '$fluid_emitter_gate_' + name
+        if not re.search(r'global\s+' + re.escape(variable) + r'\s*=', text):
+            text = text.replace('[Constants]', '[Constants]\nglobal ' + variable + ' = 1', 1)
+    # Defaults must be seeded on the first Present, even with all emitters off.
+    # Delaying this until the first draw would overwrite the first hotkey value.
+    seed = re.search(
+        r'(?m)^(?P<indent>[ \t]*)if !\$fluid_emit_seeded[ \t]*\n'
+        r'(?P<body>(?:[ \t]*\$fluid_(?:emit_[0-7]|emit_seeded|emitter_gate_dirty)[ \t]*=[^\n]*\n)+)'
+        r'(?P=indent)endif[ \t]*\n', text)
+    if seed and re.search(r'(?m)^\[Present\][ \t]*\n', text):
+        indent = seed['indent']
+        block = '\n'.join(line[len(indent):] for line in seed[0].splitlines()) + '\n'
+        text = text[:seed.start()] + text[seed.end():]
+        text = re.sub(r'(?m)^(\[Present\][ \t]*\n)', lambda match: match[1] + block, text, count=1)
+    lines = text.splitlines()
+    bounds = _section_bounds(lines, '[CommandListUpdateEmitterGate]')
+    if bounds and not any('$fluid_emitter_gate_dirty = 0' in line for line in lines[bounds[0]:bounds[1]]):
+        lines.insert(bounds[1], '$fluid_emitter_gate_dirty = 0')
+    bounds = _section_bounds(lines, '[ShaderRegexLiquidMainView]')
+    if bounds:
+        start, stop = bounds
+        body = lines[start:stop]
+        body = [line.replace('if $fluid_emitter_gate_dirty',
+                             'if $fluid_emitter_gate_dirty || !$fluid_emitter_gate_cache_safe')
+                if line.strip() == 'if $fluid_emitter_gate_dirty' else line for line in body]
+        if not any('if $fluid_emitter_gate_dirty' in line for line in body):
+            body = ['if $fluid_emitter_gate_dirty || !$fluid_emitter_gate_cache_safe\n'
+                    '    run = CommandListUpdateEmitterGate\nendif'
+                    if line.strip() == 'run = CommandListUpdateEmitterGate' else line for line in body]
+            lines[start:stop] = body
+        else:
+            lines[start:stop] = body
+    text = '\n'.join(lines) + '\n'
+    if '[CommandListMarkFluidEmitterGateDirty]' not in text:
+        text += '\n[CommandListMarkFluidEmitterGateDirty]\npost $fluid_emitter_gate_dirty = 1\n'
+    return mark_emitter_gate_writes(text)
 
 
 def apply_emitter_keys(text, entries, warnings=None):
@@ -1277,6 +1418,8 @@ def apply_emitter_controls(text, speeds, field_switches=None, enables=(),
             seed = ["%sif !$fluid_emit_seeded" % indent]
             for i, value in enumerate(enables_list):
                 seed.append("%s    $fluid_emit_%d = %d" % (indent, i, value))
+            if '$fluid_emitter_gate_dirty' in text:
+                seed.append("%s    $fluid_emitter_gate_dirty = 1" % indent)
             seed.append("%s    $fluid_emit_seeded = 1" % indent)
             seed.append("%sendif" % indent)
             text = _insert_after_match(text, match, [""] + seed)

@@ -19,6 +19,8 @@ for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common"):
     package = _install_module(package_name)
     package.__path__ = []
 
+sys.modules[f"{PKG}.blueprint"].__path__ = [str(Path(__file__).resolve().parents[1] / "blueprint")]
+
 
 _bpy_props = _install_module(
     "bpy.props",
@@ -110,6 +112,14 @@ def _load_module(module_name, relative_path):
 
 module = _load_module("blueprint.node_postprocess_anim_driver", "blueprint/node_postprocess_anim_driver.py")
 SSMTNode_PostProcess_AnimDriver = module.SSMTNode_PostProcess_AnimDriver
+
+
+def test_fluid_input_writer_marks_dirty_inside_the_driver_owned_block():
+    node = SSMTNode_PostProcess_AnimDriver()
+    text = node._build_ini_content([{'ini_content':
+        '[Present]\n$\\Fluid_demo\\fluid_emit_0 = $input\n'}])
+    assert '$\\Fluid_demo\\fluid_emit_0 = $input\n$\\Fluid_demo\\fluid_emitter_gate_dirty = 1' in text
+    assert text.index('fluid_emitter_gate_dirty') < text.index('; --- END ANIMATION DRIVER SECTION ---')
 
 
 class _FakeBlueprint:

@@ -15,6 +15,8 @@ class IniTrace:
         self.work = []
         self.calls = []
         self.external = set(external)
+        self.stores = []
+        self.readbacks = {}
         for line in self.sections.get('Constants', []):
             match = re.match(r'global\s+(\$\w+)\s*=\s*([^;]+)', line.strip())
             if match:
@@ -25,6 +27,7 @@ class IniTrace:
         expression = re.sub(
             r'\b(?:vs|ps|cs|gs)-(?:cb|t|u)\d+(?:->\w+)?|\bo\d+(?:->\w+)?|\bod\b|\bDRAW_TYPE\b',
             lambda m: 'v[%r]' % m[0], expression)
+        expression = re.sub(r'(?<![$\\\w])([xyzw]\d+)\b', lambda m: 'v[%r]' % m[1], expression)
         expression = re.sub(r'\$[\w\\]+', lambda m: 'v[%r]' % m[0], expression)
         expression = expression.replace('&&', ' and ').replace('||', ' or ')
         expression = re.sub(r'!(?!=)', ' not ', expression)
@@ -66,6 +69,10 @@ class IniTrace:
                 key, value = key.strip(), value.strip()
                 if key == 'run':
                     self.run(value)
+                elif key == 'store':
+                    target, resource, index = [part.strip() for part in value.split(',')]
+                    self.stores.append((target, resource, int(index)))
+                    self.values[target] = self.readbacks.get(resource, 0)
                 elif key in ('dispatch', 'draw', 'drawinstanced', 'drawindexedinstanced', 'clear'):
                     self.work.append((section, key, value, self.values['x65']))
                 elif value.startswith(('copy ', 'copy_desc ')):
@@ -103,7 +110,7 @@ def test_all_off_present_and_end_frame_do_no_repeated_gpu_work():
     trace = IniTrace(generated())
     trace.values.update({'$fluid_present': 1, '$fluid_seen': 1,
                          '$fluid_emitting': 1, '$fluid_initialized': 1,
-                         '$fluid_trickle9': 1})
+                         '$fluid_trickle9': 1, '$fluid_emit_seeded': 1})
     for i in range(8):
         trace.values['$fluid_emit_%d' % i] = 0
     for _ in range(3):
