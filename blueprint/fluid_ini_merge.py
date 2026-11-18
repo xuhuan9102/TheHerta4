@@ -705,16 +705,6 @@ def nearest_triangle(verts, tris, targets, center):
     return best
 
 
-#: SSMT「非镜像工作流」在对象上的标记。导入时对 mesh 做 X 镜像（顶点翻、物体矩阵不动），
-#: 导出时再翻回去 —— 于是 Blender 里是镜像的、游戏里是原样的。
-NON_MIRROR_MARKER = "_ssmt_non_mirror_workflow_processed"
-
-
-def needs_x_mirror(obj_keys):
-    """对象的自定义属性里有没有非镜像工作流标记。"""
-    return any(NON_MIRROR_MARKER in str(k) for k in obj_keys)
-
-
 def game_triangle_order(mirrored):
     """游戏侧三角形的顶点顺序。
 
@@ -837,7 +827,7 @@ def build_force_field_floats(fields_by_slot):
             continue
         for k, field in enumerate(list(fields)[:FORCE_FIELDS_PER_SLOT]):
             base = ((slot * FORCE_FIELDS_PER_SLOT) + k) * 3 * 4
-            # X 镜像工作流（NEEDS_X_MIRROR 标记）下，游戏侧的 right = -M(Blender right)：
+            # 开启非镜像工作流时，游戏侧的 right = -M(Blender right)：
             # 镜像翻转手性，而 ResolveSurface.hlsl:63-64 的 right=up×forward 必须保持右手，
             # 所以 right 是唯一整体翻号的那根轴（up/forward 都等于 Blender 侧的镜像
             # M(up)/M(forward)）。U 是沿 right 的分量 ⇒ 同一面板系数在游戏里方向相反。

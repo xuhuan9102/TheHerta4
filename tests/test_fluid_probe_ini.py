@@ -737,14 +737,6 @@ hash = aaaa1111
 class NonMirrorWorkflowTests(unittest.TestCase):
     """SSMT 非镜像工作流：Blender 里镜像、游戏里原样，顶点顺序要翻。"""
 
-    def test_marker_detected(self):
-        self.assertTrue(merge.needs_x_mirror(["_ssmt_non_mirror_workflow_processed"]))
-        self.assertTrue(merge.needs_x_mirror(["a", "_ssmt_non_mirror_workflow_processed", "b"]))
-
-    def test_marker_absent(self):
-        self.assertFalse(merge.needs_x_mirror([]))
-        self.assertFalse(merge.needs_x_mirror(["3DMigoto:MatchFirstIndex"]))
-
     def test_non_mirrored_keeps_order(self):
         self.assertEqual(merge.game_triangle_order(False), (0, 1, 2))
 

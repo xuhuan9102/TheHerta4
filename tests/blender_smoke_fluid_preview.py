@@ -21,6 +21,9 @@ base = types.ModuleType(PKG + '.blueprint.node_postprocess_base')
 base.SSMTNode_PostProcess_Base = bpy.types.Node
 sys.modules[base.__name__] = base
 fluid = importlib.import_module(PKG + '.blueprint.node_postprocess_fluid')
+properties = importlib.import_module(PKG + '.common.global_properties')
+bpy.utils.register_class(properties.GlobalProterties)
+bpy.types.Scene.global_properties = bpy.props.PointerProperty(type=properties.GlobalProterties)
 
 
 class FluidSmokeTree(bpy.types.NodeTree):

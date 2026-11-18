@@ -1356,6 +1356,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         """
         import bpy
         from mathutils import Vector
+        from ..common.global_properties import GlobalProterties
 
         obj = bpy.data.objects.get(e.object_name) if e.object_name else None
         if obj is None or obj.type != 'MESH':
@@ -1369,7 +1370,10 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
 
         mw = obj.matrix_world
         world = [mw @ me.vertices[i].co for i in poly.vertices[:3]]
-        mirrored = fluid_ini_merge.needs_x_mirror(obj.keys())
+        # Preprocess mirrors every export copy when this option is enabled,
+        # including meshes created locally or imported without the old marker.
+        # The import marker does not determine the export transform.
+        mirrored = bool(GlobalProterties.enable_non_mirror_workflow())
         order = fluid_ini_merge.game_triangle_order(mirrored)
 
         def basis(verts):
