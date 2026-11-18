@@ -88,6 +88,15 @@ def _booted_gate(booted_var: str, seed_pending_var: str, drag_node) -> str:
     return " && ".join(parts)
 
 
+def _interaction_gate(drag_node, ns, condition=""):
+    """Only interactive mode owns GPU click counters; retain legacy owners."""
+    getter = getattr(drag_node, "_runtime_variable_names", None)
+    if not callable(getter):
+        return condition or "1"
+    mode = getter(ns)[0]
+    return f"{mode} == 1" + (f" && ({condition})" if condition else "")
+
+
 def _trigger_gate_vars(drag_node, ns) -> list:
     """取拖拽节点的"按住"变量（LMB/X）。取不到时返回空 = 不做回读门控。"""
     getter = getattr(drag_node, "_click_export_trigger_vars", None)
@@ -446,7 +455,7 @@ class SSMTNode_AnimDriver_ClickExport(SSMTNode_AnimDriver_Base):
             held_expr = " || ".join(f"{var} == 1" for var in trigger_vars)
             block_lines.extend([
                 f"\t{held_var} = 0",
-                f"\tif {held_expr}",
+                f"\tif {_interaction_gate(drag_node, ns, held_expr)}",
                 f"\t\t{held_var} = 1",
                 "\tendif",
             ])
@@ -463,12 +472,14 @@ class SSMTNode_AnimDriver_ClickExport(SSMTNode_AnimDriver_Base):
             ])
             if trigger_vars:
                 block_lines.extend([
-                    f"\t\tif {held_var} == 1 || {held_prev_var} == 1",
+                    f"\t\tif {_interaction_gate(drag_node, ns, f'{held_var} == 1 || {held_prev_var} == 1')}",
                     f"\t\t\tstore = {var}, {click_f_resource}, {zone}",
                     "\t\tendif",
                 ])
             else:
-                block_lines.append(f"\t\tstore = {var}, {click_f_resource}, {zone}")
+                gate = _interaction_gate(drag_node, ns)
+                block_lines.extend([f"\t\tif {gate}",
+                                    f"\t\t\tstore = {var}, {click_f_resource}, {zone}", "\t\tendif"])
             block_lines.extend([
                 f"\t\t{prev} = {var}",
                 "\tendif",
@@ -549,6 +560,14 @@ class SSMTNode_AnimDriver_ClickExport(SSMTNode_AnimDriver_Base):
             "; 未点击时写列表首项；受控变量被外部改动（热键/驱动器）时以变量为准。",
             f"if {_booted_gate(booted_var, seed_pending_var, drag_node)}",
         ]
+        gate = _interaction_gate(drag_node, ns)
+        if gate != "1":
+            reset = [f"{edge_var} = 0", f"if !({gate})", f"\t{init_var} = 0"]
+            if trigger_vars:
+                reset.extend([f"\t{held_var} = 0", f"\t{held_prev_var} = 0"])
+            reset.append("endif")
+            block_lines[-1:-1] = reset
+            block_lines[-1] += f" && ({gate})"
         if trigger_vars:
             held_expr = " || ".join(f"{var} == 1" for var in trigger_vars)
             block_lines.extend([

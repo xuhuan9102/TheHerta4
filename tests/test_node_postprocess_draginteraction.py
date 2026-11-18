@@ -1431,7 +1431,7 @@ class DragNodeEmitTests(unittest.TestCase):
         self.assertIn("run = CustomShaderDragShapeKeyVarSync_testns", present)
         self.assertIn("$ssmtdrag_skheld_testns = 0", present)
         self.assertIn(
-            "if $ssmtdrag_mode_testns == 1 && ($ssmtdrag_lmb_down_testns == 1 || $ssmtdrag_x_down_testns == 1)",
+            "if $ssmtdrag_drag_enabled_testns == 1 && $ssmtdrag_mode_testns == 1 && ($ssmtdrag_lmb_down_testns == 1 || $ssmtdrag_x_down_testns == 1)",
             present,
         )
         # store 回读放在命名命令列表内、pre run 调用（对齐血量库 hp.ini 形态）
@@ -2530,7 +2530,9 @@ class DragNodeEmitTests(unittest.TestCase):
             "store = $ssmtdrag_ui_zone_testns, ResourceDragZoneOut_testns, 0",
             readback,
         )
-        self.assertIn("if $ssmtdrag_ui_detected_testns < 0 || $ObjectDetectAllowed_testns != 1", readback)
+        self.assertIn("if $ssmtdrag_drag_enabled_testns != 1 || $ObjectDetectAllowed_testns != 1", readback)
+        self.assertLess(readback.index("$ObjectDetectAllowed_testns != 1"), readback.index("store ="))
+        self.assertIn("if $ssmtdrag_ui_detected_testns < 0", readback)
         self.assertIn("$ssmtdrag_ui_detected_testns = -1", readback)
         self.assertIn("$ssmtdrag_ui_zone_testns = -1", readback)
         self.assertIn("type = StructuredBuffer", sections["[ResourceDragPinnedDetectID_testns]"])

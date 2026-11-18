@@ -68,6 +68,26 @@ VAR_SYNC_FLOAT4_CAPACITY = 9
 VAR_SYNC_MAX_BINDINGS = VAR_SYNC_FLOAT4_CAPACITY * 4
 
 
+def build_drag_ui_readback(ns, detected_var, zone_var, drag_mode_var=None):
+    """Read UI hits only while detection is allowed at post execution time."""
+    drag_mode_var = drag_mode_var or f"$ssmtdrag_drag_enabled_{ns}"
+    return [
+        "\t; --- DRAG UI BRIDGE BEGIN ---",
+        f"\tif {drag_mode_var} != 1 || $ObjectDetectAllowed_{ns} != 1",
+        f"\t\t{detected_var} = -1",
+        f"\t\t{zone_var} = -1",
+        "\telse",
+        f"\t\tstore = {detected_var}, ResourceDragPinnedDetectID_{ns}, 0",
+        f"\t\tstore = {zone_var}, ResourceDragZoneOut_{ns}, 0",
+        f"\t\tif {detected_var} < 0",
+        f"\t\t\t{detected_var} = -1",
+        f"\t\t\t{zone_var} = -1",
+        "\t\tendif",
+        "\tendif",
+        "\t; --- DRAG UI BRIDGE END ---",
+    ]
+
+
 def _warn_missing_merged_skeleton_binding(comp_name, reason):
     """t88 绑定无法从产物唯一确定时告警：宁可整块不发射，也不 ref 一个不存在的资源。
 
@@ -1000,18 +1020,18 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     # 新建空工程不产生垃圾段、既有已配置工程导出不变。
     feature_shapekey_link: bpy.props.BoolProperty(
         name="启用形态键联动",
-        description="生成形态键驱动整族（ShapeKeyDrive/Dir/DragLatch/ClickCount/ActiveDir 资源 + rzm_shapekey_drive.hlsl + 每帧 dispatch），供形态键节点绑定读取",
+        description="生成形态键驱动资源；交互驱动仅在总模式 1 生效，模式 2 只保留参数初始化与按需同步",
         default=True,
         update=lambda self, context: self._migrate_feature_defaults(context),
     )
     feature_variable_link: bpy.props.BoolProperty(
         name="启用变量联动",
-        description="生成变量↔驱动缓冲双向同步（rzm_shapekey_var_sync.hlsl + readback 命令表 + ClickExport 点击回读）；依赖形态键联动缓冲，形态键联动关闭时自动一并关闭",
+        description="模式 1 双向同步变量与驱动缓冲；其他模式只在变量变化或切换模式时推送到 GPU，不回读。依赖形态键联动缓冲",
         default=True,
     )
     feature_panel_link: bpy.props.BoolProperty(
         name="启用面板联动",
-        description="生成 UI 桥（$ssmtdrag_ui_detected/$ssmtdrag_ui_zone 只读联动变量 + readback 命令表）；关闭后模型拖拽命中不再暴露给面板（默认 ON = 现状恒发）",
+        description="仅在总模式 1 且检测允许时，将命中 ID 和区域回读给面板；其他模式直接清为未命中",
         default=True,
     )
     shapekey_drive_move_sensitivity: bpy.props.FloatProperty(
@@ -5925,7 +5945,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         ])
         sections[sec] = lines
 
-    # ---- ShapeKeyVarReadback：store 回读命令列表（[Present] pre run、boot 门控）----
+    # ---- ShapeKeyVarReadback：模式 1 回读，其他模式仅规划 CPU → GPU 推送 ----
 
     def _emit_shapekey_var_readback_command_list(self, sections, ns):
         bindings = self._drag_drive_var_sync_bindings()
@@ -6008,7 +6028,29 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"\t$ssmtdrag_skany_{ns} = 1",
                 "endif",
             ])
-        sections[sec] = lines
+        drag_mode_var = self._runtime_variable_names(ns)[0]
+        sync_mode = f"$ssmtdrag_sksyncmode_{ns}"
+        enter_mode_one = [f"if {drag_mode_var} != {sync_mode}"]
+        push_only = [f"$ssmtdrag_skany_{ns} = 0", f"$ssmtdrag_sklatch_{ns} = 0",
+                     f"$ssmtdrag_skheld_{ns} = 0", f"$ssmtdrag_skheldprev_{ns} = 0"]
+        for i, (var_name, _slot, _zone, _stage) in enumerate(bindings):
+            prev = f"$ssmtdrag_skprev_{ns}_{i}"
+            pending = f"$ssmtdrag_skpending_{ns}_{i}"
+            mode = f"$ssmtdrag_skmode_{ns}_{i}"
+            enter_mode_one.extend([f"\t{prev} = {var_name}", f"\t{pending} = 1"])
+            push_only.extend([
+                f"$ssmtdrag_skact_{ns}_{i} = 0", f"{mode} = 0",
+                f"if {var_name} != {prev} || {drag_mode_var} != {sync_mode} || {pending} == 1",
+                f"\t{prev} = {var_name}", f"\t{mode} = 2", f"\t$ssmtdrag_skany_{ns} = 1",
+                "endif", f"{pending} = 0",
+            ])
+        enter_mode_one.append("endif")
+        # Only mode 1 can own GPU-edited weights. In other modes CPU variables
+        # are authoritative; ordered GPU writes need no readback acknowledgement.
+        sections[sec] = ([f"if {drag_mode_var} == 1"]
+                         + ["\t" + line for line in enter_mode_one + lines]
+                         + ["else"] + ["\t" + line for line in push_only]
+                         + ["endif", f"{sync_mode} = {drag_mode_var}"])
 
     # ---- CommandList：PinDetected（boot-clear + dt 钳制 + 门槛）/ Viewport / Cursor ----
 
@@ -6132,7 +6174,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 lines.append(
                     f"\trun = CustomShaderDragUpdateScreenJiggle_{comp['comp_name']}_{ns}")
             if self._feature_skd():
-                lines.append(f"\trun = CustomShaderDragShapeKeyDrive_{ns}")
+                lines.extend([f"\tif {drag_mode_var} == 1",
+                              f"\t\trun = CustomShaderDragShapeKeyDrive_{ns}", "\tendif"])
             for _slot in ("69", "70", "72", "73", "97"):
                 for _comp in ("x", "y", "z", "w"):
                     lines.append(f"\t{_comp}{_slot} = $ssmtdrag_ipbak_{_comp}{_slot}")
@@ -6677,6 +6720,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"global $ssmtdrag_shapekey_dx_{ns} = 0",
                 f"global $ssmtdrag_shapekey_prev_y_{ns} = 0",
                 f"global $ssmtdrag_shapekey_prev_x_{ns} = 0",
+                f"global $ssmtdrag_skinteraction_mode_{ns} = -1",
             ])
         if self.enable_viewport_probe:
             globals_to_add.extend([
@@ -6727,6 +6771,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 globals_to_add.append(f"global $ssmtdrag_skheldprev_{ns} = 0")
                 globals_to_add.append(f"global $ssmtdrag_sklatch_{ns} = 0")
                 globals_to_add.append(f"global $ssmtdrag_skany_{ns} = 0")
+                globals_to_add.append(f"global $ssmtdrag_sksyncmode_{ns} = -1")
             # 冷启动播种标志：只有真的会置 1（存在 ClickExport 播种条目）时才声明，
             # 否则它是个「声明 + 被 CS 读 + 从不赋值」的死变量。未发射时驱动 CS 段
             # 显式绑 y80 = 0 / x81 = 0，不依赖本变量存在。
@@ -6765,25 +6810,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # ---- Present 块（手势归约 + 手部蓄力进度 + S8 手部绘制）----
         present_sec = "[Present]"
         present_lines = sections.setdefault(present_sec, [])
-        ui_bridge_lines = [
-            "\t; --- DRAG UI BRIDGE BEGIN ---",
-            # zone 直出回读（store 无条件执行，结果有效性由 pre 阶段设置的
-            # ObjectDetectAllowed 仲裁，避免 post 阶段门控变量时序不可靠）：
-            #   - 命中 ID：ResourceDragPinnedDetectID 槽 0（RWStructuredBuffer<float> stride 4）
-            #   - 区域 ID：ResourceDragZoneOut 槽 0（RWBuffer R32_FLOAT 标量）
-            # 两者同走 R32 标量路径，与点击计数回读同型。历史版本曾从
-            # stride-16 StructuredBuffer 按 float 标量索引 31 读 zone，实测不可靠
-            # （zone 恒 -1），故改由 pin 着色器直出到 R32 标量槽。
-            # store 读取上一份已完成的 GPU 数据，允许 UI 侧以一帧延迟稳定消费；
-            # 本帧检测未运行（ObjectDetectAllowed=0）或未命中时主动失效，避免残留命中。
-            f"\tstore = {ui_detected_var}, ResourceDragPinnedDetectID_{ns}, 0",
-            f"\tstore = {ui_zone_var}, ResourceDragZoneOut_{ns}, 0",
-            f"\tif {ui_detected_var} < 0 || $ObjectDetectAllowed_{ns} != 1",
-            f"\t\t{ui_detected_var} = -1",
-            f"\t\t{ui_zone_var} = -1",
-            "\tendif",
-            "\t; --- DRAG UI BRIDGE END ---",
-        ]
+        ui_bridge_lines = build_drag_ui_readback(ns, ui_detected_var, ui_zone_var, drag_mode_var)
         interaction_gate_lines = [
             "\t; --- DRAG INTERACTION GATE BEGIN ---",
             f"if {drag_mode_var} < 2",
@@ -6793,6 +6820,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             f"\tclear = ResourceDragJiggleScreenState_{ns} 0.0",
             f"\tclear = ResourceDragPathProgressState_{ns} 0.0",
         ]
+        if self._feature_skd():
+            interaction_gate_lines[1:1] = [
+                f"if {drag_mode_var} != $ssmtdrag_skinteraction_mode_{ns}",
+                f"\tif {drag_mode_var} != 1 && $ssmtdrag_booted_{ns} == 1",
+                f"\t\tclear = ResourceDragShapeKeyDragLatch_{ns} 0.0", "\tendif",
+                f"\t$ssmtdrag_skinteraction_mode_{ns} = {drag_mode_var}", "endif",
+            ]
         # 逐组件副本同步清零（否则模式降档后旧屏幕状态继续喂本组件 Jiggle）
         for comp in components:
             interaction_gate_lines.extend([
@@ -7011,7 +7045,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             # 驱动器/用户所有——空闲帧零回读。
             block.extend([
                 f"$ssmtdrag_skheld_{ns} = 0",
-                f"if $ssmtdrag_mode_{ns} == 1 && ($ssmtdrag_lmb_down_{ns} == 1 || $ssmtdrag_x_down_{ns} == 1)",
+                f"if {drag_mode_var} == 1 && $ssmtdrag_mode_{ns} == 1 && ($ssmtdrag_lmb_down_{ns} == 1 || $ssmtdrag_x_down_{ns} == 1)",
                 f"\t$ssmtdrag_skheld_{ns} = 1",
                 "endif",
                 f"if $ssmtdrag_booted_{ns} == 1 && $ssmtdrag_drawn_{ns} == 1",
@@ -7024,7 +7058,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 "endif",
             ])
         ui_readback_sec = f"[CommandListDragUIReadback_{ns}]"
-        if self._feature_panel() and ui_readback_sec not in sections:
+        if self._feature_panel():
             sections[ui_readback_sec] = list(ui_bridge_lines)
 
         if self.enable_hand_cursor:
