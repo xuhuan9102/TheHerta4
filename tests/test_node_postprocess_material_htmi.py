@@ -31,12 +31,13 @@ class _FakeBpyDataObjects(dict):
 
 
 _fake_bpy = types.SimpleNamespace(
-    types=types.SimpleNamespace(PropertyGroup=object, Operator=object),
+    types=types.SimpleNamespace(PropertyGroup=object, Operator=object, Object=object),
     props=types.SimpleNamespace(
         StringProperty=lambda **_kwargs: None,
         BoolProperty=lambda **_kwargs: None,
         IntProperty=lambda **_kwargs: None,
         CollectionProperty=lambda **_kwargs: None,
+        PointerProperty=lambda **_kwargs: None,
     ),
     data=types.SimpleNamespace(objects=_FakeBpyDataObjects()),
     path=types.SimpleNamespace(abspath=lambda value: value),
@@ -89,6 +90,7 @@ _install_module(
         NTEMI="NTEMI",
         ZZMI="ZZMI",
         HIMI="HIMI",
+        is_zzmi_family=lambda name: name == "ZZMI",
     ),
 )
 # 材质转资源的导出路径会调用 toolkit 的 DDS 转换；桩成「转换成功」，
@@ -118,6 +120,9 @@ def _load_blueprint_module(module_name):
 # FX 命名空间档案必须先于材质转资源节点加载（它从档案取命名空间）。
 fx_namespace = _load_blueprint_module("fx_namespace")
 node_postprocess_material = _load_blueprint_module("node_postprocess_material")
+node_postprocess_custom_material_assign = _load_blueprint_module(
+    "node_postprocess_custom_material_assign"
+)
 
 
 class _FakeImage:
@@ -3077,6 +3082,63 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         self.assertIn(sentinel_alias, joined)
         self.assertIn(sentinel_run, joined)
         self.assertIn("drawindexed = 100, 5, 0", joined)
+
+
+class MaterialProExportTests(unittest.TestCase):
+    def test_pro_preserves_named_transparency_when_pure_texture_adds_switch(self):
+        config = node_postprocess_material.GlobalConfig
+        self.addCleanup(setattr, config, "logic_name", config.logic_name)
+        config.logic_name = "ZZMI"
+        node_postprocess_material.clear_name_mapping_cache()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            obj = _FakeObject("LOD0.92cb56c9-64626-0.挂件.020_透明0.5", {})
+            _fake_bpy.data.objects[obj.name] = obj
+            self.addCleanup(_fake_bpy.data.objects.pop, obj.name)
+            extra = _FakeObject(
+                "LOD0.7fbbcf0d-7116-0.脸",
+                {},
+                [
+                    ("DiffuseMap_FaceA", _write_png(temp_dir, "face-a.png")),
+                    ("DiffuseMap_FaceB", _write_png(temp_dir, "face-b.png")),
+                ],
+            )
+            switch = types.SimpleNamespace(
+                switch_variable="$swapkey151",
+                bindings='[["DiffuseMap_FaceA", "DiffuseMap_FaceB"]]',
+                key="N",
+            )
+            mesh_name = obj.name + "_copy"
+            ini_path = Path(temp_dir) / "mod.ini"
+            ini_path.write_text(
+                "[Constants]\nglobal $active0 = 0\n\n"
+                "[TextureOverride_LOD0.92cb56c9_64626_0]\n"
+                "hash = 92cb56c9\n"
+                f"; [mesh:{mesh_name}] [vertex_count:239]\n"
+                "drawindexed = 1410,1317828,0\n",
+                encoding="utf-8",
+            )
+            node = node_postprocess_custom_material_assign.SSMTNode_PostProcess_CustomMaterialAssign()
+            node.name = "MaterialNode"
+            node.use_global_assign = True
+            node.global_switch_groups = []
+            node.target_items = [types.SimpleNamespace(target_object=extra, switch_groups=[switch])]
+            node.material_switch_var = "$swapkey150"
+            node.material_to_resource_override = False
+            node._create_cumulative_backup = mock.Mock()
+
+            node.execute_postprocess(temp_dir)
+
+            content = ini_path.read_text(encoding="utf-8")
+            self.assertTrue((Path(temp_dir) / "7fbbcf0d-7116-0_PureTexture.ini").is_file())
+            main_content, marker, transparency = content.partition(node.TRANSPARENCY_SECTION_MARKER)
+            self.assertIn("[KeySwap_Diffuse_swapkey151]", main_content)
+            self.assertTrue(marker)
+            shader_name, _ = node.extract_transparency_info_from_mesh_name(mesh_name)
+            self.assertIn(f"; [mesh:{mesh_name}] [vertex_count:239]\nrun = {shader_name}", main_content)
+            self.assertNotIn("drawindexed = 1410,1317828,0", main_content)
+            self.assertIn(f"[{shader_name}]", transparency)
+            self.assertIn("blend_factor[0] = 0.5", transparency)
+            self.assertIn("drawindexed = 1410,1317828,0", transparency)
 
 
 class TtlAlphaMaterialTokenTests(unittest.TestCase):

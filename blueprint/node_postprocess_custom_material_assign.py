@@ -4243,8 +4243,12 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         with open(ini_file, "r", encoding="utf-8") as handle:
             content = handle.read()
         preserved_driver_content, content = self.split_anim_driver_block_content(content)
-        content = self._strip_previous_transparency_sections(content)
+        # 透明段由常规材质路径生成，回写纯贴图的开关时应保留在主配置末尾。
+        content, transparency_marker, transparency_tail = content.partition(
+            self.TRANSPARENCY_SECTION_MARKER
+        )
         content, preserved_tail_content = self.split_auto_appended_tail_content(content)
+        preserved_tail_content += transparency_marker + transparency_tail
         preamble_lines, sections = self._parse_ini_content(content)
 
         # 幂等：先删掉上一次本节点生成的纯贴图模式段（旧版本写进主 ini 的那些）
