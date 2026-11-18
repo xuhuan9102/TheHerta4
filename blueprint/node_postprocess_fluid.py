@@ -552,11 +552,12 @@ class SSMTFluidEmitter(bpy.types.PropertyGroup):
     # 运行期变量（每个发射器一个，键位只是手动入口，变量是唯一真相）
     # ------------------------------------------------------------------
     enable: bpy.props.BoolProperty(update=_on_param_update,
-        name='开关',
+        name='游戏开关',
         default=True,
         description='= $fluid_emit_N（N = 这个发射器的序号，从 0 起；导出后叫 '
                     '$fluid_emit_N）。1 = 这个发射器出水，0 = 不出水；缺省 1。'
-                    '面板这里给的是初值，键位与动画驱动写的是同一个变量。',
+                    '面板这里给的是游戏初值，键位与动画驱动写的是同一个变量。'
+                    '不影响 Blender 水流预览；预览始终显示所有已配置的发射器。',
     )
     speed: bpy.props.FloatProperty(update=_on_param_update,
         name='速度 (m/s)',
@@ -943,7 +944,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         sub.label(text='留空＝不绑键，按了也不会有反应', icon='INFO')
         row = sub.row(align=True)
         row.prop(e, 'enable')
-        row.label(text='发射器 %d 开关 → $fluid_emit_%d（1 开 / 0 关）'
+        row.label(text='发射器 %d 游戏开关 → $fluid_emit_%d（1 开 / 0 关）'
                        % (idx, idx))
         sub.label(text='   键位、这里、动画驱动写的是同一个 $fluid_emit_%d' % idx,
                   icon='INFO')
@@ -1162,6 +1163,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         row.prop(self, 'sim_fps')
         row = box.row(align=True)
         row.label(text='每发射器 1024 粒子（与游戏一致）')
+        box.label(text='预览显示所有发射器，不受游戏开关影响', icon='INFO')
         box.prop(self, 'volume_radius')
         box.prop(self, 'solid')
         row = box.row(align=True)
@@ -3712,7 +3714,8 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
             'speed': float(getattr(node, 'launch_speed', sim_mod.DEFAULT_SPEED)),
             'speed_override': float(getattr(e, 'speed', 0.0)),
             'lifetime': float(getattr(e, 'lifetime', 0.0)),
-            'enabled': bool(getattr(e, 'enable', True)),
+            # The export flag is the game's initial state, not preview visibility.
+            'enabled': True,
             'trickle': bool(e.trick and not e.vis),
             'trickle_scale': float(e.trick_sp),
             'trickle_lifetime': round(float(e.tlen) / 0.05) * 0.05,
@@ -3929,7 +3932,6 @@ def _emitters_fingerprint(node):
             round(float(e.absorption), 5),
             round(float(e.tlen), 4), round(float(e.bend_delay), 4), int(e.bend_str),
             bool(e.trick), round(float(e.trick_sp), 4), bool(e.vis),
-            bool(getattr(e, 'enable', True)),
             float(getattr(e, 'speed', 0.0)),
             float(getattr(e, 'lifetime', 0.0)),
             # 力场也影响可见形状（线框落点、半径、方向），必须进指纹，

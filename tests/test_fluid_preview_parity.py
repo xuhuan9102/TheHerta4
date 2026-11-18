@@ -210,18 +210,24 @@ def test_force_field_add_updates_both_marker_collections():
     fields.assert_called_once_with(inst, scene)
 
 
-@pytest.mark.parametrize('change', ['tilt', 'force', 'speed', 'lifetime', 'enable'])
+@pytest.mark.parametrize('change', ['tilt', 'force', 'speed', 'lifetime'])
 def test_cached_preview_invalidated_by_runtime_parameters(change):
     em = _emitter(force_fields=[_force_field()], speed=1.5, lifetime=1.1, enable=True)
     inst = _bare_node([em])
     before = node._preview_fingerprint(inst)
     if change == 'force':
         em.force_fields[0].strength += 1
-    elif change == 'enable':
-        em.enable = False
     else:
         setattr(em, change, getattr(em, change) + 0.1)
     assert node._preview_fingerprint(inst) != before
+
+
+def test_game_emission_enable_does_not_invalidate_preview():
+    em = _emitter(enable=True)
+    inst = _bare_node([em])
+    before = node._preview_fingerprint(inst)
+    em.enable = False
+    assert node._preview_fingerprint(inst) == before
 
 def test_nozzle_level_follows_explicit_level_not_speed():
     """L-FLUID-005 回归：档位有显式值时，喷嘴必须用它，不许拿速度反解覆盖。

@@ -49,6 +49,7 @@ em.roll = 35
 em.ox = 0.12
 em.speed = 1.8
 em.lifetime = 2
+em.enable = False  # Game export defaults must not suppress Blender previews.
 context = types.SimpleNamespace(node=node, scene=bpy.context.scene)
 fluid._active_fluid_node = lambda context: node
 
@@ -80,6 +81,7 @@ expected = origin + right * field.offset_u + up * field.offset_v + forward * fie
 assert (Vector(ff['center']) - expected).length < 1e-6
 frames = sim.simulate(**kwargs)
 assert len(frames) == 2 and any(len(frame[0]) for frame in frames)
+assert em.enable is False
 
 field.enabled = False
 assert bpy.data.objects.get('FluidFF0_0') is None
