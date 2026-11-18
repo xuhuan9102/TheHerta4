@@ -365,6 +365,10 @@ class _FakeBlueprintExportHelper:
         pass
 
     @staticmethod
+    def validate_object_info_references(*_args, **_kwargs):
+        pass
+
+    @staticmethod
     def reset_direct_export_runtime_state(*_args, **_kwargs):
         pass
 
@@ -1777,6 +1781,19 @@ class OperatorInvokeTests(_BackgroundTestBase):
         self.assertEqual(operator.execute(context), {'RUNNING_MODAL'})
         self.assertTrue(_RecordingSession.instances[0].started)
         self.assertEqual(_FAKE_WINDOW_MANAGER.modal_handlers, [operator])
+
+    def test_invalid_object_reference_cancels_before_background_export(self):
+        context = self._make_context()
+        operator = self._make_operator(context)
+        error = "测试蓝图 / Object Info（已删物体）— 物体不存在"
+        with mock.patch.object(
+            _FakeBlueprintExportHelper, "validate_object_info_references", side_effect=ValueError(error),
+        ):
+            self.assertEqual(operator.invoke(context, None), {'CANCELLED'})
+
+        self.assertEqual(operator.reports, [({'ERROR'}, error)])
+        self.assertEqual(_RecordingSession.instances, [])
+        self.assertEqual(_FAKE_WINDOW_MANAGER.dialogs, [])
 
     def test_quick_execute_default_starts_background_session(self):
         context = self._make_context([self._make_mesh("M1")])

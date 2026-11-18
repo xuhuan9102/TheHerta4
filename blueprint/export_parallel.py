@@ -78,6 +78,7 @@ class ExportRoundExecutor:
         BlueprintExportHelper.calculate_max_export_count(tree)
         nested_trees = cls.collect_nested_trees(tree)
         PreProcessHelper.recover_blueprint_node_references(tree, nested_trees)
+        BlueprintExportHelper.validate_object_info_references(tree)
 
         try:
             cls._prepare_round_state(tree, round_plan)

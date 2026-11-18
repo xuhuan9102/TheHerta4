@@ -816,5 +816,6 @@ class NTMIModImpExportSession:
 
 
 def execute_ntmi_modimp_export(context, tree, node):
+    BlueprintExportHelper.validate_object_info_references(tree, node)
     session = NTMIModImpExportSession(context=context, tree=tree, node=node)
     return session.run()

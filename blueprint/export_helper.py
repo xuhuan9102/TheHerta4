@@ -847,14 +847,18 @@ class BlueprintExportHelper:
                     yield source_node
 
     @staticmethod
-    def _collect_ordered_start_nodes_from_tree(tree, ordered_nodes, emitted_node_keys, visited_trees):
+    def _collect_ordered_start_nodes_from_tree(
+        tree, ordered_nodes, emitted_node_keys, visited_trees,
+        output_node=None, expand_object_info_pro=True,
+    ):
         if not BlueprintExportHelper._is_valid_blueprint_tree(tree):
             return
         if tree.name in visited_trees:
             return
         visited_trees.add(tree.name)
 
-        output_node = BlueprintExportHelper.get_result_output_node(tree)
+        if output_node is None:
+            output_node = BlueprintExportHelper.get_result_output_node(tree)
         if not output_node:
             return
 
@@ -893,10 +897,11 @@ class BlueprintExportHelper:
                         ordered_nodes=ordered_nodes,
                         emitted_node_keys=emitted_node_keys,
                         visited_trees=visited_trees,
+                        expand_object_info_pro=expand_object_info_pro,
                     )
                     return
 
-                if node_type == 'SSMTNode_Object_Info_Pro':
+                if node_type == 'SSMTNode_Object_Info_Pro' and expand_object_info_pro:
                     # 物体信息 Pro：展开成多个伪装成普通物体信息节点的条目视图。
                     # 链式遍历与下游处理节点因此拿到的就是 N 个普通物体信息节点，
                     # 无需为 Pro 类型做任何分支（一个 Pro 节点 = 过去的多个节点）。
@@ -907,7 +912,7 @@ class BlueprintExportHelper:
                             append_start_node(entry_view)
                     return
 
-                if node_type in {'SSMTNode_Object_Info', 'SSMTNode_MultiFile_Export'}:
+                if node_type in {'SSMTNode_Object_Info', 'SSMTNode_Object_Info_Pro', 'SSMTNode_MultiFile_Export'}:
                     if not getattr(current_node, "mute", False):
                         append_start_node(current_node)
                     return
@@ -935,15 +940,71 @@ class BlueprintExportHelper:
         walk_node(output_node)
 
     @staticmethod
-    def collect_connected_start_nodes(tree):
+    def collect_connected_start_nodes(tree, *, output_node=None, expand_object_info_pro=True):
         ordered_nodes = []
         BlueprintExportHelper._collect_ordered_start_nodes_from_tree(
             tree,
             ordered_nodes=ordered_nodes,
             emitted_node_keys=set(),
             visited_trees=set(),
+            output_node=output_node,
+            expand_object_info_pro=expand_object_info_pro,
         )
         return ordered_nodes
+
+    @staticmethod
+    def validate_object_info_references(tree, output_node=None):
+        """在前处理前校验本次输出使用的物体信息节点和 Pro 条目。"""
+        nodes = BlueprintExportHelper.collect_connected_start_nodes(
+            tree, output_node=output_node, expand_object_info_pro=False,
+        )
+        issues = []
+        for node in nodes:
+            if node.bl_idname not in {'SSMTNode_Object_Info', 'SSMTNode_Object_Info_Pro'}:
+                continue
+            entries = getattr(node, 'object_list', ())
+            for index, entry in enumerate(entries or (node,), start=1):
+                name = ""
+                try:
+                    name = entry.object_name
+                    if not name:
+                        reason = "未设置物体"
+                    else:
+                        reason = BlueprintExportHelper._object_info_reference_error(entry, name)
+                except ReferenceError:
+                    reason = "物体或网格引用已失效"
+
+                if reason:
+                    location = f"{node.id_data.name} / {node.name}"
+                    if entries:
+                        location += f" 第 {index} 项"
+                    issues.append(f"{location}（{name or '空引用'}）— {reason}")
+
+        if issues:
+            heading = "物体信息节点存在失效引用。请重新选择物体或断开节点。"
+            raise ValueError(heading + "\n" + "\n".join(issues))
+
+    @staticmethod
+    def _object_info_reference_error(entry, name):
+        # 允许已有的改名同步和原物体恢复，避免按 DrawIB 前缀误认同部件的其它网格。
+        obj = bpy.data.objects.get(name)
+        if obj is None:
+            obj = BlueprintExportHelper._find_object_by_pointer(getattr(entry, 'object_id', ''))
+        if obj is None:
+            original_name = getattr(entry, 'original_object_name', '')
+            if original_name:
+                obj = bpy.data.objects.get(original_name)
+        if obj is None:
+            return "物体不存在"
+        if obj.is_missing:
+            return "链接物体缺失"
+        if obj.type != 'MESH':
+            return "引用的物体不是网格"
+        if obj.data is None or obj.data.is_missing:
+            return "网格数据缺失"
+        if not obj.users_scene:
+            return "物体已从场景移除"
+        return ""
 
     @staticmethod
     def scene_object_present(*names: str) -> bool:

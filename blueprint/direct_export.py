@@ -900,6 +900,7 @@ def execute_direct_export(context, tree):
     BlueprintExportHelper.set_direct_export_active(True)
     try:
         refresh_blueprint_sync_state(tree=tree, context=context, include_all_blueprints=True)
+        BlueprintExportHelper.validate_object_info_references(tree)
         session = DirectExportSession(context=context, tree=tree)
         session.run()
     finally:

@@ -21,14 +21,18 @@ for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common", f"{PKG}.utils"):
 
 
 class _FakeObjects(dict):
-    def get(self, name, default=None):
-        return super().get(name, default)
+    def __iter__(self):
+        return iter(self.values())
 
 
 class _FakeObject:
-    def __init__(self, name, pointer):
+    def __init__(self, name, pointer, *, object_type="MESH", linked=True, missing=False):
         self.name = name
         self._pointer = pointer
+        self.type = object_type
+        self.is_missing = missing
+        self.data = types.SimpleNamespace(is_missing=False)
+        self.users_scene = ["Scene"] if linked else []
 
     def as_pointer(self):
         return self._pointer
@@ -137,6 +141,71 @@ class ExportHelperPreprocessObjectNameTests(unittest.TestCase):
         _fake_bpy.data.objects.clear()
         _fake_bpy.data.node_groups[:] = []
         export_helper.BlueprintExportHelper.runtime_result_output_node_type = ""
+
+    def test_export_reference_check_reports_invalid_connected_nodes_and_pro_entries(self):
+        objects = _fake_bpy.data.objects
+        sibling_name = "LOD0.92cb56c9-64626-0.同一部件"
+        objects[sibling_name] = _FakeObject(sibling_name, 1)
+        objects["Unlinked"] = _FakeObject("Unlinked", 2, linked=False)
+        objects["Lamp"] = _FakeObject("Lamp", 3, object_type="LIGHT")
+        objects["No mesh"] = _FakeObject("No mesh", 4)
+        objects["No mesh"].data = None
+        objects["Missing library"] = _FakeObject("Missing library", 5, missing=True)
+        deleted_name = "LOD0.92cb56c9-64626-0.已删除"
+        missing = _FakeNode("旧物体", "SSMTNode_Object_Info", object_name=deleted_name, object_id="9")
+        pro = _FakeNode(
+            "衣服列表",
+            "SSMTNode_Object_Info_Pro",
+            object_list=[
+                types.SimpleNamespace(object_name=name)
+                for name in ("Unlinked", "Lamp", "No mesh", "Missing library", "")
+            ],
+        )
+        nested_output = _FakeNode(
+            "Output", "SSMTNode_Result_Output",
+            inputs=[_FakeSocket(pro, True, "SSMTSocketObject")],
+        )
+        nested = _make_tree("子蓝图", pro, nested_output)
+        _fake_bpy.data.node_groups = {nested.name: nested}
+        self.addCleanup(setattr, _fake_bpy.data, "node_groups", [])
+        nest = _FakeNode("Nested", "SSMTNode_Blueprint_Nest", blueprint_name=nested.name)
+        muted = _FakeNode("已静音", "SSMTNode_Object_Info", mute=True, object_name="Missing")
+        disconnected = _FakeNode("未连接", "SSMTNode_Object_Info", object_name="Missing")
+        output = _FakeNode(
+            "Output", "SSMTNode_Result_Output",
+            inputs=[_FakeSocket(node, True, "SSMTSocketObject") for node in (missing, nest, muted)],
+        )
+        tree = _make_tree("主蓝图", missing, nest, muted, disconnected, output)
+
+        with self.assertRaises(ValueError) as err:
+            export_helper.BlueprintExportHelper.validate_object_info_references(tree)
+
+        message = str(err.exception)
+        self.assertIn(f"主蓝图 / 旧物体（{deleted_name}）— 物体不存在", message)
+        self.assertIn("子蓝图 / 衣服列表 第 1 项（Unlinked）— 物体已从场景移除", message)
+        self.assertIn("子蓝图 / 衣服列表 第 2 项（Lamp）— 引用的物体不是网格", message)
+        self.assertIn("子蓝图 / 衣服列表 第 3 项（No mesh）— 网格数据缺失", message)
+        self.assertIn("子蓝图 / 衣服列表 第 4 项（Missing library）— 链接物体缺失", message)
+        self.assertIn("子蓝图 / 衣服列表 第 5 项（空引用）— 未设置物体", message)
+        self.assertNotIn("已静音", message)
+        self.assertNotIn("未连接", message)
+
+    def test_export_reference_check_accepts_renamed_mesh_for_selected_output(self):
+        _fake_bpy.data.objects["New name"] = _FakeObject("New name", 1001)
+        missing = _FakeNode("Missing", "SSMTNode_Object_Info", object_name="Deleted")
+        renamed = _FakeNode(
+            "Renamed", "SSMTNode_Object_Info_Pro", object_name="Old name", object_id="1001",
+        )
+        output = _FakeNode(
+            "Output", "SSMTNode_Result_Output", inputs=[_FakeSocket(missing, True, "SSMTSocketObject")],
+        )
+        selected_output = _FakeNode(
+            "NTMI", "SSMTNode_Result_Output_NTMIModImp",
+            inputs=[_FakeSocket(renamed, True, "SSMTSocketObject")],
+        )
+        tree = _make_tree("TestTree", missing, renamed, output, selected_output)
+
+        export_helper.BlueprintExportHelper.validate_object_info_references(tree, selected_output)
 
     def test_collect_connected_preprocess_object_names_prefers_object_id_resolution(self):
         """测试 collect_connected_preprocess_object_names 优先通过 object_id 解析真实对象名"""

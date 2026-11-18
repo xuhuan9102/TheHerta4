@@ -838,8 +838,11 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
             self.report({'ERROR'}, "未找到当前蓝图，请在蓝图编辑器中点击 Generate Mod")
             return {'CANCELLED'}
 
-        if GlobalConfig.logic_name == LogicName.NTEMI and self._ntmi_output_node(tree) is None:
+        ntmi_output = self._ntmi_output_node(tree)
+        if GlobalConfig.logic_name == LogicName.NTEMI and ntmi_output is None:
             self.report({'ERROR'}, "当前蓝图中未找到 NTMI ModImp 输出节点。")
+            return {'CANCELLED'}
+        if not self._validate_object_info_references(tree, ntmi_output):
             return {'CANCELLED'}
 
         # 旧配置表：沿用原有「覆盖 / 保留」确认弹窗。后台导出以前整段跳过，
@@ -850,6 +853,14 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
             return dialog_result
 
         return self._start_background_export(context, tree)
+
+    def _validate_object_info_references(self, tree, output_node):
+        try:
+            BlueprintExportHelper.validate_object_info_references(tree, output_node)
+        except ValueError as error:
+            self.report({'ERROR'}, str(error))
+            return False
+        return True
 
     def _start_background_export(self, context, tree):
         """存快照 → 起后台实例 → 挂 modal 轮询；确认弹窗与直接启动共用这一段。"""
@@ -1152,6 +1163,8 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
         tree = self._resolve_target_tree(context)
         if not tree:
             self.report({'ERROR'}, "未找到当前蓝图，请在蓝图编辑器中点击 Generate Mod")
+            return {'CANCELLED'}
+        if not self._validate_object_info_references(tree, self._ntmi_output_node(tree)):
             return {'CANCELLED'}
 
         self._backup_config_tables_before_export()
