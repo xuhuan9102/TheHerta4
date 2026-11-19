@@ -100,6 +100,7 @@ _install_module(
 _install_module(
     f"{PKG}.blueprint.direct_export_shapekey_shared",
     ShapeKeyDirectExportError=RuntimeError,
+_buffer_to_bytes=lambda data: b"" if data is None else (data.tobytes() if hasattr(data, "tobytes") else bytes(data)),
 )
 
 
