@@ -22,6 +22,7 @@ from .node_postprocess_rabbitfx_pro import (
     _leading_whitespace,
     _load_material_module,
     _normalize_suffix,
+    _on_preview_parameter_update,
     _objects_used_by_other_nodes,
     _section_fallback_unit,
     _strip_previous_blocks,
@@ -34,16 +35,19 @@ from .node_postprocess_rabbitfx import (
 )
 
 NODE_IDNAME = "SSMTNode_PostProcess_GlowFX"
-NAMESPACE = "GlowFX"
-RUN_LINE = rf"run = CommandList\{NAMESPACE}\Run"
-GLOW_REF_PREFIX = rf"Resource\{NAMESPACE}\Glowmap"
-PARAM_PREFIX = rf"$\{NAMESPACE}"
-_PARAM_NAME_CASE = {'h': 'H', 's': 'S', 'v': 'V'}
+RUN_LINE = "run = CommandListGlowFXRun"
+_DRAW_GUARD = 'if !$\\SlotFix\\is_outline_shader'
+GLOW_RESOURCE = "ResourceGlowFXMap"
+_DEFAULT_HALO_RADIUS = 40
+_LOCAL_GLOW_REF_RE = re.compile(r"^ResourceGlowFXMap(?:_r\d+)?\s*=\s*ref\s+(\S+)", re.IGNORECASE)
+_RUNTIME_NAME_RE = re.compile(r"\b(?:\w*GeoGlow\w*|ResourceGlowFXMap|CommandListGlowFXRun)\b", re.IGNORECASE)
+_LEGACY_RUN_LINE = r"run = CommandList\GlowFX\Run"
+_LEGACY_GLOW_REF_RE = re.compile(r"^Resource\\GlowFX\\Glowmap\s*=\s*ref\s+(\S+)", re.IGNORECASE)
 
 
 def _glowfx_param(name):
-    """GlowFX 着色器参数名：H/S/V 大写，其余与 RabbitFX 同名。"""
-    return f"{PARAM_PREFIX}\\{_PARAM_NAME_CASE.get(str(name), name)}"
+    return f"$glowfx_{name.lower()}"
+
 
 _PARAM_BEGIN = "; === GlowFX Params ==="
 _PARAM_END = "; === End GlowFX Params ==="
@@ -107,9 +111,9 @@ def _strip_previous_glowfx_blocks(lines):
                 index = end_index + 1
                 continue
         if (
-            text.startswith(f"Resource\\{NAMESPACE}\\")
-            or text.startswith(f"$\\{NAMESPACE}\\")
-            or text.casefold() == RUN_LINE.casefold()
+            text.casefold().startswith("resource\\glowfx\\")
+            or text.casefold().startswith("$\\glowfx\\")
+            or text.casefold() == _LEGACY_RUN_LINE.casefold()
         ):
             index += 1
             continue
@@ -132,21 +136,21 @@ def _strip_rabbitfx_glow_lines(lines, profile):
     return kept
 
 
-def _strip_material_rabbitfx_lines(lines):
+def _strip_material_rabbitfx_lines(lines, keep_markers=()):
     """删除材质转资源写入的 RabbitFX 行、标记与变量。"""
     return [
         line
         for line in lines
-        if _RABBITFX_ELEMENT_RE.search(str(line)) is None
+        if _RABBITFX_ELEMENT_RE.search(str(line)) is None or str(line).strip() in keep_markers
     ]
 
 
-def _strip_material_rabbitfx_sections(sections):
+def _strip_material_rabbitfx_sections(sections, keep_markers=()):
     cleaned = OrderedDict()
     for section_name, section_lines in sections.items():
         if _RABBITFX_ELEMENT_RE.search(str(section_name)):
             continue
-        cleaned[section_name] = _strip_material_rabbitfx_lines(section_lines)
+        cleaned[section_name] = _strip_material_rabbitfx_lines(section_lines, keep_markers)
     return cleaned
 
 
@@ -202,6 +206,23 @@ class SSMTNode_PostProcess_GlowFX(
 ):
     __annotations__ = dict(SSMTNode_PostProcess_RabbitFXPro.__annotations__)
 
+    __annotations__["glow_brightness"] = bpy.props.FloatProperty(
+        name="发光强度",
+        description="调整发光亮度",
+        default=8.0, min=0, max=500, update=_on_preview_parameter_update,
+    )
+    halo_radius: bpy.props.IntProperty(
+        name="光晕范围",
+        description="光晕在渲染画面中的渐隐半径，单位为像素，0 仅保留发光核心",
+        default=_DEFAULT_HALO_RADIUS, min=0,
+    )
+
+    emission_only: bpy.props.BoolProperty(
+        name="仅绘制发光贴图",
+        description="隐藏目标网格的原材质，只绘制发光贴图覆盖的区域",
+        default=False,
+    )
+
     bl_idname = NODE_IDNAME
     bl_label = "Glow FX着色器"
     bl_description = (
@@ -215,9 +236,42 @@ class SSMTNode_PostProcess_GlowFX(
             self.buffer_tag = uuid.uuid4().hex[:8]
         self.width = 380
 
+    def copy(self, source):
+        self.buffer_tag = uuid.uuid4().hex[:8]
+
+    def _var_tag(self):
+        tag = super()._var_tag().lower()
+        nodes = getattr(getattr(self, "id_data", None), "nodes", ())
+        tags_by_name = {
+            node.name: _RabbitFXProPanelMixin._var_tag(node).lower()
+            for node in nodes
+            if getattr(node, "bl_idname", "") == NODE_IDNAME
+        }
+        matching_names = sorted(name for name, value in tags_by_name.items() if value == tag)
+        if self.name not in matching_names or self.name == matching_names[0]:
+            return tag
+
+        # Saved copies can share a tag. Assign stable suffixes without editing the tree.
+        reserved_tags = set(tags_by_name.values())
+        suffix = 2
+        for name in matching_names[1:]:
+            while f"{tag}_{suffix}" in reserved_tags:
+                suffix += 1
+            if name == self.name:
+                return f"{tag}_{suffix}"
+            suffix += 1
+
     @property
     def fx_profile_label(self):
-        return f"FX 命名空间：{NAMESPACE}（专用内核）"
+        return "GlowFX 专用内核（随 Mod 加载）"
+
+    def _draw_breath_block(self, layout):
+        layout.prop(self, "halo_radius")
+        layout.prop(self, "emission_only")
+        super()._draw_breath_block(layout)
+
+    def _halo_suffix(self):
+        return "" if self.halo_radius == _DEFAULT_HALO_RADIUS else f"_r{self.halo_radius}"
 
     def validate_export_configuration(self):
         conflicts = []
@@ -278,6 +332,7 @@ class SSMTNode_PostProcess_GlowFX(
 
         if generated:
             self._copy_glow_fx_resources(mod_export_path)
+            self._disable_legacy_glow_fx_ini(mod_export_path)
 
     def _has_sibling_rabbitfx_targets(self):
         """同蓝图里是否有另一套 RabbitFXPro 节点、且它还配置了目标物体。"""
@@ -294,6 +349,21 @@ class SSMTNode_PostProcess_GlowFX(
                     return True
         return False
 
+    def _sibling_glow_markers(self, records):
+        targets = {
+            item.target_object.name
+            for other in getattr(getattr(self, "id_data", None), "nodes", ())
+            if other is not self and getattr(other, "bl_idname", "") == NODE_IDNAME
+            and not getattr(other, "mute", False)
+            for item in other.target_items
+            if item.target_object is not None
+        }
+        # The next GlowFX node uses these comments to locate its material draws.
+        return {
+            record["marker"] for record in records or ()
+            if record.get("type") == "Glowmap" and record.get("object") in targets
+        }
+
     def _process_ini_file(self, ini_file, targets, records=None):
         with open(ini_file, "r", encoding="utf-8") as handle:
             content = handle.read()
@@ -308,18 +378,22 @@ class SSMTNode_PostProcess_GlowFX(
             changed = self._apply_material_records(sections, records, targets, "")
             generated = changed
 
-        if generated and self.enable_glow and self._breathing():
-            changed |= self._ensure_glow_constants(sections)
         if not changed:
             return False
         if generated:
+            self._embed_glow_runtime(sections)
+            if self.enable_glow and self._breathing():
+                self._ensure_glow_constants(sections)
+                self._ensure_breath_clock(sections)
             if self._has_sibling_rabbitfx_targets():
                 # 同蓝图还有 RabbitFXPro 在用：只清本节点自己的单元，别动别人的运行元素。
                 print(
                     "[GlowFX] 同蓝图存在 RabbitFXPro 目标，保留其 RabbitFX 运行元素"
                 )
             else:
-                sections = _strip_material_rabbitfx_sections(sections)
+                sections = _strip_material_rabbitfx_sections(
+                    sections, self._sibling_glow_markers(records)
+                )
                 preamble = _strip_material_rabbitfx_lines(preamble)
                 preserved_driver = _strip_material_rabbitfx_text(preserved_driver)
                 tail = _strip_material_rabbitfx_text(tail)
@@ -378,7 +452,6 @@ class SSMTNode_PostProcess_GlowFX(
             grouped.setdefault(key, [unit, []])[1].append(record)
 
         changed = False
-        breath_tick_count = len(grouped)
         for (section_name, _), (unit, unit_records) in sorted(
             grouped.items(),
             key=lambda item: (item[0][0], item[0][1]),
@@ -402,7 +475,6 @@ class SSMTNode_PostProcess_GlowFX(
                 unit,
                 record.get("marker"),
                 ref,
-                breath_tick_count,
             )
         return changed
 
@@ -440,7 +512,6 @@ class SSMTNode_PostProcess_GlowFX(
                 unit,
                 None,
                 "",
-                len(jobs),
             )
         return changed, changed
 
@@ -450,12 +521,17 @@ class SSMTNode_PostProcess_GlowFX(
         unit,
         marker,
         record_ref,
-        breath_tick_count,
     ):
         start, end = _unit_edit_scope(lines, unit)
         block = _strip_previous_blocks(lines[start:end])
-        block = _strip_previous_glowfx_blocks(block)
         ref = record_ref or _block_resource_ref(block, self.fx_profile)
+        if not ref:
+            for line in block:
+                match = _LEGACY_GLOW_REF_RE.match(line.strip()) or _LOCAL_GLOW_REF_RE.match(line.strip())
+                if match:
+                    ref = match.group(1)
+                    break
+        block = _strip_previous_glowfx_blocks(block)
         if not ref:
             print(f"[GlowFX] 跳过 {unit.get('mesh', '')}: 找不到 Glowmap 资源引用")
             return False
@@ -471,54 +547,53 @@ class SSMTNode_PostProcess_GlowFX(
         indent = _leading_whitespace(block[draw_index])
         call_lines = [
             _CALL_BEGIN,
-            f"{GLOW_REF_PREFIX} = ref {ref}",
-            f"{PARAM_PREFIX}\\DrawCount = {draw_args[0]}",
-            f"{PARAM_PREFIX}\\DrawStart = {draw_args[1]}",
-            f"{PARAM_PREFIX}\\DrawBase = {draw_args[2]}",
-            RUN_LINE,
+            "endif",
+            f"{GLOW_RESOURCE}{self._halo_suffix()} = ref {ref}",
+            f"$glowfx_drawcount = {draw_args[0]}",
+            f"$glowfx_drawstart = {draw_args[1]}",
+            f"$glowfx_drawbase = {draw_args[2]}",
+            RUN_LINE + self._halo_suffix(),
         ]
         if self.enable_reset:
             call_lines.extend(
                 [
                     _RESET_BEGIN,
-                    f"{PARAM_PREFIX}\\H = 0",
-                    f"{PARAM_PREFIX}\\S = 0",
-                    f"{PARAM_PREFIX}\\V = 0",
-                    f"{PARAM_PREFIX}\\interpolate = 0",
+                    "$glowfx_h = 0",
+                    "$glowfx_s = 0",
+                    "$glowfx_v = 0",
+                    "$glowfx_interpolate = 0",
                     _RESET_END,
                 ]
             )
         call_lines.append(_CALL_END)
         _insert_block(block, draw_index + 1, call_lines, indent)
 
+        param_lines = [_PARAM_BEGIN]
         if self.enable_glow:
-            param_position = draw_index
-            param_lines = [
-                _PARAM_BEGIN,
-                *self._build_glow_parameter_lines(breath_tick_count),
-                _PARAM_END,
-            ]
-            _insert_block(
-                block,
-                param_position,
-                param_lines,
-                _leading_whitespace(block[param_position])
-                if 0 <= param_position < len(block)
-                else "",
-            )
+            param_lines.extend(self._build_glow_parameter_lines())
+        if self.emission_only:
+            param_lines.extend([
+                "$glowfx_emission_only = 1",
+                _DRAW_GUARD + " && !$glowfx_emission_only",
+            ])
+        else:
+            param_lines.append(_DRAW_GUARD)
+        param_lines.append(_PARAM_END)
+        _insert_block(block, draw_index, param_lines, indent)
 
         lines[start:end] = block
         return True
 
-    def _build_glow_parameter_lines(self, breath_tick_count):
+    def _build_glow_parameter_lines(self):
         if self._breathing():
-            return self._build_breath_lines(breath_tick_count)
+            _, values = self._split_breath_lines()
+            return [_BREATH_BEGIN, *values, _BREATH_END]
         return [
-            f"{PARAM_PREFIX}\\H = {_format_float(self.glow_h)}",
-            f"{PARAM_PREFIX}\\S = {_format_float(self.glow_s)}",
-            f"{PARAM_PREFIX}\\V = {_format_float(self.glow_v)}",
-            f"{PARAM_PREFIX}\\brightness = {_format_float(self.glow_brightness)}",
-            f"{PARAM_PREFIX}\\interpolate = {_format_float(self.glow_interpolate)}",
+            f"$glowfx_h = {_format_float(self.glow_h)}",
+            f"$glowfx_s = {_format_float(self.glow_s)}",
+            f"$glowfx_v = {_format_float(self.glow_v)}",
+            f"$glowfx_brightness = {_format_float(self.glow_brightness)}",
+            f"$glowfx_interpolate = {_format_float(self.glow_interpolate)}",
         ]
 
     def _build_breath_lines(self, breath_tick_count=1):
@@ -538,7 +613,24 @@ class SSMTNode_PostProcess_GlowFX(
             brightness_max=self.breath_brightness_max,
             interpolate=self.breath_interpolate,
             tick_count=breath_tick_count,
+            smooth_combo=True,
         )
+
+    def _split_breath_lines(self):
+        lines = self._build_breath_lines()
+        hue_assignment = f"{_glowfx_param('h')} = "
+        first_value = next(i for i, line in enumerate(lines) if line.startswith(hue_assignment))
+        return lines[1:first_value], lines[first_value:-1]
+
+    def _ensure_breath_clock(self, sections):
+        clock, _ = self._split_breath_lines()
+        tag = self._var_tag()
+        begin = f"; === GlowFX Breath Clock {tag} ==="
+        end = f"; === End GlowFX Breath Clock {tag} ==="
+        present = sections.setdefault("[Present]", [])
+        if begin in present and end in present:
+            del present[present.index(begin):present.index(end) + 1]
+        present.extend([begin, *clock, end])
 
     def _ensure_glow_constants(self, sections):
         tag = self._var_tag()
@@ -566,19 +658,63 @@ class SSMTNode_PostProcess_GlowFX(
             )
         )
 
-    def _copy_glow_fx_resources(self, mod_export_path):
-        source_root = self._resource_source_root()
-        resources = (
-            ("GlowFX", "GlowFX.ini"),
-            ("res", "glow_fx_ps.hlsl"),
+    def _embed_glow_runtime(self, sections):
+        template = os.path.join(self._resource_source_root(), "GlowFX", "GlowFX.ini")
+        with open(template, encoding="utf-8") as handle:
+            source = handle.read()
+        radius = self.halo_radius
+        normalization = 1.0
+        spacing = 2 * max(1, (radius + 95) // 96)
+        for offset in range(spacing, radius, spacing):
+            fraction = offset / radius
+            edge = 1.0 - fraction * fraction * (3.0 - 2.0 * fraction)
+            normalization += 2.0 * 2.0 ** (-4.0 * fraction * fraction) * edge
+        source = source.replace("__GLOW_RADIUS__", str(radius))
+        source = source.replace("__GLOW_NORMALIZATION__", f"{normalization:.8f}")
+        suffix = self._halo_suffix()
+        if suffix:
+            source = _RUNTIME_NAME_RE.sub(lambda match: match.group() + suffix, source)
+        runtime, _ = self._parse_ini(source)
+        constants = sections.setdefault("[Constants]", [])
+        existing = {line.strip().casefold() for line in constants}
+        constants.extend(line for line in runtime.pop("[Constants]") if line.casefold() not in existing)
+        present = sections.setdefault("[Present]", [])
+        existing_present = {line.strip().casefold() for line in present}
+        present.extend(
+            line for line in runtime.pop("[Present]")
+            if line.strip().casefold() not in existing_present
         )
-        for relative_dir, filename in resources:
-            source = os.path.join(source_root, relative_dir, filename)
-            if not os.path.isfile(source):
-                raise FileNotFoundError(f"Glow FX 专用着色器资源缺失: {source}")
-            target_dir = os.path.join(mod_export_path, relative_dir)
-            os.makedirs(target_dir, exist_ok=True)
-            shutil.copy2(source, os.path.join(target_dir, filename))
+        sections.update(runtime)
+
+    def _copy_glow_fx_resources(self, mod_export_path):
+        source_dir = os.path.join(self._resource_source_root(), "res")
+        target_dir = os.path.join(mod_export_path, "res")
+        os.makedirs(target_dir, exist_ok=True)
+        for filename in (
+            "glow_fx_ps.hlsl",
+            "geom_glow_vs.hlsl",
+            "geom_glow_visibility_ps.hlsl",
+            "geom_glow_layers.hlsli",
+            "geom_glow_prefilter_ps.hlsl",
+            "geom_glow_horizontal_ps.hlsl",
+            "geom_glow_composite_ps.hlsl",
+        ):
+            shutil.copy2(os.path.join(source_dir, filename), target_dir)
+
+    @staticmethod
+    def _disable_legacy_glow_fx_ini(mod_export_path):
+        legacy_ini = os.path.join(mod_export_path, "GlowFX", "GlowFX.ini")
+        if not os.path.isfile(legacy_ini):
+            return
+        # A previously exported INI can coexist in the folder after a name change.
+        for ini_file in glob.glob(os.path.join(mod_export_path, "*.ini")):
+            with open(ini_file, encoding="utf-8-sig") as handle:
+                if any(line.strip().casefold() == _LEGACY_RUN_LINE.casefold() for line in handle):
+                    return
+        with open(legacy_ini, encoding="utf-8-sig") as handle:
+            content = handle.read().casefold()
+        if "namespace = glowfx" in content and "[customshaderglowfx]" in content:
+            os.rename(legacy_ini, legacy_ini + ".disabled")
 
 
 _classes = (SSMTNode_PostProcess_GlowFX,)

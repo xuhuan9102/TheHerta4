@@ -277,6 +277,8 @@ def _load_glowfx_module():
 
 def _make_glowfx_node(**overrides):
     module = _load_glowfx_module()
+    overrides.setdefault("halo_radius", 40)
+    overrides.setdefault("emission_only", False)
     return _make_node(
         node_cls=module.SSMTNode_PostProcess_GlowFX,
         **overrides,
@@ -2241,48 +2243,61 @@ class GlowFXTests(unittest.TestCase):
         self.assertTrue(first_list_id)
         self.assertNotEqual(first_list_id, second_list_id)
 
-    def test_glow_fx_overlay_preserves_depth_culling_and_alpha(self):
-        ini_path = (
-            ROOT
-            / "Toolset"
-            / "glow_fx"
-            / "GlowFX"
-            / "GlowFX.ini"
-        )
-        states = {}
-        in_shader = False
-        for raw_line in ini_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if line.casefold() == "[customshaderglowfx]":
-                in_shader = True
-                continue
-            if in_shader and line.startswith("["):
-                break
-            if in_shader and "=" in line:
-                key, value = line.split("=", 1)
-                states[key.strip().casefold()] = value.strip().casefold()
+    def test_glow_fx_uses_private_depth_mask_and_composites_before_ui(self):
+        runtime = ROOT / "Toolset" / "glow_fx" / "GlowFX" / "GlowFX.ini"
+        node = _load_glowfx_module().SSMTNode_PostProcess_GlowFX
+        sections, _ = node._parse_ini(runtime.read_text(encoding="utf-8"))
+        mask = sections["[CustomShaderGeoGlowMask]"]
+        self.assertIn("blend = disable", mask)
+        self.assertIn("depth_write_mask = all", mask)
+        self.assertIn("depth_func = greater_equal", mask)
+        self.assertIn("od = ref ResourceGeoGlowStampDepth", mask)
+        self.assertIn("ps-t67 = ref ResourceGeoGlowWorldDepth", mask)
+        hook = sections["[ShaderOverrideGeoGlowWorldHDR]"]
+        self.assertIn("hash = 5b043c5784c3b4ed", hook)
+        self.assertIn("run = CommandListGeoGlowWorldHDR", hook)
+        taa_hook = sections["[ShaderOverrideGeoGlowTAA]"]
+        self.assertIn("hash = 7eabecd5696f8d79", taa_hook)
+        self.assertIn("run = CommandListGeoGlowTAA", taa_hook)
+        taa = sections["[CommandListGeoGlowTAA]"]
+        self.assertIn("        ResourceGeoGlowTarget = ref ps-t2", taa)
+        self.assertLess(taa.index("        ps-t2 = null"), taa.index("        run = CommandListGeoGlowCompose"))
+        self.assertIn("        ps-t2 = ref ResourceGeoGlowTarget", taa)
+        self.assertIn("    run = CommandListGeoGlowResetFrame", sections["[CommandListGeoGlowCompose]"])
+        present = sections["[Present]"]
+        self.assertEqual(present, ["pre run = CommandListGeoGlowResetFrame"])
 
-        self.assertEqual(states.get("depth_func"), "equal")
-        self.assertNotIn("cull", states)
-        for suffix in ("", "[1]", "[2]", "[3]"):
-            self.assertEqual(states.get(f"blend{suffix}"), "add one one")
-            self.assertEqual(states.get(f"alpha{suffix}"), "add zero one")
-
-    def test_glow_fx_uses_exact_texel_load_without_mip_filtering(self):
-        shader_path = (
-            ROOT
-            / "Toolset"
-            / "glow_fx"
-            / "res"
-            / "glow_fx_ps.hlsl"
-        )
-        source = shader_path.read_text(encoding="utf-8")
-
-        self.assertIn("GlowMap.Load(", source)
-        self.assertNotIn("SampleLevel(", source)
-        self.assertIn("input.uv.z > 1.0f", source)
+    def test_glow_fx_mask_preserves_parameters_and_matching_fragment_depth(self):
+        shader = ROOT / "Toolset" / "glow_fx" / "res" / "glow_fx_ps.hlsl"
+        source = shader.read_text(encoding="utf-8")
+        self.assertIn("GlowMap.SampleLevel(MaterialSampler, texcoord, 0.0)", source)
+        self.assertIn("GlowMap.SampleGrad(MaterialSampler, texcoord, dx, dy)", source)
+        self.assertIn("IniParams[224]", source)
+        self.assertIn("float brightness = abs(parameters.w);", source)
+        self.assertIn("parameters.w < 0.0 ? depthGap", source)
+        self.assertIn("return float4(emission, position.z);", source)
         self.assertIn("SV_IsFrontFace", source)
-        self.assertIn("cb4[150]", source)
+
+    def test_halo_ranges_keep_separate_runtime_and_work_with_every_glow_mode(self):
+        sections = {}
+        for radius, mode in ((0, None), (24, "SINGLE"), (40, "RAINBOW"), (64, "COMBO")):
+            node = _make_glowfx_node(
+                halo_radius=radius,
+                enable_breath=mode is not None,
+                breath_mode=mode or "SINGLE",
+            )
+            node._embed_glow_runtime(sections)
+            suffix = node._halo_suffix()
+            self.assertIn(
+                f"    x224 = {radius}",
+                sections[f"[CommandListGeoGlowCompose{suffix}]"],
+            )
+            self.assertIn(
+                f"pre run = CommandListGeoGlowResetFrame{suffix}",
+                sections["[Present]"],
+            )
+            self.assertTrue(any("$glowfx_brightness =" in line for line in node._build_glow_parameter_lines()))
+        self.assertEqual(len(sections["[Present]"]), 4)
 
     def test_glowfx_replaces_rabbitfx_with_private_call_after_draw(self):
         marker = "; MaterialRabbitFX glow-fx"
@@ -2316,33 +2331,43 @@ class GlowFXTests(unittest.TestCase):
         self.assertIn(r"Resource\ZZMI\GlowMap = ref ResourceTexture_Glowmap_Personal", content)
         self.assertNotIn(r"Resource\RabbitFX\Glowmap", content)
         self.assertNotIn(r"CommandList\RabbitFX\Run", content)
-        self.assertIn(r"$\GlowFX\H = 12.0", content)
-        self.assertIn(r"$\GlowFX\S = -4.0", content)
-        self.assertIn(r"$\GlowFX\V = 6.0", content)
-        self.assertIn(r"$\GlowFX\brightness = 2.5", content)
-        self.assertIn(r"$\GlowFX\interpolate = 0.75", content)
+        self.assertIn(r"$glowfx_h = 12.0", content)
+        self.assertIn(r"$glowfx_s = -4.0", content)
+        self.assertIn(r"$glowfx_v = 6.0", content)
+        self.assertIn(r"$glowfx_brightness = 2.5", content)
+        self.assertIn(r"$glowfx_interpolate = 0.75", content)
 
         draw_index = content.index("drawindexed = 52688, 0, 3")
         bind_index = content.index(
-            r"Resource\GlowFX\Glowmap = ref Resource_Glowmap_Personal"
+            r"ResourceGlowFXMap = ref Resource_Glowmap_Personal"
         )
-        run_index = content.index(r"run = CommandList\GlowFX\Run")
+        run_index = content.index(r"run = CommandListGlowFXRun")
+        self.assertLess(content.index('if !$\\SlotFix\\is_outline_shader'), draw_index)
+        self.assertIn("endif", content[draw_index:bind_index])
         self.assertLess(draw_index, bind_index)
         self.assertLess(bind_index, run_index)
-        self.assertIn(r"$\GlowFX\DrawCount = 52688", content)
-        self.assertIn(r"$\GlowFX\DrawStart = 0", content)
-        self.assertIn(r"$\GlowFX\DrawBase = 3", content)
+        self.assertIn(r"$glowfx_drawcount = 52688", content)
+        self.assertIn(r"$glowfx_drawstart = 0", content)
+        self.assertIn(r"$glowfx_drawbase = 3", content)
 
-        self.assertTrue(
-            os.path.isfile(
-                os.path.join(self.export_dir, "GlowFX", "GlowFX.ini")
-            )
-        )
-        self.assertTrue(
-            os.path.isfile(
-                os.path.join(self.export_dir, "res", "glow_fx_ps.hlsl")
-            )
-        )
+        self.assertFalse(os.path.isfile(os.path.join(self.export_dir, "GlowFX", "GlowFX.ini")))
+        self.assertNotIn("namespace = GlowFX", content)
+        self.assertEqual(content.count("[Constants]"), 1)
+        self.assertEqual(content.count("[CommandListGlowFXRun]"), 1)
+        self.assertEqual(content.count("[CustomShaderGeoGlowMask]"), 1)
+        self.assertIn("ps = res/glow_fx_ps.hlsl", content)
+        self.assertIn("o3 !== null && o4 === null", content)
+        self.assertIn(r"&& $\SlotFix\is_color_shader && !$\SlotFix\is_outline_shader", content)
+        for filename in (
+            "glow_fx_ps.hlsl",
+            "geom_glow_vs.hlsl",
+            "geom_glow_visibility_ps.hlsl",
+            "geom_glow_layers.hlsli",
+            "geom_glow_prefilter_ps.hlsl",
+            "geom_glow_horizontal_ps.hlsl",
+            "geom_glow_composite_ps.hlsl",
+        ):
+            self.assertTrue(os.path.isfile(os.path.join(self.export_dir, "res", filename)))
 
     def test_glowfx_removes_all_rabbitfx_runtime_elements_from_export(self):
         marker = "; MaterialRabbitFX glow-fx"
@@ -2368,9 +2393,9 @@ class GlowFXTests(unittest.TestCase):
         content = _read_ini(self.ini_path)
 
         self.assertNotIn("RabbitFX", content)
-        self.assertIn("CommandList\\GlowFX\\Run", content)
+        self.assertIn("CommandListGlowFXRun", content)
 
-    def test_glowfx_breathing_uses_private_namespace_and_own_counter(self):
+    def test_glowfx_breathing_uses_local_parameters_and_own_counter(self):
         marker = "; MaterialRabbitFX breathing"
         section = (
             f"[{GLOW_SECTION}]\n"
@@ -2394,9 +2419,14 @@ class GlowFXTests(unittest.TestCase):
         node.execute_postprocess(self.export_dir)
         content = _read_ini(self.ini_path)
 
-        self.assertIn("$glowfx_abcd1234_frame = $glowfx_abcd1234_frame + 0.3", content)
+        tick = "$glowfx_abcd1234_frame = $glowfx_abcd1234_frame + 0.3"
+        sections, _ = node._parse_ini(content)
+        self.assertIn(tick, sections["[Present]"])
+        self.assertIn("pre run = CommandListGeoGlowResetFrame", sections["[Present]"])
+        self.assertEqual(content.count(tick), 1)
+        self.assertNotIn("$glowfx_h =", "\n".join(sections["[Present]"]))
         self.assertIn(
-            r"$\GlowFX\H = $glowfx_abcd1234_glow * 1",
+            r"$glowfx_h = $glowfx_abcd1234_glow * 1",
             content,
         )
         self.assertIn("global persist $glowfx_abcd1234_frame = 0", content)
@@ -2424,6 +2454,54 @@ class GlowFXTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "GlowFX")))
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "res")))
 
+
+    def test_two_glowfx_nodes_keep_material_markers_until_their_own_pass(self):
+        other_name = "LOD0.fd054d1d-30030-0.Other"
+        first_marker = "; MaterialRabbitFX first"
+        second_marker = "; MaterialRabbitFX second"
+        section = (
+            f"[{GLOW_SECTION}]" "\n"
+            f"; [mesh:{MESH_NAME}]" "\n"
+            f"{first_marker}" "\n"
+            "drawindexed = 10, 20, 0\n"
+            f"; [mesh:{other_name}]" "\n"
+            f"{second_marker}" "\n"
+            "drawindexed = 30, 40, 0\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(first_marker)
+        records = material._rabbitfx_outputs[os.path.normcase(os.path.abspath(self.ini_path))]
+        records.append({
+            **records[0],
+            "object": other_name,
+            "marker": second_marker,
+            "lines": [r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Other"],
+        })
+        first = _make_glowfx_node(
+            name="GlowFX", emission_only=True, target_items=[_item(_fake_object())],
+            enable_breath=True, breath_mode="COMBO", breath_fps=200, breath_step=0.3,
+        )
+        second = _make_glowfx_node(
+            name="GlowFX.001", halo_radius=10, target_items=[_item(_fake_object(other_name))],
+            enable_breath=True, breath_mode="COMBO", breath_fps=180, breath_step=4.0,
+        )
+        tree = _fake_tree([first, second])
+        first.id_data = second.id_data = tree
+        first.execute_postprocess(self.export_dir)
+        self.assertIn(second_marker, _read_ini(self.ini_path))
+        second.execute_postprocess(self.export_dir)
+        result = _read_ini(self.ini_path)
+        self.assertNotIn("MaterialRabbitFX", result)
+        self.assertIn("ResourceGlowFXMap = ref Resource_Glowmap_Personal", result)
+        self.assertIn("ResourceGlowFXMap_r10 = ref Resource_Glowmap_Other", result)
+        self.assertIn("run = CommandListGlowFXRun_r10", result)
+        self.assertEqual(first.buffer_tag, second.buffer_tag)
+        self.assertIn("$glowfx_abcd1234_frame + 0.3", result)
+        self.assertIn("$glowfx_abcd1234_2_frame + 4", result)
+        self.assertIn("$glowfx_abcd1234_glow / 200", result)
+        self.assertIn("$glowfx_abcd1234_2_glow / 180", result)
+        second.copy(first)
+        self.assertNotEqual(first.buffer_tag, second.buffer_tag)
 
     def test_glowfx_keeps_sibling_rabbitfx_runtime_elements(self):
         """同蓝图里另有 RabbitFXPro 目标时，GlowFX 不得删掉它的运行元素。"""
@@ -2461,7 +2539,7 @@ class GlowFXTests(unittest.TestCase):
         content = _read_ini(self.ini_path)
 
         # GlowFX 自己的目标被替换成私有调用
-        self.assertIn(r"$\GlowFX\H =", content)
+        self.assertIn(r"$glowfx_h =", content)
         self.assertNotIn(r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal", content)
         # 兄弟 RabbitFXPro 目标的运行元素必须原样保留
         self.assertIn(r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Other", content)
@@ -2514,6 +2592,30 @@ class GlowFXTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["tick_count"], 2)
         self.assertEqual(calls[1]["tick_count"], 2)
+
+    def test_glowfx_combo_eases_brightness_and_respects_both_limits(self):
+        glow = _make_glowfx_node(
+            enable_breath=True, breath_mode="COMBO",
+            breath_brightness_min=2, breath_brightness_max=6,
+            breath_step=1, breath_fps=60,
+        )
+        text = "\n".join(glow._build_breath_lines())
+        self.assertIn("$glowfx_brightness = $glowfx_abcd1234_glow / 60", text)
+        self.assertIn(
+            "$glowfx_brightness = 2 + (6 - 2) * $glowfx_brightness * "
+            "$glowfx_brightness * (3 - 2 * $glowfx_brightness)", text,
+        )
+        self.assertEqual(pro._preview_parameters(glow, 0)[3], 2)
+        self.assertEqual(pro._preview_parameters(glow, 0.99 / 60)[3], 2)
+        self.assertEqual(
+            pro._preview_parameters(glow, 1.01 / 60),
+            pro._preview_parameters(glow, 1.99 / 60),
+        )
+        self.assertGreater(pro._preview_parameters(glow, 1 / 60)[3], 2)
+        self.assertAlmostEqual(pro._preview_parameters(glow, 0.25)[3], 2.625)
+        self.assertEqual(pro._preview_parameters(glow, 1)[3], 6)
+        self.assertAlmostEqual(pro._preview_parameters(glow, 1.75)[3], 2.625)
+        self.assertEqual(pro._preview_parameters(glow, 2)[3], 2)
 
     def test_breath_lines_are_byte_identical_for_same_inputs(self):
         """同一组入参交给共享生成器，两次产物逐字节相同。"""
