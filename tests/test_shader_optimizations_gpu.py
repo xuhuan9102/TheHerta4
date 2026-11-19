@@ -109,3 +109,15 @@ def test_shared_calibration_matches_per_thread_calibration(gpu, tmp_path, degene
         results.append(gpu.read_bytes(resource, data.nbytes).view(np.float32))
     np.testing.assert_array_equal(*results)
     assert results[1][3] == (0 if degenerate else 1)
+
+
+def test_zero_brightness_glow_does_not_draw():
+    from test_fluid_runtime_gating import IniTrace
+    text = (ROOT / 'Toolset/glow_fx/GlowFX/GlowFX.ini').read_text('utf-8')
+    trace = IniTrace(text, external=('CustomShaderGlowFX',))
+    trace.values.update({'$DrawCount': 300, '$brightness': 0})
+    trace.run('CommandListRun')
+    assert 'CustomShaderGlowFX' not in trace.calls
+    trace.values.update({'$DrawCount': 300, '$brightness': 1})
+    trace.run('CommandListRun')
+    assert 'CustomShaderGlowFX' in trace.calls
