@@ -1160,7 +1160,7 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         return -1
 
     def _refresh_entries(self):
-        """刷新节点 UI 中的物体切换列表：蓝图节点 + 可选 INI 配置。"""
+        """刷新节点 UI 中的物体切换列表：读取当前蓝图节点。"""
         self._ensure_namespace()
         self.swap_panel_entries.clear()
 
@@ -1290,34 +1290,6 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
             entry.node_name = f"{node.name}:{part_name or 'part'}:{var}"
             idx_map[var] = len(self.swap_panel_entries) - 1
 
-        # 3. 可选：从 INI 读取 [KeySwap_*] 配置并合并（覆盖备注/选项数/按键）
-        ini_path = (self.ini_file_path or "").strip()
-        if ini_path and os.path.isfile(ini_path):
-            ini_swaps = self._parse_ini_key_swaps(ini_path)
-            for s in ini_swaps:
-                var = str(s["var_name"] or "").strip()
-                if not var:
-                    continue
-                comment = str(s["comment"] or "").strip()
-                existing = self._find_entry_index(var, comment, allow_variable_match=True)
-                if existing >= 0:
-                    entry = self.swap_panel_entries[existing]
-                    self._append_entry_variable(entry, var)
-                    if comment:
-                        entry.comment = s["comment"]
-                    entry.option_count = s["option_count"]
-                    if s["key"]:
-                        entry.hotkey = s["key"]
-                    idx_map[var] = existing
-                else:
-                    entry = self.swap_panel_entries.add()
-                    entry.variable_name = var
-                    entry.variables = var
-                    entry.comment = s["comment"]
-                    entry.option_count = s["option_count"]
-                    entry.hotkey = s["key"]
-                    entry.node_name = ""
-                    idx_map[var] = len(self.swap_panel_entries) - 1
         self._refresh_button_image_entries()
         return len(self.swap_panel_entries)
 
@@ -1499,12 +1471,8 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
     # ==========================================
     # 导出
     # ==========================================
-    def _build_button_list(self, target_ini_file):
-        """构建按钮数据列表。
-
-        Current node list controls order; INI-only switches are retained after
-        node entries, and INI settings fill metadata for matching variables.
-        """
+    def _build_button_list(self, target_ini_file=""):
+        """Build current blueprint buttons in the panel node's saved order."""
         buttons = []
         by_variable = {}
 
@@ -1590,50 +1558,7 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
             for name in names:
                 by_variable[name] = new_button
 
-        # The visible node list is the user's current ordering. Seed it first so
-        # an older target INI cannot silently put its previous KeySwap order back
-        # in front of the current settings. The INI loop below still enriches
-        # matching entries and appends INI-only controls.
-        for entry in getattr(self, "swap_panel_entries", []) or []:
-            var_names = [
-                name.strip() for name in str(getattr(entry, "variables", "") or "").split("|")
-                if name.strip()
-            ]
-            if not var_names:
-                name = str(getattr(entry, "variable_name", "") or "").strip()
-                if name:
-                    var_names = [name]
-            if not var_names:
-                continue
-            option_count = max(1, int(getattr(entry, "option_count", 2) or 2))
-            hotkey = str(getattr(entry, "hotkey", "") or "")
-            add_button({
-                "var_name": var_names[0],
-                "var_names": var_names,
-                "option_count": option_count,
-                "option_counts": [option_count] * len(var_names),
-                "comment": str(getattr(entry, "comment", "") or ""),
-                "hotkey": hotkey,
-                "image_path": self._button_image_for_source(hotkey, var_names[0]),
-            })
-
-        # 1. Explicit INI takes priority; otherwise inspect the generated INI.
-        explicit = (self.ini_file_path or "").strip()
-        ini_swaps = []
-        if explicit and os.path.isfile(explicit):
-            ini_swaps = self._parse_ini_key_swaps(explicit)
-        if not ini_swaps:
-            ini_swaps = self._parse_ini_key_swaps(target_ini_file)
-        for swap in ini_swaps:
-            add_button({
-                "var_name": swap["var_name"],
-                "comment": swap["comment"],
-                "option_count": swap["option_count"],
-                "hotkey": swap["key"],
-                "image_path": self._button_image_for_source(swap["key"], swap["var_name"]),
-            })
-
-        # 2. Fill from blueprint object switches.
+        # 1. Fill from blueprint object switches.
         for node in self._collect_swap_nodes():
             if not VARIABLE_REGISTRY_AVAILABLE:
                 continue
@@ -1692,10 +1617,28 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
                 "hotkey": hotkey,
                 "image_path": self._button_image_for_source(hotkey, var),
             })
-        # Preserve separately configured controls in the panel even when their
-        # keyboard shortcuts match. A shared KeySwap hotkey may still activate
-        # several variables in the game, but it must not collapse their UI
-        # buttons into one long, unusably narrow label.
+        # Old entries can contain several variables merged from an INI.
+        # Use them only for ordering, never to define which variables a button switches.
+        order = {}
+        entries = getattr(self, "swap_panel_entries", ())
+        for index, entry in enumerate(entries):
+            for var in self._entry_variable_names(entry):
+                order.setdefault(var, index)
+        buttons.sort(key=lambda button: min(
+            order.get(var, len(entries)) for var in button["var_names"]
+        ))
+        # 6. 兜底：蓝图里一个切换节点都没有时，才用目标 INI 的 [KeySwap_*] 建按钮
+        #    （VELO/EFMI 桥接等外部流程只写 INI；有节点时仍以当前蓝图为准）。
+        ini_path = str(target_ini_file or "").strip()
+        if not buttons and ini_path and os.path.isfile(ini_path):
+            for swap in self._parse_ini_key_swaps(ini_path):
+                add_button({
+                    "var_name": swap["var_name"],
+                    "comment": swap["comment"],
+                    "option_count": swap["option_count"],
+                    "hotkey": swap["key"],
+                    "image_path": self._button_image_for_source(swap["key"], swap["var_name"]),
+                })
         return buttons
 
     @staticmethod

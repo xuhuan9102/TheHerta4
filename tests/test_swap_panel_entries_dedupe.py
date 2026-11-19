@@ -172,7 +172,7 @@ class EntriesDedupeTestCase(unittest.TestCase):
         ), mock.patch.object(
             self.panel, "_button_image_for_source", return_value=""
         ):
-            return self.panel._build_button_list("")
+            return self.panel._build_button_list()
 
     def _ini_swaps(self, *swaps):
         return list(swaps)
@@ -273,42 +273,34 @@ class BlueprintMergeTests(EntriesDedupeTestCase):
 
 
 class IniMergeTests(EntriesDedupeTestCase):
-    def test_duplicate_variable_in_ini_added_once(self):
-        ini = ["[KeySwap_1]", "[KeySwap_2]"]
-        swaps = [
-            {"var_name": "swapkey3", "comment": "口罩", "option_count": 2, "key": "home"},
-            {"var_name": "swapkey3", "comment": "口罩", "option_count": 4, "key": "end"},
-        ]
-        with self._parse_ini(*swaps):
-            self._refresh([], ini=ini)
-        self.assertEqual(len(self.panel.swap_panel_entries), 1)
-        self.assertEqual(self.panel.swap_panel_entries[0].option_count, 4)
-
-    def test_ini_merges_into_blueprint_entry_and_updates_idx_map(self):
-        swaps = [
-            {"var_name": "swapkey3", "comment": "口罩", "option_count": 3, "key": "home"},
-        ]
-        with self._parse_ini(*swaps):
-            self._refresh([_swap_node()], ini=["[KeySwap_1]"])
+    def test_refresh_ignores_ini_key_swaps(self):
+        stale_swap = {"var_name": "swapkey3", "comment": "旧备注", "option_count": 5, "key": "end"}
+        with self._parse_ini(stale_swap) as parse:
+            self._refresh([_swap_node(slots=2, hotkey="home")], ini=["[KeySwap_1]"])
+        parse.assert_not_called()
         self.assertEqual(len(self.panel.swap_panel_entries), 1)
         entry = self.panel.swap_panel_entries[0]
-        self.assertEqual(entry.option_count, 3)
+        self.assertEqual(entry.comment, "口罩")
+        self.assertEqual(entry.option_count, 2)
         self.assertEqual(entry.hotkey, "home")
-
-    def test_ini_same_comment_different_variable_merged(self):
-        node = _swap_node(var="swapkey4", comment="口罩")
-        swaps = [
-            {"var_name": "swapkey3", "comment": "口罩", "option_count": 5, "key": "end"},
-        ]
-        with self._parse_ini(*swaps):
-            self._refresh([node], ini=["[KeySwap_1]"])
-        self.assertEqual(len(self.panel.swap_panel_entries), 1)
-        entry = self.panel.swap_panel_entries[0]
-        self.assertEqual(entry.variables, "swapkey4|swapkey3")
-        self.assertEqual(entry.option_count, 5)
 
 
 class ButtonListTests(EntriesDedupeTestCase):
+    def test_stale_panel_entry_cannot_merge_futa_and_face(self):
+        entry = self.panel.swap_panel_entries.add()
+        entry.variables = "$swapkey0|$swapkey4|$swapkey150"
+        entry.comment = "futa / 脸-face"
+        buttons = self._build_buttons([
+            _swap_node(var="$swapkey1", comment="hair"),
+            _swap_node(var="$swapkey0", comment="futa"),
+            _swap_node(var="$swapkey4", comment="futa"),
+            _swap_node(var="$swapkey150", comment="脸-face"),
+        ])
+        self.assertEqual(
+            [(button["comment"], button["var_names"]) for button in buttons],
+            [("futa", ["$swapkey0", "$swapkey4"]), ("脸-face", ["$swapkey150"]), ("hair", ["$swapkey1"])],
+        )
+
     def test_same_comment_different_variables_one_button(self):
         nodes = [
             _swap_node(var="swapkey3", slots=2),
