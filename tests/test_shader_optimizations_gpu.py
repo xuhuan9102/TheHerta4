@@ -69,3 +69,43 @@ def test_uv_updates_only_configured_fields_on_gpu(gpu, tmp_path, stride):
     gpu.bind(5, None, True)
     expected = gpu.read_bytes(resource, data.nbytes).view(np.uint32).reshape(data.shape)
     np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize('degenerate', [False, True])
+def test_shared_calibration_matches_per_thread_calibration(gpu, tmp_path, degenerate):
+    source = (ROOT / 'Toolset/drag_interaction/rzm_object_detect.hlsl').read_text('utf-8')
+    source = source[:source.index('[numthreads(THREADS_PER_GROUP, 1, 1)]')]
+    fixture = '''bool ReadCalibSample(uint slot,uint count,out float3 p,out float4 c){
+        p=float3(slot&1u,(slot>>1u)&1u,(slot>>2u)&1u);
+        if(IniParams[0].x>.5)p.z=0;
+        c=float4(p.x*.8+p.y*.1,p.y*.7+p.z*.2,p.z*.9+.1,1+p.z*.2);
+        return true;
+    }'''
+    source = re.sub(r'bool ReadCalibSample\([^\n]*\)\s*\{.*?\n\}', fixture, source, count=1, flags=re.S)
+    params = np.zeros((128, 4), np.float32)
+    params[0, 0] = int(degenerate)
+    _, ini = gpu.ini(params)
+    gpu.bind(120, ini)
+    results = []
+    for shared in (False, True):
+        select = ('if(lane==0){Calibration c;SelectCalibration(c);sharedCalibration=c;}'
+                  'GroupMemoryBarrierWithGroupSync();cal=sharedCalibration;') if shared else 'SelectCalibration(cal);'
+        main = '''RWStructuredBuffer<float4> Result:register(u7);
+        [numthreads(128,1,1)]void main(uint lane:SV_GroupIndex){
+            Calibration cal;SELECT
+            uint b=lane*11;
+            Result[b]=float4(cal.p0,cal.valid);Result[b+1]=float4(cal.p1,cal.invDet);
+            Result[b+2]=float4(cal.p2,0);Result[b+3]=float4(cal.p3,0);
+            Result[b+4]=cal.c0;Result[b+5]=cal.c1;Result[b+6]=cal.c2;Result[b+7]=cal.c3;
+            Result[b+8]=cal.col0;Result[b+9]=cal.col1;Result[b+10]=cal.col2;
+        }'''.replace('SELECT', select)
+        path = tmp_path / ('shared.hlsl' if shared else 'reference.hlsl')
+        path.write_text(source + main, encoding='utf-8')
+        data = np.full((128*11, 4), -321, np.float32)
+        resource = gpu.buffer(data, structured=16, writable=True)
+        gpu.bind(7, gpu.view(resource, len(data), 0, writable=True), True)
+        gpu.dispatch(gpu.shader(path), 1)
+        gpu.bind(7, None, True)
+        results.append(gpu.read_bytes(resource, data.nbytes).view(np.float32))
+    np.testing.assert_array_equal(*results)
+    assert results[1][3] == (0 if degenerate else 1)

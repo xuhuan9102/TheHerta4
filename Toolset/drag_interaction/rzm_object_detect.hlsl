@@ -760,6 +760,8 @@ void TestTriangleRange(
     }
 }
 
+groupshared Calibration sharedCalibration;
+
 [numthreads(THREADS_PER_GROUP, 1, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID,
           uint3 groupThreadID    : SV_GroupThreadID)
@@ -767,7 +769,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID,
     uint tid = groupThreadID.x;
 
     Calibration cal;
-    SelectCalibration(cal);
+    if (tid == 0u)
+    {
+        Calibration selected;
+        SelectCalibration(selected);
+        sharedCalibration = selected;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    cal = sharedCalibration;
 
     float bestDepth = 3.402823e+38f;
     float bestID = -1.0f;
