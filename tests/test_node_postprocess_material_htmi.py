@@ -84,6 +84,10 @@ _install_module(
     GlobalConfig=types.SimpleNamespace(logic_name="HTMI"),
 )
 _install_module(
+    f"{PKG}.common.export_section_registry",
+    get_ini_paths=lambda: [],
+)
+_install_module(
     f"{PKG}.common.logic_name",
     LogicName=types.SimpleNamespace(
         EFMI="EFMI",
@@ -3129,7 +3133,8 @@ class MaterialProExportTests(unittest.TestCase):
             node.execute_postprocess(temp_dir)
 
             content = ini_path.read_text(encoding="utf-8")
-            self.assertTrue((Path(temp_dir) / "7fbbcf0d-7116-0_PureTexture.ini").is_file())
+            self.assertFalse((Path(temp_dir) / "7fbbcf0d-7116-0_PureTexture.ini").exists())
+            self.assertIn("[TextureOverride_MaterialPureTexture_", content)
             main_content, marker, transparency = content.partition(node.TRANSPARENCY_SECTION_MARKER)
             self.assertIn("[KeySwap_Diffuse_swapkey151]", main_content)
             self.assertTrue(marker)
