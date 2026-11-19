@@ -379,6 +379,14 @@ class PreProcessCache:
                 hasher.update(verts.tobytes())
 
             n_loops = len(mesh.loops)
+            if "TEXCOORD2.xy" in mesh.uv_layers:
+                from ..common.global_config import GlobalConfig
+                from ..common.logic_name import LogicName
+
+                if GlobalConfig.logic_name == LogicName.ZZMI:
+                    active_uv = mesh.uv_layers.active
+                    active_name = active_uv.name if active_uv is not None else ""
+                    hasher.update(f"zzmi-uv2-v1:{active_name}".encode('utf-8'))
             for uv_layer in mesh.uv_layers:
                 hasher.update(uv_layer.name.encode('utf-8'))
                 if n_loops > 0:
