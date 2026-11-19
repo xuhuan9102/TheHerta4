@@ -1471,7 +1471,7 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
     # ==========================================
     # 导出
     # ==========================================
-    def _build_button_list(self):
+    def _build_button_list(self, target_ini_file=""):
         """Build current blueprint buttons in the panel node's saved order."""
         buttons = []
         by_variable = {}
@@ -1627,6 +1627,18 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         buttons.sort(key=lambda button: min(
             order.get(var, len(entries)) for var in button["var_names"]
         ))
+        # 6. 兜底：蓝图里一个切换节点都没有时，才用目标 INI 的 [KeySwap_*] 建按钮
+        #    （VELO/EFMI 桥接等外部流程只写 INI；有节点时仍以当前蓝图为准）。
+        ini_path = str(target_ini_file or "").strip()
+        if not buttons and ini_path and os.path.isfile(ini_path):
+            for swap in self._parse_ini_key_swaps(ini_path):
+                add_button({
+                    "var_name": swap["var_name"],
+                    "comment": swap["comment"],
+                    "option_count": swap["option_count"],
+                    "hotkey": swap["key"],
+                    "image_path": self._button_image_for_source(swap["key"], swap["var_name"]),
+                })
         return buttons
 
     @staticmethod
@@ -2304,7 +2316,7 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         print(f"物体切换面板{'原地刷新' if _in_place else '开始执行'}: {target_ini_file}")
 
         # 1. 收集按钮数据
-        buttons = self._build_button_list()
+        buttons = self._build_button_list(target_ini_file)
         if not buttons:
             print("未检测到任何物体切换节点 / [KeySwap_*] 配置，跳过面板生成")
             return False
