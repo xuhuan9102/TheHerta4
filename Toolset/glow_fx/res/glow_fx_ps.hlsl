@@ -1,16 +1,8 @@
 Texture2D<float4> GlowMap : register(t64);
+Texture2D<float> SceneDepth : register(t67);
 Texture1D<float4> IniParams : register(t120);
-
-cbuffer CB4 : register(b4)
-{
-    float4 cb4[151];
-};
-
-struct PSInput
-{
-    float4 uv : TEXCOORD0;
-    bool is_front_face : SV_IsFrontFace;
-};
+SamplerState MaterialSampler : register(s0);
+cbuffer Material : register(b4) { float4 material[151]; };
 
 float3 rgb_to_hsv(float3 color)
 {
@@ -28,42 +20,95 @@ float3 hsv_to_rgb(float3 color)
     return color.z * lerp(float3(1.0f, 1.0f, 1.0f), saturate(p - 1.0f), color.y);
 }
 
-void main(
-    PSInput input,
-    out float4 target0 : SV_Target0,
-    out float4 target1 : SV_Target1,
-    out float4 target2 : SV_Target2,
-    out float4 target3 : SV_Target3)
+float4 sampleCollapsedSide(float2 uv)
 {
-    uint width = 0;
-    uint height = 0;
+    float4 sampleColor = GlowMap.SampleLevel(MaterialSampler, uv, 0.0);
+    if (sampleColor.a >= 0.99)
+        return sampleColor;
+
+    uint width, height;
     GlowMap.GetDimensions(width, height);
-
-    // TEXCOORD0 contains the main UV in xy and the alternate UV in zw.
-    // Load at the exact texel to avoid filtered seams along mesh boundaries.
-    float2 uv = input.uv.xy;
-    bool use_alternate_uv =
-        (!input.is_front_face && cb4[150].x > 0.5f)
-        || (input.uv.z > 1.0f && cb4[150].y > 0.5f);
-    if (use_alternate_uv)
+    int2 limit = int2(width, height) - 1;
+    float2 location = uv * float2(width, height) - 0.5;
+    int2 center = int2(round(location));
+    float nearestDistance = 4.0;
+    [unroll]
+    for (int y = -2; y <= 2; ++y)
     {
-        uv = input.uv.zw;
+        [unroll]
+        for (int x = -2; x <= 2; ++x)
+        {
+            int2 pixel = center + int2(x, y);
+            if (any(pixel < 0) || any(pixel > limit))
+                continue;
+
+            float2 offset = float2(pixel) - location;
+            float distanceSquared = dot(offset, offset);
+            if (distanceSquared >= nearestDistance)
+                continue;
+
+            float4 candidate = GlowMap.Load(int3(pixel, 0));
+            if (candidate.a >= 0.99)
+            {
+                sampleColor = candidate;
+                nearestDistance = distanceSquared;
+            }
+        }
     }
+    return sampleColor;
+}
 
-    int2 texel = (int2)floor(uv * float2(width, height));
-    texel = clamp(texel, int2(0, 0), int2(width - 1, height - 1));
-    float4 glow = GlowMap.Load(int3(texel, 0));
-    float3 shift = IniParams[224].xyz;
-    float brightness = max(IniParams[224].w, 0.0f);
-
+float4 main(float4 position : SV_Position, float4 uv : TEXCOORD0, bool front : SV_IsFrontFace,
+            out float2 coverage : SV_Target1) : SV_Target0
+{
+    float4 parameters = IniParams[224];
+    float sceneDepth = SceneDepth.Load(int3(int2(position.xy), 0));
+    float depthGap = position.z - sceneDepth;
+    bool alternate = (!front && material[150].x > 0.5)
+                  || (uv.z > 1.0 && material[150].y > 0.5);
+    float2 texcoord = alternate ? uv.zw : uv.xy;
+    float2 dx = ddx(texcoord);
+    float2 dy = ddy(texcoord);
+    float determinant = dx.x * dy.y - dx.y * dy.x;
+    bool collapsedUV = determinant * determinant <= 0.000025 * dot(dx, dx) * dot(dy, dy);
+    float4 glow;
+    if (parameters.w < 0.0)
+    {
+        // A palette must not pick different mip colors on adjacent faces.
+        glow = collapsedUV ? sampleCollapsedSide(texcoord)
+                           : GlowMap.SampleLevel(MaterialSampler, texcoord, 0.0);
+    }
+    else
+    {
+        glow = GlowMap.SampleGrad(MaterialSampler, texcoord, dx, dy);
+    }
+    // A negative strength selects geometry without a native color/depth draw.
+    clip(0.0000002 + (parameters.w < 0.0 ? depthGap : -abs(depthGap)));
+    clip(glow.a - 0.0001);
+    float3 shift = parameters.xyz;
+    float brightness = abs(parameters.w);
     float3 hsv = rgb_to_hsv(glow.rgb);
-    hsv.x = frac(hsv.x + shift.x + 1.0f);
     hsv.y = saturate(hsv.y + shift.y);
     hsv.z = saturate(hsv.z + shift.z);
-    float3 color = hsv_to_rgb(hsv);
 
-    target0 = float4(color * glow.a * brightness, 0.0f);
-    target1 = 0.0f;
-    target2 = 0.0f;
-    target3 = 0.0f;
+    // Keep the emission luminance stable as the hue rotates.
+    const float3 luminance_weights = float3(0.2126f, 0.7152f, 0.0722f);
+    float base_luminance = dot(hsv_to_rgb(hsv), luminance_weights);
+    hsv.x = frac(hsv.x + shift.x + 1.0f);
+    float3 color = hsv_to_rgb(hsv);
+    float color_luminance = dot(color, luminance_weights);
+    color *= base_luminance / max(color_luminance, 1.0e-10f);
+
+    // Keep luminance constant while fitting the rotated chroma to the
+    // original value. Saturated blue must not create an HDR channel spike.
+    float3 chroma = color - base_luminance.xxx;
+    float positive_chroma = max(chroma.r, max(chroma.g, chroma.b));
+    float peak_limit = max(hsv.z, base_luminance);
+    float chroma_scale = min(1.0, (peak_limit - base_luminance) / max(positive_chroma, 1.0e-10f));
+    color = base_luminance.xxx + chroma * chroma_scale;
+
+    float3 emission = color * glow.a * brightness;
+    clip(max(emission.r, max(emission.g, emission.b)) - 0.0001);
+    coverage = float2(glow.a, 0.0);
+    return float4(emission, position.z);
 }

@@ -114,13 +114,19 @@ def test_shared_calibration_matches_per_thread_calibration(gpu, tmp_path, degene
 def test_zero_brightness_glow_does_not_draw():
     from test_fluid_runtime_gating import IniTrace
     text = (ROOT / 'Toolset/glow_fx/GlowFX/GlowFX.ini').read_text('utf-8')
-    trace = IniTrace(text, external=('CustomShaderGlowFX',))
-    trace.values.update({'$DrawCount': 300, '$brightness': 0})
-    trace.run('CommandListRun')
-    assert 'CustomShaderGlowFX' not in trace.calls
-    trace.values.update({'$DrawCount': 300, '$brightness': 1})
-    trace.run('CommandListRun')
-    assert 'CustomShaderGlowFX' in trace.calls
+    trace = IniTrace(text, external=('CustomShaderGeoGlowMask', 'CommandListGeoGlowStamp'))
+    trace.values.update({
+        '$glowfx_drawcount': 300,
+        '$glowfx_brightness': 0,
+        'o3': 1,  # 深度/颜色目标是运行时绑定；测试给个非空值让 gate 通过
+        '$\\SlotFix\\is_color_shader': 1,
+    })
+    trace.run('CommandListGlowFXRun')
+    assert 'CommandListGeoGlowStamp' not in trace.calls
+    # 第一轮结束时 ini 会把 drawcount/brightness 复位，第二轮必须重新给。
+    trace.values.update({'$glowfx_drawcount': 300, '$glowfx_brightness': 1})
+    trace.run('CommandListGlowFXRun')
+    assert 'CommandListGeoGlowStamp' in trace.calls
 
 
 def test_cached_cloth_normals_match_inline_display_calculation(tmp_path):

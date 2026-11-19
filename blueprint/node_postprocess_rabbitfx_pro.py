@@ -563,6 +563,7 @@ def build_breath_parameter_lines(
     brightness_max,
     interpolate,
     tick_count=1,
+    smooth_combo=False,
 ):
     """共享的呼吸灯参数行生成器：RabbitFXPro 与 GlowFX 都只调这一份。
 
@@ -614,9 +615,17 @@ def build_breath_parameter_lines(
                 f"{param('h')} = {glow} * {_format_number(360.0 / fps)}",
                 f"{param('s')} = {_format_number(s)}",
                 f"{param('v')} = {_format_number(v)}",
-                f"{param('brightness')} = {glow} * {_format_number(float(brightness_max) / fps)}",
             ]
         )
+        brightness = param('brightness')
+        if smooth_combo:
+            lines.extend([
+                f"{brightness} = {glow} / {fps}",
+                f"{brightness} = {bmin} + ({bmax} - {bmin}) * "
+                f"{brightness} * {brightness} * (3 - 2 * {brightness})",
+            ])
+        else:
+            lines.append(f"{brightness} = {glow} * {_format_number(float(brightness_max) / fps)}")
     lines.extend(
         [f"{param('interpolate')} = {_format_number(interpolate)}", breath_end]
     )
@@ -826,14 +835,22 @@ def _preview_parameters(node, elapsed):
         return (node.glow_h, node.glow_s, node.glow_v,
                 node.glow_brightness, node.glow_interpolate)
     period = max(1, node.breath_fps)
-    phase = (elapsed * 60.0 * node.breath_step) % (period * 2.0)
+    frames = elapsed * 60.0
+    if node.bl_idname == GLOWFX_NODE_IDNAME:
+        frames = int(frames)
+    phase = (frames * node.breath_step) % (period * 2.0)
     wave = phase if phase <= period else period * 2.0 - phase
     if node.breath_mode == 'SINGLE':
         brightness = node.breath_brightness_min + (node.breath_brightness_max - node.breath_brightness_min) * wave / period
         hue = node.breath_h
     else:
         hue = wave * 360.0 / period
-        brightness = node.breath_brightness_max if node.breath_mode == 'RAINBOW' else node.breath_brightness_max * wave / period
+        if node.breath_mode == 'COMBO' and node.bl_idname == GLOWFX_NODE_IDNAME:
+            phase = wave / period
+            eased = phase * phase * (3.0 - 2.0 * phase)
+            brightness = node.breath_brightness_min + (node.breath_brightness_max - node.breath_brightness_min) * eased
+        else:
+            brightness = node.breath_brightness_max if node.breath_mode == 'RAINBOW' else node.breath_brightness_max * wave / period
     return hue, node.breath_s, node.breath_v, brightness, node.breath_interpolate
 
 
@@ -886,6 +903,7 @@ def _stop_all_glow_previews(*_args):
 
 
 def _update_glow_previews():
+    interval = 0.1
     for key, session in list(_glow_previews.items()):
         try:
             elapsed = time.monotonic() - session['started']
@@ -897,6 +915,8 @@ def _update_glow_previews():
                 if node_parameters is None:
                     node_parameters = _preview_parameters(owner, elapsed)
                     parameters[owner] = node_parameters
+                    if owner.bl_idname == GLOWFX_NODE_IDNAME and owner.enable_glow and owner.enable_breath:
+                        interval = 1.0 / 60.0
                 hue, saturation, value, brightness, interpolate = node_parameters
                 tint.inputs[0].default_value = 1.0 if owner.preview_use_color or not has_image else 0.0
                 tint.inputs[2].default_value = owner.preview_color
@@ -913,7 +933,7 @@ def _update_glow_previews():
                         area.tag_redraw()
         except ReferenceError:
             _stop_glow_preview(key)
-    return 0.1 if _glow_previews else None
+    return interval if _glow_previews else None
 
 
 def _on_preview_parameter_update(node, _context):
