@@ -121,3 +121,49 @@ def test_zero_brightness_glow_does_not_draw():
     trace.values.update({'$DrawCount': 300, '$brightness': 1})
     trace.run('CommandListRun')
     assert 'CustomShaderGlowFX' in trace.calls
+
+
+def test_cached_cloth_normals_match_inline_display_calculation(tmp_path):
+    from tests.test_drag_cloth import GarmentExportTests
+    GarmentExportTests.setUpClass()
+    fixture = GarmentExportTests('test_self_collision_switch_omits_only_its_passes_and_assets')
+    node, sections, comp = fixture.prepare(tmp_path)
+    node._emit_sections(sections, [comp], 'unit')
+    node._inject_draw_hooks(sections, comp, 'unit')
+    spec = importlib.util.spec_from_file_location('cloth_normals_gpu', ROOT / 'tools/check_drag_cloth.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def replay():
+        runner = module.GeneratedCloth(tmp_path, sections, comp)
+        try:
+            runner.prepare_identity()
+            garment = comp['cloth']['garments'][0]
+            mask = garment['map'] != 0xFFFFFFFF
+            rows = np.flatnonzero(mask)
+            row = int(rows[len(rows)//2])
+            result = [runner.frame(hit_row=row).copy()]
+            result.append(runner.frame(600, True, row).copy())
+            for frame in range(1, 5):
+                result.append(runner.frame(600-frame*8, True, row).copy())
+            result.append(runner.frame(568, False, row).copy())
+            return result
+        finally:
+            runner.gpu.release()
+
+    actual = replay()
+    for path in (tmp_path / comp['cloth']['directory']).glob('g*/apply.hlsl'):
+        normals = path.with_name('display_normals.hlsl').read_text('utf-8')
+        function = normals[normals.index('float3 ParticleNormal'):normals.index('[numthreads(64,1,1)]')]
+        source = path.read_text('utf-8')
+        source = re.sub(r'Buffer<float4> DisplayNormals : register\(t74\);\s*float3 ParticleNormal\([^\n]+',
+                        lambda _: function, source, count=1)
+        path.write_text(source, encoding='utf-8')
+    for name, lines in list(sections.items()):
+        if isinstance(lines, list):
+            sections[name] = [line for line in lines if not (
+                line.strip().startswith('run = CustomShader') and 'Normals_s' in line)]
+    expected = replay()
+    for optimized, reference in zip(actual, expected):
+        np.testing.assert_allclose(optimized.copy().view(np.float32), reference.copy().view(np.float32),
+                                   rtol=1e-6, atol=1e-6)

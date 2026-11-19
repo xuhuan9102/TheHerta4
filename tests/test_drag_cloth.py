@@ -2155,7 +2155,7 @@ class GarmentExportTests(unittest.TestCase):
                 for name, value in saved.items():
                     np.testing.assert_array_equal(read(name, value.shape[1]), value)
                 self.assertTrue(traces)
-                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "apply.hlsl") for name, _ in traces), traces)
+                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
                 self.assertFalse(any(name == "frozen_skin.hlsl" and mode == 1 for name, mode in traces))
                 # A render row omitted from the proxy must not be reprojected
                 # from the native, fully worn garment while the pointer rests.
@@ -2189,7 +2189,7 @@ class GarmentExportTests(unittest.TestCase):
                 np.testing.assert_allclose(out[mask, :3], old[mask, :3] @ rotation.T + translation, atol=1e-6)
                 for name, value in saved.items():
                     np.testing.assert_array_equal(read(name, value.shape[1]), value)
-                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "apply.hlsl") for name, _ in traces), traces)
+                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
                 traces.clear()
                 r.frame(760, True, hit)
                 self.assertTrue(any(name == "cloth_nodes_p4.hlsl" for name, _ in traces), traces)
@@ -2198,7 +2198,7 @@ class GarmentExportTests(unittest.TestCase):
                 traces.clear()
                 for _ in range(8):
                     np.testing.assert_array_equal(r.frame(760, False), resumed)
-                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "apply.hlsl") for name, _ in traces), traces)
+                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
             finally:
                 r.close()
 

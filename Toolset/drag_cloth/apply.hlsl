@@ -16,20 +16,8 @@ Buffer<float4> Skeleton1 : register(t2);
 Buffer<float4> Skeleton2 : register(t3);
 RWBuffer<float> Output : register(u0);
 
-float3 ParticleNormal(uint particle)
-{
-    float3 normal=0;uint begin=FaceAdjacency[particle],end=FaceAdjacency[particle+1];
-    [loop]for(uint i=begin;i<end;++i)
-    {
-        uint face=FaceAdjacency[PARTICLE_COUNT+1+i];
-        uint3 ids=uint3(Faces[face*3],Faces[face*3+1],Faces[face*3+2]);
-        Vertex a=Source[Representatives[ids.x]],b=Source[Representatives[ids.y]],c=Source[Representatives[ids.z]];
-        float orientation=dot(cross(b.position-a.position,c.position-a.position),a.normal+b.normal+c.normal)<0?-1:1;
-        float3 p0=Particles[ids.x].current.xyz,p1=Particles[ids.y].current.xyz,p2=Particles[ids.z].current.xyz;
-        normal+=cross(p1-p0,p2-p0)*orientation;
-    }
-    return SafeUnit(normal,Source[Representatives[particle]].normal);
-}
+Buffer<float4> DisplayNormals : register(t74);
+float3 ParticleNormal(uint particle){return DisplayNormals[particle].xyz;}
 
 [numthreads(256,1,1)]void main(uint3 dispatch:SV_DispatchThreadID)
 {

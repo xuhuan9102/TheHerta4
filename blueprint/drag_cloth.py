@@ -30,6 +30,7 @@ SHADERS = (
     "shorts_bind.hlsl",
     "frozen_skin.hlsl",
     "frozen_display.hlsl",
+    "display_normals.hlsl",
     "apply.hlsl",
     "exterior.hlsl",
     "contacts.hlsl",
@@ -1191,6 +1192,7 @@ class _Emitter:
             self.global_(f"boot_g{g}_s{slot}", 0)
             self.resource(f"G{g}_FrozenMesh_s{slot}", p, "R32G32B32A32_FLOAT", writable=True)
             self.resource(f"G{g}_FrozenDisplay_s{slot}", self.meta["vertices"], "R32G32B32A32_FLOAT", writable=True)
+            self.resource(f"G{g}_DisplayNormals_s{slot}", p, "R32G32B32A32_FLOAT", writable=True)
             if cfg[14, 3] == 2:
                 self.resource(f"G{g}_ShortsBinding_s{slot}", p*17, "R32G32B32A32_FLOAT", writable=True)
             bands = int(data["level_config"][0, 3])
@@ -1431,6 +1433,18 @@ class _Emitter:
                     ],
                 )
             self.s(
+                call("Normals"),
+                ["cs = " + path + "/display_normals.hlsl"]
+                + bind
+                + [
+                    "cs-t76 = ref " + r(f"Particles_s{slot}"),
+                    "cs-t77 = ref " + r("State"),
+                    "cs-u0 = ref " + r(f"DisplayNormals_s{slot}"),
+                    f"Dispatch = {groups}, 1, 1",
+                    "cs-u0 = null", "cs-t76 = null", "cs-t77 = null",
+                ],
+            )
+            self.s(
                 call("Apply"),
                 ["cs = " + path + "/apply.hlsl"]
                 + bind
@@ -1439,6 +1453,7 @@ class _Emitter:
                     "cs-t77 = ref " + r("State"),
                     "cs-t97 = ref " + r(f"Weights_s{slot}"),
                     "cs-t99 = ref " + r(f"FrozenDisplay_s{slot}"),
+                    "cs-t74 = ref " + r(f"DisplayNormals_s{slot}"),
                     "cs-u0 = ref " + self.r(f"Write_s{slot}"),
                     f"Dispatch = {(self.meta['vertices'] + 255) // 256}, 1, 1",
                     "cs-u0 = null",
@@ -1446,6 +1461,7 @@ class _Emitter:
                     "cs-t77 = null",
                     "cs-t97 = null",
                     "cs-t99 = null",
+                    "cs-t74 = null",
                 ],
             )
             lines = [
@@ -1557,7 +1573,7 @@ class _Emitter:
                     lines += [run("Face" + str(i)) for i in range(len(offsets) - 1)]
                     lines += [run("Collision"), run("Validate"), run("Quality")]
                 lines += [f"{self.var}repair_g{g} = 0"]
-            lines += [run("Velocity"), run("Weights"), run("Apply")]
+            lines += [run("Velocity"), run("Weights"), run("Normals"), run("Apply")]
             self.s(self.cmd(f"G{g}Simulate_s{slot}"), lines)
             # Stopping the pointer freezes the last solved mesh. This path
             # deliberately contains no collision search or constraint solve.
@@ -1566,10 +1582,10 @@ class _Emitter:
                 f"{self.var}control_due_g{g} = 0",
                 f"if {self.var}control_time_g{g} != time",
                 "\t" + run("Control"),
-                f"\t{self.var}control_time_g{g} = time", "endif", run("Apply"),
+                f"\t{self.var}control_time_g{g} = time", "endif", run("Normals"), run("Apply"),
             ])
             simulate = self.sections["[" + self.cmd(f"G{g}Simulate_s{slot}") + "]"]
-            simulate.insert(len(simulate)-1, run("Capture"))
+            simulate.insert(len(simulate)-2, run("Capture"))
             simulate.append(run("CaptureDisplay"))
 
     def emit(self):
