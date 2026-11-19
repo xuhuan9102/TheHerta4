@@ -24,22 +24,47 @@ import os
 import re
 import sys
 
-DEFAULT_INI = (
-    r"K:\SSMT-Package-master\3Dmigoto\ZZZ\Mods\SSMTGeneratedMod\克拉蕾\克拉蕾.ini"
+DEFAULT_INI_CANDIDATES = (
+    r"K:\SSMT-Package-master\3Dmigoto\ZZZ\Mods\SSMTGeneratedMod\克拉蕾\克拉蕾.ini",
+    r"K:\SSMT-Package-master\3Dmigoto\ZZZ\新建文件夹\Mods\SSMTGeneratedMod\克拉蕾\克拉蕾.ini",
 )
 GEN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "blueprint")
 # 单文件 UI 构造器不在本仓库内，路径因机器而异：可用环境变量覆盖，找不到就跳过 P7/P8。
 HTML = os.environ.get(
     "SSMT_UI_BUILDER_HTML", r"E:\代码\SSMT4-Alpha-main\UI 构造器 v79.24-融合版.html"
 )
-INI = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_INI
-BAK = os.path.join(os.path.dirname(INI), "Backups")
+def _pick_ini(argv):
+    """优先 --ini/位置参数；否则按候选路径找，全不存在就返回空串（跳过 ini 检查）。"""
+    args = [a for a in argv[1:]]
+    for index, value in enumerate(args):
+        if value == "--ini" and index + 1 < len(args):
+            return args[index + 1]
+    positional = [a for a in args if not a.startswith("--")]
+    if positional:
+        return positional[0]
+    for candidate in DEFAULT_INI_CANDIDATES:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+INI = _pick_ini(sys.argv)
+BAK = os.path.join(os.path.dirname(INI), "Backups") if INI else ""
+if INI:
+    text = open(INI, encoding="utf-8-sig").read()
+    lines = text.splitlines()
+else:
+    text = ""
+    lines = []
 
 text = open(INI, encoding="utf-8-sig").read()
 lines = text.splitlines()
 
-print(f"模组配置表: {INI}")
-print(f"  最后写入: {os.path.getmtime(INI):.0f}  ({len(lines)} 行)")
+if INI:
+    print(f"模组配置表: {INI}")
+    print(f"  最后写入: {os.path.getmtime(INI):.0f}  ({len(lines)} 行)")
+else:
+    print("模组配置表: 未找到（用 --ini <路径> 指定；跳过依赖 ini 的检查）")
 for name in ("node_postprocess_draginteraction.py", "direct_export_shapekey_output_mixin.py",
              "anim_driver_random.py", "anim_driver_collector.py", "node_postprocess_material.py"):
     path = os.path.join(GEN, name)
@@ -374,13 +399,49 @@ _gen_check("P3 动画驱动 [Present] 门控 + 段头边界仍在（anim_driver�
 _gen_check("P4 拖拽绘制门控 / 发布门控 / 光标门控仍在（drag）", "drag",
            ["$ssmtdrag_drawn_{ns} == 1", "&& $ssmtdrag_mode_{ns} == 1",
             "if $ssmtdrag_mode_{ns} == 1"])
-# ③ 的失败实验必须保持回滚状态：只读绑定不得是 ref
-_gen_check("P5 形态键只读绑定仍是 copy（③ 回滚状态）", "shapekey_mixin",
+# ③ 两条路径并存：非帧表仍 copy；帧表允许 ref，但资源必须声明可建 SRV 的 bind_flags。
+_gen_check("P5 形态键绑定：copy 路径仍在，帧表 ref 路径带 bind_flags", "shapekey_mixin",
+           ["cs-t51 = copy", "cs-t51 = ref", "bind_flags = shader_resource"])
+_gen_check("P6 形态键只读绑定仍是 copy（节点内联发射器，无帧表 ref 路径）", "shapekey_node",
            ["cs-t51 = copy", "cs-u5 = copy {res_name}_0"],
            forbidden=["cs-t51 = ref", "cs-t52 = ref", "cs-t53 = ref"])
-_gen_check("P6 形态键只读绑定仍是 copy（节点内联发射器）", "shapekey_node",
-           ["cs-t51 = copy", "cs-u5 = copy {res_name}_0"],
-           forbidden=["cs-t51 = ref", "cs-t52 = ref", "cs-t53 = ref"])
+
+
+def _check_ref_bindings(ini_text):
+    """`= ref <资源>` 只允许引用声明了 shader_resource 的 StructuredBuffer。"""
+    sections = {}
+    current = ""
+    for raw in ini_text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].strip().casefold()
+            sections.setdefault(current, [])
+        elif current:
+            sections[current].append(line.casefold())
+    bad = []
+    for raw in ini_text.splitlines():
+        line = raw.strip()
+        match = re.match(r"cs-t\d+\s*=\s*ref\s+(\S+)", line, re.IGNORECASE)
+        if not match:
+            continue
+        resource = match.group(1).strip().strip("[]").casefold()
+        if "frametable" not in resource and "groupmap" not in resource:
+            continue  # 只有帧表/组映射要求显式 bind_flags（slot 会自动传播 bind flags）
+        body = sections.get(resource)
+        if body is None:
+            continue  # 资源不在本 ini 里声明（运行时/别处提供），无法判定，不误报
+        has_flags = any("bind_flags" in item and "shader_resource" in item for item in body)
+        if not has_flags:
+            bad.append(match.group(1))
+    return bad
+
+
+if INI:
+    _bad_refs = _check_ref_bindings(text)
+    check("P5b 生成的 ini：每个 cs-t* = ref 的资源都声明 shader_resource",
+          not _bad_refs, "缺少 bind_flags: " + ", ".join(_bad_refs) if _bad_refs else "")
+else:
+    check("P5b 生成的 ini：每个 cs-t* = ref 的资源都声明 shader_resource", True, "无 ini，跳过")
 # HTML 生成器（单文件权威版）—— 不在仓库内，缺失则跳过
 if os.path.isfile(HTML):
     _html = open(HTML, encoding="utf-8").read()

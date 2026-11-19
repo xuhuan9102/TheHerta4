@@ -1,6 +1,7 @@
 import os
 import re
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 
@@ -208,12 +209,133 @@ class DirectShapeKeyOutputMixin:
         逐哈希解析——必须与 ``_update_shader_file`` 注入着色器的那个是同一份，
         否则数据列与着色器结构体字段会错位。
         """
-        plan = self.node._resolve_delta_channel_plan(
+        plan = self._delta_channel_plan(runtime_info, num_floats_per_vertex, struct_definition)
+        return self.node._channel_plan_columns(plan)
+
+    def _delta_channel_plan(self, runtime_info, num_floats_per_vertex, struct_definition=None):
+        return self.node._resolve_delta_channel_plan(
             hash_val=runtime_info.get("logical_hash") if runtime_info else None,
             struct_definition=struct_definition,
             num_floats_per_vertex=num_floats_per_vertex,
         )
-        return self.node._channel_plan_columns(plan)
+
+    @classmethod
+    def _freeze_resource_equivalence_value(cls, value):
+        if isinstance(value, np.ndarray):
+            contiguous = np.ascontiguousarray(value)
+            return ("ndarray", contiguous.dtype.str, tuple(contiguous.shape), contiguous.tobytes())
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return (
+                "dict",
+                tuple(
+                    (cls._freeze_resource_equivalence_value(key), cls._freeze_resource_equivalence_value(item))
+                    for key, item in value.items()
+                ),
+            )
+        if isinstance(value, (list, tuple)):
+            return (
+                "list" if isinstance(value, list) else "tuple",
+                tuple(cls._freeze_resource_equivalence_value(item) for item in value),
+            )
+        if isinstance(value, (set, frozenset)):
+            return (
+                "set",
+                tuple(
+                    sorted(
+                        (cls._freeze_resource_equivalence_value(item) for item in value),
+                        key=repr,
+                    )
+                ),
+            )
+        if isinstance(value, memoryview):
+            return value.tobytes()
+        return value
+
+    def _build_shapekey_resource_equivalence_signature(
+        self,
+        *,
+        actual_hash,
+        logical_hash,
+        runtime_info,
+        hash_slot_data,
+        slot_position_overrides,
+        calculated_ranges,
+        unique_names,
+        channel_plan,
+        frame_plan,
+        use_packed,
+        use_delta,
+        use_optimized,
+        merge_slot_files,
+        use_sparse_vertex_index,
+        frame_table_mode,
+    ):
+        """Compare candidate inputs without copying or hashing override payloads."""
+        slot_records = []
+        for slot_num, names_data in hash_slot_data.items():
+            name_records = []
+            slot_overrides = slot_position_overrides.get(slot_num, {})
+            for shapekey_name, objects in names_data.items():
+                object_records = []
+                for obj_name in objects:
+                    override = slot_overrides.get(obj_name)
+                    object_records.append(
+                        (
+                            obj_name,
+                            self._freeze_resource_equivalence_value(
+                                calculated_ranges.get(obj_name)
+                            ),
+                            id(override) if override else None,
+                        )
+                    )
+                name_records.append((shapekey_name, tuple(object_records)))
+            slot_records.append((int(slot_num), tuple(name_records)))
+
+        return (
+            str(actual_hash),
+            self.node._extract_hash_prefix(logical_hash),
+            str(runtime_info.get("base_path", "")),
+            len(runtime_info["base_bytes"]),
+            int(runtime_info["position_stride"]),
+            int(runtime_info["vertex_count"]),
+            bool(use_packed),
+            bool(use_delta),
+            bool(use_optimized),
+            bool(merge_slot_files),
+            bool(use_sparse_vertex_index),
+            bool(frame_table_mode),
+            tuple(unique_names),
+            tuple(slot_records),
+            self._freeze_resource_equivalence_value(tuple(channel_plan or ())),
+            self._freeze_resource_equivalence_value(frame_plan),
+        )
+
+    @staticmethod
+    def _select_equivalent_shapekey_resources(
+        logical_resource_meta,
+        actual_resource_members,
+        frame_table_mode,
+    ):
+        if not frame_table_mode:
+            return set()
+
+        reusable_actual_hashes = set()
+        for actual_hash, logical_hashes in actual_resource_members.items():
+            if len(logical_hashes) < 2:
+                continue
+            first_meta = logical_resource_meta[logical_hashes[0]]
+            first_signature = first_meta["signature"]
+            first_base_bytes = first_meta["runtime_info"]["base_bytes"]
+            if all(
+                logical_resource_meta[logical_hash]["signature"] == first_signature
+                and logical_resource_meta[logical_hash]["runtime_info"]["base_bytes"]
+                == first_base_bytes
+                for logical_hash in logical_hashes[1:]
+            ):
+                reusable_actual_hashes.add(actual_hash)
+        return reusable_actual_hashes
 
     def _write_slot_files(self, logical_hash, runtime_info, hash_slot_data, slot_position_overrides):
         use_packed = self.node.use_packed_Meshess
@@ -690,7 +812,7 @@ class DirectShapeKeyOutputMixin:
             return None
         return {"groups": groups}
 
-    def _read_frame_table_inputs(self, actual_hash):
+    def _read_frame_table_inputs(self, actual_hash, channel_plan):
         """读回刚写出的稀疏产物（帧表构建零侵入，不改动旧路径的产出）。"""
         data_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_merged_packed_pos_delta.buf")
         map_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_merged_map.buf")
@@ -704,13 +826,10 @@ class DirectShapeKeyOutputMixin:
         if merged_map.size == 0 or merged_map.size != freq_indices.size:
             return None
         active = int(merged_map.max()) + 1
-        if active <= 0 or raw.size % active != 0:
+        per_record = self.node._channel_plan_float_count(channel_plan)
+        if active <= 0 or per_record <= 0 or raw.size != active * per_record:
             return None
-        per_record = raw.size // active
-        if per_record < 3:
-            return None
-        # 只取每条记录的前 3 个 float：形态键着色器只写回 position。
-        return raw.reshape(active, per_record)[:, :3], merged_map, freq_indices
+        return raw.reshape(active, per_record), merged_map, freq_indices
 
     def _pack_half_float3(self, values):
         """把 (N,3) float32 逐条半精度打包：2 条记录占 3 个 uint32。
@@ -750,6 +869,7 @@ class DirectShapeKeyOutputMixin:
         第 0 条恒为 0——于是「第 K 帧姿态 − base」与累积位移逐位等价。
         """
         delta_data, merged_map, freq_indices = inputs
+        channel_width = delta_data.shape[1]
         slot_count = merged_map.size // vertex_count if vertex_count else 0
         # 必须整除：freq_indices/merged_map 都是 (顶点数 × 槽位数) 展平而来，
         # 不能整除说明读到的产物与当前顶点数不匹配（例如残留的旧文件）。
@@ -799,8 +919,8 @@ class DirectShapeKeyOutputMixin:
             local_index = np.full(vertex_count, -1, dtype=np.int32)
             local_index[union_rows] = np.arange(union_size, dtype=np.int32)
 
-            frames = np.zeros((len(members) + 1, union_size, 3), dtype=np.float32)
-            accumulator = np.zeros((union_size, 3), dtype=np.float32)
+            frames = np.zeros((len(members) + 1, union_size, channel_width), dtype=np.float32)
+            accumulator = np.zeros((union_size, channel_width), dtype=np.float32)
             for step, freq_index in enumerate(members, start=1):
                 for vertices, payload in key_records.get(int(freq_index), ()):
                     # local_index is the already-built exact inverse of union_rows.
@@ -810,11 +930,8 @@ class DirectShapeKeyOutputMixin:
                     accumulator[positions] += payload
                 frames[step] = accumulator
 
-            # 注意：这里只收集原始记录，**不能**逐段打包。半精度打包把 2 条记录装进
-            # 3 个 uint32（每条 1.5 word），逐段打包时奇数条记录会产生半条 padding；
-            # 而 shader 是按「全局记录索引」推算 word 位置的（rec * 1.5），于是其后
-            # 所有组整体错位 3 个 word —— 实机表现为大范围顶点乱飞。
-            table_parts.append(frames.reshape(-1, 3))
+            # 每组只收集原始记录。着色器按全局记录索引寻址，组间不能插入填充。
+            table_parts.append(frames.reshape(-1, channel_width))
             # 序号必须连续：并集为空的组会被跳过，沿用 plan 的原始序号会让
             # shader 里的 frame_group_map_N 与 map_register 错位。
             slot_ordinal = len(group_meta)
@@ -833,20 +950,22 @@ class DirectShapeKeyOutputMixin:
         if not group_meta:
             return None
 
-        # 全部组的记录拼成一个连续数组后**一次性**打包，保证
-        # 「记录索引 → word 索引」的全局 1.5 倍关系处处成立。
+        # 三分量对齐时复用现有半精度打包器，其他布局按全局分量索引打包。
         try:
             from ..common.shapekey_native import pack_half_float3_parts
         except ImportError:
             pack_half_float3_parts = None
-        packed = pack_half_float3_parts(table_parts) if pack_half_float3_parts is not None else None
-        if packed is None:
-            all_records = (
-                np.concatenate(table_parts, axis=0)
-                if table_parts
-                else np.zeros((0, 3), dtype=np.float32)
-            )
-            packed = self._pack_half_float3(all_records)
+        if channel_width % 3 == 0:
+            triples = [part.reshape(-1, 3) for part in table_parts]
+            packed = pack_half_float3_parts(triples) if pack_half_float3_parts is not None else None
+            if packed is None:
+                packed = self._pack_half_float3(np.concatenate(triples, axis=0))
+        else:
+            components = np.concatenate(table_parts, axis=0).ravel()
+            # The shader indexes individual halves. Only the end of the global
+            # table can be padded, even when a record spans multiple words.
+            components = np.pad(components, (0, (-components.size) % 3))
+            packed = self._pack_half_float3(components.reshape(-1, 3))
         table_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_frame_table.buf")
         with open(table_path, "wb") as file_obj:
             file_obj.write(memoryview(packed))
@@ -868,6 +987,40 @@ class DirectShapeKeyOutputMixin:
         r"// --- \[PYTHON-MANAGED LOGIC START\] ---.*?// --- \[PYTHON-MANAGED LOGIC END\] ---",
         re.DOTALL,
     )
+    FRAME_SHADER_DELTA_RE = re.compile(
+        r"// --- \[PYTHON-MANAGED DELTA START\] ---.*?// --- \[PYTHON-MANAGED DELTA END\] ---",
+        re.DOTALL,
+    )
+
+    def _build_frame_table_delta_functions(self, channel_plan):
+        width = self.node._channel_plan_float_count(channel_plan)
+        fields, loads, interpolates, accumulates = [], [], [], []
+        offset = 0
+        for name, _start, count in channel_plan:
+            type_text = self.node._delta_channel_type_text(count)
+            fields.append(f"    {type_text} {name};")
+            if count == 3 and width % 3 == 0 and offset % 3 == 0:
+                load = f"frame_table_load_float3(rec * {width // 3}u + {offset // 3}u)"
+            else:
+                components = [
+                    f"frame_table_load_component(rec * {width}u + {offset + i}u)"
+                    for i in range(count)
+                ]
+                load = components[0] if count == 1 else f"{type_text}({', '.join(components)})"
+            loads.append(f"    delta.{name} = {load};")
+            interpolates.append(f"    delta.{name} = lerp(a.{name}, b.{name}, frac);")
+            accumulates.append(f"    total.{name} += delta.{name};")
+            offset += count
+
+        return [
+            "struct FrameTableDelta {", *fields, "};", "",
+            "FrameTableDelta frame_table_load(uint rec)", "{", "    FrameTableDelta delta;",
+            *loads, "    return delta;", "}", "",
+            "FrameTableDelta frame_table_lerp(FrameTableDelta a, FrameTableDelta b, float frac)",
+            "{", "    FrameTableDelta delta;", *interpolates, "    return delta;", "}", "",
+            "void frame_table_accumulate(inout FrameTableDelta total, FrameTableDelta delta)",
+            "{", *accumulates, "}",
+        ]
 
     def _build_frame_table_defines(self, key_count, frame_meta, vertex_count=0):
         """帧表模式下的资源声明与分组常量。"""
@@ -908,21 +1061,21 @@ class DirectShapeKeyOutputMixin:
                 # 当成合法的局部索引 0，从而静默串到该组第 0 条记录上。
                 f"        if (frame_local_{ordinal} >= 0 && frame_local_{ordinal} < (int)GROUP{ordinal}_UNION)",
                 "        {",
-                f"            total_diff_position += frame_table_sample("
+                f"            frame_table_accumulate(total_diff, frame_table_sample("
                 f"GROUP{ordinal}_OFFSET, GROUP{ordinal}_UNION, GROUP{ordinal}_KEYS, "
-                f"(uint)frame_local_{ordinal}, GROUP{ordinal}_PROGRESS);",
+                f"(uint)frame_local_{ordinal}, GROUP{ordinal}_PROGRESS));",
                 "        }",
                 "    }",
             ])
         return lines
 
-    def _update_frame_table_shader(self, shader_path, template_path, key_count, frame_meta,
-                                   hash_val=None, vertex_count=0):
-        """把帧表配置注入模板并写到 shader_path。"""
+    def _render_frame_table_shader(self, template_path, key_count, frame_meta,
+                                   channel_plan, hash_val=None, vertex_count=0):
+        """把帧表配置注入模板，返回生成的着色器源码。"""
         # vertex_count 为 0 时 FRAME_VERTEX_COUNT 不会被定义，而注入的逻辑会引用它
         # → shader 编译失败。这里直接拒绝，交由调用方回退旧模型。
         if int(vertex_count or 0) <= 0 or not template_path:
-            return False
+            return None
         with open(template_path, "r", encoding="utf-8") as file_obj:
             content = file_obj.read()
 
@@ -937,6 +1090,7 @@ class DirectShapeKeyOutputMixin:
 
         define_lines = self._build_frame_table_defines(key_count, frame_meta, vertex_count)
         logic_lines = self._build_frame_table_logic(frame_meta)
+        delta_lines = self._build_frame_table_delta_functions(channel_plan)
 
         content = self.FRAME_SHADER_BLOCK_RE.sub(
             lambda _match: (
@@ -956,8 +1110,21 @@ class DirectShapeKeyOutputMixin:
             content,
             count=1,
         )
-        write_text_if_changed(shader_path, content)
-        return True
+        content = self.FRAME_SHADER_DELTA_RE.sub(
+            lambda _match: "\n".join(delta_lines),
+            content,
+            count=1,
+        )
+        writeback = [
+            "    " + line.replace(" += total_diff_", " += total_diff.", 1)
+            for line in self.node._build_writeback_lines(channel_plan)
+        ]
+        content = self.node._SHADER_WRITEBACK_BLOCK_RE.sub(
+            lambda _match: "\n".join(writeback),
+            content,
+            count=1,
+        )
+        return content
 
     def _compose_slot_bytes(self, logical_hash, runtime_info, slot_index, names_data, slot_position_overrides):
         base_bytes = runtime_info["base_bytes"]
@@ -1163,6 +1330,40 @@ class DirectShapeKeyOutputMixin:
     def _parse_hash_to_base_resources(self, sections):
         return collect_base_position_resource_map(sections, self.node._extract_hash_prefix)
 
+    def _deduplicate_frame_table_dispatches(
+        self, target_ini_file, logical_hashes, frame_table_meta_map,
+        hash_slot_data_map, hash_to_actual_file_hash, frame_shader_sources,
+    ):
+        if not frame_table_meta_map:
+            return logical_hashes
+
+        shader_dir = Path(target_ini_file).parent / "res"
+        retained = []
+        previous = None
+        for logical_hash in logical_hashes:
+            frame_meta = frame_table_meta_map.get(logical_hash)
+            slots = hash_slot_data_map.get(logical_hash)
+            signature = None
+            if frame_meta and slots:
+                shader = shader_dir / f"shapekey_anim_{logical_hash}.hlsl"
+                source = frame_shader_sources.get(logical_hash)
+                if source is None and shader.is_file():
+                    source = shader.read_bytes()
+                if source is not None:
+                    weight_names = tuple(dict.fromkeys(
+                        name for slot in slots.values() for name in slot
+                    ))
+                    signature = (
+                        self.node._extract_hash_prefix(logical_hash),
+                        hash_to_actual_file_hash.get(logical_hash, logical_hash),
+                        frame_meta["groups"], weight_names, source,
+                    )
+            # Keep intervening writes in order when passes for the same buffer differ.
+            if signature is None or signature != previous:
+                retained.append(logical_hash)
+            previous = signature
+        return retained
+
     def _update_ini_sections(
         self,
         sections,
@@ -1187,10 +1388,29 @@ class DirectShapeKeyOutputMixin:
         drag_drive_resource=None,
         frame_table_meta_map=None,
         use_sparse_index=False,
+        frame_shader_sources=None,
     ):
         if '[Constants]' not in sections:
             sections['[Constants]'] = []
         constants_lines = sections['[Constants]']
+        original_hashes = unique_hashes
+        unique_hashes = self._deduplicate_frame_table_dispatches(
+            target_ini_file, original_hashes, frame_table_meta_map,
+            hash_slot_data_map, hash_to_actual_file_hash, frame_shader_sources or {},
+        )
+        if frame_shader_sources:
+            shader_dir = Path(target_ini_file).parent / "res"
+            for logical_hash in unique_hashes:
+                if logical_hash in frame_shader_sources:
+                    write_text_if_changed(
+                        shader_dir / f"shapekey_anim_{logical_hash}.hlsl",
+                        frame_shader_sources[logical_hash],
+                    )
+        redundant_runs = {
+            f"post run = CustomShader_{logical_hash}_Anim"
+            for logical_hash in set(original_hashes) - set(unique_hashes)
+        }
+        constants_lines[:] = [line for line in constants_lines if line.strip() not in redundant_runs]
         constants_content = "".join(constants_lines)
         vars_to_define = set()
 
@@ -1265,10 +1485,10 @@ class DirectShapeKeyOutputMixin:
         rebuilt_present_lines = []
         generated_run_lines = {
             f"run = CustomShader_{logical_hash}_Anim"
-            for logical_hash in unique_hashes
+            for logical_hash in original_hashes
         } | {
             f"run = CustomShaderShapeKeyWeightSync_{logical_hash}"
-            for logical_hash in unique_hashes
+            for logical_hash in original_hashes
         }
         line_index = 0
         while line_index < len(present_lines):
@@ -1424,17 +1644,17 @@ class DirectShapeKeyOutputMixin:
             )
             block_lines.append(f"\n    ; --- Binding Shape Key Meshess (Mode: {mode_str}) ---")
             if frame_meta:
-                # 帧表模式：t51 给帧表，t52+ 给各组顶点局部索引表；
-                # 不再需要 merged delta / map / freq_indices（逐槽位遍历已被取代）。
+                # Read-only structured resources can be bound as SRVs directly.
+                # Copying the frame table here would duplicate every animation frame on each dispatch.
                 block_lines.append("\n    ; --- Frame Table (per-group frame interpolation) ---")
                 block_lines.append(
-                    f"    cs-t51 = copy {derive_shapekey_frame_table_resource_name(primary_base_resource)}"
+                    f"    cs-t51 = ref {derive_shapekey_frame_table_resource_name(primary_base_resource)}"
                 )
                 t_registers_to_null.append("cs-t51")
                 for ordinal, group in enumerate(frame_groups):
                     register = group["map_register"]
                     block_lines.append(
-                        f"    cs-t{register} = copy "
+                        f"    cs-t{register} = ref "
                         f"{derive_shapekey_group_map_resource_name(primary_base_resource, ordinal)}"
                     )
                     t_registers_to_null.append(f"cs-t{register}")
@@ -1570,22 +1790,26 @@ class DirectShapeKeyOutputMixin:
             frame_meta = (frame_table_meta_map or {}).get(logical_hash)
             if frame_meta:
                 table_section = f"[{derive_shapekey_frame_table_resource_name(primary_base_resource)}]"
-                if table_section not in sections and table_section not in generated_section_names:
+                if table_section not in generated_section_names:
+                    sections.pop(table_section, None)
                     new_resource_lines.extend([
                         table_section,
-                        "type = Buffer",
+                        "type = StructuredBuffer",
                         "stride = 4",
+                        "bind_flags = shader_resource",
                         f"filename = Meshes0000/{actual_file_hash}-Position_frame_table.buf",
                         "",
                     ])
                     generated_section_names.add(table_section)
                 for ordinal, _group in enumerate(frame_meta["groups"]):
                     map_section = f"[{derive_shapekey_group_map_resource_name(primary_base_resource, ordinal)}]"
-                    if map_section not in sections and map_section not in generated_section_names:
+                    if map_section not in generated_section_names:
+                        sections.pop(map_section, None)
                         new_resource_lines.extend([
                             map_section,
-                            "type = Buffer",
+                            "type = StructuredBuffer",
                             "stride = 4",
+                            "bind_flags = shader_resource",
                             f"filename = Meshes0000/{actual_file_hash}-Position_group_map_{ordinal}.buf",
                             "",
                         ])
@@ -1736,3 +1960,4 @@ class DirectShapeKeyOutputMixin:
 
         sections.update(compute_blocks_to_add)
         self.node._write_ordered_dict_to_ini(sections, target_ini_file, preserved_tail_content, preserved_driver_content)
+        return unique_hashes

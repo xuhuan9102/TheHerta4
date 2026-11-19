@@ -3,6 +3,7 @@ import os
 import shutil
 import copy
 from collections import OrderedDict
+from pathlib import Path
 from time import perf_counter
 
 import bpy
@@ -152,7 +153,7 @@ class DirectShapeKeyGenerator(
 
         return related_names
 
-    def generate(self):
+    def generate(self, frame_cache=None):
         stage_start = perf_counter()
         classification_text_obj = None
         if self.blueprint_model is not None:
@@ -169,6 +170,28 @@ class DirectShapeKeyGenerator(
         target_ini_file = ini_files[0]
         self.node._create_cumulative_backup(target_ini_file, self.mod_export_path)
         sections, preserved_tail_content, preserved_driver_content = self.node._read_ini_to_ordered_dict(target_ini_file)
+
+        if frame_cache is not None and frame_cache.ini_data is not None:
+            cached_ini = dict(frame_cache.ini_data)
+            cached_ini["slot_to_name_to_objects"] = {
+                int(slot): data for slot, data in cached_ini["slot_to_name_to_objects"].items()
+            }
+            cached_ini["hash_slot_data_map"] = {
+                hash_val: {int(slot): data for slot, data in slots.items()}
+                for hash_val, slots in cached_ini["hash_slot_data_map"].items()
+            }
+            # 显式列出稀疏标志：缓存命中也要把它交给 ini 阶段（AST 检查与可读性都要求）。
+            cached_sparse_index = bool(cached_ini.pop("use_sparse_index", False))
+            self._update_ini_sections(
+                sections=sections,
+                preserved_tail_content=preserved_tail_content,
+                preserved_driver_content=preserved_driver_content,
+                target_ini_file=target_ini_file,
+                hash_to_base_resources=self._parse_hash_to_base_resources(sections),
+                use_sparse_index=cached_sparse_index,
+                **cached_ini,
+            )
+            return
 
         slot_to_name_to_objects, unique_hashes, hash_to_objects, all_objects = self.node._parse_classification_text_final(
             classification_text_obj.as_string()
@@ -192,9 +215,15 @@ class DirectShapeKeyGenerator(
 
         source_object_map = self._build_source_object_map()
         static_copy_map = {}
+        frame_table_all_channels = bool(
+            getattr(self.node, "use_frame_table", False)
+            and getattr(self.node, "store_all_vertex_channels", False)
+        )
 
         try:
             use_preprocess_records = bool(BlueprintExportHelper.get_direct_shapekey_position_records())
+            if use_preprocess_records and frame_table_all_channels:
+                raise ShapeKeyDirectExportError("全通道帧表需要包含法线和切线的导出器顶点缓冲区")
             if use_preprocess_records and bool(getattr(self.node, "store_all_vertex_channels", False)):
                 # 前处理记录只存顶点坐标（preprocess.py 只 foreach_get("co")），
                 # 合成槽位时也只覆写 POSITION 元素字节 —— 法线/切线会保持基础网格值，
@@ -245,6 +274,8 @@ class DirectShapeKeyGenerator(
                 slot_position_overrides=slot_position_overrides,
             )
             if dropped_slots and not use_preprocess_records:
+                if frame_table_all_channels:
+                    raise ShapeKeyDirectExportError(f"全通道帧表缺少导出器槽位数据: {dropped_slots}")
                 LOG.info(
                     "直出形态键: exporter ShapeKey 缓冲路径丢失槽位，"
                     f"改用静态副本补齐: {dropped_slots}"
@@ -267,6 +298,8 @@ class DirectShapeKeyGenerator(
                 LOG.warning(f"Direct ShapeKey: missing preprocess-record slots {dropped_slots}")
             LOG.info("Direct ShapeKey: using preprocess-record path" if use_preprocess_records else "直出形态键: 使用 exporter ShapeKey 缓冲路径")
         except ShapeKeyDirectExportError as exc:
+            if frame_table_all_channels:
+                raise
             LOG.info(
                 f"直出形态键: exporter ShapeKey 缓冲不可用，回退到静态副本采样路径 "
                 f"({perf_counter() - stage_start:.3f}s) - {exc}"
@@ -326,41 +359,9 @@ class DirectShapeKeyGenerator(
         hash_to_vertex_count = {}
         hash_to_slot_maps = {}
         hash_to_merged_index_map = {}
-
-        for logical_hash in unique_hashes:
-            runtime_info = runtime_infos.get(logical_hash)
-            hash_slot_data = hash_slot_data_map.get(logical_hash, {})
-            if not runtime_info or not hash_slot_data:
-                continue
-
-            logical_prefix = self.node._extract_hash_prefix(logical_hash)
-            actual_hash = runtime_info["actual_hash"]
-
-            hash_to_actual_file_hash[logical_hash] = actual_hash
-            if logical_prefix:
-                hash_to_stride[logical_prefix] = runtime_info["position_stride"]
-                hash_to_vertex_count[logical_prefix] = runtime_info["vertex_count"]
-
-            if self.node._should_merge_slot_files(getattr(self.node, "use_packed_Meshess", False)):
-                merged_index_map = self._write_merged_slot_files(
-                    logical_hash=logical_hash,
-                    runtime_info=runtime_info,
-                    hash_slot_data=hash_slot_data,
-                    slot_position_overrides=slot_position_overrides,
-                )
-                hash_to_merged_index_map[logical_hash] = merged_index_map
-            else:
-                slot_maps = self._write_slot_files(
-                    logical_hash=logical_hash,
-                    runtime_info=runtime_info,
-                    hash_slot_data=hash_slot_data,
-                    slot_position_overrides=slot_position_overrides,
-                )
-                hash_to_slot_maps[logical_hash] = slot_maps
-        LOG.info(f"直出形态键: Position 缓冲写出完成 {perf_counter() - stage_start:.3f}s")
-
-        processed_hashes = [logical_hash for logical_hash in unique_hashes if logical_hash in hash_to_actual_file_hash]
-        LOG.info(f"Direct ShapeKey: processed hashes -> {processed_hashes}")
+        position_build_cache = {}
+        downstream_build_cache = {}
+        reusable_actual_hashes = set()
         hash_to_base_resources = self._parse_hash_to_base_resources(sections)
         all_unique_names = list(
             OrderedDict.fromkeys(name for slot_data in slot_to_name_to_objects.values() for name in slot_data.keys())
@@ -401,16 +402,12 @@ class DirectShapeKeyGenerator(
         group_totals = {}
         freq_params = {}
         frame_table_meta_map = {}
+        frame_shader_sources = {}
         frame_table_blocked = []
         if frame_table_mode:
             # 前置条件校验：帧表依赖「紧凑 + 合并槽位文件 + 优化查找」三件套产出的
-            # 中间数据，且当前模板只处理位置通道。任一不满足都明确点名并回退，
+            # 中间数据。任一不满足都明确点名，
             # 而不是让用户只看到一句笼统的「帧表构建失败」。
-            if bool(getattr(self.node, "store_all_vertex_channels", False)):
-                frame_table_blocked.append(
-                    "「存储全部顶点属性增量」：帧表当前只建位置通道，法线/切线增量会被丢弃"
-                    "（描边与光照不会跟随形变）"
-                )
             if not use_packed:
                 frame_table_blocked.append("「紧凑模式」：帧表需要合并后的逐槽位数据")
             if not merge_slot_files:
@@ -470,6 +467,124 @@ class DirectShapeKeyGenerator(
                     "或取消勾选「帧表插值（序列组加速）」后重试。"
                 )
 
+        logical_resource_meta = {}
+        actual_resource_members = {}
+        for logical_hash in unique_hashes:
+            runtime_info = runtime_infos.get(logical_hash)
+            hash_slot_data = hash_slot_data_map.get(logical_hash, {})
+            if not runtime_info or not hash_slot_data:
+                continue
+
+            hash_unique_names = list(
+                OrderedDict.fromkeys(
+                    name for slot_data in hash_slot_data.values() for name in slot_data.keys()
+                )
+            )
+            frame_plan = None
+            if frame_table_mode:
+                try:
+                    frame_plan = self._build_frame_table_plan(
+                        hash_unique_names, freq_params, sequence_groups, group_totals
+                    )
+                except Exception as exc:
+                    raise ShapeKeyDirectExportError(
+                        f"{logical_hash}: 帧表分组计划构建失败: {exc!r}"
+                    ) from exc
+                if not frame_plan:
+                    raise ShapeKeyDirectExportError(
+                        f"{logical_hash}: 无法生成帧表分组计划。\n"
+                        "常见原因：某分组只有部分形态键属于本网格（时间轴会错位）、"
+                        "组内形态键缺少对应的强度变量、或分组数超过上限。"
+                    )
+
+            channel_plan = self._delta_channel_plan(
+                runtime_info, runtime_info["position_stride"] // 4
+            )
+            signature = self._build_shapekey_resource_equivalence_signature(
+                actual_hash=runtime_info["actual_hash"],
+                logical_hash=logical_hash,
+                runtime_info=runtime_info,
+                hash_slot_data=hash_slot_data,
+                slot_position_overrides=slot_position_overrides,
+                calculated_ranges=calculated_ranges,
+                unique_names=hash_unique_names,
+                channel_plan=channel_plan,
+                frame_plan=frame_plan,
+                use_packed=use_packed,
+                use_delta=use_delta,
+                use_optimized=use_optimized,
+                merge_slot_files=merge_slot_files,
+                use_sparse_vertex_index=use_sparse_vertex_index,
+                frame_table_mode=frame_table_mode,
+            )
+            logical_resource_meta[logical_hash] = {
+                "runtime_info": runtime_info,
+                "hash_slot_data": hash_slot_data,
+                "unique_names": hash_unique_names,
+                "frame_plan": frame_plan,
+                "channel_plan": channel_plan,
+                "signature": signature,
+            }
+            actual_resource_members.setdefault(runtime_info["actual_hash"], []).append(logical_hash)
+
+        reusable_actual_hashes = self._select_equivalent_shapekey_resources(
+            logical_resource_meta,
+            actual_resource_members,
+            frame_table_mode,
+        )
+        for actual_hash in reusable_actual_hashes:
+            LOG.info(
+                f"直出形态键: 实际资源等价组 actual={actual_hash}, "
+                f"logical_hashes={actual_resource_members[actual_hash]}"
+            )
+
+        for logical_hash in unique_hashes:
+            meta = logical_resource_meta.get(logical_hash)
+            if meta is None:
+                continue
+            runtime_info = meta["runtime_info"]
+            actual_hash = runtime_info["actual_hash"]
+            logical_prefix = self.node._extract_hash_prefix(logical_hash)
+            hash_to_actual_file_hash[logical_hash] = actual_hash
+            if logical_prefix:
+                hash_to_stride[logical_prefix] = runtime_info["position_stride"]
+                hash_to_vertex_count[logical_prefix] = runtime_info["vertex_count"]
+
+            if actual_hash in reusable_actual_hashes and actual_hash in position_build_cache:
+                merged_index_map, slot_maps = position_build_cache[actual_hash]
+                LOG.info(
+                    f"直出形态键: 复用 Position 构建 logical={logical_hash}, actual={actual_hash}"
+                )
+            else:
+                if merge_slot_files:
+                    merged_index_map = self._write_merged_slot_files(
+                        logical_hash=logical_hash,
+                        runtime_info=runtime_info,
+                        hash_slot_data=meta["hash_slot_data"],
+                        slot_position_overrides=slot_position_overrides,
+                    )
+                    slot_maps = {}
+                else:
+                    slot_maps = self._write_slot_files(
+                        logical_hash=logical_hash,
+                        runtime_info=runtime_info,
+                        hash_slot_data=meta["hash_slot_data"],
+                        slot_position_overrides=slot_position_overrides,
+                    )
+                    merged_index_map = None
+                if actual_hash in reusable_actual_hashes:
+                    position_build_cache[actual_hash] = (merged_index_map, slot_maps)
+
+            if merge_slot_files:
+                hash_to_merged_index_map[logical_hash] = merged_index_map
+            else:
+                hash_to_slot_maps[logical_hash] = slot_maps
+
+        processed_hashes = [
+            logical_hash
+            for logical_hash in unique_hashes
+            if runtime_infos.get(logical_hash) and hash_slot_data_map.get(logical_hash)
+        ]
         hash_to_shader_paths = {}
         for logical_hash in processed_hashes:
             if logical_hash not in hash_slot_data_map or not hash_slot_data_map[logical_hash]:
@@ -478,7 +593,7 @@ class DirectShapeKeyGenerator(
             # 只播种缺失的模板；已存在则保持原样，由 _update_shader_file 以模板为源
             # 重新注入。不能用 shutil.copy2：它每轮把目标 mtime 重置成模板的旧
             # mtime，而 3DMigoto 的 .bin 缓存按"注入后写入时刻"对齐 → 每轮必错配。
-            if not os.path.exists(shader_dest_path):
+            if not frame_table_mode and not os.path.exists(shader_dest_path):
                 with open(shader_source_path, 'r', encoding='utf-8') as f:
                     write_text_if_changed(shader_dest_path, f.read())
             hash_to_shader_paths[logical_hash] = shader_dest_path
@@ -494,6 +609,12 @@ class DirectShapeKeyGenerator(
                 write_text_if_changed(os.path.join(dest_res_dir, WEIGHT_SYNC_SHADER_NAME), f.read())
         else:
             LOG.warning(f"直出形态键: 未找到权重同步着色器模板 {weight_sync_source}")
+
+        LOG.info(f"Direct ShapeKey: processed hashes -> {processed_hashes}")
+        LOG.info(
+            f"直出形态键: Position 缓冲写出完成 "
+            f"{perf_counter() - stage_start:.3f}s"
+        )
 
         for logical_hash in processed_hashes:
             hash_slot_data = hash_slot_data_map.get(logical_hash, {})
@@ -512,86 +633,86 @@ class DirectShapeKeyGenerator(
                 )
             )
 
-            if use_optimized:
-                logical_prefix = self.node._extract_hash_prefix(logical_hash)
-                vertex_count = hash_to_vertex_count.get(logical_prefix, 0)
-                LOG.info(
-                    f"Direct ShapeKey: write freq indices hash={logical_hash}, names={hash_unique_names}, objects={hash_unique_objects}, vertex_count={vertex_count}"
-                )
-                if use_sparse_vertex_index:
-                    # 稀疏模式只写三份顶点命中索引，不写稠密 FREQ 表。
-                    self._write_sparse_vertex_index(
-                        logical_hash=logical_hash,
-                        actual_hash=hash_to_actual_file_hash.get(logical_hash, logical_hash),
-                        hash_slot_data=hash_slot_data,
-                        unique_names=hash_unique_names,
-                        vertex_count=vertex_count,
-                        calculated_ranges=calculated_ranges,
-                        merged_index_map=hash_to_merged_index_map.get(logical_hash),
-                        slot_index_maps=hash_to_slot_maps.get(logical_hash, {}),
-                    )
-                else:
-                    self._write_freq_indices(
-                        logical_hash=logical_hash,
-                        actual_hash=hash_to_actual_file_hash.get(logical_hash, logical_hash),
-                        hash_slot_data=hash_slot_data,
-                        unique_names=hash_unique_names,
-                        vertex_count=vertex_count,
-                        calculated_ranges=calculated_ranges,
-                        merged_index_map=hash_to_merged_index_map.get(logical_hash),
-                        slot_index_maps=hash_to_slot_maps.get(logical_hash, {}),
-                    )
-
-            frame_table_meta = None
+            meta = logical_resource_meta[logical_hash]
+            actual_hash = hash_to_actual_file_hash.get(logical_hash, logical_hash)
+            runtime_info = meta["runtime_info"]
+            frame_plan = meta["frame_plan"]
+            channel_plan = meta["channel_plan"]
             frame_vertex_count = hash_to_vertex_count.get(
                 self.node._extract_hash_prefix(logical_hash), 0
             )
-            if frame_table_mode:
-                # 帧表模式下任何一步失败都**直接终止导出**：勾选了就该明确成功或明确
-                # 失败，静默回退会让用户无法分辨本次究竟用了哪套模型。
-                # 陈旧产物防护：merged 数据必须由**本次**导出写出。否则磁盘上残留的
-                # 是上次的文件，直接拿来建表会得到静默错误的结果。
-                _merged_ok = hash_to_merged_index_map.get(logical_hash) is not None
-                if not _merged_ok:
-                    raise ShapeKeyDirectExportError(
-                        f"{logical_hash}: 本次导出未生成 merged 数据，帧表无法构建。"
-                        "请确认已勾选「紧凑模式」与「合并槽位文件」。"
+            cached_downstream = (
+                downstream_build_cache.get(actual_hash)
+                if actual_hash in reusable_actual_hashes
+                else None
+            )
+            if cached_downstream is not None:
+                frame_table_meta, channel_plan, frame_plan = cached_downstream
+                LOG.info(
+                    f"直出形态键: 复用 FREQ/帧表构建 "
+                    f"logical={logical_hash}, actual={actual_hash}"
+                )
+            else:
+                if use_optimized:
+                    vertex_count = hash_to_vertex_count.get(
+                        self.node._extract_hash_prefix(logical_hash), 0
                     )
-                try:
-                    plan = self._build_frame_table_plan(
-                        hash_unique_names, freq_params, sequence_groups, group_totals
-                    )
-                except Exception as exc:
-                    raise ShapeKeyDirectExportError(
-                        f"{logical_hash}: 帧表分组计划构建失败: {exc!r}"
-                    ) from exc
-                if not plan:
-                    raise ShapeKeyDirectExportError(
-                        f"{logical_hash}: 无法生成帧表分组计划。\n"
-                        "常见原因：某分组只有部分形态键属于本网格（时间轴会错位）、"
-                        "组内形态键缺少对应的强度变量、或分组数超过上限。"
-                    )
-                actual_file_hash = hash_to_actual_file_hash.get(logical_hash, logical_hash)
-                inputs = self._read_frame_table_inputs(actual_file_hash)
-                if inputs is None:
-                    raise ShapeKeyDirectExportError(
-                        f"{logical_hash}: 读取帧表输入数据失败"
-                        "（merged / freq_indices 缺失，或与当前顶点数不匹配）。"
-                    )
-                try:
-                    frame_table_meta = self._write_frame_table_files(
-                        actual_hash=actual_file_hash,
-                        vertex_count=frame_vertex_count,
-                        plan=plan,
-                        inputs=inputs,
-                    )
-                except Exception as exc:
-                    raise ShapeKeyDirectExportError(
-                        f"{logical_hash}: 帧表数据写入失败: {exc!r}"
-                    ) from exc
-                if not frame_table_meta:
-                    raise ShapeKeyDirectExportError(
-                        f"{logical_hash}: 帧表数据为空（所有分组的顶点并集均为空）。"
+                    if use_sparse_vertex_index:
+                        self._write_sparse_vertex_index(
+                            logical_hash=logical_hash,
+                            actual_hash=actual_hash,
+                            hash_slot_data=hash_slot_data,
+                            unique_names=hash_unique_names,
+                            vertex_count=vertex_count,
+                            calculated_ranges=calculated_ranges,
+                            merged_index_map=hash_to_merged_index_map.get(logical_hash),
+                            slot_index_maps=hash_to_slot_maps.get(logical_hash, {}),
+                        )
+                    else:
+                        self._write_freq_indices(
+                            logical_hash=logical_hash,
+                            actual_hash=actual_hash,
+                            hash_slot_data=hash_slot_data,
+                            unique_names=hash_unique_names,
+                            vertex_count=vertex_count,
+                            calculated_ranges=calculated_ranges,
+                            merged_index_map=hash_to_merged_index_map.get(logical_hash),
+                            slot_index_maps=hash_to_slot_maps.get(logical_hash, {}),
+                        )
+
+                frame_table_meta = None
+                if frame_table_mode:
+                    if hash_to_merged_index_map.get(logical_hash) is None:
+                        raise ShapeKeyDirectExportError(
+                            f"{logical_hash}: 本次导出未生成 merged 数据，帧表无法构建。"
+                            "请确认已勾选「紧凑模式」与「合并槽位文件」。"
+                        )
+                    inputs = self._read_frame_table_inputs(actual_hash, channel_plan)
+                    if inputs is None:
+                        raise ShapeKeyDirectExportError(
+                            f"{logical_hash}: 读取帧表输入数据失败"
+                            "（merged / freq_indices 缺失，或与当前顶点数不匹配）。"
+                        )
+                    try:
+                        frame_table_meta = self._write_frame_table_files(
+                            actual_hash=actual_hash,
+                            vertex_count=frame_vertex_count,
+                            plan=frame_plan,
+                            inputs=inputs,
+                        )
+                    except Exception as exc:
+                        raise ShapeKeyDirectExportError(
+                            f"{logical_hash}: 帧表数据写入失败: {exc!r}"
+                        ) from exc
+                    if not frame_table_meta:
+                        raise ShapeKeyDirectExportError(
+                            f"{logical_hash}: 帧表数据为空（所有分组的顶点并集均为空）。"
+                        )
+                if actual_hash in reusable_actual_hashes:
+                    downstream_build_cache[actual_hash] = (
+                        frame_table_meta,
+                        channel_plan,
+                        frame_plan,
                     )
 
             shader_path = hash_to_shader_paths.get(logical_hash)
@@ -601,17 +722,19 @@ class DirectShapeKeyGenerator(
                     raise ShapeKeyDirectExportError(
                         "未找到帧表着色器模板 Toolset/shapekey_anim_frame_table.hlsl。"
                     )
-                if not self._update_frame_table_shader(
-                    shader_path,
+                source = self._render_frame_table_shader(
                     frame_table_template,
                     key_count=len(hash_unique_names),
                     frame_meta=frame_table_meta["groups"],
+                    channel_plan=channel_plan,
                     hash_val=logical_hash,
                     vertex_count=frame_vertex_count,
-                ):
+                )
+                if source is None:
                     raise ShapeKeyDirectExportError(
                         f"{logical_hash}: 帧表着色器注入失败。"
                     )
+                frame_shader_sources[logical_hash] = source
                 frame_table_meta_map[logical_hash] = frame_table_meta
             elif shader_path:
                 self.node._update_shader_file(
@@ -634,11 +757,7 @@ class DirectShapeKeyGenerator(
                 )
         LOG.info(f"直出形态键: shader/freq 写出完成 {perf_counter() - stage_start:.3f}s")
 
-        self._update_ini_sections(
-            sections=sections,
-            preserved_tail_content=preserved_tail_content,
-            preserved_driver_content=preserved_driver_content,
-            target_ini_file=target_ini_file,
+        ini_data = dict(
             slot_to_name_to_objects=slot_to_name_to_objects,
             unique_hashes=processed_hashes,
             hash_to_objects=hash_to_objects,
@@ -649,7 +768,6 @@ class DirectShapeKeyGenerator(
             hash_to_actual_file_hash=hash_to_actual_file_hash,
             hash_to_vertex_count=hash_to_vertex_count,
             hash_slot_data_map=hash_slot_data_map,
-            hash_to_base_resources=hash_to_base_resources,
             use_packed=use_packed,
             use_delta=use_delta,
             use_optimized=use_optimized,
@@ -658,7 +776,45 @@ class DirectShapeKeyGenerator(
             frame_table_meta_map=frame_table_meta_map,
             use_sparse_index=use_sparse_vertex_index,
         )
+        retained_hashes = self._update_ini_sections(
+            sections=sections,
+            frame_shader_sources=frame_shader_sources,
+            preserved_tail_content=preserved_tail_content,
+            preserved_driver_content=preserved_driver_content,
+            target_ini_file=target_ini_file,
+            hash_to_base_resources=hash_to_base_resources,
+            **ini_data,
+        )
         LOG.info(f"直出形态键: ini 更新完成 {perf_counter() - stage_start:.3f}s")
+
+        if frame_cache is not None and frame_table_meta_map:
+            output = Path(self.mod_export_path)
+            files = [Path("res") / WEIGHT_SYNC_SHADER_NAME]
+            compact_frame_meta = {}
+            tangent_layouts = {}
+            ini_data["unique_hashes"] = retained_hashes
+            for logical_hash in retained_hashes:
+                meta = frame_table_meta_map.get(logical_hash)
+                if meta is None:
+                    continue
+                actual_hash = hash_to_actual_file_hash[logical_hash]
+                runtime_info = runtime_infos[logical_hash]
+                stride = runtime_info["position_stride"]
+                for field, start, count in self._delta_channel_plan(runtime_info, stride // 4):
+                    if field == "tangent":
+                        tangent_layouts[f"{actual_hash}-Position.buf"] = (stride, start, count)
+                files.append(Path("Meshes0000") / f"{actual_hash}-Position_frame_table.buf")
+                files.append(Path(hash_to_shader_paths[logical_hash]).relative_to(output))
+                groups = []
+                for group in meta["groups"]:
+                    files.append(Path(group["map_path"]).relative_to(output))
+                    groups.append({key: value for key, value in group.items() if key not in ("map_path", "local_index")})
+                compact_frame_meta[logical_hash] = {"groups": groups, "slot_count": meta["slot_count"]}
+            ini_data["frame_table_meta_map"] = compact_frame_meta
+            try:
+                frame_cache.store(output, files, ini_data, tangent_layouts)
+            except OSError as exc:
+                LOG.warning(f"全属性帧表缓存写入失败: {exc}")
 
         # 帧表模式收尾：删除本次已不再被 ini 引用的中间数据文件（约 190 MB）。
         # 必须放在 ini 写回**之后**——若中途失败，ini 仍引用旧文件、文件也还在，

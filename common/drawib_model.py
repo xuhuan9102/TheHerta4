@@ -263,11 +263,13 @@ class DrawIBModel:
                         shapekey_chunks[shapekey_name].append(base_position_buffer)
                     continue
 
-                position_bytes = self._extract_position_bytes_from_shape_key(
-                    shape_key_buffer_result.element_vertex_ndarray,
-                    position_offset,
-                    position_stride,
-                )
+                position_bytes = getattr(shape_key_buffer_result, "position_bytes", None)
+                if position_bytes is None:
+                    position_bytes = self._extract_position_bytes_from_shape_key(
+                        shape_key_buffer_result.element_vertex_ndarray,
+                        position_offset,
+                        position_stride,
+                    )
                 shapekey_chunks[shapekey_name].append(position_bytes)
 
         return {

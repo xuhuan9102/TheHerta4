@@ -110,7 +110,6 @@ class ShapeKeyNativeTests(unittest.TestCase):
             lambda obj: setattr(obj, "mode", "EDIT"),
             lambda obj: obj.modifiers.append(NS(show_viewport=True)),
             lambda obj: setattr(obj.data.shape_keys, "animation_data", NS()),
-            lambda obj: setattr(obj, "animation_data", NS()),
             lambda obj: setattr(obj.data.shape_keys.reference_key, "vertex_group", "mask"),
             lambda obj: setattr(obj.data.shape_keys.reference_key, "mute", True),
             lambda obj: setattr(obj.data.shape_keys.reference_key, "data", [None]),
@@ -127,6 +126,17 @@ class ShapeKeyNativeTests(unittest.TestCase):
         self.assertEqual(native.fast_path_reason(obj), "")
         with mock.patch.dict(os.environ, {"HERTA_SHAPEKEY_FAST": "0"}):
             self.assertEqual(native.fast_path_reason(obj), "disabled")
+
+    def test_object_animation_does_not_affect_fast_path_eligibility(self):
+        obj = self.object()
+        obj.animation_data = NS(action=NS(), drivers=[], nla_tracks=[NS()])
+        self.assertEqual(native.fast_path_reason(obj), "")
+
+        obj.modifiers.append(NS(show_viewport=True))
+        self.assertEqual(native.fast_path_reason(obj), "evaluated modifiers")
+        obj.modifiers.clear()
+        obj.data.shape_keys.animation_data = NS(drivers=[NS()])
+        self.assertTrue(native.fast_path_reason(obj))
 
 
 if __name__ == "__main__":

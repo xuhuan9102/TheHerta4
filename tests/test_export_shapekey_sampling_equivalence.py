@@ -102,6 +102,7 @@ class _ShapeKeyDirectExportError(RuntimeError):
 _install_module(
     f"{PKG}.blueprint.direct_export_shapekey_shared",
     ShapeKeyDirectExportError=_ShapeKeyDirectExportError,
+_buffer_to_bytes=lambda data: b"" if data is None else (data.tobytes() if hasattr(data, "tobytes") else bytes(data)),
 )
 
 _module_path = Path(__file__).resolve().parents[1] / "blueprint" / "direct_export_shapekey_sampling_mixin.py"

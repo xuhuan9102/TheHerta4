@@ -332,7 +332,7 @@ class PreProcessCache:
         return f"shapekey-bake={'on' if enabled else 'off'}:{','.join(names)}:rev{cls.SHAPEKEY_BAKE_REVISION}"
 
     @classmethod
-    def compute_object_hash(cls, obj_name: str) -> str:
+    def compute_object_hash(cls, obj_name: str, *, preserve_shapes=False) -> str:
         obj, source_obj_name = cls.resolve_source_object(obj_name)
         if obj is None:
             return ""
@@ -366,6 +366,11 @@ class PreProcessCache:
 
         if obj.type == 'MESH' and obj.data:
             mesh = obj.data
+            if preserve_shapes:
+                from .frame_table_cache import hash_mesh_topology
+
+                hasher.update(b"preserved-shape-layout-v1")
+                hash_mesh_topology(hasher, mesh)
 
             n_verts = len(mesh.vertices)
             if n_verts > 0:
@@ -413,6 +418,12 @@ class PreProcessCache:
                 hasher.update(kb.name.encode('utf-8'))
                 hasher.update(struct.pack('<d', kb.value))
                 hasher.update(struct.pack('<?', kb.mute))
+                if preserve_shapes:
+                    hasher.update(json.dumps([
+                        kb.relative_key.name if kb.relative_key else None,
+                        kb.vertex_group, kb.slider_min, kb.slider_max,
+                        obj.data.shape_keys.use_relative,
+                    ], ensure_ascii=False).encode("utf-8"))
                 if kb.data:
                     n_sk_verts = len(kb.data)
                     if n_sk_verts > 0:

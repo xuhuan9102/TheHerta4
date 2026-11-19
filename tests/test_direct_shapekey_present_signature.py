@@ -51,7 +51,7 @@ _install_module(
 _install_module(f"{PKG}.utils.log_utils", LOG=types.SimpleNamespace())
 _install_module(
     f"{PKG}.common.safe_write",
-    write_text_if_changed=lambda *_args, **_kwargs: None,
+    write_text_if_changed=lambda path, source: path.write_text(source, encoding="utf-8"),
 )
 _install_module(
     f"{PKG}.blueprint.direct_export_runtime_utils",
@@ -78,6 +78,8 @@ spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+module.derive_shapekey_frame_table_resource_name = lambda base: f"{base}_FrameTable"
+module.derive_shapekey_group_map_resource_name = lambda base, index: f"{base}_GroupMap{index}"
 
 
 class _NodeStub:
@@ -154,33 +156,80 @@ def _sections():
     ])
 
 
-def _run_update(sections, drag_drive_resource=None):
+def _run_update(sections, drag_drive_resource=None, frame_table_meta_map=None,
+                target_ini_file="mod.ini", logical_hashes=("d942b3a7-39828-0",),
+                frame_shader_sources=None):
     harness = _Harness()
     harness._update_ini_sections(
         sections,
         preserved_tail_content="",
-        target_ini_file="mod.ini",
+        target_ini_file=target_ini_file,
         slot_to_name_to_objects={},
-        unique_hashes=["d942b3a7-39828-0"],
-        hash_to_objects={"d942b3a7-39828-0": ["body"]},
+        unique_hashes=list(logical_hashes),
+        hash_to_objects={key: ["body"] for key in logical_hashes},
         all_unique_names=["shape_a", "shape_b"],
         all_unique_objects=["body"],
         calculated_ranges={"body": (0, 10)},
         hash_to_stride={"d942b3a7": 40},
-        hash_to_actual_file_hash={"d942b3a7": "d942b3a7"},
+        hash_to_actual_file_hash={key: "d942b3a7" for key in logical_hashes},
         hash_to_vertex_count={"d942b3a7": 32},
-        hash_slot_data_map={"d942b3a7-39828-0": {1: {"shape_a": ["body"], "shape_b": ["body"]}}},
+        hash_slot_data_map={key: {1: {"shape_a": ["body"], "shape_b": ["body"]}} for key in logical_hashes},
         hash_to_base_resources={"d942b3a7": ["Resourced942b3a7Position"]},
         use_packed=True,
         use_delta=True,
         use_optimized=True,
         merge_slot_files=True,
         drag_drive_resource=drag_drive_resource,
+        frame_table_meta_map=frame_table_meta_map,
+        frame_shader_sources=frame_shader_sources,
     )
     return harness
 
 
 class ShapeKeyPresentSignatureWiringTests(unittest.TestCase):
+    def test_frame_table_inputs_use_compatible_shader_resource_references(self):
+        sections = _sections()
+        table = "Resourced942b3a7Position_FrameTable"
+        group_map = "Resourced942b3a7Position_GroupMap0"
+        sections[f"[{table}]"] = ["type = Buffer", "stride = 4", "filename = old.buf"]
+        _run_update(sections, frame_table_meta_map={
+            "d942b3a7-39828-0": {
+                "groups": [{"map_register": 52, "progress": "$Freq_Group1", "group": 1}],
+            },
+        })
+        shader = "\n".join(sections["[CustomShader_d942b3a7-39828-0_Anim]"])
+        self.assertIn(f"cs-t51 = ref {table}", shader)
+        self.assertIn(f"cs-t52 = ref {group_map}", shader)
+        self.assertIn("cs-u5 = copy ", shader)
+        self.assertNotIn(f"[{table}]", sections)
+        resources = "\n".join(sections[";; --- Generated Shape Key Meshess ---"])
+        for resource in (table, group_map):
+            self.assertIn(f"[{resource}]\ntype = StructuredBuffer\nstride = 4\nbind_flags = shader_resource", resources)
+
+    def test_equivalent_frame_table_dispatches_run_once(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        first, second = "d942b3a7-39828-0", "d942b3a7-300-39828"
+        meta = {"groups": [{"map_register": 52, "progress": "$Freq_Group1", "group": 1}]}
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "res").mkdir()
+            for second_shader, expected_count in (("matching", 1), ("different", 2)):
+                with self.subTest(expected_count=expected_count):
+                    sections = _sections()
+                    _run_update(sections, target_ini_file=str(root / "mod.ini"),
+                                logical_hashes=(first, second),
+                                frame_table_meta_map={first: meta, second: meta},
+                                frame_shader_sources={first: "matching", second: second_shader})
+                    self.assertEqual(len(list((root / "res").glob("*.hlsl"))), expected_count)
+                    present = "\n".join(sections["[Present]"])
+                    constants = "\n".join(sections["[Constants]"])
+                    self.assertEqual(present.count("run = CustomShaderShapeKeyWeightSync_"), expected_count)
+                    self.assertEqual(present.count("run = CustomShader_d942b3a7-"), expected_count)
+                    self.assertEqual(constants.count("post run = CustomShader_d942b3a7-"), expected_count)
+                    self.assertEqual(constants.count(" = copy_desc "), expected_count)
+
     def test_present_block_is_gated_by_signature(self):
         sections = _sections()
         _run_update(sections)

@@ -1019,6 +1019,12 @@ def _run_worker(manifest_path: str) -> None:
                 "后台直出导出完成",
             )
         else:
+            pose_kwargs = {}
+            if getattr(tree, "use_current_pose_shading", False):
+                from ..utils.current_pose_shading import capture
+
+                names = BlueprintExportHelper.collect_connected_preprocess_object_names(tree)
+                pose_kwargs["pose_shading"] = capture(tree, names)
             for index, round_plan in enumerate(round_plans, start=1):
                 # 第 2 轮开始时，第 1 轮才算完成；每轮只推进一步（按计划清单名字）
                 if index > 1:
@@ -1036,6 +1042,7 @@ def _run_worker(manifest_path: str) -> None:
                     tree=tree,
                     round_plan=round_plan,
                     allow_parallel_preprocess=False,
+                    **pose_kwargs,
                 )
 
                 blueprint_model = round_result.get("blueprint_model", blueprint_model)

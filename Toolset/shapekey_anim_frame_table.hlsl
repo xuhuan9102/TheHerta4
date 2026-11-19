@@ -11,7 +11,7 @@
 //   - 帧表第 m 条 = 组内前 m 个形态键的累积位移（相对基础网格，不含 base），
 //     与「第 m 帧姿态 − base」逐位等价（形态键是线性混合，前缀和可无损预计算）。
 //   - 帧表记录数 = key_count + 1（第 0 条恒为零位移起点）。
-//   - 半精度打包：2 条 float3 记录占 3 个 uint32（每条 6 字节）。
+//   - 各通道连续半精度打包，每个 uint32 存两个分量。
 //   - 每组一张顶点局部索引表（-1 = 该顶点不属于此组），按组累加。
 // 于是每顶点只需 2 次顺序读取/组，取代 num_slots 次遍历。
 //
@@ -39,15 +39,14 @@ Texture1D<float4> IniParams : register(t120);
 // 组映射表 / 权重缓冲的声明与 #define 由导出器注入。
 // --- [PYTHON-MANAGED BLOCK END] ---
 
-// 取出帧表第 rec 条记录（float3 = 3 个 half）。
-// 偶数记录落在 [w0.lo, w0.hi, w1.lo]，奇数记录落在 [w1.hi, w2.lo, w2.hi]。
-float3 frame_table_load(uint rec)
+// 三个连续且以 float3 对齐的分量最多读两个 word。
+float3 frame_table_load_float3(uint rec)
 {
     uint even_base = (rec >> 1u) * 3u;
-    uint w0 = frame_table[even_base];
     uint w1 = frame_table[even_base + 1u];
     if ((rec & 1u) == 0u)
     {
+        uint w0 = frame_table[even_base];
         return float3(
             f16tof32(w0 & 0xFFFFu),
             f16tof32(w0 >> 16u),
@@ -60,6 +59,16 @@ float3 frame_table_load(uint rec)
         f16tof32(w2 >> 16u));
 }
 
+float frame_table_load_component(uint component)
+{
+    uint word = frame_table[component >> 1u];
+    return f16tof32((word >> ((component & 1u) * 16u)) & 0xFFFFu);
+}
+
+// --- [PYTHON-MANAGED DELTA START] ---
+// 增量结构与读写顺序由导出器按顶点通道生成。
+// --- [PYTHON-MANAGED DELTA END] ---
+
 // 越界外推的帧数上限：单键组（key_count = 1）时正好等于权重硬边界 ±4，
 // 多键组时最多沿首/末段外推 4 帧 —— 界外是线性外推，不设上限的话进度被写成
 // 3~4 就能把 30 键的组推到一百多帧之外，模型直接炸开。
@@ -71,46 +80,31 @@ float3 frame_table_load(uint rec)
 //
 // t 不夹到 0..1：负 t 沿首段反向、t > 1 沿末段正向线性外推。单键组的 t 就是
 // 该键权重，夹掉符号会让 `$Freq_x = -0.4` 完全不动（旧版 saturate 的行为）。
-float3 frame_table_sample(uint group_offset, uint union_size, uint key_count, uint local_index, float t)
+FrameTableDelta frame_table_sample(uint group_offset, uint union_size, uint key_count, uint local_index, float t)
 {
-    // 空组兜底：下面的末帧回退会算出 key_count - 1，0 会绕成 0xFFFFFFFF。
-    if (key_count == 0u)
+    FrameTableDelta result = (FrameTableDelta)0;
+    if (key_count != 0u)
     {
-        return float3(0.0, 0.0, 0.0);
-    }
-    // NaN 防护：NaN 在下面的比较与 uint 转换里结果是未定义的。权重侧虽有 clamp，
-    // 但本函数是公共入口。
-    if (t != t)
-    {
-        t = 0.0;
-    }
-    float scaled = clamp(t * (float)key_count,
-                         -FRAME_TABLE_EXTRAPOLATION_FRAMES,
-                         (float)key_count + FRAME_TABLE_EXTRAPOLATION_FRAMES);
+        if (t != t)
+        {
+            t = 0.0;
+        }
+        float scaled = clamp(t * (float)key_count,
+                             -FRAME_TABLE_EXTRAPOLATION_FRAMES,
+                             (float)key_count + FRAME_TABLE_EXTRAPOLATION_FRAMES);
 
-    // 帧 0 恒为零位移起点，所以负进度等价于沿首段反向外推：origin + (first - origin) * scaled。
-    if (scaled < 0.0)
-    {
-        float3 origin = frame_table_load(group_offset + local_index);
-        float3 first = frame_table_load(group_offset + union_size + local_index);
-        return origin + (first - origin) * scaled;
+        // 首段和末段共用同一插值式，分别以 frac < 0 和 frac > 1 外推。
+        uint frame_index = scaled < 0.0 ? 0u : min((uint)floor(scaled), key_count - 1u);
+        float frac = scaled - (float)frame_index;
+        uint record = group_offset + frame_index * union_size + local_index;
+        result = frame_table_load(record);
+        if (frac != 0.0)
+        {
+            FrameTableDelta next_frame = frame_table_load(record + union_size);
+            result = frame_table_lerp(result, next_frame, frac);
+        }
     }
-
-    uint frame_index = (uint)floor(scaled);
-    float frac = scaled - (float)frame_index;
-    if (frame_index >= key_count)
-    {
-        // 越过末帧：回到最后一段，用 frac >= 1 继续线性外推（单键组即 t * delta）。
-        frame_index = key_count - 1u;
-        frac = scaled - (float)frame_index;
-    }
-    float3 a = frame_table_load(group_offset + frame_index * union_size + local_index);
-    if (frac <= 0.0)
-    {
-        return a;
-    }
-    float3 b = frame_table_load(group_offset + (frame_index + 1u) * union_size + local_index);
-    return lerp(a, b, frac);
+    return result;
 }
 
 [numthreads(16, 1, 1)]
@@ -124,14 +118,13 @@ void main(uint3 threadID : SV_DispatchThreadID)
     }
 
     VertexAttributes output = rw_buffer[i];
-    float3 total_diff_position = float3(0.0, 0.0, 0.0);
+    FrameTableDelta total_diff = (FrameTableDelta)0;
 
     // --- [PYTHON-MANAGED LOGIC START] ---
     // 各分组逐帧插值累加，由导出器注入。
     // --- [PYTHON-MANAGED LOGIC END] ---
 
     // --- [PYTHON-MANAGED WRITEBACK START] ---
-    output.position += total_diff_position;
     // --- [PYTHON-MANAGED WRITEBACK END] ---
     rw_buffer[i] = output;
 }

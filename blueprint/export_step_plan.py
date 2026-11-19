@@ -196,10 +196,31 @@ def build_step_plan(
         not bool(getattr(node, "direct_export_mode", False)) for node in shapekey_nodes
     )
     has_multifile = _has_direct_multifile_nodes(nodes) or bool(has_multi_file_export)
+    frame_table_all_channels = any(
+        getattr(node, "use_frame_table", False)
+        and getattr(node, "store_all_vertex_channels", False)
+        for node in direct_shapekey_nodes
+    )
 
     plan = list(DIRECT_BASE_STAGE_STEPS)
-    plan += list(PREPROCESS_STAGE_STEPS)
-    if has_shapekey:
+    if frame_table_all_channels:
+        plan += [
+            "前处理-计算缓存哈希",
+            "前处理-加载缓存",
+            "前处理-创建副本",
+            "前处理-清空形态键",
+            "前处理-应用约束",
+            "前处理-应用修改器",
+            "前处理-三角化",
+            "前处理-应用变换",
+            "前处理-恢复形态键",
+            "前处理-重命名UV",
+            "前处理-恢复非镜像",
+            "Preprocess-BakeDisabledShapeKeys",
+        ]
+    else:
+        plan += list(PREPROCESS_STAGE_STEPS)
+    if has_shapekey and not frame_table_all_channels:
         plan += list(PREPROCESS_SHAPEKEY_STEPS)
     plan += list(BASE_EXPORT_STEPS)
     plan += _node_step_keys(nodes, direct_export=True)

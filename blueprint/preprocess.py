@@ -334,7 +334,7 @@ class PreProcessHelper:
 
     @classmethod
     def _build_preserve_shapekey_cache_hash(cls, object_name: str) -> str:
-        base_hash = PreProcessCache.compute_object_hash(object_name)
+        base_hash = PreProcessCache.compute_object_hash(object_name, preserve_shapes=True)
         if not base_hash:
             return ""
         return f"{cls.PRESERVE_SHAPEKEY_CACHE_PREFIX}{base_hash}"

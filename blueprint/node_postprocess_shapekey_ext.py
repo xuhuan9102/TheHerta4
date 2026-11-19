@@ -2895,7 +2895,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             switch_buttons = None
             if PIL_AVAILABLE and callable(getattr(combined, "_build_button_list", None)):
                 try:
-                    switch_buttons = combined._build_button_list(target_ini_file)
+                    switch_buttons = combined._build_button_list()
                 except Exception as error:
                     print(f"[形态键扩展] 读取集成切换按钮尺寸失败，回退节点列表: {error}")
             switch_count = len(switch_buttons) if switch_buttons is not None else len(switch_entries)
