@@ -139,9 +139,7 @@ _ACTIVATION_FLAG_SET_RE = re.compile(r"^[ \t]*(\$[A-Za-z_]\w*)[ \t]*=[ \t]*1[ \t
 #: 段内写法按该贴图自己的贴图标记选：``Hash`` → ``[TextureOverride_<贴图hash>] …
 #: this = …``，其余（Slot / SharedSlot / 没有标记）→ 本前缀的槽位段。
 _MATERIAL_PURE_TEXTURE_SECTION_PREFIX = "TextureOverride_MaterialPureTexture_"
-_MATERIAL_PURE_TEXTURE_SECTION_MARKER = (
-    "; --- 纯贴图替换（无网格修改）：由「材质转资源pro」节点生成 ---"
-)
+_MATERIAL_PURE_TEXTURE_SECTION_MARKER = "; mpure"
 #: 纯贴图段登记进 ``common/export_section_registry`` 时使用的段类型。
 #: 「条件判断」节点据此把这类凭空生成的段也纳入门控（正常导出段由 M_IniBuilder 登记）。
 _MATERIAL_PURE_TEXTURE_SECTION_TYPE = "TextureOverrideMaterialPureTexture"
