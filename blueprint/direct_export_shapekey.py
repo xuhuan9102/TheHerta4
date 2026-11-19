@@ -399,6 +399,7 @@ class DirectShapeKeyGenerator(
         group_totals = {}
         freq_params = {}
         frame_table_meta_map = {}
+        frame_shader_sources = {}
         frame_table_blocked = []
         if frame_table_mode:
             # 前置条件校验：帧表依赖「紧凑 + 合并槽位文件 + 优化查找」三件套产出的
@@ -589,7 +590,7 @@ class DirectShapeKeyGenerator(
             # 只播种缺失的模板；已存在则保持原样，由 _update_shader_file 以模板为源
             # 重新注入。不能用 shutil.copy2：它每轮把目标 mtime 重置成模板的旧
             # mtime，而 3DMigoto 的 .bin 缓存按"注入后写入时刻"对齐 → 每轮必错配。
-            if not os.path.exists(shader_dest_path):
+            if not frame_table_mode and not os.path.exists(shader_dest_path):
                 with open(shader_source_path, 'r', encoding='utf-8') as f:
                     write_text_if_changed(shader_dest_path, f.read())
             hash_to_shader_paths[logical_hash] = shader_dest_path
@@ -718,18 +719,19 @@ class DirectShapeKeyGenerator(
                     raise ShapeKeyDirectExportError(
                         "未找到帧表着色器模板 Toolset/shapekey_anim_frame_table.hlsl。"
                     )
-                if not self._update_frame_table_shader(
-                    shader_path,
+                source = self._render_frame_table_shader(
                     frame_table_template,
                     key_count=len(hash_unique_names),
                     frame_meta=frame_table_meta["groups"],
                     channel_plan=channel_plan,
                     hash_val=logical_hash,
                     vertex_count=frame_vertex_count,
-                ):
+                )
+                if source is None:
                     raise ShapeKeyDirectExportError(
                         f"{logical_hash}: 帧表着色器注入失败。"
                     )
+                frame_shader_sources[logical_hash] = source
                 frame_table_meta_map[logical_hash] = frame_table_meta
             elif shader_path:
                 self.node._update_shader_file(
@@ -771,8 +773,9 @@ class DirectShapeKeyGenerator(
             frame_table_meta_map=frame_table_meta_map,
             use_sparse_index=use_sparse_vertex_index,
         )
-        self._update_ini_sections(
+        retained_hashes = self._update_ini_sections(
             sections=sections,
+            frame_shader_sources=frame_shader_sources,
             preserved_tail_content=preserved_tail_content,
             preserved_driver_content=preserved_driver_content,
             target_ini_file=target_ini_file,
@@ -786,7 +789,11 @@ class DirectShapeKeyGenerator(
             files = [Path("res") / WEIGHT_SYNC_SHADER_NAME]
             compact_frame_meta = {}
             tangent_layouts = {}
-            for logical_hash, meta in frame_table_meta_map.items():
+            ini_data["unique_hashes"] = retained_hashes
+            for logical_hash in retained_hashes:
+                meta = frame_table_meta_map.get(logical_hash)
+                if meta is None:
+                    continue
                 actual_hash = hash_to_actual_file_hash[logical_hash]
                 runtime_info = runtime_infos[logical_hash]
                 stride = runtime_info["position_stride"]

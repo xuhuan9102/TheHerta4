@@ -1,6 +1,7 @@
 import os
 import re
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 
@@ -1068,13 +1069,13 @@ class DirectShapeKeyOutputMixin:
             ])
         return lines
 
-    def _update_frame_table_shader(self, shader_path, template_path, key_count, frame_meta,
+    def _render_frame_table_shader(self, template_path, key_count, frame_meta,
                                    channel_plan, hash_val=None, vertex_count=0):
-        """把帧表配置注入模板并写到 shader_path。"""
+        """把帧表配置注入模板，返回生成的着色器源码。"""
         # vertex_count 为 0 时 FRAME_VERTEX_COUNT 不会被定义，而注入的逻辑会引用它
         # → shader 编译失败。这里直接拒绝，交由调用方回退旧模型。
         if int(vertex_count or 0) <= 0 or not template_path:
-            return False
+            return None
         with open(template_path, "r", encoding="utf-8") as file_obj:
             content = file_obj.read()
 
@@ -1123,8 +1124,7 @@ class DirectShapeKeyOutputMixin:
             content,
             count=1,
         )
-        write_text_if_changed(shader_path, content)
-        return True
+        return content
 
     def _compose_slot_bytes(self, logical_hash, runtime_info, slot_index, names_data, slot_position_overrides):
         base_bytes = runtime_info["base_bytes"]
@@ -1330,6 +1330,40 @@ class DirectShapeKeyOutputMixin:
     def _parse_hash_to_base_resources(self, sections):
         return collect_base_position_resource_map(sections, self.node._extract_hash_prefix)
 
+    def _deduplicate_frame_table_dispatches(
+        self, target_ini_file, logical_hashes, frame_table_meta_map,
+        hash_slot_data_map, hash_to_actual_file_hash, frame_shader_sources,
+    ):
+        if not frame_table_meta_map:
+            return logical_hashes
+
+        shader_dir = Path(target_ini_file).parent / "res"
+        retained = []
+        previous = None
+        for logical_hash in logical_hashes:
+            frame_meta = frame_table_meta_map.get(logical_hash)
+            slots = hash_slot_data_map.get(logical_hash)
+            signature = None
+            if frame_meta and slots:
+                shader = shader_dir / f"shapekey_anim_{logical_hash}.hlsl"
+                source = frame_shader_sources.get(logical_hash)
+                if source is None and shader.is_file():
+                    source = shader.read_bytes()
+                if source is not None:
+                    weight_names = tuple(dict.fromkeys(
+                        name for slot in slots.values() for name in slot
+                    ))
+                    signature = (
+                        self.node._extract_hash_prefix(logical_hash),
+                        hash_to_actual_file_hash.get(logical_hash, logical_hash),
+                        frame_meta["groups"], weight_names, source,
+                    )
+            # Keep intervening writes in order when passes for the same buffer differ.
+            if signature is None or signature != previous:
+                retained.append(logical_hash)
+            previous = signature
+        return retained
+
     def _update_ini_sections(
         self,
         sections,
@@ -1354,10 +1388,29 @@ class DirectShapeKeyOutputMixin:
         drag_drive_resource=None,
         frame_table_meta_map=None,
         use_sparse_index=False,
+        frame_shader_sources=None,
     ):
         if '[Constants]' not in sections:
             sections['[Constants]'] = []
         constants_lines = sections['[Constants]']
+        original_hashes = unique_hashes
+        unique_hashes = self._deduplicate_frame_table_dispatches(
+            target_ini_file, original_hashes, frame_table_meta_map,
+            hash_slot_data_map, hash_to_actual_file_hash, frame_shader_sources or {},
+        )
+        if frame_shader_sources:
+            shader_dir = Path(target_ini_file).parent / "res"
+            for logical_hash in unique_hashes:
+                if logical_hash in frame_shader_sources:
+                    write_text_if_changed(
+                        shader_dir / f"shapekey_anim_{logical_hash}.hlsl",
+                        frame_shader_sources[logical_hash],
+                    )
+        redundant_runs = {
+            f"post run = CustomShader_{logical_hash}_Anim"
+            for logical_hash in set(original_hashes) - set(unique_hashes)
+        }
+        constants_lines[:] = [line for line in constants_lines if line.strip() not in redundant_runs]
         constants_content = "".join(constants_lines)
         vars_to_define = set()
 
@@ -1432,10 +1485,10 @@ class DirectShapeKeyOutputMixin:
         rebuilt_present_lines = []
         generated_run_lines = {
             f"run = CustomShader_{logical_hash}_Anim"
-            for logical_hash in unique_hashes
+            for logical_hash in original_hashes
         } | {
             f"run = CustomShaderShapeKeyWeightSync_{logical_hash}"
-            for logical_hash in unique_hashes
+            for logical_hash in original_hashes
         }
         line_index = 0
         while line_index < len(present_lines):
@@ -1907,3 +1960,4 @@ class DirectShapeKeyOutputMixin:
 
         sections.update(compute_blocks_to_add)
         self.node._write_ordered_dict_to_ini(sections, target_ini_file, preserved_tail_content, preserved_driver_content)
+        return unique_hashes
