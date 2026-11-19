@@ -979,6 +979,19 @@ class SSMTNode_PostProcess_UVOffset(SSMTNode_PostProcess_Base):
             if apply_warning:
                 print(f"[UVOffset] {apply_warning}")
 
+            # Preserve untouched attributes bit for bit, including packed COLOR.
+            # Only successfully generated UV operations determine memory traffic.
+            touched = sorted({int(index) for index in re.findall(r"data\[(\d+)\]", apply_code)})
+            for block, lines in (
+                ("LOAD", [f"    data[{index}] = rw_buffer[base + {index}];" for index in touched]),
+                ("STORE", [f"    rw_buffer[base + {index}] = data[{index}];" for index in touched]),
+            ):
+                start = f"// --- [PYTHON-MANAGED {block} START] ---"
+                end = f"// --- [PYTHON-MANAGED {block} END] ---"
+                content = re.sub(re.escape(start) + r".*?" + re.escape(end),
+                                 start + "\n" + "\n".join(lines) + "\n    " + end,
+                                 content, flags=re.DOTALL)
+
             content = re.sub(
                 r"// --- \[PYTHON-MANAGED APPLY START\] ---.*?// --- \[PYTHON-MANAGED APPLY END\] ---",
                 apply_code,

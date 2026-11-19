@@ -47,20 +47,24 @@ void main(uint3 threadID : SV_DispatchThreadID)
 
     uint base = i * UV_STREAM_UINTS_PER_VERTEX;
     uint data[16];
+    // --- [PYTHON-MANAGED LOAD START] ---
     [unroll]
     for (uint k = 0; k < UV_STREAM_UINTS_PER_VERTEX; ++k)
     {
         data[k] = rw_buffer[base + k];
     }
+    // --- [PYTHON-MANAGED LOAD END] ---
 
     // --- [PYTHON-MANAGED APPLY START] ---
     // --- [PYTHON-MANAGED APPLY END] ---
 
+    // --- [PYTHON-MANAGED STORE START] ---
     [unroll]
     for (uint k = 0; k < UV_STREAM_UINTS_PER_VERTEX; ++k)
     {
         rw_buffer[base + k] = data[k];
     }
+    // --- [PYTHON-MANAGED STORE END] ---
 }
 // --- END OF FILE uv_offset_anim.hlsl ---
 
