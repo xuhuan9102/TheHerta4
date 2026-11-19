@@ -180,12 +180,15 @@ class DirectShapeKeyGenerator(
                 hash_val: {int(slot): data for slot, data in slots.items()}
                 for hash_val, slots in cached_ini["hash_slot_data_map"].items()
             }
+            # 显式列出稀疏标志：缓存命中也要把它交给 ini 阶段（AST 检查与可读性都要求）。
+            cached_sparse_index = bool(cached_ini.pop("use_sparse_index", False))
             self._update_ini_sections(
                 sections=sections,
                 preserved_tail_content=preserved_tail_content,
                 preserved_driver_content=preserved_driver_content,
                 target_ini_file=target_ini_file,
                 hash_to_base_resources=self._parse_hash_to_base_resources(sections),
+                use_sparse_index=cached_sparse_index,
                 **cached_ini,
             )
             return
