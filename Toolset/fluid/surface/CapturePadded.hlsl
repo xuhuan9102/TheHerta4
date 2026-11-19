@@ -2,8 +2,12 @@
 // register POSITION_REGISTER after its other outputs. The registers before it
 // are declared whole whatever the vertex shader packs into them, so a driver
 // linking the stages by register finds SV_Position at its register and one
-// linking by semantic finds it by name. Their values are never read.
+// linking by semantic finds it by name. Supported ZZMI exports also consume
+// TEXCOORD2/3 as the native world normal/tangent for orientation transport.
 #define CAPTURE_VERTEX_DEFINED
+#if POSITION_REGISTER > 4
+#define CAPTURE_SHADING_FRAME
+#endif
 struct OriginalVertex {
 #if POSITION_REGISTER > 0
  float4 output0:TEXCOORD0;

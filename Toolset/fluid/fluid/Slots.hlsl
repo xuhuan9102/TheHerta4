@@ -6,6 +6,7 @@
 // Includers declare IniParams first.
 #ifndef LIQUID_SLOTS
 #define LIQUID_SLOTS
+#include "EmitterFeatures.hlsl"
 static const uint SLOT_ROWS=16;
 // xyz the character root that slot particles are stored relative to; w is 1
 // while the slot is assigned. A freed slot drops its particles that frame.
@@ -85,7 +86,7 @@ float slotLifetime(uint s){
  return fluidLifetimeOf(float4(v[id&3u],0,0,0));
 }
 bool slotLive(uint s){return slots[s*SLOT_ROWS+SLOT_ROOT].w>.5;}
-bool slotComputeOn(uint s){return slotLive(s)&&slotEmitOn(s);}
+bool slotComputeOn(uint s){return slotLive(s)&&slotEmitterValid(s);}
 float3 slotRoot(uint s){return slots[s*SLOT_ROWS+SLOT_ROOT].xyz;}
 uint primarySlot(uint i){return i/PRIMARY_PER_SLOT;}
 // The nozzle setting the slot emits with: the global strength level (253.y)

@@ -21,8 +21,8 @@ def runtime(tmp_path_factory):
     directory = tmp_path_factory.mktemp('fluid-gpu')
     shaders = {}
     for phase in ('Predict', 'Density', 'Correct', 'Finalize', 'State',
-                  'AssignSlots', 'SplashUpdate', 'SplashSpawn'):
-        filename = ('Fluid' + phase) if phase in ('Predict', 'Density', 'Correct', 'Finalize', 'State') else phase
+                  'AssignSlots', 'SplashUpdate', 'SplashSpawn', 'Activity'):
+        filename = ('Fluid' + phase) if phase in ('Predict', 'Density', 'Correct', 'Finalize', 'State', 'Activity') else phase
         path = ROOT / 'Toolset/fluid/fluid' / (filename + '.hlsl')
         source = node.SSMTNode_PostProcess_FluidProbe._remap_hlsl(module.base.load_file(
             'fluid_compiler', ROOT / 'tools/compile-hlsl.py').expand(str(path)))
@@ -91,9 +91,9 @@ def run_primary(gpu, shader, particles, phase):
 
 
 @pytest.mark.parametrize('phase', ['Predict', 'Density', 'Correct', 'Finalize'])
-@pytest.mark.parametrize('requested,changed', [(2, (0, 3)), (0, (1,)), (1, ())])
+@pytest.mark.parametrize('requested,changed', [(2, (0, 3)), (0, (1,)), (1, (2,))])
 @pytest.mark.parametrize('reset', [False, True])
-def test_only_requested_enabled_owner_banks_are_written(runtime, phase, requested, changed, reset):
+def test_only_requested_live_owner_banks_are_written(runtime, phase, requested, changed, reset):
     gpu, shaders, _ = runtime
     bindings(gpu, requested, reset)
     particles = np.zeros((8192, 4, 4), np.float32)
@@ -127,7 +127,68 @@ def test_new_slot_keeps_first_substep_births_during_second_substep(runtime):
     assert np.all(second[first_born, 1, 3] > 0.5)
 
 
-def test_state_updates_only_enabled_slots(runtime):
+@pytest.mark.parametrize('age,alive', [(.1, True), (1.099, False)])
+def test_closed_nozzle_preserves_existing_particles_without_new_births(runtime, age, alive):
+    gpu, shaders, _ = runtime
+    bindings(gpu, requested=1)
+    particles = np.zeros((8192, 4, 4), np.float32)
+    index = 2 * 1024 + 10
+    particles[index, 0] = [.1, .85, 0, age]
+    particles[index, 1] = [.1, -.1, 0, 1]
+    particles[index, 2] = [.1, .85, 0, 0]
+    particles[index, 3] = [1000, 0, .1, 1.5]
+    result = run_primary(gpu, shaders['Predict'], particles, 'Predict')
+    bank = result[2048:3072]
+    assert np.flatnonzero(bank[:, 1, 3] > .5).tolist() == ([10] if alive else [])
+    assert bank[10, 0, 3] > age
+    if alive:
+        assert bank[10, 2, 1] < .85
+
+
+@pytest.mark.parametrize('phase', ['Density', 'Correct', 'Finalize'])
+def test_empty_group_skip_matches_full_neighbor_traversal(runtime, tmp_path, phase):
+    gpu, shaders, _ = runtime
+    source = gpu.compiler.expand(str(ROOT / 'Toolset/fluid/fluid' / ('Fluid'+phase+'.hlsl')))
+    source = source.replace('if(groupHasActive(active,lane)) ', '').replace('if(groupHasActive(coupled,lane)) ', '')
+    path = tmp_path / 'reference.hlsl'
+    path.write_text(node.SSMTNode_PostProcess_FluidProbe._remap_hlsl(source), encoding='utf-8')
+    reference = gpu.shader(path)
+    random = np.random.default_rng(381)
+    particles = np.zeros((8192, 4, 4), np.float32)
+    for slot in (0, 3):
+        rows = slice(slot*1024, slot*1024+95)
+        particles[rows, 0, :3] = random.uniform(-.02, .02, (95, 3)) + [0, .85, 0]
+        particles[rows, 0, 3] = .1
+        particles[rows, 1, :3] = [.1, -.1, .05]
+        particles[rows, 1, 3] = 1
+        particles[rows, 2, :3] = particles[rows, 0, :3] + [.001, -.001, 0]
+        particles[rows, 2, 3] = -.01
+        particles[rows, 3] = [1000, 0, .1, 1.5]
+    results = []
+    for shader in (reference, shaders[phase]):
+        bindings(gpu, requested=2)
+        results.append(run_primary(gpu, shader, particles, phase))
+    np.testing.assert_array_equal(*results)
+
+
+def test_activity_counts_primary_and_secondary_by_owner_and_slot(runtime):
+    gpu, shaders, _ = runtime
+    bindings(gpu)
+    primary = np.zeros((8192, 4, 4), np.float32)
+    primary[0, 1, 3] = 1  # slot 0, emitter 2
+    secondary = np.zeros((6144, 4, 4), np.float32)
+    secondary[1, 1, 3] = 3  # slot 2, closed emitter 1
+    for register, array in ((100, primary), (101, secondary)):
+        resource = gpu.buffer(array, structured=64)
+        gpu.bind(register, gpu.view(resource, len(array), 0))
+    output = gpu.buffer(np.zeros(2, np.float32), writable=True)
+    gpu.bind(0, gpu.view(output, 2, 41, writable=True), True)
+    gpu.dispatch(shaders['Activity'], 1)
+    gpu.bind(0, None, True)
+    np.testing.assert_array_equal(gpu.read_bytes(output, 8).view(np.float32), [6, 5])
+
+
+def test_state_updates_live_slots_including_draining_owners(runtime):
     gpu, shaders, _ = runtime
     bindings(gpu)
     frames = np.full((8, 4, 4), -321, np.float32)
@@ -137,13 +198,14 @@ def test_state_updates_only_enabled_slots(runtime):
     gpu.bind(1, None, True)
     result = gpu.read_bytes(target, frames.nbytes).view(np.float32).reshape(frames.shape)
     for slot in range(8):
-        if slot in (0, 1, 3):
+        if slot in (0, 1, 2, 3):
             assert np.all(result[slot, :3] != -321)
         else:
             np.testing.assert_array_equal(result[slot], -321)
 
 
-def test_assign_slots_releases_closed_owner_and_rejects_its_candidate(runtime):
+@pytest.mark.parametrize('alive', [False, True])
+def test_assign_slots_retires_closed_owner_only_after_its_particles_finish(runtime, alive):
     gpu, shaders, _ = runtime
     slots, frames = bindings(gpu)
     candidates = np.zeros((145, 4), np.float32)
@@ -155,6 +217,8 @@ def test_assign_slots_releases_closed_owner_and_rejects_its_candidate(runtime):
         gpu.bind(register, gpu.view(resource, len(array), 0))
     output = gpu.buffer(slots, structured=16, writable=True)
     state = gpu.buffer(frames, structured=16, writable=True)
+    activity = gpu.buffer(np.array([2 if alive else 0, 4 if alive else 0], np.float32))
+    gpu.bind(104, gpu.view(activity, 2, 41))
     gpu.bind(0, gpu.view(output, 128, 0, writable=True), True)
     gpu.bind(1, gpu.view(state, 32, 0, writable=True), True)
     gpu.dispatch(shaders['AssignSlots'], 1)
@@ -162,15 +226,18 @@ def test_assign_slots_releases_closed_owner_and_rejects_its_candidate(runtime):
     gpu.bind(1, None, True)
     result = gpu.read_bytes(output, slots.nbytes).view(np.float32).reshape(slots.shape)
     result_state = gpu.read_bytes(state, frames.nbytes).view(np.float32).reshape(frames.shape)
-    assert result[2, 9, 3] == 0
-    assert result_state[2, 2, 3] == 0
+    assert result[2, 9, 3] == int(alive)
+    assert result_state[2, 2, 3] == int(alive)
     assert result[[0, 1, 3], 9, 3].tolist() == [1, 1, 1]
 
 
 @pytest.mark.parametrize('phase', ['SplashUpdate', 'SplashSpawn'])
-def test_closed_owners_splashes_are_removed_before_physics(runtime, phase):
+def test_unassigned_owners_splashes_are_removed_before_physics(runtime, phase):
     gpu, shaders, _ = runtime
-    bindings(gpu)
+    slots, _ = bindings(gpu)
+    slots[2, 9, 3] = 0
+    resource = gpu.buffer(slots, structured=16)
+    gpu.bind(103, gpu.view(resource, 128, 0))
     particles = np.zeros((6144, 4, 4), np.float32)
     # A closed owner's invalid old puddle must be rejected before touching its
     # geometry. A fresh slot has the same rule through its nozzle-valid flag.
@@ -188,6 +255,88 @@ def test_closed_owners_splashes_are_removed_before_physics(runtime, phase):
     gpu.bind(0, None, True)
     result = gpu.read_bytes(target, particles.nbytes).view(np.float32).reshape(particles.shape)
     np.testing.assert_array_equal(result[0], 0)
+
+
+def test_new_emitter_cannot_take_another_emitters_live_bank(runtime):
+    gpu, shaders, _ = runtime
+    slots, frames = bindings(gpu)
+    slots[:] = 0
+    slots[0, 4, 1] = 0
+    slots[0, 9, 3] = 1
+    frames[:] = 0
+    frames[0, 2, 3] = 1
+    candidates = np.zeros((145, 4), np.float32)
+    candidates[0, 0] = 1
+    candidates[5] = [-1, 2, 0, 1]
+    candidates[6, 3] = 1
+    for register, array in ((0, candidates), (1, np.zeros((40, 4), np.float32))):
+        resource = gpu.buffer(array, structured=16)
+        gpu.bind(register, gpu.view(resource, len(array), 0))
+    output = gpu.buffer(slots, structured=16, writable=True)
+    state = gpu.buffer(frames, structured=16, writable=True)
+    gpu.bind(0, gpu.view(output, 128, 0, writable=True), True)
+    gpu.bind(1, gpu.view(state, 32, 0, writable=True), True)
+    gpu.dispatch(shaders['AssignSlots'], 1)
+    gpu.bind(0, None, True)
+    gpu.bind(1, None, True)
+    result = gpu.read_bytes(output, slots.nbytes).view(np.float32).reshape(slots.shape)
+    assert result[0, 4, 1] == 0
+    assert result[0, 9, 3] == 1
+    assert result[1, 4, 1] == 2
+    assert result[1, 9, 3] == 1
+
+
+def test_multiple_instances_use_pool_capacity_not_emitter_count(runtime):
+    gpu, shaders, _ = runtime
+    slots, frames = bindings(gpu)
+    slots[:] = 0
+    for slot in range(2):
+        slots[slot, 4, 1] = slot
+        slots[slot, 9, 3] = 1
+    params = np.zeros((128, 4), np.float32)
+    params[node.FLUID_INI_PARAM_MAP[253]] = [.02, 3, 2, 1/60]
+    params[node.FLUID_INI_PARAM_MAP[239]] = [.01, .05, 0, 0]
+    params[42] = [1, 1, 0, 0]
+    _, view = gpu.ini(params)
+    gpu.bind(120, view)
+    candidates = np.zeros((145, 4), np.float32)
+    candidates[0, 0] = 4
+    for candidate, (owner, root) in enumerate(((0, 0), (1, 0), (0, .4), (1, .4))):
+        base = 1 + candidate*9
+        candidates[base+4] = [-1, owner, .001, 1]
+        candidates[base+5] = [root, 0, 0, 1]
+    for register, array in ((0, candidates), (1, np.zeros((40, 4), np.float32))):
+        resource = gpu.buffer(array, structured=16)
+        gpu.bind(register, gpu.view(resource, len(array), 0))
+    output = gpu.buffer(slots, structured=16, writable=True)
+    state = gpu.buffer(frames, structured=16, writable=True)
+    gpu.bind(0, gpu.view(output, 128, 0, writable=True), True)
+    gpu.bind(1, gpu.view(state, 32, 0, writable=True), True)
+    gpu.dispatch(shaders['AssignSlots'], 1)
+    gpu.bind(0, None, True)
+    gpu.bind(1, None, True)
+    result = gpu.read_bytes(output, slots.nbytes).view(np.float32).reshape(slots.shape)
+    actual = {(round(float(row[9, 0]), 1), int(row[4, 1])) for row in result if row[9, 3] > .5}
+    assert actual == {(0, 0), (0, 1), (.4, 0), (.4, 1)}
+
+
+def test_closed_owner_existing_surface_drop_keeps_its_lifetime(runtime):
+    gpu, shaders, _ = runtime
+    bindings(gpu)
+    particles = np.zeros((6144, 4, 4), np.float32)
+    particles[0, 0] = [.1, .85, .2, .1]
+    particles[0, 1] = [.5, .1, 0, 3]  # slot 2 belongs to the closed emitter 1
+    particles[0, 3, 3] = 4
+    source = gpu.buffer(particles, structured=64)
+    target = gpu.buffer(np.zeros_like(particles), structured=64, writable=True)
+    gpu.bind(100, gpu.view(source, 6144, 0))
+    gpu.bind(0, gpu.view(target, 6144, 0, writable=True), True)
+    gpu.dispatch(shaders['SplashUpdate'], 96)
+    gpu.bind(0, None, True)
+    result = gpu.read_bytes(target, particles.nbytes).view(np.float32).reshape(particles.shape)
+    assert result[0, 1, 3] == 3
+    assert result[0, 0, 3] > .1
+    assert np.isfinite(result).all()
 
 
 @pytest.mark.parametrize('stage,define', [('vs', 'VERTEX_SHADER'), ('ps', 'PIXEL_SHADER')])

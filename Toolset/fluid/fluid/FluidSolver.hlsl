@@ -68,6 +68,15 @@ static const uint TILE=64;
 groupshared float4 tilePredicted[TILE];
 groupshared uint tileUsable[TILE];
 groupshared uint tileAny;
+groupshared uint groupActive;
+bool groupHasActive(bool active,uint lane){
+ GroupMemoryBarrierWithGroupSync();
+ if(lane==0)groupActive=0;
+ GroupMemoryBarrierWithGroupSync();
+ if(active)InterlockedOr(groupActive,1);
+ GroupMemoryBarrierWithGroupSync();
+ return groupActive!=0;
+}
 #ifdef PHASE_FINALIZE
 groupshared float4 tilePosition[TILE];
 groupshared float4 tileSheet[TILE];
@@ -116,8 +125,7 @@ void simulateParticle(uint i,uint slot,uint lane){
  // This same rule covers first activation, reactivation, and teleport recovery.
  bool trickle=slotTrickle(slot);
  bool visOn=slotVisOn(slot);
- // nhd-pick: 出生门与死亡门**共用同一个值**（2026-11-05：两处各调一次 slotEmitOn，
- // 出生读到越界 id 的 1、死亡读到有效 id 的 0 ⇒ 一帧生一帧死 = 闪）。只算一次。
+ // The nozzle switch gates births only; existing fluid keeps its age and motion.
  bool emitOn=slotEmitOn(slot);
  bool emitting=(trickle?(IniParams[241].y>.5 && slotSeen(slot)):(visOn?slotVisActive(slot):(IniParams[237].x>.5 && pulse[3].w>.5 && slotSeen(slot))))&&emitOn;
  float drive=slotDrive(slot);
@@ -133,13 +141,7 @@ void simulateParticle(uint i,uint slot,uint lane){
  if(!birth){
   age=p.positionAge.w+DT;
   float trickleLife=slots[slot*SLOT_ROWS+15].x;
- // nhd-pick: 「关了就别留尾」的两个开关（位掩码 IniParams[60].x；0 = 默认全开）。
- // bit0 = 关闭即清空该槽（默认 1），bit1 = 允许尾流 tailEmission（默认 1）。
- // 导出只在「与默认不同」时写这个 lane，所以默认档产物与旧版逐字节相同，
- // 这里 0 就按 1|2 解析。
- #define EMITFLAGS (IniParams[60].x>1e-6 ? (uint)IniParams[60].x : 3u)
- if(age>=((trickle&&trickleLife>0)?trickleLife:lifetime) || teleport || !slotLive(slot)
-    || (((EMITFLAGS&1u)!=0u) && !emitOn))p.velocityAlive.w=0;
+ if(age>=((trickle&&trickleLife>0)?trickleLife:lifetime) || teleport || !slotLive(slot))p.velocityAlive.w=0;
  }
  // Root-relative storage is only a floating origin. Old fluid never receives emitter velocity.
  float frameTime=STEP.y+(STEP.z<.5?DT:0);
@@ -216,8 +218,8 @@ void simulateParticle(uint i,uint slot,uint lane){
    branchTag=scatterBlend>.65?-3:(scatterBlend>.05?0:(burstTime<scatterStart?2:3));
    nozzle.speed*=lerp(1,.75+.75*hash1(i*31.3+t*23.7),scatterBlend*(1-smoothstep(0,.45,saturate((pulse[2].x-1)/.85))));
   }
-  // nhd-pick: bit1 关掉时不要尾流（`TAIL_ON` 见上面 EMITFLAGS）。
-  bool tailEmission=((EMITFLAGS&2u)!=0u) && (trickle || (!visOn && pulse[5].x<.75));
+  // The emitting owner's option controls its own fine tail.
+  bool tailEmission=emitterTailEnabled(slotEmitterId(slot)) && (trickle || (!visOn && pulse[5].x<.75));
   if(tailEmission){
    nozzle.sheetAmount=0;frozenMode=-1;branchTag=2;
    birthSheetFrame[i]=float4(slitLong,frozenMode);
@@ -344,7 +346,7 @@ void simulateParticle(uint i,uint slot,uint lane){
 #ifdef PHASE_DENSITY
  bool released=releasedSheet(p,i),active=!released && p.velocityAlive.w>.5;
  float density=0,sumGradient2=0;float3 gradientI=0;
- [loop]for(uint tile=0;tile<PRIMARY_PER_SLOT/TILE;tile++){
+ if(groupHasActive(active,lane)) [loop]for(uint tile=0;tile<PRIMARY_PER_SLOT/TILE;tile++){
   uint first=segment+tile*TILE;
   bool any=loadTile(first,lane);
   if(any && active){
@@ -365,7 +367,7 @@ void simulateParticle(uint i,uint slot,uint lane){
 #ifdef PHASE_CORRECT
  bool released=releasedSheet(p,i),active=!released && p.velocityAlive.w>.5;
  float3 correction=0;
- [loop]for(uint tile=0;tile<PRIMARY_PER_SLOT/TILE;tile++){
+ if(groupHasActive(active,lane)) [loop]for(uint tile=0;tile<PRIMARY_PER_SLOT/TILE;tile++){
   uint first=segment+tile*TILE;
   bool any=loadTile(first,lane);
   if(any && active){
@@ -419,7 +421,7 @@ void simulateParticle(uint i,uint slot,uint lane){
   coupling=(1-ballisticBlend)*(1-saturate(-frozenSheet.w));
  }
  bool gathering=coupled && coupling>0;
- [loop]for(uint tile=0;tile<PRIMARY_PER_SLOT/TILE;tile++){
+ if(groupHasActive(coupled,lane)) [loop]for(uint tile=0;tile<PRIMARY_PER_SLOT/TILE;tile++){
   uint first=segment+tile*TILE;
   bool any=loadTile(first,lane);
   if(any && gathering){
@@ -485,7 +487,7 @@ void simulateParticle(uint i,uint slot,uint lane){
    // 用秒而不是帧：帧率与子步数都不影响「刚诞生那几帧不溅」。
    float splashMinAge=(IniParams[62].y>.5)?IniParams[62].x:0.167;
    if(p.positionAge.w<splashMinAge)impact=0;
-   if(impact>.15 || (impact>0 && adhesionChance(velocity,normal)>.001)){
+   if(emitterSplashEnabled(slotEmitterId(slot)) && (impact>.15 || (impact>0 && adhesionChance(velocity,normal)>.001))){
     // Impact coherence comes from nearby parcels on the same moving path,
     // not from the selected strength. Dispersed rain therefore splashes less.
     float alignedSupport=0;
@@ -505,7 +507,7 @@ void simulateParticle(uint i,uint slot,uint lane){
      uint seed=asuint(p.densityBirth.y)^(i*747796405u)^asuint(STEP.y);
      // Pack 16 random bits + 8 coherence bits in an exactly representable float.
      uint packed=(seed&0xffffu)|((uint)round(coherence*255)<<16);
-     e.incoming=float4(velocity,float(packed));e.slot=float4(slot,slotEmitOn(slot)?1.0:0.0,0,0);collisionEvents[eventId]=e;}
+     e.incoming=float4(velocity,float(packed));e.slot=float4(slot,1,0,0);collisionEvents[eventId]=e;}
    }
    p.velocityAlive.w=0;p.predictedLambda.xyz=contact;
   }

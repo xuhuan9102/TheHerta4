@@ -60,10 +60,10 @@ bool puddleDepthUnavailableAtBorder(uint s,float3 relativePosition){
  // Match screenSurface's 0.2 percent viewport exclusion margin.
  return abs(c.x)>=c.w*.996 || abs(c.y)>=c.w*.996;
 }
-// nhd-pick: 次生总开关。x61 = 有效位、y61 = 值（都是 0 = 没写过 = 开）。
-// 为什么不用「0 = 关」：那样没写过与关掉无法区分（重力/吸收各踩过一次）。
-bool splashEnabled(){return IniParams[61].x>.5 ? (IniParams[61].y>.5) : true;}
+// Reject disabled owners before assigning free-particle ranks, so their
+// events cannot consume another emitter's splash allocation.
 uint childCount(CollisionEvent e){
+ if(e.slot.x<0 || e.slot.x>=SLOT_COUNT || !emitterSplashEnabled(slotEmitterId((uint)e.slot.x)))return 0;
  float expected=lerp(.25,2,impactCoherence(e))*lowStrengthFloorSplash(e);
  uint whole=(uint)floor(expected);
  return max((adhesionEvent(e)||e.normalRadius.y>=PUDDLE_MIN_UP)?1u:0u,whole+(random01((uint)e.incoming.w&0xffffu,101)<frac(expected)?1u:0u));
@@ -193,11 +193,7 @@ void main(uint3 id:SV_DispatchThreadID){
    // Retained droplets must survive slow creep; detached ones keep the usual rules.
    bool retained=p.densityBirth.w>3.5;
    float lifetime=puddle?PUDDLE_LIFETIME:(retained?ADHESION_LIFETIME:.42);
-   // nhd-pick: 「关闭即清空」时，子滴/水洼/附着跟着主槽一起死（同一 bit0）。
-   // IniParams[60].x 的解析与 FluidSolver 的 EMITFLAGS 同式：0 视为默认全开。
-   uint emitFlags=IniParams[60].x>1e-6?(uint)IniParams[60].x:3u;
-   bool emitOff=((emitFlags&1u)!=0u)&&!slotEmitOn(owner);
-   if(emitOff||p.positionAge.w>lifetime||(!attached&&(p.densityBirth.x>2||(!retained&&length(velocity)<.12)))||length(to)>6||to.y< -4||!all(isfinite(to))||!all(isfinite(velocity)))p.velocityAlive.w=0;
+   if(p.positionAge.w>lifetime||(!attached&&(p.densityBirth.x>2||(!retained&&length(velocity)<.12)))||length(to)>6||to.y< -4||!all(isfinite(to))||!all(isfinite(velocity)))p.velocityAlive.w=0;
   }
  }
 #endif
@@ -227,7 +223,7 @@ void main(uint3 id:SV_DispatchThreadID){
  }
  // Return transferred slots to the airborne emitter immediately. Overflow
  // replaces the oldest floor contacts, preserving room for new incoming liquid.
- if(splashEnabled() && p.velocityAlive.w>.5 && floorPuddle(p.densityBirth.w))p.velocityAlive.w=0;
+ if(p.velocityAlive.w>.5 && floorPuddle(p.densityBirth.w))p.velocityAlive.w=0;
  if(p.velocityAlive.w<.5){
   uint slot;InterlockedAdd(freeCounter[0],1,slot);
   float pulseSuppression=1-saturate((pulse[2].x-1)/.85);
@@ -240,7 +236,7 @@ void main(uint3 id:SV_DispatchThreadID){
   bool spraying=nozzleSpray && IniParams[237].x>.5 && pulse[3].w>.5 && pulse[5].x>.75;
   uint emitterCount=0,sprayOwner=0,sprayChild=0;
   [unroll]for(uint s=0;s<SLOT_COUNT;s++){
-   if(!slotComputeOn(s))continue;
+   if(!slotComputeOn(s)||!slotEmitOn(s)||!emitterSplashEnabled(slotEmitterId(s)))continue;
    bool tk=slotTrickle(s);
    float tkAge=IniParams[241].z;
    if(slotVisOn(s))continue;
@@ -253,12 +249,10 @@ void main(uint3 id:SV_DispatchThreadID){
   }
   // nhd-pick: 次生总开关关掉时，**在产生次生的入口**就不取事件（不是生完再杀）。
   uint eventId=0,child=slot>=emitterCount?slot-emitterCount:0;
-  if(splashEnabled()){
   [loop]for(;eventId<min(eventCounter[0],EVENT_CAPACITY);eventId++){
    uint count=childCount(events[eventId]);if(child<count)break;child-=count;
   }
-  }
-  bool impactReady=splashEnabled() && slot>=emitterCount && eventId<min(eventCounter[0],EVENT_CAPACITY);
+  bool impactReady=slot>=emitterCount && eventId<min(eventCounter[0],EVENT_CAPACITY);
   if(impactReady)impactReady=events[eventId].slot.y>.5 && slotComputeOn((uint)events[eventId].slot.x);
   if(impactReady){
    CollisionEvent e=events[eventId];float3 n=e.normalRadius.xyz;

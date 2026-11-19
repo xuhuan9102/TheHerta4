@@ -3,6 +3,9 @@ Texture1D<float4> IniParams:register(t120);
 Texture2D<float4> captured:register(t0);
 StructuredBuffer<float4> profiles:register(t1);
 StructuredBuffer<float4> modelOffsets:register(t2);
+Texture2D<float4> capturedNormals:register(t3);
+Texture2D<float4> capturedTangents:register(t4);
+Buffer<float4> emitterFrames:register(t10);
 #include "../camera/Camera.hlsl"
 // A copy of the drawn object's constants; IniParams[242].w names the row
 // holding its world root, with w = 1 when there is one.
@@ -35,7 +38,32 @@ void main(uint3 tid:SV_DispatchThreadID){
  // on where the game puts it.
  if(dot(delta.xz,delta.xz)>1.0 || delta.y<IniParams[242].x || delta.y>IniParams[242].y)return;
  float3 n=cross(b.xyz-a.xyz,c.xyz-a.xyz);
- float area=length(n);stats[7]=float4(area,id,profile.x,1);if(area<1e-9||area>.03)return;
+ float area=length(n);stats[7]=float4(area,id,profile.x,1);if(!isfinite(area)||area>.03)return;
+ bool hasFrame=area>=1e-9;
+ n=hasFrame?n/area:0;
+ // Carry the model's forward/up frame through the live triangle deformation.
+ float3 tangent=hasFrame?normalize(b.xyz-a.xyz):0;
+ float3 bitangent=cross(n,tangent);
+ float3 f=profiles[id*PROFILE_ROWS+1].xyz,u=profiles[id*PROFILE_ROWS+2].xyz;
+ // Tiny skinned faces can shear/rotate their geometric normal substantially.
+ // Carry the authored axes through the same smooth frame as the visible mesh.
+ uint frameCount;emitterFrames.GetDimensions(frameCount);
+ if(id*2+1<frameCount && emitterFrames[id*2].w>.5){
+  float4 na=capturedNormals.Load(int3(0,0,0)),nb=capturedNormals.Load(int3(1,0,0)),nc=capturedNormals.Load(int3(2,0,0));
+  float4 ta=capturedTangents.Load(int3(0,0,0)),tb=capturedTangents.Load(int3(1,0,0)),tc=capturedTangents.Load(int3(2,0,0));
+  float3 sn=na.xyz*profile.y+nb.xyz*profile.z+nc.xyz*profile.w;
+  float3 st=ta.xyz*profile.y+tb.xyz*profile.z+tc.xyz*profile.w;
+  if(min(na.w,min(nb.w,nc.w))>.5 && min(ta.w,min(tb.w,tc.w))>.5 && all(isfinite(sn)) && all(isfinite(st)) && dot(sn,sn)>1e-8){
+   sn=normalize(sn);st-=sn*dot(sn,st);
+   if(dot(st,st)>1e-8){
+    hasFrame=true;
+    n=sn;tangent=normalize(st);bitangent=cross(n,tangent);
+    f=emitterFrames[id*2].xyz;u=emitterFrames[id*2+1].xyz;
+   }
+  }
+ }
+ if(!hasFrame)return;
+
  stats[0].w+=1;
 
  // nhd-pick patch: candidates are grouped by root AND emitter id, so one character can run several emitters at once.
@@ -53,11 +81,6 @@ void main(uint3 tid:SV_DispatchThreadID){
   candidates[0]=float4(count+1,0,0,0);
  }
 
- n/=area;
- // Carry the model's forward/up frame through the live triangle deformation.
- float3 tangent=normalize(b.xyz-a.xyz);
- float3 bitangent=cross(n,tangent);
- float3 f=profiles[id*PROFILE_ROWS+1].xyz,u=profiles[id*PROFILE_ROWS+2].xyz;
  float3 forward=normalize(tangent*f.x+bitangent*f.y+n*f.z);
  float3 upHint=normalize(tangent*u.x+bitangent*u.y+n*u.z);
  float3 right=normalize(cross(upHint,forward));

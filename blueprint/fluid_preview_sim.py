@@ -840,7 +840,7 @@ class Simulator(object):
             branch = -3 if blend > 0.65 else (0 if blend > 0.05 else (2 if clock < start else 3))
             tightening = float(_smoothstep(0, 0.45, np.clip((nozzle['pulse_speed'] - 1) / 0.85, 0, 1)))
             speed *= 1 + ((0.75 + 0.75 * float(_hash1(idx * 31.3 + birth_time * 23.7))) - 1) * blend * (1 - tightening)
-        if e.get('trickle', False):
+        if e.get('trickle', False) and e.get('tail_emission', True):
             frozen, branch = -1, 2
             side_slope = long_slope = 0
             speed = 0.27 * min(max(float(e.get('trickle_scale', 0.1)), 0.1), 8)
@@ -899,7 +899,7 @@ class Simulator(object):
         self.travel[idx] = 0
         self.slot[idx] = int(e.get('slot', 0))
         self.alive[idx] = True
-        if e.get('trickle', False) and idx % 5 != 0:
+        if e.get('trickle', False) and e.get('tail_emission', True) and idx % 5 != 0:
             self.alive[idx] = False
         if branch < -2 and (idx + int(np.floor(birth_time / 0.48))) & 1:
             self.alive[idx] = False

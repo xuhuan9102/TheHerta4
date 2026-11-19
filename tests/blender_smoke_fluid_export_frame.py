@@ -1,7 +1,9 @@
 """Compare fluid profiles with real export-preprocessed triangles in Blender."""
 import importlib
 import json
+import struct
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -129,4 +131,67 @@ for enabled in (True, False):
             checks += 1
             bpy.data.objects.remove(exported, do_unlink=True)
             bpy.data.objects.remove(obj, do_unlink=True)
-print('FLUID_EXPORT_FRAME_OK ' + json.dumps({'cases': checks, 'artist_angles_preserved': True}))
+
+# Exercise the real export reader and coefficient builder together.
+config = types.ModuleType(PKG + '.common.global_config')
+config.GlobalConfig = types.SimpleNamespace(logic_name='ZZMI')
+sys.modules[config.__name__] = config
+Settings.non_mirror = True
+mesh = bpy.data.meshes.new('FrameExportSource')
+mesh.from_pydata(fixtures[2][0], [], [(0, 1, 2)])
+obj = bpy.data.objects.new('LOD0.12345678-3-0.Body', mesh)
+bpy.context.scene.collection.objects.link(obj)
+node.emitters.clear()
+em = node.emitters.add()
+em.object_name, em.poly_index = obj.name, 0
+em.bx, em.by, em.bz = .57, .31, .12
+em.tilt, em.yaw, em.roll = 17, -42, 27
+_, _, up, forward, normal = node._emitter_basis(em)
+tangent = (mesh.vertices[1].co-mesh.vertices[0].co).normalized()
+normal, tangent = mirror(normal), mirror(tangent)
+bitangent = normal.cross(tangent)
+with tempfile.TemporaryDirectory(prefix='fluid-frame-export-') as directory:
+    target = Path(directory)
+    rows = [tuple(mirror(v.co))+tuple(normal)+tuple(tangent)+(1.0,) for v in mesh.vertices]
+    def write_rows(values):
+        (target/'position.buf').write_bytes(b''.join(struct.pack('<10f', *row) for row in values))
+    write_rows(rows)
+    (target/'index.buf').write_bytes(struct.pack('<3I', 0, 2, 1))
+    (target/'model.ini').write_text('''[Resource12345678Position]
+stride = 40
+filename = position.buf
+[ResourceIndex]
+format = DXGI_FORMAT_R32_UINT
+filename = index.buf
+[TextureOverrideBody]
+ib = ResourceIndex
+; [mesh:LOD0.12345678-3-0.Body_copy]
+drawindexed = 3,0,0
+''')
+    frame = node._build_surface_frames(directory)
+    assert frame[3] == 1
+    for coefficients, expected in ((frame[:3], mirror(forward)), (frame[4:7], mirror(up))):
+        actual = tangent*coefficients[0]+bitangent*coefficients[1]+normal*coefficients[2]
+        assert (actual-expected).length < 2e-5, (actual, expected)
+    for value in (float('nan'), 1e30):
+        invalid = [list(row) for row in rows]
+        invalid[0][3:6] = [value]*3
+        write_rows(invalid)
+        assert node._build_surface_frames(directory) == [0.0]*64
+
+node.emitters.clear()
+node.tail_emission = False
+node.splash_enable = True
+first, second = node.emitters.add(), node.emitters.add()
+assert first.tail_emission is False and second.tail_emission is False
+assert first.splash_enable is True and second.splash_enable is True
+first.tail_emission = True
+second.splash_enable = False
+assert first.tail_emission is True and second.tail_emission is False
+assert first.splash_enable is True and second.splash_enable is False
+assert node.tail_emission is False and node.splash_enable is True
+text = node._build_main_ini('FluidFrameTest', [])
+assert 'data = 3 0 0 0 0 0 0 0' in text
+print('FLUID_EXPORT_FRAME_OK ' + json.dumps({'cases': checks, 'artist_angles_preserved': True,
+                                           'legacy_features_inherited': True, 'independent_features': True,
+                                           'exported_shading_frame': True, 'invalid_frame_fallback': True}))

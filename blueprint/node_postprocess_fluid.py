@@ -415,7 +415,27 @@ class SSMTFluidForceField(bpy.types.PropertyGroup):
 
 
 
+def _emitter_feature_value(emitter, name):
+    if name in emitter:
+        return bool(emitter[name])
+    tree = getattr(emitter, 'id_data', None)
+    for node in getattr(tree, 'nodes', ()):
+        if getattr(node, 'bl_idname', '') != 'SSMTNode_PostProcess_FluidProbe':
+            continue
+        if any(item.as_pointer() == emitter.as_pointer() for item in node.emitters):
+            return bool(getattr(node, name, True))
+    return True
+
+
 class SSMTFluidEmitter(bpy.types.PropertyGroup):
+    tail_emission: bpy.props.BoolProperty(
+        name='尾流', get=lambda e: _emitter_feature_value(e, 'tail_emission'),
+        set=lambda e, value: e.__setitem__('tail_emission', bool(value)), update=_on_param_update,
+        description='只控制本发射器的细尾流；已有工程沿用原设置，修改后独立保存。')
+    splash_enable: bpy.props.BoolProperty(
+        name='飞溅与水洼', get=lambda e: _emitter_feature_value(e, 'splash_enable'),
+        set=lambda e, value: e.__setitem__('splash_enable', bool(value)), update=_on_param_update,
+        description='只控制本发射器产生飞溅、水洼；关闭后已有粒子仍自然消亡。')
     """一个发射器的用户参数。
 
     导出时按 ``surface\\LoadProfilesJSON.hlsl:45-65`` 的 23 浮点格式落盘。
@@ -556,6 +576,7 @@ class SSMTFluidEmitter(bpy.types.PropertyGroup):
         default=True,
         description='= $fluid_emit_N（N = 这个发射器的序号，从 0 起；导出后叫 '
                     '$fluid_emit_N）。1 = 这个发射器出水，0 = 不出水；缺省 1。'
+                    '关闭只停止生成新粒子，已有粒子继续模拟到自然消亡。'
                     '面板这里给的是游戏初值，键位与动画驱动写的是同一个变量。'
                     '不影响 Blender 水流预览；预览始终显示所有已配置的发射器。',
     )
@@ -702,13 +723,11 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
 
     tail_emission: bpy.props.BoolProperty(
         name='尾流', default=True,
-        description='= $fluid_emit_flags 的 bit1。开着时散射/缠流阶段会额外出 1/5 的细尾流；'
-                    '关掉就只有一支主流。')
+        description='旧工程兼容默认值；尚未单独设置的发射器沿用此值。')
     #: 次生总开关（默认开；关掉时写 x61=1/y61=0，见 _build_main_ini）。
     splash_enable: bpy.props.BoolProperty(update=_on_param_update,
         name='飞溅与水洼', default=True,
-        description='= $fluid_splash_enable（IniParams[61].x 有效位 / .y 值）。'
-                    '关掉后只剩主粒子水柱，不再有飞溅与水洼；默认开 = 不写变量，产物不变。')
+        description='旧工程兼容默认值；尚未单独设置的发射器沿用此值。')
     nozzle_spray: bpy.props.BoolProperty(
         name='喷口雾化', default=False,
         description='关（默认）= 只有碰撞才产生次生；开 = 喷口处也会雾化出小粒子（写 x64 = 1）。')
@@ -725,12 +744,12 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         description='= $fluid_splash_min_age（IniParams[62].x 值 / .y 有效位）。'
                     '填了 >0 就直接用这个秒数；填 0 则按「出生后不溅(帧)」÷ fps 计算。'
                     '导出时总是写 x62/y62，ini 里能看到实际值。')
-    #: 分阶段染色探针（默认关）：开着时导出写 `x63 = 1`，shader 按阶段纯色直出。
+    #: 分阶段染色探针（默认关）：每帧明确写 0/1，避免继承其他模组的状态。
     stage_probe: bpy.props.BoolProperty(
         name='阶段染色探针', default=False,
         description='调试用：导出写 x63 = 1，按阶段直出色块（红=出生帧、绿=主粒子、'
                     '蓝=其它次生、黄=碰撞事件次生、紫=水洼、青=附着）。'
-                    '默认关 ⇒ 不写 x63 ⇒ 与不带探针的产物完全相同。')
+                    '关闭时明确写 x63 = 0。')
 
     #: 是否重映射 IniParams 号段（237-243/251-255 → 29-40）
     remap_ini_params: bpy.props.BoolProperty(
@@ -948,6 +967,9 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                        % (idx, idx))
         sub.label(text='   键位、这里、动画驱动写的是同一个 $fluid_emit_%d' % idx,
                   icon='INFO')
+        row = sub.row(align=True)
+        row.prop(e, 'tail_emission')
+        row.prop(e, 'splash_enable')
         r = sub.row(align=True)
         r.prop(e, 'trick', text='缠流', toggle=True)
         r.prop(e, 'vis', text='常驻显示', toggle=True)
@@ -1104,9 +1126,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         # 它是**全局**的东西，所以画在全局外观里，不进每个发射器的力场组。
         box.prop(self, 'force_scale', text='力场总增益（全局，乘在所有力场强度上）')
         col = box.column(align=True)
-        col.label(text='关闭发射器即停止该发射器的全部计算')
-        col.prop(self, 'tail_emission')
-        col.prop(self, 'splash_enable')
+        col.label(text='关闭发射器只停止新粒子，存量继续到自然消亡')
         col.prop(self, 'stage_probe')
 
         layout.separator()
@@ -1681,7 +1701,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
     # ------------------------------------------------------------------
     # 主 ini
     # ------------------------------------------------------------------
-    def _build_main_ini(self, ns, host_hashes):
+    def _build_main_ini(self, ns, host_hashes, mod_export_path=None):
         raw = _read_text(os.path.join(_toolset_fluid_dir(), TEMPLATE_INI))
         text = self._rewrite(raw, ns)
 
@@ -1784,7 +1804,8 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         for message in control_warnings:
             print("[FluidProbe][WARN] " + message)
         # 排除列表已整块移除（2026-11-06）：全部物体无条件参与碰撞/遮挡。
-        # 「关了就别留尾」：两个开关全默认时不写 x60（产物与旧版逐字节相同）。
+        # Preserve legacy parameter lanes; the private emitter table carries
+        # this export's individual settings.
         text, flag_warnings = fluid_ini_merge.apply_emit_flags(
             text,
             hard_off=True,
@@ -1807,10 +1828,12 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             _frames = float(getattr(self, "splash_min_frames", 10) or 10)
             _fps = float(getattr(self, "assumed_fps", 120.0) or 120.0)
             _min_age = _frames / max(_fps, 1e-3)
-        if bool(getattr(self, 'nozzle_spray', False)):
+        # IniParams is shared between mods: explicitly publish disabled values.
+        for lane, field in ((64, 'nozzle_spray'), (63, 'stage_probe')):
+            value = int(bool(getattr(self, field, False)))
             text = re.sub(
                 r"(?m)^([ \t]*)x47[ \t]*=[ \t]*\$fluid_gravity_scale[ \t]*$",
-                lambda m: (m.group(0) + "\n" + m.group(1) + "x64 = 1"),
+                lambda m, lane=lane, value=value: m.group(0) + "\n" + m.group(1) + "x%d = %d" % (lane, value),
                 text, count=1)
         if True:
             text = re.sub(
@@ -1818,12 +1841,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 lambda m: (m.group(0) + "\n" + m.group(1) + "x62 = "
                            + fluid_ini_merge._fmt_float(_min_age) + "\n"
                            + m.group(1) + "y62 = 1"),
-                text, count=1)
-        # 阶段染色探针：默认关 ⇒ **不写 x63**（产物与不带探针完全相同）；开着写 x63 = 1。
-        if bool(getattr(self, "stage_probe", False)):
-            text = re.sub(
-                r"(?m)^([ \t]*)x47[ \t]*=[ \t]*\$fluid_gravity_scale[ \t]*$",
-                lambda m: m.group(0) + "\n" + m.group(1) + "x63 = 1",
                 text, count=1)
         # 所有 $var 加 fluid_ 前缀放在**最后**：前面的步骤（$slot_count 替换、
         # apply_force_fields 的开关拨动）都按模板原名工作，改完再统一改名，
@@ -1875,7 +1892,59 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             "global $strength_level = " + fluid_ini_merge._fmt_float(level_value),
             text,
         )
+        features = [0] * fluid_ini_merge.EMITTER_CAPACITY
+        for i, emitter in enumerate(self.emitters[:fluid_ini_merge.EMITTER_CAPACITY]):
+            features[i] = (int(bool(getattr(emitter, 'tail_emission', getattr(self, 'tail_emission', True))))
+                           | (int(bool(getattr(emitter, 'splash_enable', getattr(self, 'splash_enable', True)))) << 1))
+        frames = self._build_surface_frames(mod_export_path) if mod_export_path else [0.0] * 64
+        for section, values in (('[ResourceEmitterFeatures]', features), ('[ResourceEmitterFrames]', frames)):
+            lines = text.splitlines()
+            bounds = fluid_ini_merge._section_bounds(lines, section)
+            if bounds:
+                for i in range(*bounds):
+                    if lines[i].strip().startswith('data ='):
+                        lines[i] = 'data = ' + ' '.join(fluid_ini_merge._fmt_float(v) for v in values)
+                        break
+                text = '\n'.join(lines) + '\n'
         return fluid_ini_merge.apply_emitter_gate_cache(fluid_ini_merge.prefix_variables(text))
+
+    def _build_surface_frames(self, mod_export_path):
+        values = [0.0] * 64
+        from math import isfinite
+        from ..common.global_config import GlobalConfig
+        if str(getattr(GlobalConfig, 'logic_name', '')) not in ('ZZMI', 'ZZMIDX12'):
+            return values
+        from mathutils import Vector
+        from .fluid_surface_frame import exported_triangle_rows
+        for i, emitter in enumerate(self.emitters[:fluid_ini_merge.EMITTER_CAPACITY]):
+            rows = exported_triangle_rows(mod_export_path, emitter)
+            if rows is None:
+                continue
+            basis, frame = self._emitter_basis(emitter), self._game_frame(emitter)
+            if basis is None or frame is None:
+                continue
+            bary = [max(0.0, float(getattr(emitter, key))) for key in ('bx', 'by', 'bz')]
+            total = sum(bary)
+            bary = [v / total for v in bary] if total > 1e-9 else [1/3] * 3
+            if frame[6]:
+                bary[1], bary[2] = bary[2], bary[1]
+            normal = sum((Vector(row[3:6]) * weight for row, weight in zip(rows, bary)), Vector())
+            tangent = sum((Vector(row[6:9]) * weight for row, weight in zip(rows, bary)), Vector())
+            if not isfinite(normal.length_squared) or normal.length < 1e-6:
+                continue
+            normal.normalize()
+            tangent -= normal * tangent.dot(normal)
+            if not isfinite(tangent.length_squared) or tangent.length < 1e-6:
+                continue
+            tangent.normalize()
+            bitangent = normal.cross(tangent)
+            forward, up = basis[3].copy(), basis[2].copy()
+            if frame[6]:
+                forward.x *= -1
+                up.x *= -1
+            values[i*8:i*8+8] = [forward.dot(tangent), forward.dot(bitangent), forward.dot(normal), 1,
+                                  up.dot(tangent), up.dot(bitangent), up.dot(normal), 0]
+        return values
 
 
 
@@ -2094,7 +2163,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         total += 1
         if write_text_if_changed(
             os.path.join(mod_export_path, OUTPUT_INI),
-            fluid_ini_merge.collapse_constants(self._build_main_ini(ns, host_hashes)),
+            fluid_ini_merge.collapse_constants(self._build_main_ini(ns, host_hashes, mod_export_path)),
         ):
             written += 1
 
@@ -2445,7 +2514,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 bv = int(getattr(em, "base_vertex", 0))
                 block = (
                     "{i}; nhd-pick {idx} begin\n"
-                    "{i}if $\\{ns}\\fluid_emit_{idx} > 0.5\n"
+                    "{i}if $\\{ns}\\fluid_emit_{idx} > 0.5 || $\\{ns}\\fluid_live_{idx} > 0.5\n"
                     "{i}{xk} = {idx}\n"
                     "{i}{yk} = {fi}\n"
                     "{i}{zk} = {bv}\n"
@@ -3721,6 +3790,8 @@ def _sim_setup(node, frames=None, fps=None, capacity=None, ground_z=None,
             'lifetime': float(getattr(e, 'lifetime', 0.0)),
             # The export flag is the game's initial state, not preview visibility.
             'enabled': True,
+            'tail_emission': bool(getattr(e, 'tail_emission', getattr(node, 'tail_emission', True))),
+            'splash_enable': bool(getattr(e, 'splash_enable', getattr(node, 'splash_enable', True))),
             'trickle': bool(e.trick and not e.vis),
             'trickle_scale': float(e.trick_sp),
             'trickle_lifetime': round(float(e.tlen) / 0.05) * 0.05,
@@ -3937,6 +4008,8 @@ def _emitters_fingerprint(node):
             round(float(e.absorption), 5),
             round(float(e.tlen), 4), round(float(e.bend_delay), 4), int(e.bend_str),
             bool(e.trick), round(float(e.trick_sp), 4), bool(e.vis),
+            bool(getattr(e, 'tail_emission', getattr(node, 'tail_emission', True))),
+            bool(getattr(e, 'splash_enable', getattr(node, 'splash_enable', True))),
             float(getattr(e, 'speed', 0.0)),
             float(getattr(e, 'lifetime', 0.0)),
             # 力场也影响可见形状（线框落点、半径、方向），必须进指纹，

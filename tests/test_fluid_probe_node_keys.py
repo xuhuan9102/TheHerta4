@@ -454,12 +454,11 @@ class EmitterStateTests(unittest.TestCase):
 
 
 class StageProbeExportTests(unittest.TestCase):
-    """阶段染色探针：默认关不写 x63；开着写 x63 = 1，且在 x47 之后。"""
+    """阶段染色探针显式写入 0/1，避免读取其他模组遗留的值。"""
 
-    def test_default_off_writes_nothing(self):
-        # RED-BY: node 里无条件写 x63 = 1
+    def test_default_off_writes_zero(self):
         text = _bare_node([_emitter()])._build_main_ini("FluidTest", [])
-        self.assertNotIn("x63", text)
+        self.assertIn("x63 = 0", text)
 
     def test_on_writes_one_after_x47(self):
         # RED-BY: 删掉 node 里写 x63 的那段 re.sub

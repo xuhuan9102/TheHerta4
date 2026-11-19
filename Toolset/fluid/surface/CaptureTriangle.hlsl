@@ -6,7 +6,12 @@
 #ifndef CAPTURE_VERTEX_DEFINED
 struct OriginalVertex { float4 clip : SV_Position; };
 #endif
-struct CapturedVertex { float4 clip : SV_Position; nointerpolation float4 world : TEXCOORD0; };
+struct CapturedVertex {
+ float4 clip : SV_Position;
+ nointerpolation float4 world : TEXCOORD0;
+ nointerpolation float4 normal : TEXCOORD1;
+ nointerpolation float4 tangent : TEXCOORD2;
+};
 #ifdef GEOMETRY_SHADER
 [maxvertexcount(12)]
 void main(triangle OriginalVertex input[3], inout TriangleStream<CapturedVertex> stream) {
@@ -20,6 +25,12 @@ void main(triangle OriginalVertex input[3], inout TriangleStream<CapturedVertex>
   const float2 corners[4]={float2(0,-1),float2(0,1),float2(1,-1),float2(1,1)};
   for(uint j=0;j<4;j++) {
    CapturedVertex o;o.world=world;
+#ifdef CAPTURE_SHADING_FRAME
+   o.normal=float4(input[i].output2.xyz,1);
+   o.tangent=float4(input[i].output3.xyz,1);
+#else
+   o.normal=0;o.tangent=0;
+#endif
    o.clip=float4(-1+(i+corners[j].x)*(2.0/3.0),corners[j].y,0,1);
    stream.Append(o);
   }
@@ -28,5 +39,8 @@ void main(triangle OriginalVertex input[3], inout TriangleStream<CapturedVertex>
 }
 #endif
 #ifdef PIXEL_SHADER
-float4 main(CapturedVertex input):SV_Target { return input.world; }
+struct CaptureOutput {float4 world:SV_Target0;float4 normal:SV_Target1;float4 tangent:SV_Target2;};
+CaptureOutput main(CapturedVertex input){
+ CaptureOutput o;o.world=input.world;o.normal=input.normal;o.tangent=input.tangent;return o;
+}
 #endif

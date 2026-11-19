@@ -1483,20 +1483,18 @@ class EmitGateSourceTests(unittest.TestCase):
 
     _FLUID = Path(__file__).resolve().parent.parent / "Toolset" / "fluid" / "fluid"
 
-    def test_slot_emit_on_is_called_once_and_shared(self):
-        # RED-BY: FluidSolver 里删掉 `bool emitOn=slotEmitOn(slot);`、改回两处各调一次
+    def test_nozzle_switch_gates_births_without_disabling_collision_events(self):
         text = (self._FLUID / "FluidSolver.hlsl").read_text(encoding="utf-8-sig")
-        self.assertEqual(text.count("slotEmitOn("), 2,
-                         "一处共用的 emitOn + 事件快照，共 2 次")
+        self.assertEqual(text.count("slotEmitOn("), 1)
         lines = text.splitlines()
         emitting = [ln for ln in lines if "bool emitting=" in ln]
         self.assertEqual(len(emitting), 1)
         self.assertIn("emitOn", emitting[0])
         shared = [ln for ln in lines if "bool emitOn=" in ln]
-        self.assertEqual(len(shared), 1, "只许算一次，两门共用")
+        self.assertEqual(len(shared), 1)
         snapshot = [ln for ln in lines if "e.slot=float4(slot" in ln]
         self.assertEqual(len(snapshot), 1)
-        self.assertIn("slotEmitOn(slot)?1.0:0.0", snapshot[0])
+        self.assertIn("e.slot=float4(slot,1,0,0)", snapshot[0])
 
     def test_splash_reads_the_birth_flag_not_the_slot(self):
         # RED-BY: Splash 生成门改回直接读 slotEmitOn(slot)

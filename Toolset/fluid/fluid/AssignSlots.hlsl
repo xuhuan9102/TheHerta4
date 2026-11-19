@@ -8,10 +8,10 @@ StructuredBuffer<float4> candidates:register(t0);
 StructuredBuffer<float4> profiles:register(t1);
 // FluidSolver's frame state, four rows per slot.
 RWStructuredBuffer<float4> frameState:register(u1);
-// How far a slot follows its character onto a different emitter id, past the
-// motion predicted from the last two frames.
+Buffer<float> activity:register(t104);
+// Bound the motion prediction from the last two captured roots.
 static const float FOLLOW_RADIUS=.5;
-// Longer than any slot particle lives: stream .48 s, adhesion 1.6 s, puddle 2.4 s.
+// Missing captures time out open nozzles; closed banks retire by activity only.
 static const float SLOT_TIMEOUT=3.0;
 static const uint NONE=0xffffffffu;
 float3 candidateRoot(uint c){return candidates[1+c*CANDIDATE_ROWS+5].xyz;}
@@ -26,11 +26,13 @@ float3 expectedRoot(uint s){
 void main(uint3 tid:SV_DispatchThreadID){
  float now=IniParams[239].y+IniParams[239].x;
  uint count=min((uint)candidates[0].x,CANDIDATE_CAPACITY);
- uint active=clamp((uint)IniParams[253].z,1,SLOT_COUNT);
- // Release disabled owners before matching, so they consume no slot and
- // re-enabling cannot inherit their old nozzle, primary or splash state.
+ // Profile count limits owner ids, not physical banks: several characters
+ // can instantiate the same emitter and each needs its own particles.
+ uint active=SLOT_COUNT;
+ // Closing a nozzle does not release its particles. Retire only an empty
+ // closed bank, using the previous completed frame's GPU activity mask.
  [unroll]for(uint old=0;old<SLOT_COUNT;old++){
-  if(slotLive(old)&&!slotEmitOn(old)){
+  if(slotLive(old)&&!slotEmitOn(old)&&(((uint)activity[1]&(1u<<old))==0u)){
    slots[old*SLOT_ROWS+SLOT_ROOT]=0;
    slots[old*SLOT_ROWS+SLOT_PREVIOUS_ROOT]=0;
    frameState[old*4]=0;frameState[old*4+2]=0;
@@ -41,27 +43,23 @@ void main(uint3 tid:SV_DispatchThreadID){
  [unroll]for(uint c=0;c<CANDIDATE_CAPACITY;c++)taken[c]=false;
  [unroll]for(uint s=0;s<SLOT_COUNT;s++)match[s]=NONE;
 
- // Closest pairs first. The first phase keeps a slot on its own emitter id;
- // the second lets it follow its character to another one, e.g. an outfit
- // toggle that swaps the hooked mesh.
- [loop]for(uint phase=0;phase<2;phase++){
-  [loop]for(uint attempt=0;attempt<SLOT_COUNT;attempt++){
-   float best=1e30;uint bestSlot=NONE,bestCandidate=NONE;
-   [loop]for(uint slot=0;slot<SLOT_COUNT;slot++){
-    if(slot>=active||!slotLive(slot)||match[slot]!=NONE)continue;
-    float3 expected=expectedRoot(slot);
-    float id=slotAnchor(slot,4).y;
-    [loop]for(uint candidate=0;candidate<count;candidate++){
-     if(taken[candidate]||!emitterEnabled((uint)candidateId(candidate))||(phase==0&&candidateId(candidate)!=id))continue;
-     float3 offset=candidateRoot(candidate)-expected;
-     float distance2=dot(offset,offset);
-     if(phase==1&&distance2>FOLLOW_RADIUS*FOLLOW_RADIUS)continue;
-     if(distance2<best){best=distance2;bestSlot=slot;bestCandidate=candidate;}
-    }
+ // Match the nearest instance of the same emitter. A living bank must keep
+ // its owner, including its independent look, force fields and feature flags.
+ [loop]for(uint attempt=0;attempt<SLOT_COUNT;attempt++){
+  float best=1e30;uint bestSlot=NONE,bestCandidate=NONE;
+  [loop]for(uint slot=0;slot<SLOT_COUNT;slot++){
+   if(slot>=active||!slotLive(slot)||match[slot]!=NONE)continue;
+   float3 expected=expectedRoot(slot);
+   float id=slotAnchor(slot,4).y;
+   [loop]for(uint candidate=0;candidate<count;candidate++){
+    if(taken[candidate]||candidateId(candidate)!=id)continue;
+    float3 offset=candidateRoot(candidate)-expected;
+    float distance2=dot(offset,offset);
+    if(distance2<best){best=distance2;bestSlot=slot;bestCandidate=candidate;}
    }
-   if(bestSlot==NONE)break;
-   match[bestSlot]=bestCandidate;taken[bestCandidate]=true;
   }
+  if(bestSlot==NONE)break;
+  match[bestSlot]=bestCandidate;taken[bestCandidate]=true;
  }
 
  // Characters no slot followed take the empty slots; the rest wait for one.
@@ -99,8 +97,8 @@ void main(uint3 tid:SV_DispatchThreadID){
    bool hold=false; // nhd-pick: no extra hold, a hidden part stops at once
    slots[base+4]=float4(anchor.xyz,hold?1:0);
    // Freeing last keeps the slot from being reused in the frame its
-   // particles are dropped. A slot above $slot_count never waits it out.
-   if(slotLive(target)&&(target>=active||now-slots[base+SLOT_TRACK].x>SLOT_TIMEOUT)){
+   // particles are dropped. Invalid owners never occupy a physical bank.
+   if(slotLive(target)&&(!slotEmitterValid(target)||(slotEmitOn(target)&&now-slots[base+SLOT_TRACK].x>SLOT_TIMEOUT))){
     slots[base+SLOT_ROOT]=0;slots[base+SLOT_PREVIOUS_ROOT]=0;
    }
   }

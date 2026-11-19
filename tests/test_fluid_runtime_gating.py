@@ -2,6 +2,7 @@
 from collections import defaultdict
 from itertools import product
 import re
+import math
 
 import pytest
 
@@ -17,6 +18,7 @@ class IniTrace:
         self.external = set(external)
         self.stores = []
         self.readbacks = {}
+        self.values['time'] = 1.0
         for line in self.sections.get('Constants', []):
             match = re.match(r'global\s+(\$\w+)\s*=\s*([^;]+)', line.strip())
             if match:
@@ -31,9 +33,9 @@ class IniTrace:
         expression = re.sub(r'\$[\w\\]+', lambda m: 'v[%r]' % m[0], expression)
         expression = expression.replace('&&', ' and ').replace('||', ' or ')
         expression = re.sub(r'!(?!=)', ' not ', expression)
-        expression = re.sub(r'\btime\b', '1.0', expression)
+        expression = re.sub(r'\btime\b', "v['time']", expression)
         expression = re.sub(r'\bnull\b', '0', expression)
-        return eval(expression.strip(), {'__builtins__': {}}, {'v': self.values})
+        return eval(expression.strip(), {'__builtins__': {}}, {'v': self.values, 'floor': math.floor})
 
     def run(self, section):
         self.calls.append(section)
@@ -118,7 +120,7 @@ def test_all_off_present_and_end_frame_do_no_repeated_gpu_work():
         trace.run('CommandListEndFrame')
     assert trace.work == []
     assert trace.values['$fluid_emitting'] == 0
-    assert trace.values['$fluid_initialized'] == 0
+    assert trace.values['$fluid_any_simulation'] == 0
 
 
 def test_capture_cleanup_runs_once_after_shutdown():
@@ -128,6 +130,62 @@ def test_capture_cleanup_runs_once_after_shutdown():
         trace.run('CommandListEndFrame')
     assert [(row[1], row[2]) for row in trace.work] == [
         ('clear', 'ResourceSurfaceCandidates'), ('clear', 'ResourceSurfaceStats')]
+
+
+def test_closed_nozzle_runs_its_tail_without_clearing_particle_pools():
+    trace = IniTrace(generated())
+    trace.values.update({'$fluid_present': 1, '$fluid_seen': 1, '$fluid_initialized': 1,
+                         '$fluid_emit_seeded': 1, '$fluid_live_1': 1})
+    for i in range(8):
+        trace.values['$fluid_emit_%d' % i] = 0
+    trace.readbacks['ResourceFluidActivity'] = 2
+    trace.run('Present')
+    assert trace.values['$fluid_any_simulation'] == 1
+    assert trace.values['$fluid_emitting'] == 0
+    assert trace.values['$fluid_initialized'] == 1
+    trace.run('CommandListInjectWorld')
+    primary = [row for row in trace.work if row[0] == 'CustomShaderFluidPredict']
+    assert [int(row[3]) for row in primary] == [1, 1]
+    assert not any(row[1] == 'clear' and row[2] in (
+        'ResourceFluidA', 'ResourceFluidB', 'ResourceSplashA', 'ResourceSplashB') for row in trace.work)
+    assert trace.values['$fluid_live_1'] == 1
+
+
+def test_activity_poll_is_limited_and_empty_tail_stops_the_next_frame():
+    trace = IniTrace(generated())
+    trace.values.update({'$fluid_initialized': 1, '$fluid_live_1': 1})
+    for i in range(8):
+        trace.values['$fluid_emit_%d' % i] = 0
+    trace.readbacks['ResourceFluidActivity'] = 2
+    trace.run('CommandListPollFluidActivity')
+    trace.run('CommandListPollFluidActivity')
+    assert len(trace.stores) == 1
+    trace.values['time'] += .11
+    trace.readbacks['ResourceFluidActivity'] = 0
+    trace.run('CommandListPollFluidActivity')
+    trace.run('CommandListUpdateEmitterGate')
+    assert trace.values['$fluid_live_1'] == 0
+    assert trace.values['$fluid_any_simulation'] == 0
+    trace.work.clear()
+    trace.run('CommandListInjectWorld')
+    assert trace.work == []
+
+
+def test_open_emitters_do_not_dispatch_activity_scans_or_readback():
+    trace = IniTrace(generated())
+    trace.values.update({'$fluid_present': 1, '$fluid_seen': 1, '$fluid_initialized': 1})
+    trace.run('CommandListInjectWorld')
+    assert 'CustomShaderFluidActivity' not in trace.calls
+    assert trace.stores == []
+
+
+def test_disabled_optional_effects_do_not_inherit_another_mods_parameters():
+    trace = IniTrace(generated())
+    trace.values.update({'$fluid_present': 1, '$fluid_seen': 1, '$fluid_initialized': 1,
+                         'x63': 1, 'x64': 1})
+    trace.run('CommandListInjectWorld')
+    assert trace.values['x63'] == 0
+    assert trace.values['x64'] == 0
 
 
 def test_all_off_shader_hooks_do_not_copy_camera_or_bind_tonemap():
@@ -188,6 +246,7 @@ def test_header_update_invalidates_entry_shader_cache(tmp_path, remap):
     instance.remap_ini_params = remap
     instance.emit_legacy_buffers = False
     instance._build_profiles = lambda: []
+    instance._build_surface_frames = lambda *args: [0.0] * 64
     instance._build_index = lambda *args: {}
     instance._build_profile_loader = lambda *args: '[Constants]\n'
     instance._retarget_host_refs = lambda *args: []
