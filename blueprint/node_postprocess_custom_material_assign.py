@@ -135,8 +135,7 @@ _ACTIVATION_FLAG_SET_RE = re.compile(r"^[ \t]*(\$[A-Za-z_]\w*)[ \t]*=[ \t]*1[ \t
 
 
 #: 「纯贴图模式」段：目标物体**不在导出链**（本次导出没有产出它的网格段）时，
-#: 由本节点凭空生成的只贴图片段。整个物体写成一个**独立 ini 片段文件**（不写主 ini），
-#: 段名前缀刻意与「纯贴图替换」节点不同，两个节点并存时各自清理自己的产物，不会互删。
+#: 由本节点在主 INI 中生成，只修改贴图。
 #: 段内写法按该贴图自己的贴图标记选：``Hash`` → ``[TextureOverride_<贴图hash>] …
 #: this = …``，其余（Slot / SharedSlot / 没有标记）→ 本前缀的槽位段。
 _MATERIAL_PURE_TEXTURE_SECTION_PREFIX = "TextureOverride_MaterialPureTexture_"
@@ -165,11 +164,9 @@ _MATERIAL_PURE_TEXTURE_SLOTS_EFMI = OrderedDict(
 )
 _MATERIAL_PURE_TEXTURE_SET_TEXTURES_EFMI = r"run = CommandList\RabbitFx\SetTextures"
 
-#: 纯贴图模式的「独立片段」文件名后缀与识别正则（对齐 SSMT4 的
-#: ``<subMesh>_SlotTextureMod.ini`` 习惯：一个部件一个自成一体的 ini 片段）。
-_MATERIAL_PURE_TEXTURE_FRAGMENT_SUFFIX = "_PureTexture.ini"
+#: 识别旧版生成的独立片段，用于重新导出时清理。
 _MATERIAL_PURE_TEXTURE_FRAGMENT_RE = re.compile(
-    r"^[0-9a-fA-F]{8}(?:-\d+-\d+)?_PureTexture\.ini$"
+    r"^[0-9a-f]{8}(?:-\d+-\d+)?_PureTexture\.ini$", re.IGNORECASE
 )
 
 #: 物体名里的三段绘制信息 ``<hash>-<indexCount>-<firstIndex>``（与纯贴图节点同口径）。
@@ -3906,10 +3903,27 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
 
     @staticmethod
     def _pure_texture_main_ini(mod_export_path):
-        """导出目录里含 TextureOverride 段最多的那个 ini（主配置表）。"""
-        ini_files = sorted(glob.glob(os.path.join(mod_export_path, "*.ini")))
+        """优先使用导出器登记的主配置表。"""
+        from ..common import export_section_registry
+
+        ini_files = sorted(
+            path for path in glob.glob(os.path.join(mod_export_path, "*.ini"))
+            if not _MATERIAL_PURE_TEXTURE_FRAGMENT_RE.fullmatch(os.path.basename(path))
+        )
         if not ini_files:
             return ""
+        registered = {
+            os.path.normcase(os.path.abspath(path))
+            for path in export_section_registry.get_ini_paths()
+        }
+        candidates = [
+            path for path in ini_files
+            if os.path.normcase(os.path.abspath(path)) in registered
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            ini_files = candidates
         best = ""
         best_score = -1
         for ini_file in ini_files:
@@ -4015,8 +4029,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         每个贴图按**它自己的贴图标记**选写法：``MarkType`` 为 ``Hash`` 的写
         ``[TextureOverride_<贴图hash>] … this = …``（与本仓库 ``M_IniHelper`` 及
         SSMT4「Hash 风格贴图 Mod 模板」同口径）；其余（``Slot`` / ``SharedSlot`` /
-        没有标记）仍按材质名前缀走槽位写法。``resource_sections`` 是片段自己的
-        资源段字典（``[Resource_…] filename = …``），不再写进主 ini。
+        没有标记）仍按材质名前缀走槽位写法。``resource_sections`` 暂存当前物体的贴图资源段。
         """
         lines = []
         hash_blocks = []
@@ -4175,29 +4188,28 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         for name in names:
             if not _MATERIAL_PURE_TEXTURE_FRAGMENT_RE.match(name):
                 continue
+            path = os.path.join(mod_export_path, name)
             try:
-                os.remove(os.path.join(mod_export_path, name))
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    content = handle.read()
+                if not (
+                    content.startswith("; --- 纯贴图替换片段：由「材质转资源pro」节点生成")
+                    or f"[{_MATERIAL_PURE_TEXTURE_SECTION_PREFIX}" in content
+                ):
+                    continue
+                os.remove(path)
                 removed += 1
-            except OSError:
+            except (OSError, UnicodeError):
                 continue
         return removed
 
     @staticmethod
-    def _pure_texture_fragment_path(mod_export_path, ib):
-        """片段文件名：``<hash>-<indexCount>-<firstIndex>_PureTexture.ini``。"""
-        if ib[1] is None:
-            stem = str(ib[0])
-        else:
-            stem = "{}-{}-{}".format(ib[0], ib[1], ib[2])
-        return os.path.join(
-            mod_export_path, stem + _MATERIAL_PURE_TEXTURE_FRAGMENT_SUFFIX
-        )
-
-    @staticmethod
-    def _collect_ini_section_names(mod_export_path):
-        """导出目录里所有 ini 已有的段名（小写，不带方括号）。"""
+    def _collect_ini_section_names(mod_export_path, main_ini):
+        """收集其他配置表中的段名，排除待清理的旧版片段。"""
         names = set()
         for ini_file in glob.glob(os.path.join(mod_export_path, "*.ini")):
+            if ini_file == main_ini or _MATERIAL_PURE_TEXTURE_FRAGMENT_RE.fullmatch(os.path.basename(ini_file)):
+                continue
             try:
                 with open(ini_file, "r", encoding="utf-8") as handle:
                     for line in handle:
@@ -4209,33 +4221,35 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         return names
 
     @staticmethod
-    def _serialize_pure_texture_fragment(header_lines, sections):
-        """把片段头 + 段体拼成 ini 文本。"""
-        lines = [str(line) for line in header_lines]
-        for section_name, body in sections.items():
-            if lines:
-                lines.append("")
-            name = str(section_name or "").strip()
-            if not (name.startswith("[") and name.endswith("]")):
-                name = "[" + name + "]"
-            lines.append(name)
-            lines.extend(str(line) for line in body)
-        return "\n".join(lines).rstrip("\n") + "\n"
+    def _merge_pure_texture_resources(sections, overrides, resources, used_names):
+        """复用同名同内容的资源，同名异内容的资源使用独立段名。"""
+        names = {section.lower(): section for section in sections}
+        aliases = {}
+        for label, body in resources.items():
+            candidate = label
+            suffix = 2
+            while candidate.strip("[]").lower() in used_names:
+                existing = sections.get(names.get(candidate.lower()), ())
+                if [line for line in existing if line != _MATERIAL_PURE_TEXTURE_SECTION_MARKER] == body:
+                    break
+                candidate = f"{label[:-1]}_{suffix}]"
+                suffix += 1
+            if candidate.strip("[]").lower() not in used_names:
+                sections[candidate] = [_MATERIAL_PURE_TEXTURE_SECTION_MARKER, *body]
+                used_names.add(candidate.strip("[]").lower())
+                names[candidate.lower()] = candidate
+            if candidate != label:
+                aliases[label.strip("[]").lower()] = candidate.strip("[]")
+        if aliases:
+            binding = re.compile(r"^(\s*[^;=\s]+\s*=\s*(?:ref\s+)?)([^\s;]+)(\s*)$", re.IGNORECASE)
+            for body in overrides.values():
+                for index, line in enumerate(body):
+                    match = binding.match(line)
+                    if match and match[2].lower() in aliases:
+                        body[index] = match[1] + aliases[match[2].lower()] + match[3]
 
     def _apply_pure_texture_sections(self, mod_export_path):
-        """对「不在导出链」的物体生成纯贴图「独立片段」；返回生成的片段数。
-
-        全局模式下主路径（基类 ``execute_postprocess``）只处理 ini 里已有的 mesh
-        段，没导出的物体永远不会被它看见；这里补上这一块：物体仍然取自
-        ``target_items``（全局模式下它们是「附加物体」，不再当白名单用），生成前
-        先用 ``_pure_texture_conflict_with_export`` 把真正在导出链上的物体让出去。
-
-        产出的形式是**独立片段**：每个物体一个 ``<hash>-<indexCount>-<firstIndex>
-        _PureTexture.ini``（对齐 SSMT4 的 ``<subMesh>_SlotTextureMod.ini`` 习惯），
-        自成一体的资源段 + 覆盖段，不写进主 ini。原因有两个：主 ini 每次重新导出都
-        会被重写，片段则是我们自己的文件；用户也能单独开关/删除某一个部件的贴图替换。
-        3Dmigoto 的 ``include_recursive = Mods`` 会读到同目录的这些 ini。
-        """
+        """将导出链外物体的贴图绑定和资源合并到本次导出的主 INI。"""
         ini_file = self._pure_texture_main_ini(mod_export_path)
         if not ini_file:
             return 0
@@ -4251,13 +4265,11 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         preserved_tail_content += transparency_marker + transparency_tail
         preamble_lines, sections = self._parse_ini_content(content)
 
-        # 幂等：先删掉上一次本节点生成的纯贴图模式段（旧版本写进主 ini 的那些）
         removed = 0
-        for section_name in list(sections.keys()):
-            if _is_material_pure_texture_section(section_name):
+        for section_name, body in list(sections.items()):
+            if _is_material_pure_texture_section(section_name) or _MATERIAL_PURE_TEXTURE_SECTION_MARKER in body:
                 del sections[section_name]
                 removed += 1
-        removed_fragments = self._clear_pure_texture_fragments(mod_export_path)
 
         def _write_main_ini():
             new_content = self._serialize_ini_content(
@@ -4269,27 +4281,18 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             with open(ini_file, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(new_content)
 
-        if removed:
-            _write_main_ini()
-        if removed_fragments:
-            print(
-                f"[材质转资源pro] 纯贴图模式：清理上一次的 {removed_fragments} 个独立片段"
-            )
-
         items = [
             item
             for item in (getattr(self, "target_items", []) or [])
             if getattr(item, "target_object", None) is not None
         ]
-        if not items:
-            return 0
         slot_map, set_textures_line = self._pure_texture_slot_layout()
-        if slot_map is None:
+        if items and slot_map is None:
             print(
                 "[材质转资源pro] 纯贴图模式：当前游戏执行逻辑不支持"
                 "（只支持 ZZMI 家族 / EFMI），已跳过"
             )
-            return 0
+            items = []
 
         material_group_to_swapkey = {}
         self._prepare_material_group_switch_map(material_group_to_swapkey)
@@ -4300,13 +4303,12 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         used_swap_keys = set()
         object_to_diffuse_swapkey = {}
         texture_folder = os.path.join(mod_export_path, "Textures")
-        generated_fragments = []
+        registrations = []
         handled_names = []
         warnings = []
         mark_cache = {}
-        # 目录里已有的段名（片段自己的文件已在上一步清掉）：哈希段 [TextureOverride_<贴图hash>]
-        # 可能和常规导出写过的同名，重复段在 3Dmigoto 里是「后者覆盖前者」，不允许瞎撞。
-        used_section_names = self._collect_ini_section_names(mod_export_path)
+        used_section_names = self._collect_ini_section_names(mod_export_path, ini_file)
+        used_section_names.update(name.strip("[]").lower() for name in sections)
 
         for item in items:
             obj = item.target_object
@@ -4345,20 +4347,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 )
                 warnings.append(warning)
                 continue
-            style_parts = []
-            if hash_blocks:
-                style_parts.append(f"哈希 {len(hash_blocks)}")
-            if lines:
-                style_parts.append(f"插槽 {len(lines)}")
-            # 片段头：这是本节点自己的文件，重跑就覆盖，先在最上面说清楚。
-            # （段体里另有 _MATERIAL_PURE_TEXTURE_SECTION_MARKER，那段是为了从片段里
-            # 单独拷出去也认得出，不是重复。）
-            fragment_lines = [
-                "; --- 纯贴图替换片段：由「材质转资源pro」节点生成，重跑会覆盖 ---",
-                f"; 物体: {obj.name}",
-                f"; 贴图标记: {'有' if marks else '无'}；写法: {'、'.join(style_parts)}",
-            ]
-            fragment_sections = OrderedDict()
+            overrides = OrderedDict()
             emitted_names = []
             slot_section_name = None
             if lines:
@@ -4394,7 +4383,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 body.extend(texture_lines)
                 if set_textures_line:
                     body.append(set_textures_line)
-                fragment_sections[unique_name] = body
+                overrides[unique_name] = body
                 used_section_names.add(unique_name.strip("[]").lower())
                 emitted_names.append(unique_name)
                 slot_section_name = unique_name
@@ -4406,44 +4395,25 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                         "别的段覆盖），跳过这条哈希段"
                     )
                     continue
-                fragment_sections[hash_section] = block
+                overrides[hash_section] = [_MATERIAL_PURE_TEXTURE_SECTION_MARKER, *block]
                 used_section_names.add(hash_section.strip("[]").lower())
                 emitted_names.append(hash_section)
             if not emitted_names:
                 continue
-            # 资源段放在本片段自己文件里（自包含）：某个片段被用户删掉/单独关掉时，
-            # 不会把别的片段的贴图一起带走。
-            for resource_name, resource_body in resource_sections.items():
-                fragment_sections[resource_name] = resource_body
-            fragment_path = self._pure_texture_fragment_path(mod_export_path, ib)
-            with open(fragment_path, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(
-                    self._serialize_pure_texture_fragment(
-                        fragment_lines, fragment_sections
-                    )
-                )
-            # 登记给「条件判断」等后处理节点：这类段不是导出器写的，不登记的话
-            # 条件节点按「物体 → DrawIB → 段名」反查永远查不到，无法门控。
-            # 只登记槽位段：它按 DrawIB 起作用；哈希段是按贴图自身 hash 命中的，
-            # 不属于任何 DrawIB，登记进去只会误导按 DrawIB 反查的节点。
+            self._merge_pure_texture_resources(sections, overrides, resource_sections, used_section_names)
+            sections.update(overrides)
+            # 只有槽位段按 DrawIB 命中。哈希写法按贴图自身的 hash 命中。
             if slot_section_name is not None:
-                self._register_pure_texture_section(
-                    slot_section_name, ib_hash, fragment_path
-                )
-            generated_fragments.append(fragment_path)
+                registrations.append((slot_section_name, ib_hash))
             handled_names.append(obj.name)
             print(
-                f"[材质转资源pro] 纯贴图模式：{os.path.basename(fragment_path)}"
+                f"[材质转资源pro] 纯贴图模式：{os.path.basename(ini_file)}"
                 f"（{obj.name}，段 {', '.join(emitted_names)}，"
                 f"贴图类型 {', '.join(matched_types)}）"
             )
 
-        main_dirty = False
-        if generated_fragments and used_swap_keys:
-            # 开关变量必须落在主 ini 的 [Constants] 里：片段是独立文件，变量定义和
-            # KeySwap 段仍留在主 ini，否则按键位名字找不到变量。
+        if handled_names and used_swap_keys:
             self.define_swapkeys_in_sections(sections, used_swap_keys)
-            main_dirty = True
             chosen = OrderedDict()
             for spec in self._iter_pure_texture_switch_specs():
                 if not spec["enabled"] or not spec["key"]:
@@ -4456,16 +4426,16 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             for spec in chosen.values():
                 self._write_keyswap_section(sections, spec)
 
-        if main_dirty:
+        if handled_names or removed:
             _write_main_ini()
+            for section_label, draw_ib in registrations:
+                self._register_pure_texture_section(section_label, draw_ib, ini_file)
 
-        if not generated_fragments and not removed_fragments and not warnings:
+        removed_fragments = self._clear_pure_texture_fragments(mod_export_path)
+        if not handled_names and not removed_fragments and not warnings:
             return 0
 
-        summary = (
-            f"纯贴图模式：{len(generated_fragments)} 个物体不在导出链，"
-            f"已生成独立片段（{', '.join(handled_names) if handled_names else '无'}）"
-        )
+        summary = f"纯贴图模式：合并 {len(handled_names)} 个物体的贴图段到 {os.path.basename(ini_file)}"
         if removed:
             summary += f"；清掉主 ini 里上一次的 {removed} 段"
         if removed_fragments:
@@ -4475,7 +4445,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         print(f"[材质转资源pro] {summary}")
         for warning in warnings:
             print(f"[材质转资源pro]     - {warning}")
-        return len(generated_fragments)
+        return len(handled_names)
 
     def execute_postprocess(self, mod_export_path, exporter=None):
         if not bool(getattr(self, "use_global_assign", False)) and not self._target_object_set():
