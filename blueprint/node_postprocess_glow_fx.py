@@ -545,15 +545,20 @@ class SSMTNode_PostProcess_GlowFX(
             return False
 
         indent = _leading_whitespace(block[draw_index])
+        # 只有「仅绘制发光贴图」才需要临时收起原始 draw；默认导出不包任何 guard，
+        # 避免把 SlotFix 之类的运行时变量塞在原始 drawindexed 外面（未声明即风险）。
         call_lines = [
             _CALL_BEGIN,
-            "endif",
+        ]
+        if self.emission_only:
+            call_lines.append("endif")
+        call_lines.extend([
             f"{GLOW_RESOURCE}{self._halo_suffix()} = ref {ref}",
             f"$glowfx_drawcount = {draw_args[0]}",
             f"$glowfx_drawstart = {draw_args[1]}",
             f"$glowfx_drawbase = {draw_args[2]}",
             RUN_LINE + self._halo_suffix(),
-        ]
+        ])
         if self.enable_reset:
             call_lines.extend(
                 [
@@ -574,10 +579,8 @@ class SSMTNode_PostProcess_GlowFX(
         if self.emission_only:
             param_lines.extend([
                 "$glowfx_emission_only = 1",
-                _DRAW_GUARD + " && !$glowfx_emission_only",
+                "if !$glowfx_emission_only",
             ])
-        else:
-            param_lines.append(_DRAW_GUARD)
         param_lines.append(_PARAM_END)
         _insert_block(block, draw_index, param_lines, indent)
 

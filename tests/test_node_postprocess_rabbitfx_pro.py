@@ -2342,8 +2342,8 @@ class GlowFXTests(unittest.TestCase):
             r"ResourceGlowFXMap = ref Resource_Glowmap_Personal"
         )
         run_index = content.index(r"run = CommandListGlowFXRun")
-        self.assertLess(content.index('if !$\\SlotFix\\is_outline_shader'), draw_index)
-        self.assertIn("endif", content[draw_index:bind_index])
+        self.assertNotIn('if !$\\SlotFix\\is_outline_shader', content)
+        self.assertNotIn("endif", content[draw_index:bind_index])
         self.assertLess(draw_index, bind_index)
         self.assertLess(bind_index, run_index)
         self.assertIn(r"$glowfx_drawcount = 52688", content)
