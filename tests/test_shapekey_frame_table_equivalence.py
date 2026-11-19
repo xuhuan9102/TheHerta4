@@ -45,14 +45,15 @@ def reference(vertex_count, plan, inputs):
             continue
         index = np.full(vertex_count, -1, dtype=np.int32)
         index[union] = np.arange(len(union), dtype=np.int32)
-        frames = np.zeros((len(group["members"]) + 1, len(union), 3), dtype=np.float32)
-        accumulator = np.zeros((len(union), 3), dtype=np.float32)
+        width = deltas.shape[1]
+        frames = np.zeros((len(group["members"]) + 1, len(union), width), dtype=np.float32)
+        accumulator = np.zeros((len(union), width), dtype=np.float32)
         for step, key in enumerate(group["members"], 1):
             for vertices, payload in records.get(key, ()):
                 np.add.at(accumulator, np.searchsorted(union, vertices), payload)
             frames[step] = accumulator
         metadata.append((offset, len(union), len(group["members"]), index))
-        parts.append(frames.reshape(-1, 3))
+        parts.append(frames.reshape(-1, width))
         offset += frames.shape[0] * len(union)
     if not parts:
         return None, []
@@ -61,6 +62,31 @@ def reference(vertex_count, plan, inputs):
 
 
 class FrameTableEquivalenceTests(unittest.TestCase):
+    def test_full_channels_accumulate_across_groups(self):
+        # Two groups with an odd record offset between them. The second group
+        # also includes a vertex whose delta changes only the tangent.
+        deltas = np.array([
+            [1, 2, 3, 0, 1, 0, 0, -1, 0],
+            [-1, 0, 0, 0, -1, 1, 2, 0, 1],
+            [0, 0, 0, 0, 0, 0, -1, 1, 1],
+        ], dtype=np.float32)
+        merged = np.array([0, 1, -1, 2], dtype=np.int32)
+        frequencies = np.array([0, 1, 0xffffffff, 2], dtype=np.uint32)
+        plan = {"groups": [
+            {"group": 0, "progress": "$g0", "members": [0, 1]},
+            {"group": 1, "progress": "$g1", "members": [2]},
+        ]}
+        extra = np.array([[0.0], [0.5], [-0.25]], dtype=np.float32)
+        for channels in (deltas, np.hstack((deltas, extra))):
+            with self.subTest(width=channels.shape[1]), tempfile.TemporaryDirectory() as root:
+                inputs = channels, merged, frequencies
+                expected, _ = reference(2, plan, inputs)
+                writer = Writer()
+                writer.meshes_dir = root
+                result = writer._write_frame_table_files("hash", 2, plan, inputs)
+                self.assertEqual(result["groups"][1]["offset"], 3)
+                self.assertEqual((Path(root) / "hash-Position_frame_table.buf").read_bytes(), expected)
+
     def test_random_groups_and_cross_slot_overlaps_preserve_all_bytes_and_metadata(self):
         for seed in range(12):
             rng = np.random.default_rng(seed)

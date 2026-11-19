@@ -51,7 +51,8 @@ class UnityBufferBuildResult:
 @dataclass
 class ShapeKeyBufferBuildResult:
     name: str
-    element_vertex_ndarray: numpy.ndarray = field(repr=False)
+    element_vertex_ndarray: Optional[numpy.ndarray] = field(default=None, repr=False)
+    position_bytes: Optional[numpy.ndarray] = field(default=None, repr=False)
 
 
 @dataclass
@@ -529,8 +530,8 @@ class ExportUtils:
             shape_key_buffer_dict = ExportUtils.build_unity_shape_key_buffer_dict(
                 obj=obj,
                 d3d11_game_type=d3d11_game_type,
-                dtype=element_context.total_structured_dtype,
                 index_loop_id_dict=index_loop_id_dict,
+                element_vertex_ndarray=element_vertex_ndarray,
             )
         TimerUtils.end_stage("ShapeKey计算")
 
@@ -560,6 +561,35 @@ class ExportUtils:
         if getter is None:
             return True
         return bool(getter)
+
+    @staticmethod
+    def _apply_current_pose_shading(obj, rows, d3d11_game_type):
+        attributes = getattr(getattr(obj, "data", None), "attributes", None)
+        if attributes is None or "_ssmt_pose_normal" not in attributes:
+            return rows
+
+        from .current_pose_shading import PoseLoops
+
+        loops = PoseLoops(obj, GlobalConfig.logic_name)
+        if len(loops.normals) != len(rows):
+            raise RuntimeError(f"以当前状态计算法线、切线：{obj.name} 的导出面角数发生变化")
+        elements = d3d11_game_type.ElementNameD3D11ElementDict
+        encoded = "ENCODEDDATA" in elements and GlobalConfig.logic_name == LogicName.EFMI
+        for name in rows.dtype.names:
+            if encoded:
+                if name != "ENCODEDDATA":
+                    continue
+                parser = ObjBufferHelper._parse_encodeddata
+            elif name == "NORMAL":
+                parser = ObjBufferHelper._parse_normal
+            elif name == "TANGENT":
+                parser = ObjBufferHelper._parse_tangent
+            elif name.startswith("BINORMAL"):
+                parser = ObjBufferHelper._parse_binormal
+            else:
+                continue
+            rows[name] = parser(loops, len(rows), elements[name]).reshape(rows[name].shape)
+        return rows
 
     @staticmethod
     def recalculate_element_vertex_ndarray(
@@ -598,10 +628,11 @@ class ExportUtils:
             d3d11GameType=d3d11_game_type,
             dtype=dtype,
         )
-        return ExportUtils._coerce_recalculated_element_vertex_ndarray(
+        recalculated = ExportUtils._coerce_recalculated_element_vertex_ndarray(
             recalculated=recalculated,
             fallback=element_vertex_ndarray,
         )
+        return ExportUtils._apply_current_pose_shading(obj, recalculated, d3d11_game_type)
 
     @staticmethod
     def _coerce_recalculated_element_vertex_ndarray(recalculated, fallback):
@@ -657,7 +688,9 @@ class ExportUtils:
         ):
             return ObjBufferHelper.calc_index_vertex_buffer_girlsfrontline2(
                 mesh=mesh,
-                element_vertex_ndarray=element_vertex_ndarray,
+                element_vertex_ndarray=ExportUtils._apply_current_pose_shading(
+                    obj, element_vertex_ndarray, d3d11_game_type
+                ),
                 d3d11_game_type=d3d11_game_type,
                 dtype=dtype,
             )
@@ -709,19 +742,103 @@ class ExportUtils:
         return ib, category_buffer_dict, index_loop_id_dict, unique_first_loop_indices
 
     @staticmethod
+    def _frame_table_sample_signatures(obj, shape_groups, indices_map, element_vertex_ndarray, sample_version):
+        import hashlib
+        import json
+        from ..blueprint.frame_table_cache import hash_array, hash_mesh_topology
+        from ..common.shapekey_native import read_coords
+
+        mesh = obj.data
+        digest = hashlib.sha256()
+        digest.update(json.dumps([sample_version, bpy.app.version_string, GlobalConfig.logic_name]).encode())
+        digest.update(str(element_vertex_ndarray.dtype.descr).encode("utf-8"))
+        hash_array(digest, indices_map)
+        if not hash_mesh_topology(digest, mesh):
+            return None, []
+        reference = mesh.shape_keys.reference_key
+        hash_array(digest, read_coords(reference))
+        key_digests = {}
+        signatures = []
+        for group in shape_groups:
+            group_digest = digest.copy()
+            group_digest.update(json.dumps([(key.name, key.relative_key.name) for key in group]).encode())
+            for key in group:
+                for block in (key, key.relative_key):
+                    if block not in key_digests:
+                        coordinates = hashlib.sha256()
+                        hash_array(coordinates, read_coords(block))
+                        key_digests[block] = coordinates.digest()
+                    group_digest.update(key_digests[block])
+            signatures.append(group_digest.hexdigest())
+        return hashlib.sha256("".join(signatures).encode("ascii")).hexdigest(), signatures
+
+    @staticmethod
+    def _write_pose_group_cache(cache, mesh_name, ordinal, signature, poses):
+        try:
+            cache.store_pose_group(mesh_name, ordinal, signature, poses)
+        except OSError as exc:
+            print(f"形态键组缓存写入失败（{mesh_name}）: {exc}", flush=True)
+
+    @staticmethod
+    def _store_pose_group_results(cache, mesh_name, pending_groups, frames, base, group_results):
+        start = 0
+        for ordinal, signature, group in pending_groups:
+            stop = start + len(group)
+            poses = frames[start:stop]
+            ExportUtils._write_pose_group_cache(cache, mesh_name, ordinal, signature, poses)
+            group_results[ordinal] = ExportUtils._build_parallel_shape_buffers(group, base, poses)
+            start = stop
+        return {name: result for ordinal in sorted(group_results)
+                for name, result in group_results[ordinal].items()}
+
+    @staticmethod
+    def _collect_parallel_pose_results(
+        cache, mesh_name, pending_groups, samples, shared_frames, completed, base, group_results,
+    ):
+        from itertools import chain, islice
+
+        frames = chain.from_iterable(completed)
+        if not pending_groups:
+            return ExportUtils._build_parallel_shape_buffers(samples, base, frames)
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        start = 0
+        with ThreadPoolExecutor(max_workers=1) as writer:
+            writes = []
+            for ordinal, signature, group in pending_groups:
+                stop = start + len(group)
+                group_results[ordinal] = ExportUtils._build_parallel_shape_buffers(
+                    group, base, islice(frames, len(group)),
+                )
+                # The group has been fully published. The worker will only
+                # write to later blocks while the read-only cache write runs.
+                writes.append(writer.submit(
+                    ExportUtils._write_pose_group_cache,
+                    cache, mesh_name, ordinal, signature, shared_frames[start:stop],
+                ))
+                start = stop
+            for write in writes:
+                write.result()
+        return {name: result for ordinal in sorted(group_results)
+                for name, result in group_results[ordinal].items()}
+
+    @staticmethod
     def build_unity_shape_key_buffer_dict(
         obj: bpy.types.Object,
         d3d11_game_type: D3D11GameType,
-        dtype: numpy.dtype,
         index_loop_id_dict: Optional[dict],
+        element_vertex_ndarray: numpy.ndarray,
     ) -> dict:
         shape_key_buffer_dict = {}
 
-        shapekeyname_mkey_dict = BlueprintExportHelper.get_current_shapekeyname_mkey_dict()
-        shapekey_names = list(dict.fromkeys(
-            list(shapekeyname_mkey_dict.keys())
-            + BlueprintExportHelper.get_runtime_shapekey_buffer_names(getattr(obj, "name", ""))
-        ))
+        use_evaluated_samples = BlueprintExportHelper.should_preserve_current_shapekey_mix_for_export()
+        shapekey_names = BlueprintExportHelper.get_runtime_shapekey_buffer_names(obj.name)
+        if not use_evaluated_samples:
+            # Other exporters can also request keys outside the direct export classification.
+            shapekey_names = list(dict.fromkeys(
+                list(BlueprintExportHelper.get_current_shapekeyname_mkey_dict()) + shapekey_names
+            ))
         if not shapekey_names:
             return shape_key_buffer_dict
 
@@ -737,30 +854,159 @@ class ExportUtils:
         if not shape_keys:
             return shape_key_buffer_dict
 
-        TimerUtils.Start(f"Processing {len(shape_keys)} ShapeKeys for {obj.name}")
+        shape_groups = []
+        grouped_keys = set()
+        if use_evaluated_samples:
+            keys_by_name = {key.name: key for key in shape_keys}
+            for sequence in BlueprintExportHelper.runtime_shapekey_sequences:
+                group = [keys_by_name[name] for name in sequence if name in keys_by_name]
+                if group:
+                    shape_groups.append(group)
+                    grouped_keys.update(key.name for key in group)
+        shape_groups.extend([key] for key in shape_keys if key.name not in grouped_keys)
+        sample_groups = [
+            [(key, index == 0, len(group) > 1) for index, key in enumerate(group)]
+            for group in shape_groups
+        ]
+        samples = [sample for group in sample_groups for sample in group]
+        indices_map = (
+            numpy.fromiter(index_loop_id_dict.values(), dtype=int, count=len(index_loop_id_dict))
+            if index_loop_id_dict is not None else numpy.arange(len(obj.data.vertices), dtype=int)
+        )
+        fast_coordinates = False
+        pose_layout = False
+        pending_groups = []
+        group_results = {}
+        if use_evaluated_samples:
+            from ..common.shapekey_native import capture_relative_shapes, fast_path_reason
+
+            fast_coordinates = (
+                not fast_path_reason(obj)
+                and all(key.slider_min <= 0.0 <= key.slider_max for key in obj.data.shape_keys.key_blocks)
+                and all(key.slider_max >= 1.0 for key in shape_keys)
+            )
+            pose_layout = (
+                fast_coordinates
+                and BlueprintExportHelper.runtime_shapekey_sequences
+                and LogicName.is_zzmi_family(GlobalConfig.logic_name)
+                and [
+                    (element.ElementName, element.Format)
+                    for element in d3d11_game_type.D3D11ElementList
+                    if element.Category == "Position"
+                ] == [
+                    ("POSITION", "R32G32B32_FLOAT"),
+                    ("NORMAL", "R32G32B32_FLOAT"),
+                    ("TANGENT", "R32G32B32A32_FLOAT"),
+                ]
+            )
+            cache = BlueprintExportHelper.runtime_frame_table_cache
+            if cache is not None:
+                # Evaluated modifiers and drivers require
+                # Blender state beyond the deterministic coordinate sampler.
+                signature, group_signatures = (
+                    ExportUtils._frame_table_sample_signatures(
+                        obj, shape_groups, indices_map, element_vertex_ndarray, cache.sample_version,
+                    ) if fast_coordinates else (None, [])
+                )
+                if cache.record_sample(signature):
+                    return shape_key_buffer_dict
+                if pose_layout and group_signatures:
+                    base = element_vertex_ndarray[indices_map]
+                    for ordinal, (group, group_signature) in enumerate(zip(sample_groups, group_signatures)):
+                        poses = cache.load_pose_group(obj.name, ordinal, group_signature, (len(group), len(indices_map), 10))
+                        if poses is None:
+                            pending_groups.append((ordinal, group_signature, group))
+                        else:
+                            group_results[ordinal] = ExportUtils._build_parallel_shape_buffers(group, base, poses)
+                    del poses
+                    samples = [sample for _, _, group in pending_groups for sample in group]
+                    if group_results:
+                        print(
+                            f"形态键组缓存命中：{obj.name} 复用 {len(group_results)} 组，重新采样 {len(samples)} 帧",
+                            flush=True,
+                        )
+                    if not samples:
+                        return ExportUtils._store_pose_group_results(
+                            cache, obj.name, pending_groups, (), base, group_results,
+                        )
+
+        stage = f"Processing {len(samples)} ShapeKeys for {obj.name}"
+        TimerUtils.Start(stage)
+        sample_mesh = None
         try:
             with ShapeKeyUtils.preserve_shape_key_state(obj):
                 ShapeKeyUtils.reset_shapekey_values(obj)
                 ShapeKeyUtils._update_view_layer()
 
-                if index_loop_id_dict is not None:
-                    target_count = len(index_loop_id_dict)
-                    indices_map = numpy.zeros(target_count, dtype=int)
-                    indices_map[:] = list(index_loop_id_dict.values())
-                else:
-                    target_count = len(obj.data.vertices)
-                    indices_map = numpy.arange(target_count, dtype=int)
+                # Start each sample with the unchanged base attributes.
+                base_shape_vertex_ndarray = element_vertex_ndarray[indices_map]
+                depsgraph = bpy.context.evaluated_depsgraph_get() if use_evaluated_samples else None
+                sampled_coords = None
+                pose_frames = None
+                if fast_coordinates:
+                    ordered_keys = [key for key, _, _ in samples]
+                    basis_coords, sampled_coords = capture_relative_shapes(obj, ordered_keys)
+                    # Keep Blender's normal and tangent calculation on an unlinked mesh.
+                    sample_mesh = bpy.data.meshes.new_from_object(
+                        obj.evaluated_get(depsgraph),
+                        preserve_all_data_layers=True,
+                        depsgraph=depsgraph,
+                    )
+                    if pose_layout and len(samples) >= 120:
+                        from .shapekey_pose_worker import pose_worker_count, sample_parallel
 
-                base_shape_vertex_ndarray = numpy.zeros(target_count, dtype=dtype)
+                        workers = pose_worker_count(sample_mesh, len(samples), len(indices_map))
+                        if workers:
+                            from ..blueprint import export_progress
 
-                for shapekey in shape_keys:
+                            flags = [(first, sequential) for _, first, sequential in samples]
+                            print(f"形态键并行采样：{workers} 个 Blender 进程，{len(samples)} 帧", flush=True)
+                            export_progress.report_stage(f"ShapeKey计算 | {workers} 个进程采样 {len(samples)} 帧")
+                            with sample_parallel(sample_mesh, indices_map, basis_coords, sampled_coords, flags, workers) as (shared, completed):
+                                return ExportUtils._collect_parallel_pose_results(
+                                    cache, obj.name, pending_groups, samples, shared, completed,
+                                    base_shape_vertex_ndarray, group_results,
+                                )
+                    if pending_groups:
+                        pose_frames = numpy.empty((len(samples), len(indices_map), 10), dtype=numpy.float32)
+                active_keys = []
+                previous_attributes = {}
+
+                for frame_index, (shapekey, first_in_group, sequential) in enumerate(samples):
                     shapekey_name = shapekey.name
                     sample_obj = None
+                    evaluated_obj = None
                     try:
-                        sample_obj, mesh_eval = ExportUtils._create_baked_shape_key_sample_mesh(
-                            obj=obj,
-                            shapekey_name=shapekey_name,
-                        )
+                        if first_in_group:
+                            previous_attributes.clear()
+                            for active_key in active_keys:
+                                active_key.value = 0.0
+                            active_keys.clear()
+                        if sampled_coords is not None:
+                            _, coords = next(sampled_coords)
+                            if sequential:
+                                if first_in_group:
+                                    sequence_coords = basis_coords.copy()
+                                sequence_coords += coords - basis_coords
+                                posed_coords = sequence_coords
+                            else:
+                                posed_coords = coords
+                            sample_mesh.vertices.foreach_set("co", posed_coords.ravel())
+                            sample_mesh.update()
+                            mesh_eval = sample_mesh
+                        elif use_evaluated_samples:
+                            # Sequence weights are cumulative. Group boundaries
+                            # reset the temporary export object to its basis.
+                            shapekey.value = 1.0
+                            active_keys.append(shapekey)
+                            ShapeKeyUtils._update_view_layer()
+                            evaluated_obj = obj.evaluated_get(depsgraph)
+                            mesh_eval = evaluated_obj.to_mesh()
+                        else:
+                            sample_obj, mesh_eval = ExportUtils._create_baked_shape_key_sample_mesh(
+                                obj=obj,
+                                shapekey_name=shapekey_name,
+                            )
                         if mesh_eval is None:
                             continue
 
@@ -772,19 +1018,72 @@ class ExportUtils:
                                 ObjUtils.mesh_triangulate(mesh_eval)
                                 mesh_eval.calc_tangents(uvmap=uv_map_name)
 
-                        shape_key_buffer_dict[shapekey_name] = ExportUtils.build_shape_key_buffer_result(
+                        result = ExportUtils.build_shape_key_buffer_result(
                             name=shapekey_name,
                             base_element_vertex_ndarray=base_shape_vertex_ndarray,
                             mesh=mesh_eval,
                             indices_map=indices_map,
                             d3d11_game_type=d3d11_game_type,
+                            position_coords=coords if sampled_coords is not None else None,
                         )
+                        if pose_frames is not None:
+                            frame = pose_frames[frame_index]
+                            frame[:, :3] = result.element_vertex_ndarray["POSITION"]
+                            frame[:, 3:6] = result.element_vertex_ndarray["NORMAL"]
+                            frame[:, 6:] = result.element_vertex_ndarray["TANGENT"]
+                            continue
+                        if sequential:
+                            sampled_attributes = result.element_vertex_ndarray
+                            # The slot merger sums float deltas. Encode the
+                            # difference between two adjacent posed frames so
+                            # their sum reconstructs the current tangent frame.
+                            for field in ("POSITION", "NORMAL", "TANGENT", "BINORMAL"):
+                                if field == "POSITION" and sampled_coords is not None:
+                                    continue
+                                if field not in sampled_attributes.dtype.names:
+                                    continue
+                                value = sampled_attributes[field]
+                                if value.dtype.kind != "f":
+                                    continue
+                                basis = base_shape_vertex_ndarray[field]
+                                current = value.copy()
+                                value[:] = basis + (current - previous_attributes.get(field, basis))
+                                previous_attributes[field] = current
+                        shape_key_buffer_dict[shapekey_name] = result
                     finally:
+                        if evaluated_obj is not None:
+                            evaluated_obj.to_mesh_clear()
                         ExportUtils._cleanup_shape_key_sample_object(sample_obj)
+                if pose_frames is not None:
+                    return ExportUtils._store_pose_group_results(
+                        cache, obj.name, pending_groups, pose_frames, base_shape_vertex_ndarray, group_results,
+                    )
         finally:
-            TimerUtils.End(f"Processing {len(shape_keys)} ShapeKeys for {obj.name}")
+            if sample_mesh is not None:
+                bpy.data.meshes.remove(sample_mesh)
+            TimerUtils.End(stage)
 
         return shape_key_buffer_dict
+
+    @staticmethod
+    def _build_parallel_shape_buffers(samples, base, frames):
+        # The other vertex categories are invariant across poses. Keep only the
+        # Position resource bytes (position, normal and tangent) for this layout.
+        base_surface = numpy.concatenate((base["NORMAL"], base["TANGENT"]), axis=1)
+        result = {}
+        previous = base_surface
+        for (key, first, sequential), frame in zip(samples, frames):
+            packed = frame.copy()
+            if sequential:
+                current = frame[:, 3:]
+                previous_frame = base_surface if first else previous
+                packed[:, 3:] = base_surface + (current - previous_frame)
+                previous = current
+            result[key.name] = ShapeKeyBufferBuildResult(
+                name=key.name,
+                position_bytes=packed.view(numpy.uint8).reshape(-1),
+            )
+        return result
 
     @staticmethod
     def build_shape_key_buffer_result(
@@ -835,11 +1134,16 @@ class ExportUtils:
                     )
 
             elif elem_name == "NORMAL":
-                all_normals = ObjBufferHelper._parse_normal(
-                    mesh_loops=mesh.loops,
-                    mesh_loops_length=len(mesh.loops),
-                    d3d11_element=d3d11_element,
-                )
+                corners = getattr(mesh, "corner_normals", None)
+                if d3d11_element.Format == "R32G32B32_FLOAT" and corners is not None and len(corners) == len(mesh.loops):
+                    all_normals = numpy.empty((len(corners), 3), dtype=numpy.float32)
+                    corners.foreach_get("vector", all_normals.ravel())
+                else:
+                    all_normals = ObjBufferHelper._parse_normal(
+                        mesh_loops=mesh.loops,
+                        mesh_loops_length=len(mesh.loops),
+                        d3d11_element=d3d11_element,
+                    )
                 data = all_normals[loop_indices]
 
             elif elem_name == "TANGENT":

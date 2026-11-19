@@ -121,7 +121,7 @@ def pack_half_float3_parts(parts):
 
 
 def fast_path_reason(obj):
-    """Conservative eligibility: anything requiring dependency evaluation falls back."""
+    """Check eligibility for sampling stored relative keys in mesh-local space."""
     if os.environ.get("HERTA_SHAPEKEY_FAST", "1") == "0":
         return "disabled"
     if getattr(obj, "mode", "OBJECT") != "OBJECT" or getattr(obj, "show_only_shape_key", False):
@@ -129,7 +129,8 @@ def fast_path_reason(obj):
     keys = getattr(getattr(obj, "data", None), "shape_keys", None)
     if keys is None or not keys.use_relative or keys.reference_key is None:
         return "absolute/no reference key"
-    if getattr(keys, "animation_data", None) is not None or getattr(obj, "animation_data", None) is not None:
+    # Animation on the Key datablock can control the weights being sampled.
+    if getattr(keys, "animation_data", None) is not None:
         return "animation/drivers"
     if any(getattr(modifier, "show_viewport", True) for modifier in obj.modifiers):
         return "evaluated modifiers"

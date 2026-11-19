@@ -72,7 +72,7 @@ class ExportRoundExecutor:
     """导出轮次执行器，管理单次导出的完整生命周期（前处理→蓝图解析→导出→清理）"""
 
     @classmethod
-    def execute_round(cls, tree, round_plan: dict, allow_parallel_preprocess: bool = True) -> dict:
+    def execute_round(cls, tree, round_plan: dict, allow_parallel_preprocess: bool = True, pose_shading=None) -> dict:
         BluePrintModel.clear_object_name_mapping()
         BlueprintExportHelper.set_runtime_blueprint_tree(tree)
         BlueprintExportHelper.calculate_max_export_count(tree)
@@ -81,6 +81,10 @@ class ExportRoundExecutor:
         BlueprintExportHelper.validate_object_info_references(tree)
 
         try:
+            if pose_shading is None and getattr(tree, "use_current_pose_shading", False):
+                from ..utils.current_pose_shading import capture
+
+                pose_shading = capture(tree, BlueprintExportHelper.collect_connected_preprocess_object_names(tree))
             cls._prepare_round_state(tree, round_plan)
 
             object_names = cls.collect_object_names_from_tree(tree)
@@ -95,6 +99,10 @@ class ExportRoundExecutor:
                 original_to_copy_map = PreProcessHelper.execute_preprocess(object_names)
 
             if original_to_copy_map:
+                if pose_shading:
+                    from ..utils.current_pose_shading import apply_to_copies
+
+                    apply_to_copies(original_to_copy_map, pose_shading)
                 PreProcessHelper.update_blueprint_node_references(tree, nested_trees)
             TimerUtils.end_stage("前处理")
 

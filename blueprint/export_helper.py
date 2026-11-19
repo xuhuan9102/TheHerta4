@@ -38,6 +38,8 @@ class BlueprintExportHelper:
     # 这些运行时字段由标准导出、并行导出和直出共同读写，用来传递形态键上下文。
     runtime_shapekey_buffer_names = []
     runtime_shapekey_buffer_name_map = {}
+    runtime_shapekey_sequences = ()
+    runtime_frame_table_cache = None
     preserve_current_shapekey_mix_for_export = False
     suppress_shapekey_resource_export = False
     capture_direct_shapekey_positions = False
@@ -516,8 +518,9 @@ class BlueprintExportHelper:
             if key.startswith("TEMP_SUBMESH_MERGED_"):
                 key = key[len("TEMP_SUBMESH_MERGED_"):]
 
-            key_prefix = key.split("-", 1)[0] if "-" in key else key
-            for candidate_key in (buffer_key, key, key_prefix):
+            _, bare_key = ObjectPrefixHelper.split_lod_prefix(key)
+            key_prefix = bare_key.split("-", 1)[0]
+            for candidate_key in (buffer_key, key, bare_key, key_prefix):
                 names.extend(BlueprintExportHelper.runtime_shapekey_buffer_name_map.get(candidate_key, []))
 
         return list(dict.fromkeys(name for name in names if name))
@@ -526,6 +529,8 @@ class BlueprintExportHelper:
     def clear_runtime_shapekey_buffer_names():
         BlueprintExportHelper.runtime_shapekey_buffer_names = []
         BlueprintExportHelper.runtime_shapekey_buffer_name_map = {}
+        BlueprintExportHelper.runtime_shapekey_sequences = ()
+        BlueprintExportHelper.runtime_frame_table_cache = None
 
     # ---- 导出期蓝图模型 / 导出器的运行时缓存 ----
     # 后处理节点在导出结束之后才运行（同进程顺序执行），所以导出结束**不清理**这两个

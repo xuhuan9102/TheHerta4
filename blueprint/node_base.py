@@ -102,6 +102,12 @@ class SSMTBlueprintTree(NodeTree):
         default=False,
     ) # type: ignore
 
+    use_current_pose_shading: bpy.props.BoolProperty(
+        name="以当前状态计算法线、切线",
+        description="用原物体当前的形态键与视口修改器效果计算法线、切线。位置及其余数据沿用原有副本导出流程",
+        default=False,
+    ) # type: ignore
+
 
 _NODE_COLOR_INPUT_SOURCE = (0.38, 0.39, 0.40)
 _NODE_COLOR_GROUP = (0.15, 0.16, 0.17)

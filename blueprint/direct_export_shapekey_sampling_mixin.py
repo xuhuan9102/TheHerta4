@@ -18,7 +18,7 @@ from ..utils.shapekey_utils import ShapeKeyUtils
 from ..utils.export_utils import ExportUtils
 from .direct_export_runtime_utils import extract_position_bytes_by_indices as _extract_position_bytes_by_indices
 from .direct_export_runtime_utils import normalize_runtime_name as _normalize_runtime_name
-from .direct_export_shapekey_shared import ShapeKeyDirectExportError
+from .direct_export_shapekey_shared import ShapeKeyDirectExportError, _buffer_to_bytes
 from .export_helper import BlueprintExportHelper
 from .preprocess import PreProcessHelper
 

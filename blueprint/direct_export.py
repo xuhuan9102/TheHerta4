@@ -1,5 +1,8 @@
 import os
 import shutil
+import hashlib
+import json
+from pathlib import Path
 
 import bpy
 
@@ -429,6 +432,7 @@ class DirectExportSession:
         self.direct_shapekey_nodes = []
         self.direct_multifile_nodes = []
         self.ordered_postprocess_nodes = []
+        self.pose_shading = {}
 
     def _collect_direct_nodes(self):
         BlueprintExportHelper.set_runtime_blueprint_tree(self.tree)
@@ -544,6 +548,79 @@ class DirectExportSession:
                         shapekey_name_map.setdefault(key, []).append(shapekey_name)
         BlueprintExportHelper.set_runtime_shapekey_buffer_name_map(shapekey_name_map)
         BlueprintExportHelper.set_runtime_shapekey_buffer_names([])
+        BlueprintExportHelper.runtime_shapekey_sequences = ()
+        for node in self.direct_shapekey_nodes:
+            if not (getattr(node, "use_frame_table", False) and getattr(node, "store_all_vertex_channels", False)):
+                continue
+            names = dict.fromkeys(
+                name for names_data in slot_to_name_to_objects.values() for name in names_data
+            )
+            names_to_vars = {name: node.get_shape_key_export_variable_name(name) for name in names}
+            vars_to_names = {var.lstrip("$"): name for name, var in names_to_vars.items()}
+            generator = DirectShapeKeyGenerator(node, "", blueprint_model=None, exporter=None)
+            groups, _totals = generator._read_sequence_groups_from_ext_node(names_to_vars)
+            BlueprintExportHelper.runtime_shapekey_sequences = tuple(
+                tuple(vars_to_names[var] for var in members)
+                for members in groups.values()
+            )
+            return slot_to_name_to_objects, names_to_vars, groups, _totals
+
+    def _frame_table_cache(self, frame_settings):
+        from .frame_table_cache import FrameTableCache
+        from .preprocess_cache import PreProcessCache
+
+        cache_dir = PreProcessCache.get_cache_dir()
+        if not cache_dir or not frame_settings:
+            return None
+        slots, variable_names, sequence_groups, totals = frame_settings
+        node = self.direct_shapekey_nodes[0]
+        if not sequence_groups:
+            return None
+        draw_calls = self.base_blueprint_model.ordered_draw_obj_data_model_list
+        relative_keys = {}
+        for name in dict.fromkeys(draw.get_blender_obj_name() for draw in draw_calls):
+            obj = bpy.data.objects.get(name)
+            shape_keys = getattr(getattr(obj, "data", None), "shape_keys", None)
+            if shape_keys is not None:
+                relative_keys[name] = [
+                    (key.name, key.relative_key.name if key.relative_key else None)
+                    for key in shape_keys.key_blocks
+                ]
+        context = [
+            bpy.app.version_string,
+            GlobalConfig.logic_name,
+            # Draw conditions are emitted from the current INI. Geometry and
+            # vertex ordering are validated separately by sample/base digests.
+            sorted((draw.obj_name, draw.get_blender_obj_name()) for draw in draw_calls),
+            slots,
+            variable_names,
+            sequence_groups,
+            totals,
+            sorted(relative_keys.items()),
+            node.use_packed_Meshess,
+            node.use_optimized_lookup,
+            node.merge_slot_files,
+            node.use_sparse_vertex_index,
+            node.drag_drive_enabled,
+        ]
+        digest = hashlib.sha256(json.dumps(context, ensure_ascii=False).encode("utf-8"))
+        root = Path(__file__).resolve().parents[1]
+        sample_version = hashlib.sha256(b"full-channel-pose-groups-v2")
+        for source in (
+            "utils/export_utils.py", "utils/shapekey_pose_worker.py",
+            "common/obj_buffer_helper.py", "common/shapekey_native.py",
+        ):
+            sample_version.update((root / source).read_bytes())
+        digest.update(sample_version.digest())
+        for source in (
+            "blueprint/direct_export_shapekey.py", "blueprint/direct_export_shapekey_output_mixin.py",
+            "blueprint/frame_table_cache.py", "common/drawib_model.py",
+            "Toolset/shapekey_anim_frame_table.hlsl", "Toolset/shapekey_weight_sync.hlsl",
+        ):
+            digest.update((root / source).read_bytes())
+        blueprint_id = hashlib.sha256(self.tree.name.encode("utf-8")).hexdigest()[:24]
+        bundle = Path(cache_dir) / "frame_tables" / f"{blueprint_id}.zip"
+        return FrameTableCache(bundle, digest.hexdigest(), sample_version.hexdigest())
 
     def _export_full(self, exporter, folder_name: str):
         BlueprintExportHelper.set_current_buffer_folder_name(folder_name)
@@ -592,6 +669,7 @@ class DirectExportSession:
                 tree=self.tree,
                 round_plan=round_plan,
                 allow_parallel_preprocess=True,
+                **({"pose_shading": self.pose_shading} if self.pose_shading else {}),
             )
             if reference_size and round_result.get("buffer_size", 0) != reference_size:
                 LOG.warning(
@@ -629,18 +707,35 @@ class DirectExportSession:
 
         has_shapekey = bool(self.direct_shapekey_nodes)
         has_multifile = bool(self.direct_multifile_nodes)
+        frame_cache = None
+        frame_table_all_channels = any(
+            getattr(node, "use_frame_table", False)
+            and getattr(node, "store_all_vertex_channels", False)
+            for node in self.direct_shapekey_nodes
+        )
 
+        object_names = None
         TimerUtils.start_stage("Direct-SetupState")
+        if getattr(self.tree, "use_current_pose_shading", False):
+            from ..utils.current_pose_shading import capture
+
+            object_names = self._collect_objects()
+            self.pose_shading = capture(self.tree, object_names)
         self._setup_base_state()
         TimerUtils.end_stage("Direct-SetupState")
 
         TimerUtils.start_stage("Direct-CollectObjects")
         _report_stage_nodes(self.tree, _OBJECT_INFO_NODE_IDNAMES, export_progress.STATE_RUNNING)
-        object_names = self._collect_objects()
+        if object_names is None:
+            object_names = self._collect_objects()
         TimerUtils.end_stage("Direct-CollectObjects")
 
         TimerUtils.start_stage("Direct-Preprocess")
-        if has_shapekey:
+        if frame_table_all_channels:
+            # Keep the preprocessed keys so the exporter can build per-key
+            # vertex buffers in the same index space as the base buffer.
+            base_copy_map, _nested_trees = self._run_preprocess(object_names, preserve_shape_keys=True)
+        elif has_shapekey:
             BlueprintExportHelper.clear_direct_shapekey_position_records()
             base_copy_map, _nested_trees = self._run_preprocess(object_names, capture_shape_keys=True)
         else:
@@ -651,6 +746,14 @@ class DirectExportSession:
         _report_stage_nodes(self.tree, _OBJECT_INFO_NODE_IDNAMES, export_progress.STATE_DONE)
 
         try:
+            if frame_table_all_channels:
+                TimerUtils.start_stage("Preprocess-BakeDisabledShapeKeys")
+                PreProcessHelper._bake_disabled_shape_keys(list(base_copy_map.values()))
+                TimerUtils.end_stage("Preprocess-BakeDisabledShapeKeys")
+            if self.pose_shading:
+                from ..utils.current_pose_shading import apply_to_copies
+
+                apply_to_copies(base_copy_map, self.pose_shading)
             if has_shapekey:
                 TimerUtils.start_stage("Direct-BlueprintModel")
                 _report_stage_nodes(
@@ -661,12 +764,19 @@ class DirectExportSession:
                 self.base_blueprint_model = self._build_blueprint_model()
                 TimerUtils.end_stage("Direct-BlueprintModel")
 
-                self._prepare_shapekey_buffer_names(self.base_blueprint_model)
+                frame_settings = self._prepare_shapekey_buffer_names(self.base_blueprint_model)
+                if (
+                    frame_table_all_channels and len(self.direct_shapekey_nodes) == 1
+                    and not has_multifile and not self._needs_standard_shapekey_rounds()
+                    and GlobalProterties.enable_export_cache()
+                ):
+                    frame_cache = self._frame_table_cache(frame_settings)
+                    BlueprintExportHelper.runtime_frame_table_cache = frame_cache
 
                 TimerUtils.start_stage("Direct-BuildExporter")
                 self.base_exporter = self._build_exporter(
                     self.base_blueprint_model,
-                    preserve_shape_key_mix=False,
+                    preserve_shape_key_mix=frame_table_all_channels,
                 )
                 TimerUtils.end_stage("Direct-BuildExporter")
                 _report_stage_nodes(
@@ -688,6 +798,21 @@ class DirectExportSession:
                         export_progress.STATE_RUNNING,
                     )
                     self._export_full(self.base_exporter, "Meshes0000")
+                    if frame_cache is not None:
+                        if frame_cache.finish_probe(mod_export_path):
+                            LOG.info("全属性帧表缓存命中：已跳过形态键采样和帧表重建")
+                        elif frame_cache.skipped_samples:
+                            LOG.info("全属性帧表无法整体复用，检查分组缓存并补齐采样")
+                            frame_cache.reset_probe()
+                            BlueprintExportHelper.set_suppress_shapekey_resource_export(False)
+                            self.base_exporter = self._build_exporter(
+                                self.base_blueprint_model, preserve_shape_key_mix=True
+                            )
+                            self.shapekey_source_exporter = self.base_exporter
+                            base_name_mapping = dict(BluePrintModel._object_name_mapping)
+                            BlueprintExportHelper.set_suppress_shapekey_resource_export(True)
+                            self._export_full(self.base_exporter, "Meshes0000")
+                            frame_cache.finish_probe(mod_export_path)
                     TimerUtils.end_stage("Direct-BaseExport")
                     _report_stage_nodes(
                         self.tree,
@@ -764,7 +889,7 @@ class DirectExportSession:
                 self._run_standard_shapekey_rounds()
                 TimerUtils.end_stage("直出-形态键附加轮次")
             elif has_shapekey:
-                LOG.info("Direct ShapeKey: skipped standard slot export; generating direct resources from Meshes0000 and preprocess records")
+                LOG.info("Direct ShapeKey: skipped standard slot export; generating direct resources from Meshes0000 and sampled vertex data")
 
             # 附加形态键轮次（_run_standard_shapekey_rounds → execute_round）会把运行时缓存里的
             # 蓝图模型覆盖成轮次模型；后处理阶段要的是基态模型，这里再登记一次。
@@ -793,7 +918,7 @@ class DirectExportSession:
                             mod_export_path=mod_export_path,
                             blueprint_model=self.shapekey_source_blueprint_model or self.base_blueprint_model,
                             exporter=self.shapekey_source_exporter or self.base_exporter,
-                        ).generate()
+                        ).generate(frame_cache=frame_cache)
                         TimerUtils.end_stage("直出-形态键生成")
                     else:
                         execute_postprocess = getattr(postprocess_node, "execute_postprocess", None)
