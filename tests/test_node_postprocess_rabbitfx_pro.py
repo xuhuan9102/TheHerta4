@@ -2239,7 +2239,7 @@ class GlowFXTests(unittest.TestCase):
         self.assertEqual(reference[0], "${anchor}")
         self.assertEqual(reference.count("${anchor}"), 1)
         assembly = "\n".join(reference)
-        self.assertIn("add_sat ${flowd}.xyz, -r15.xyzx, l(1.0)", assembly)
+        self.assertIn("add_sat ${flowd}.xyz, -${temp_r15}.xyzx, l(1.0)", assembly)
         self.assertIn(
             "min ${flowh}.xyz, ${flowh}.xyzw, ${flowd}.xyzw",
             assembly,

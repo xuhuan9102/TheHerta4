@@ -1,5 +1,7 @@
 """Scoped surface sweep for the ZZMI material shaders."""
 
+import re
+
 _MAGIC = 734125
 _TEXTURE_MAGIC = 734126
 
@@ -160,11 +162,37 @@ def _relative_height(coord, world_y, origin_y):
     )
 
 
+def _capture_registers(pattern, normal, accumulator):
+    """Match the same data flow after the compiler renumbers temporaries."""
+    registers = {}
+
+    def capture(match):
+        register = match[0]
+        if register in registers:
+            return rf"\k<{registers[register]}>"
+        name = f"temp_{register}"
+        registers[register] = name
+        return rf"(?<{name}>r[0-9]+)"
+
+    pattern = re.sub(r"\br[0-9]+\b", capture, pattern)
+
+    def operand(value):
+        register, separator, swizzle = value.partition(".")
+        if re.fullmatch(r"r[0-9]+", register):
+            return "${" + registers[register] + "}" + separator + swizzle
+        return value
+
+    return pattern, operand(normal), operand(accumulator)
+
+
 def surface_shader_sections(textured=False):
     shader = "ShaderRegexTheHertaZZMISurfaceFlow"
     sections = {}
     face_color = r"\.xyz, r4\.xxxx, r2\.xyzx, r0\.xyzx\r?\n"
-    face_tail = r"(?=[ \t]*movc r0\.x, r9\.x, l\(0\.340000\), l\(0\)\r?\n)"
+    face_tail = (
+        r"(?=[ \t]*movc r0\.x, r9\.x, l\(0\.340000\), l\(0\)\r?\n"
+        r"[ \t]*movc o2\.w,[^\r\n]*\r?\n[ \t]*mad o3\.xyz, r3\.xyzx, l\(0\.500000,)"
+    )
     branch_color = (
         "${color_start}${flowcolor}${color_middle}${flowcolor}"
         "${color_end}${flowcolor}${color_tail}"
@@ -172,6 +200,8 @@ def surface_shader_sections(textured=False):
     face_outputs = {
         "NativeFaceColor": ("v4", branch_color),
         "NativeFaceColorDirect": ("v4", "${color_start}${flowcolor}${color_tail}"),
+        "NativeFaceClose": ("v4", "${color_start}${flowcolor}${color_tail}"),
+        "NativeFaceCloseBranched": ("v4", branch_color),
         "NativeFaceDeferred": ("v4", "${color_start}${flowcolor}${color_tail}"),
         "NativeFaceDeferredBranched": ("v4", branch_color),
         "NativeFaceOverlay": ("v3", None),
@@ -182,7 +212,10 @@ def surface_shader_sections(textured=False):
         "", "AgentSceneColor", "NativeFaceDeferred",
         "NativeFaceDeferredBranched", "NativeFaceOverlay",
     }
-    deferred_origin = {"DeferredColor", "NativeFaceColor", "NativeFaceColorDirect"}
+    deferred_origin = {
+        "DeferredColor", "NativeFaceColor", "NativeFaceColorDirect",
+        "NativeFaceClose", "NativeFaceCloseBranched",
+    }
     for suffix, opening, ending, normal, camera, accumulator, components, after in (
         (
             "",
@@ -205,7 +238,8 @@ def surface_shader_sections(textured=False):
         (
             "AgentSceneColor",
             r"mul r0\.xyw, r0\.xyxw, r3\.xyxz\r?\n",
-            r"(?=(?:(?!^[ \t]*ret\b).)*?mad o3\.xyz, r4\.xyzx, l\(0\.500000,)",
+            r"(?=(?:(?!^[ \t]*ret\b).)*?^[ \t]*add (?:o0|r[0-9]+)\.xyz, r2\.xzwx, r1\.xywx\r?\n"
+            r"(?:(?!^[ \t]*ret\b).)*?mad o3\.xyz, r4\.xyzx, l\(0\.500000,)",
             "r4.xyzx", 55, "r2", "xzw", False,
         ),
         (
@@ -223,7 +257,8 @@ def surface_shader_sections(textured=False):
             r"(?<color_start>mul r1\.x, cb4\[25\]\.w, cb4\[122\]\.w\r?\n"
             r"[ \t]*add r1\.yzw, -r0\.xxyz, cb4\[25\]\.xxyz\r?\n[ \t]*mad )o0"
             r"(?<color_tail>\.xyz, r1\.xxxx, r1\.yzwy, r0\.xyzx\r?\n)",
-            r"(?=[ \t]*mad r0\.x, -cb4\[25\]\.w, cb4\[122\]\.w, l\(1\.000000\))",
+            r"(?=[ \t]*mad r0\.x, -cb4\[25\]\.w, cb4\[122\]\.w, l\(1\.000000\)"
+            r"(?:(?!^[ \t]*ret\b).)*?mad o3\.xyz, r3\.xyzx, l\(0\.500000,)",
             "r3.xyzx", 53, "${flowcolor}", "xyz", True,
         ),
         (
@@ -231,6 +266,25 @@ def surface_shader_sections(textured=False):
             r"(?<color_start>movc )o0(?<color_tail>" + face_color + ")",
             face_tail,
             "r3.xyzx", 55, "${flowcolor}", "xyz", True,
+        ),
+        (
+            "NativeFaceClose",
+            r"(?<color_start>mad o3\.xyz, r3\.xyzx, l\(0\.500000,[^\r\n]*\r?\n"
+            r"[ \t]*mov )o0(?<color_tail>\.xyz, r2\.xyzx\r?\n)",
+            r"(?=[ \t]*mov o0\.w, l\(1\.000000\))",
+            "r3.xyzx", 53, "${flowcolor}", "xyz", True,
+        ),
+        (
+            "NativeFaceCloseBranched",
+            r"(?<color_start>mad o3\.xyz, r3\.xyzx, l\(0\.500000,[^\r\n]*\r?\n"
+            r"[ \t]*if_nz r27\.x\r?\n[ \t]*if_z r25\.z\r?\n[ \t]*mov )"
+            r"o0(?<color_middle>\.xyz, r32\.xyz\r?\n[ \t]*else[^\r\n]*\r?\n"
+            r"[ \t]*mov r31\.xyz, r2\.xyzx\r?\n[ \t]*max )"
+            r"o0(?<color_end>\.xyz, r31\.xyz, r32\.xyz\r?\n[ \t]*endif[^\r\n]*\r?\n"
+            r"[ \t]*else[^\r\n]*\r?\n[ \t]*mov )"
+            r"o0(?<color_tail>\.xyz, r2\.xyzx\r?\n[ \t]*endif[^\r\n]*\r?\n)",
+            r"(?=[ \t]*mov o0\.w, l\(1\.000000\))",
+            "r3.xyzx", 53, "${flowcolor}", "xyz", True,
         ),
         (
             "NativeFaceDeferredBranched",
@@ -252,6 +306,7 @@ def surface_shader_sections(textured=False):
         ),
     ):
         name = shader + suffix
+        pattern, normal, accumulator = _capture_registers(opening + ending, normal, accumulator)
         position, color_output = face_outputs.get(suffix, (None, None))
         head_buffer = "cb2" if suffix in shared_origin else "cb3" if suffix in deferred_origin else None
         origin_y = f"{head_buffer}[0].y" if head_buffer else "cb1[3].y"
@@ -304,10 +359,18 @@ def surface_shader_sections(textured=False):
             options[1] += " flowcolor"
             anchor = color_output
             assembly.append(r"mov o0.xyz, ${flowcolor}.xyzx\n")
+        layout = ""
+        if position == "v4":
+            # Face variants supply position in v4.xyz. Body variants pack it
+            # across three .w components and can otherwise share the same tail.
+            layout = r"\A(?=.*?^[ \t]*dcl_input_ps linear v4\.xyz[ \t]*\r?$)(?<shader_prefix>.*?)"
+        replacement = [anchor, *assembly] if after else [*assembly, anchor]
+        if layout:
+            replacement.insert(0, "${shader_prefix}")
         sections.update({
             f"[{name}]": options,
-            f"[{name}.Pattern]": [r"(?ms)(?<anchor>^[ \t]*" + opening + ending + ")"],
-            f"[{name}.Pattern.Replace]": [anchor, *assembly] if after else [*assembly, anchor],
+            f"[{name}.Pattern]": [r"(?ms)" + layout + r"(?<anchor>^[ \t]*" + pattern + ")"],
+            f"[{name}.Pattern.Replace]": replacement,
             f"[{name}.InsertDeclarations]": [
                 "dcl_resource_texture1d (float,float,float,float) t120",
                 *(("dcl_resource_texture2d (float,float,float,float) t119",) if textured else ()),

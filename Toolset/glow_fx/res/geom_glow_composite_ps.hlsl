@@ -22,6 +22,7 @@ float3 highlightColor(float3 emission)
     return lerp(emission, luminance.xxx, smoothstep(0.1063, 0.8504, luminance));
 }
 
+
 float4 main(float4 position : SV_Position) : SV_Target
 {
     uint width, height;
@@ -60,14 +61,18 @@ float4 main(float4 position : SV_Position) : SV_Target
     float haloNormalization = max(haloParameters.y, 1.0);
     float3 haloEmission = halo / haloNormalization;
     float haloCoverage = saturate(coverage / haloNormalization);
-    float3 background = scene.rgb + highlightColor(haloEmission);
+    float3 haloColor = highlightColor(haloEmission);
     float3 surface = highlightColor(core / max(coreCoverage, 0.000001));
     float alpha = scene.a;
     if (haloParameters.w > 0.5)
     {
-        // This scene composites the character layer over a separate background.
-        float glowCoverage = max(haloCoverage, coreCoverage);
+        // The game expects straight RGB and premultiplies it at layer composition.
+        // Accumulate the halo once in premultiplied space, then encode that result.
+        float glowCoverage = saturate(max(haloCoverage, max(haloColor.x, max(haloColor.y, haloColor.z))));
+        glowCoverage = lerp(glowCoverage, 1.0, coreCoverage);
         alpha = alpha + (1.0 - alpha) * glowCoverage;
+        float3 premultiplied = lerp(scene.rgb * scene.a + haloColor, surface, coreCoverage);
+        return float4(premultiplied / max(alpha, 0.000001), alpha);
     }
-    return float4(lerp(background, surface, coreCoverage), alpha);
+    return float4(lerp(scene.rgb + haloColor, surface, coreCoverage), alpha);
 }
