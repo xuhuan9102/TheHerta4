@@ -6,7 +6,7 @@ _MAGIC = 734125
 _TEXTURE_MAGIC = 734126
 
 
-def surface_draw_scope(tag, draw_id, speed, brightness, color, height_scale=0.0, texture=None):
+def surface_draw_scope(tag, draw_id, speed, brightness, color, height_scale=0.0, texture=None, switch=""):
     prefix = f"$zzmi_surface_{tag}_{draw_id}"
     color_slots = tuple(zip(("x496", "y496", "z496"), color))
     saved = f"ResourceZZMISurfaceFlowSaved{tag}"
@@ -18,7 +18,8 @@ def surface_draw_scope(tag, draw_id, speed, brightness, color, height_scale=0.0,
             f"local {prefix}_brightness = y497",
             *(f"local {prefix}_{slot} = {slot}" for slot, _ in color_slots),
             *((f"pre {saved} = ref ps-t119", f"pre ps-t119 = ref {texture}") if texture else ()),
-            f"pre x498 = {_TEXTURE_MAGIC if texture else _MAGIC}",
+            f"pre x498 = {_TEXTURE_MAGIC if texture else _MAGIC}"
+            + (f" * ({switch} != 0)" if switch else ""),
             f"pre y498 = {height_scale:.9f}",
             f"pre x497 = time * {-speed:.6f}",
             f"pre y497 = {brightness:.6f}",

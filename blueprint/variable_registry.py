@@ -140,6 +140,9 @@ def _iter_node_variable_names(node):
         yield custom_name
     if assigned_name:
         yield assigned_name
+    effect_name = normalize_variable_name(getattr(node, "effect_switch_variable", ""))
+    if effect_name:
+        yield effect_name
     continuous_custom_name = normalize_variable_name(getattr(node, "custom_continuous_index_variable_name", "") or "")
     continuous_assigned_name = normalize_variable_name(getattr(node, "assigned_continuous_index_variable_name", "") or "")
     if continuous_custom_name:
@@ -194,6 +197,8 @@ def _iter_shapekey_item_variable_names(item):
 
 # 节点上「自己声明」的标量变量字段（owner）。
 _OWNER_SCALAR_VARIABLE_FIELDS = (
+    "effect_switch_variable",
+    "material_switch_var",
     "custom_var_name",
     "assigned_variable_name",
     "custom_continuous_index_variable_name",
@@ -450,6 +455,43 @@ def normalize_variable_name(var_name: str) -> str:
     if cleaned.startswith("$"):
         cleaned = cleaned[1:]
     return _sanitize_name(cleaned, fallback="")
+
+
+def glow_fx_switch_variable_name(node, base_name):
+    """Keep a saved name if free, otherwise allocate an unused Glow FX name."""
+    used = set()
+    tree = getattr(node, "id_data", None)
+    nodes = (*_iter_blueprint_nodes(), *(_iter_blueprint_nodes(tree) if tree is not None else ()))
+    for other in nodes:
+        if other == node:
+            continue
+        used.update(name.casefold() for name in _iter_node_owned_variable_names(other))
+        for item in getattr(other, "shapekey_variable_items", ()) or ():
+            used.update(name.casefold() for name in _iter_shapekey_item_variable_names(item))
+        for item in getattr(other, "uv_offset_variable_items", ()) or ():
+            used.update(name.casefold() for name in _iter_uv_offset_item_variable_names(item))
+        groups = list(getattr(other, "global_switch_groups", ()) or ())
+        for item in getattr(other, "target_items", ()) or ():
+            groups.extend(getattr(item, "switch_groups", ()) or ())
+        for group in groups:
+            used.add(normalize_variable_name(getattr(group, "switch_variable", "")).casefold())
+        if getattr(other, "bl_idname", "") == "SSMTNode_PostProcess_DiffuseSwitch":
+            from .node_postprocess_diffuse_switch import diffuse_group_variable
+
+            used.update(
+                diffuse_group_variable(group).casefold()
+                for group in other.groups if str(getattr(group, "uid", "") or "").strip()
+            )
+
+    current = str(getattr(node, "effect_switch_variable", "") or "").strip().lstrip("$").lower()
+    if current and current not in used:
+        return f"${current}"
+    candidate = base_name
+    suffix = 2
+    while candidate.casefold() in used:
+        candidate = f"{base_name}_{suffix}"
+        suffix += 1
+    return f"${candidate}"
 
 
 def ensure_object_swap_variable_name(node, context=None) -> str:

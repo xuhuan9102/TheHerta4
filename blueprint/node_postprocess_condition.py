@@ -623,6 +623,7 @@ def _find_sections(lines):
 #: TTL 的 Draw 是实际绘制入口，逐笔参数必须与它一起门控；其它 run / 变量
 #: 仍按下方原有顶层规则处理，避免改动骨架 attach 等副作用调用。
 _TTL_GATEABLE_PATTERNS = (
+    re.compile(r"^(?:\$surface_replay_(?:count|start|base)\s*=|run\s*=\s*CommandListZZMISurfaceReplayIndexed\w*\s*$)", re.IGNORECASE),
     re.compile(r"^Resource\\TTL\\TransparencyTex\s*=", re.IGNORECASE),
     re.compile(r"^run\s*=\s*CommandList\\TTL\\Draw\s*(?:;.*)?$", re.IGNORECASE),
     re.compile(r"^\$\\TTL\\[A-Za-z_][A-Za-z0-9_]*\s*=", re.IGNORECASE),
