@@ -429,7 +429,7 @@ def _swap_node_payloads(blueprint_model: BluePrintModel) -> list[dict[str, objec
                 "index": index,
                 "section_name": f"KeySwap_NTMIModImp_{index}",
                 "variable_name": variable_name,
-                "hotkey": str(getattr(node, "hotkey", "") or "No_Modifiers Numpad3"),
+                "hotkey": str(getattr(node, "hotkey", "") or "").strip(),
                 "swap_type": str(getattr(node, "swap_type", "") or "cycle"),
                 "option_count": int(getattr(node, "input_slot_count", 2) or 2),
                 "comment": str(getattr(node, "comment", "") or ""),

@@ -1054,6 +1054,23 @@ def key_picker_display(mods, key):
     return key_picker_format(mods, key) or "（未设置）"
 
 
+def key_picker_resolve_target(node, target_path):
+    """把节点相对属性路径解析为 (属性所属对象, 属性名)。"""
+    path = str(target_path or "").strip()
+    if node is None or not path:
+        return None, ""
+    if "." not in path:
+        return (node, path) if hasattr(node, path) else (None, "")
+    owner_path, prop_name = path.rsplit(".", 1)
+    try:
+        owner = node.path_resolve(owner_path)
+    except (AttributeError, TypeError, ValueError):
+        return None, ""
+    if owner is None or not prop_name or not hasattr(owner, prop_name):
+        return None, ""
+    return owner, prop_name
+
+
 def _force_key_picker_redraw():
     """弹窗重绘兜底：Blender 5.x 的 invoke_props_dialog 弹窗是独立窗口（screen 名 temp），
     area.tag_redraw 刷不到它。延迟一拍后对每个窗口各做一次窗口级重绘，尽力让已打开
@@ -1152,16 +1169,26 @@ class SSMT_OT_KeyPicker(bpy.types.Operator):
         getter = getattr(nodes, "get", None)
         return getter(node_name) if getter and node_name else None
 
+    def _resolve_target(self):
+        node = self._find_node(self.node_tree_name, self.node_name)
+        return key_picker_resolve_target(node, self.target_prop)
+
     def invoke(self, context, event):
         wm = context.window_manager
         current = ""
         picked = bool(getattr(wm, "ssmt_kp_just_picked", False))
-        if picked and getattr(wm, "ssmt_kp_prop", "") == self.target_prop:
+        same_target = (
+            picked
+            and getattr(wm, "ssmt_kp_prop", "") == self.target_prop
+            and getattr(wm, "ssmt_kp_node", "") == self.node_name
+            and getattr(wm, "ssmt_kp_tree", "") == self.node_tree_name
+        )
+        if same_target:
             current = getattr(wm, "ssmt_kp_combo", "") or ""
         else:
-            node = self._find_node(self.node_tree_name, self.node_name)
-            if node is not None and self.target_prop:
-                current = getattr(node, self.target_prop, "") or ""
+            owner, prop_name = self._resolve_target()
+            if owner is not None and prop_name:
+                current = getattr(owner, prop_name, "") or ""
         wm.ssmt_kp_just_picked = False
         wm.ssmt_kp_prop = self.target_prop
         wm.ssmt_kp_node = self.node_name
@@ -1171,11 +1198,11 @@ class SSMT_OT_KeyPicker(bpy.types.Operator):
 
     def execute(self, context):
         wm = context.window_manager
-        node = self._find_node(self.node_tree_name, self.node_name)
-        if node is None or not self.target_prop:
-            self.report({'WARNING'}, "无法找到形态键扩展配置节点")
+        owner, prop_name = self._resolve_target()
+        if owner is None or not prop_name:
+            self.report({'WARNING'}, "无法找到快捷键目标")
             return {'CANCELLED'}
-        setattr(node, self.target_prop, getattr(wm, "ssmt_kp_combo", "") or "")
+        setattr(owner, prop_name, getattr(wm, "ssmt_kp_combo", "") or "")
         wm.ssmt_kp_just_picked = False
         return {'FINISHED'}
 
@@ -1322,13 +1349,13 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
     )
     help_key: bpy.props.StringProperty(
         name="显示/隐藏面板",
-        description="游戏内显示或隐藏滑块面板的快捷键，默认 home",
-        default="home",
+        description="游戏内显示或隐藏滑块面板的快捷键，默认右方向键",
+        default="right",
     )
     reset_key: bpy.props.StringProperty(
         name="重置位置",
-        description="游戏内把滑块面板位置、缩放恢复默认的快捷键，默认 Ctrl+Home",
-        default="ctrl home",
+        description="游戏内把滑块面板位置、缩放恢复默认的快捷键，默认 Ctrl+右方向键",
+        default="ctrl right",
     )
     zoom_in_key: bpy.props.StringProperty(
         name="放大",
@@ -2595,6 +2622,8 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         s = sec_name.strip()
         fixed = [
             f"[KeyToggleAutoPlay_{ns}]", f"[CommandListToggleAutoPlay_{ns}]",
+            "[Key面板-panel]", "[Key重置位置-ResetPosition]",
+            "[Key放大-ZoomIn]", "[Key缩小-ZoomOut]", "[Key鼠标拖动-MouseDrag]",
             "[KeyHelp]", "[KeyResetPosition]", "[KeyZoomIn]", "[KeyZoomOut]", "[KeyMouseDrag]",
             "[CommandListZoomIn]", "[CommandListZoomOut]",
             "[ResourceImageToRender0]", "[ResourceSliderHandle]", "[ResourceLeftBar]", "[ResourceRightBar]",
@@ -3129,21 +3158,21 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         zoom_in_lines = ["$zoom0 = $zoom0 + 0.05"]
         zoom_out_lines = ["$zoom0 = $zoom0 - 0.05"]
 
-        other_sections["[KeyHelp]"] = [
+        other_sections["[Key面板-panel]"] = [
             f"condition = $ui_active == 1", f"key = {help_key}", "type = cycle", "$help = 0,1"
         ]
-        other_sections["[KeyResetPosition]"] = [
+        other_sections["[Key重置位置-ResetPosition]"] = [
             f"condition = $help == 1 && $ui_active == 1", f"key = {reset_key}", "type = cycle",
         ] + reset_lines
-        other_sections["[KeyZoomIn]"] = [
+        other_sections["[Key放大-ZoomIn]"] = [
             f"condition = $help == 1 && $ui_active == 1", f"key = {zoom_in_key}",
             "type = press", "run = CommandListZoomIn"
         ]
-        other_sections["[KeyZoomOut]"] = [
+        other_sections["[Key缩小-ZoomOut]"] = [
             f"condition = $help == 1 && $ui_active == 1", f"key = {zoom_out_key}",
             "type = press", "run = CommandListZoomOut"
         ]
-        other_sections["[KeyMouseDrag]"] = [
+        other_sections["[Key鼠标拖动-MouseDrag]"] = [
             f"condition = $help == 1 && $ui_active == 1", f"key = {drag_key}",
             "type = hold", "$mouse_clicked = 1"
         ]
@@ -3561,11 +3590,11 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         box = layout.box()
         box.label(text="快捷键设置", icon='KEYINGSET')
         row = box.row(align=True)
+        row.prop(self, "auto_play_toggle_key", text="自动播放")
         op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
         op.node_name = self.name
         op.node_tree_name = self.id_data.name
         op.target_prop = "auto_play_toggle_key"
-        row.prop(self, "auto_play_toggle_key", text="自动播放")
         box.prop(self, "auto_play_key_global", text="全局生效")
 
     def _draw_slider_ui(self, layout, config_node=None, property_map=None, columns=None,

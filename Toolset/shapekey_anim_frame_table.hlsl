@@ -10,7 +10,7 @@
 // 本模板把每个分组编译成「逐帧位移表」：
 //   - 帧表第 m 条 = 组内前 m 个形态键的累积位移（相对基础网格，不含 base），
 //     与「第 m 帧姿态 − base」逐位等价（形态键是线性混合，前缀和可无损预计算）。
-//   - 帧表记录数 = key_count + 1（第 0 条恒为零位移起点）。
+//   - Only frames 1 through key_count are stored; frame 0 is implicit zero.
 //   - 各通道连续半精度打包，每个 uint32 存两个分量。
 //   - 每组一张顶点局部索引表（-1 = 该顶点不属于此组），按组累加。
 // 于是每顶点只需 2 次顺序读取/组，取代 num_slots 次遍历。
@@ -75,7 +75,7 @@ float frame_table_load_component(uint component)
 #define FRAME_TABLE_EXTRAPOLATION_FRAMES (4.0)
 
 // 组内按进度 t 取插值位移：帧 K 与 K+1 之间线性插值。
-// key_count = 该组形态键数；帧表记录数 = key_count + 1（第 0 条为零起点）。
+// key_count is the number of stored frames, excluding the implicit zero frame.
 // local_index = 该顶点在组顶点并集中的局部下标（>= 0 才调用）。
 //
 // t 不夹到 0..1：负 t 沿首段反向、t > 1 沿末段正向线性外推。单键组的 t 就是
@@ -96,11 +96,14 @@ FrameTableDelta frame_table_sample(uint group_offset, uint union_size, uint key_
         // 首段和末段共用同一插值式，分别以 frac < 0 和 frac > 1 外推。
         uint frame_index = scaled < 0.0 ? 0u : min((uint)floor(scaled), key_count - 1u);
         float frac = scaled - (float)frame_index;
-        uint record = group_offset + frame_index * union_size + local_index;
-        result = frame_table_load(record);
+        uint first_record = group_offset + local_index;
+        if (frame_index != 0u)
+        {
+            result = frame_table_load(first_record + (frame_index - 1u) * union_size);
+        }
         if (frac != 0.0)
         {
-            FrameTableDelta next_frame = frame_table_load(record + union_size);
+            FrameTableDelta next_frame = frame_table_load(first_record + frame_index * union_size);
             result = frame_table_lerp(result, next_frame, frac);
         }
     }

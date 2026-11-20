@@ -365,7 +365,7 @@ def _pick_variable_control_group(groups):
 def _normalize_switch_variable_metadata(collections):
     """把同一变量的 备注/按键/启用 归一为该变量控制组的值。
 
-    扫描重建后每个部件组各自带着旧值，同伴可能停在默认 ``N``；归一后
+    扫描重建后每个部件组各自带着旧值，同伴可能停在默认空值；归一后
     "看到的控件 = 实际生成的 KeySwap 段"，也不会在下一次导出时回退。
     返回每个变量的控制组，供调用方做一次显式跨节点同步。
     """
@@ -413,8 +413,8 @@ class SSMT_CustomMaterialAssignSwitchGroup(bpy.types.PropertyGroup):
     )
     key: bpy.props.StringProperty(
         name="切换按键",
-        description="控制该部件多套贴图切换的按键；同一切换变量下的部件共享此按键",
-        default="N",
+        description="控制该部件多套贴图切换的按键；留空时不生成按键切换，同一切换变量下的部件共享此按键",
+        default="",
         update=_sync_switch_variable_fields,
     )
     state_count: bpy.props.IntProperty(
@@ -1293,7 +1293,7 @@ class SSMT_OT_CustomMaterialScanSwitches(bpy.types.Operator):
             next_number = max(next_number, max(_used_numbers) + 1)
 
         # 重建期间关掉同变量同步回调：批量重建时每个部件组都要先按自己的旧值落位，
-        # 否则同伴默认值（N / 空备注）会在写入瞬间通过 update 回调把用户的键顶掉。
+        # 否则同伴默认值（空按键 / 空备注）会在写入瞬间通过 update 回调把用户的键顶掉。
         # 重建完成后由下面的归一 + 一次显式同步统一该变量。
         global _switch_sync_guard
         previous_guard = _switch_sync_guard
@@ -1354,7 +1354,7 @@ class SSMT_OT_CustomMaterialScanSwitches(bpy.types.Operator):
                     group.enabled = metadata["enabled"]
                 else:
                     group.comment = ""
-                    group.key = "N"
+                    group.key = ""
                     group.enabled = True
                 total_groups += 1
 
@@ -1366,7 +1366,7 @@ class SSMT_OT_CustomMaterialScanSwitches(bpy.types.Operator):
                     )
 
             # 同一变量的 备注/按键/启用 归一：一个变量在 UI 上只有一套控件、在 INI 里
-            # 只有一段 KeySwap，同伴若停在默认 N，导出时会把用户填的键覆盖掉。
+            # 只有一段 KeySwap，同伴若停在默认空值，导出时会把用户填的键覆盖掉。
             if global_mode:
                 control_groups = _normalize_switch_variable_metadata(
                     [node.global_switch_groups]
@@ -2269,6 +2269,8 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         variable = spec["variable"].lstrip("$")
         if not variable:
             return
+        if not str(spec.get("key", "") or "").strip():
+            return
         section_name = f"[KeySwap_Diffuse_{variable}]"
         state_count = spec["state_count"]
         values = ",".join(str(index) for index in range(state_count))
@@ -2290,6 +2292,8 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         effective_key = resolve_keyswap_key(
             sections, section_name, spec["key"], log_prefix="材质转资源pro"
         )
+        if not effective_key:
+            return
         lines.extend(
             [
                 f"condition = {condition}",
@@ -2341,7 +2345,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         super().define_swapkeys_in_sections(sections, keys_to_define)
         used_keys = set(keys_to_define or [])
         # 一个变量只写一段 [KeySwap_Diffuse_<var>]：同变量的每个部件组都会写出
-        # 同名 section，后写覆盖先写，同伴停在默认 N 时会把用户的按键顶掉。
+        # 同名 section，后写覆盖先写，同伴停在默认空值时会把用户的按键顶掉。
         # 取该变量里第一个填过按键的组为准（与 UI 控件组/贴图面板口径一致）。
         chosen = OrderedDict()
         for spec in self._iter_switch_group_defs():
@@ -3320,7 +3324,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             header.label(text=f"贴图切换 {group_index}（{group.state_count} 档）", icon="KEYFRAME_HLT")
             parent.prop(group, "switch_variable", text="材质切换变量")
             parent.prop(group, "comment", text="备注")
-            parent.prop(group, "key", text="切换按键")
+            self._draw_switch_key_control(parent, group)
             self._draw_switch_preview_row(parent, group)
 
         for index, item in enumerate(self.target_items):
@@ -3362,6 +3366,33 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             for group_index, group in enumerate(item.switch_groups, 1):
                 draw_switch_controls(box, group, group_index)
 
+    def _switch_group_key_path(self, target_group):
+        target_pointer = (
+            target_group.as_pointer()
+            if hasattr(target_group, "as_pointer")
+            else id(target_group)
+        )
+        for item_index, item in enumerate(self.target_items):
+            for group_index, group in enumerate(item.switch_groups):
+                pointer = group.as_pointer() if hasattr(group, "as_pointer") else id(group)
+                if pointer == target_pointer:
+                    return f"target_items[{item_index}].switch_groups[{group_index}].key"
+        for group_index, group in enumerate(self.global_switch_groups):
+            pointer = group.as_pointer() if hasattr(group, "as_pointer") else id(group)
+            if pointer == target_pointer:
+                return f"global_switch_groups[{group_index}].key"
+        return ""
+
+    def _draw_switch_key_control(self, parent, group):
+        row = parent.row(align=True)
+        target_path = self._switch_group_key_path(group)
+        row.prop(group, "key", text="切换按键")
+        if target_path:
+            op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+            op.node_name = self.name
+            op.node_tree_name = self.id_data.name
+            op.target_prop = target_path
+
     def _draw_global_switch_panel(self, context, layout):
         """全局模式：显示全局贴图切换框。"""
         box = layout.box()
@@ -3397,7 +3428,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             header.label(text=f"贴图切换 1（{first_group.state_count} 档）", icon="KEYFRAME_HLT")
             group_box.prop(first_group, "switch_variable", text="材质切换变量")
             group_box.prop(first_group, "comment", text="备注")
-            group_box.prop(first_group, "key", text="切换按键")
+            self._draw_switch_key_control(group_box, first_group)
             self._draw_switch_preview_row(group_box, first_group)
 
     def draw_buttons(self, context, layout):
