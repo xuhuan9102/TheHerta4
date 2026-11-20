@@ -1557,6 +1557,16 @@ class PreProcessHelper:
                 skipped_count += 1
                 continue
 
+            if active_uv.name == "TEXCOORD2.xy":
+                from ..common.global_config import GlobalConfig
+                from ..common.logic_name import LogicName
+
+                if GlobalConfig.logic_name == LogicName.ZZMI:
+                    primary_uv = uv_layers.get("TEXCOORD.xy")
+                    if primary_uv is not None:
+                        uv_layers.active = primary_uv
+                    continue
+
             if "TEXCOORD.xy" in uv_layers:
                 uv_layers["TEXCOORD.xy"].name = "_TEXCOORD_xy_conflict"
                 LOG.warning(f"   {obj_name}: 名称冲突，已有TEXCOORD.xy UV层，将其临时重命名")

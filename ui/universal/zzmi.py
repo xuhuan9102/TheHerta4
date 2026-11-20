@@ -3,6 +3,7 @@ import os
 import hashlib
 import re
 import copy
+import zlib
 
 import bpy
 
@@ -595,7 +596,16 @@ class ExportZZMI(ExportUnity):
         # 注入 3 顶点占位，最终把完整合并网格隐藏掉。
         self._zzmi_merged_identity_records = []
         try:
+            from ...common.zzmi_native_flow import UV_LAYER, prepare_native_flow
+
             self._normalize_merged_object_drawcalls(blueprint_model)
+            reproject_uv2 = any(
+                getattr(obj, "type", None) == "MESH" and obj.data.polygons
+                and UV_LAYER not in obj.data.uv_layers
+                for draw in getattr(blueprint_model, "ordered_draw_obj_data_model_list", ())
+                if not getattr(draw, "zzmi_stub", False)
+                for obj in (self._zzmi_drawcall_object(draw),)
+            )
             if GlobalProterties.import_merged_vgmap():
                 # 占位是合并骨架渲染身份完整性的硬前提。创建失败时中止导出，
                 # 不能回退到旧的 ib=null/IB skip 路径让部件静默消失并串扰其它 hash。
@@ -604,6 +614,7 @@ class ExportZZMI(ExportUnity):
             # 接缝焊接由蓝图里的「接缝焊接」节点直接触发；节点不存在或没有分组时不焊接。
             self.weld_by_group_enabled = True
             super().__init__(blueprint_model)
+            self._native_flow_height = prepare_native_flow(self.drawib_model_list, reproject_uv2)
 
             self.cross_ib_info_dict = blueprint_model.cross_ib_info_dict
             self.cross_ib_method_dict = blueprint_model.cross_ib_method_dict
@@ -8057,6 +8068,13 @@ class ExportZZMI(ExportUnity):
     def add_unity_vs_texture_override_ib_sections(self, ini_builder: M_IniBuilder, drawib_model):
         texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
         draw_ib = drawib_model.draw_ib
+        flow_height = getattr(self, "_native_flow_height", None)
+        if flow_height is not None:
+            from ...common.zzmi_native_flow import flow_draw_scope
+
+            flow_setup, flow_restore = flow_draw_scope(flow_height)
+        else:
+            flow_setup, flow_restore = (), ()
 
         print(f"[CrossIB ZZMI] 处理 draw_ib={draw_ib}, has_cross_ib={self.has_cross_ib}")
 
@@ -8218,6 +8236,9 @@ class ExportZZMI(ExportUnity):
                 continue
 
             texture_override_ib_section.append("ib = " + ib_resource_name)
+
+            if flow_setup:
+                texture_override_ib_section.extend(flow_setup)
 
             # 合并网格渲染换绑：导出顶点数超过原部件顶点数时（= 本对象把同组
             # 其它部件的几何也合并了进来），渲染 draw 必须把 vb1 换绑为本 mod
@@ -8425,6 +8446,11 @@ class ExportZZMI(ExportUnity):
                     else:
                         print(f"[CrossIB ZZMI] 警告: 未找到源块 submesh for {source_ib_key}")
 
+            if flow_restore:
+                # 材质节点把绘制单元移到 ;MARK: 之前。此处仍走 pre，
+                # 因为换绑 IB 后，ZZMI 的 post 检查可能找不到原来的渲染段。
+                texture_override_ib_section.extend(flow_restore)
+
         ini_builder.append_section(texture_override_ib_section)
 
     def _warn_missing_drawib_parts(self):
@@ -8620,7 +8646,15 @@ class ExportZZMI(ExportUnity):
             self.add_merged_skeleton_sections(ini_builder)
             self._copy_merged_skeleton_shader_to_mod()
 
-        ini_builder.save_to_file(GlobalConfig.path_generate_mod_ini())
+        ini_path = GlobalConfig.path_generate_mod_ini()
+        if getattr(self, "_native_flow_height", None) is not None:
+            from ...common.zzmi_native_flow import flow_shader_sections
+
+            tag = f"{zlib.crc32(os.path.normcase(os.path.abspath(ini_path)).encode('utf-8')):08x}"
+            section = M_IniSection(M_SectionType.ShaderReplace)
+            section.extend(flow_shader_sections(tag))
+            ini_builder.append_section(section)
+        ini_builder.save_to_file(ini_path)
         TimerUtils.end_stage("INI配置生成")
 
 
