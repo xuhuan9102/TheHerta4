@@ -7,11 +7,13 @@
 
 import bpy
 import glob
+import hashlib
 import os
 import re
 import shutil
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 
 from .node_postprocess_rabbitfx_pro import (
     ini_scope,
@@ -24,6 +26,8 @@ from .node_postprocess_rabbitfx_pro import (
     _normalize_suffix,
     _on_preview_parameter_update,
     _objects_used_by_other_nodes,
+    _glow_previews,
+    _preview_tree_key,
     _section_fallback_unit,
     _strip_previous_blocks,
     _unit_edit_scope,
@@ -205,6 +209,41 @@ class SSMTNode_PostProcess_GlowFX(
     SSMTNode_PostProcess_Base,
 ):
     __annotations__ = dict(SSMTNode_PostProcess_RabbitFXPro.__annotations__)
+    enable_native_surface_flow: bpy.props.BoolProperty(
+        name="独立表面流光",
+        description="叠加随镜头和曲面变化的动态镜面反光，保留游戏原生反光",
+        default=False,
+    )
+    native_surface_color: bpy.props.FloatVectorProperty(
+        name="流光颜色",
+        subtype='COLOR', size=3, min=0.0, max=1.0,
+        default=(0.0, 0.75, 0.62),
+    )
+    native_surface_use_texture: bpy.props.BoolProperty(
+        name="使用流光贴图", description="由 DDS 贴图的 RGB 和透明度控制独立流光", default=False,
+    )
+    native_surface_texture: bpy.props.StringProperty(
+        name="流光贴图", subtype='FILE_PATH',
+        description="选择自定义 DDS，留空时使用插件内置流光贴图",
+    )
+    native_surface_mode: bpy.props.EnumProperty(
+        name="流光模式",
+        items=[
+            ('MIRROR', "镜面流光", "高光随镜头和曲面的镜面反射方向移动"),
+            ('HEIGHT', "高光流光", "反光按几何高度从脚向头滚动"),
+        ],
+        default='MIRROR',
+    )
+    native_surface_speed: bpy.props.FloatProperty(
+        name="流光速度",
+        description="流光每秒循环的次数",
+        default=0.25, min=0.01, max=4.0,
+    )
+    native_surface_brightness: bpy.props.FloatProperty(
+        name="流光亮度",
+        description="动态反光强度，1 为参考强度",
+        default=1.0, min=0.0, max=4.0,
+    )
 
     __annotations__["glow_brightness"] = bpy.props.FloatProperty(
         name="发光强度",
@@ -265,6 +304,36 @@ class SSMTNode_PostProcess_GlowFX(
     def fx_profile_label(self):
         return "GlowFX 专用内核（随 Mod 加载）"
 
+    def draw_buttons(self, context, layout):
+        self._draw_targets(layout)
+        layout.prop(self, "enable_native_surface_flow")
+        if getattr(self, "enable_native_surface_flow", False):
+            layout.prop(self, "native_surface_mode")
+            layout.prop(self, "native_surface_use_texture")
+            if self.native_surface_use_texture:
+                layout.prop(self, "native_surface_texture")
+            else:
+                layout.prop(self, "native_surface_color")
+            layout.prop(self, "native_surface_speed")
+            layout.prop(self, "native_surface_brightness")
+            return
+        self._draw_glow_block(layout)
+        self._draw_fx_block(layout)
+        layout.separator()
+        layout.label(text=self.fx_profile_label, icon='INFO')
+        layout.prop(self, "enable_reset")
+        row = layout.row(align=True)
+        row.prop(self, "preview_use_color", text="")
+        colors = row.row(align=True)
+        colors.enabled = self.preview_use_color
+        colors.prop(self, "preview_color", text="预览底色")
+        op = row.operator(
+            "ssmt.rabbitfx_pro_preview",
+            text="退出预览" if _preview_tree_key(self) in _glow_previews else "预览发光",
+            icon='HIDE_OFF',
+        )
+        op.node_name = self.name
+
     def _draw_breath_block(self, layout):
         layout.prop(self, "halo_radius")
         layout.prop(self, "emission_only")
@@ -274,6 +343,12 @@ class SSMTNode_PostProcess_GlowFX(
         return "" if self.halo_radius == _DEFAULT_HALO_RADIUS else f"_r{self.halo_radius}"
 
     def validate_export_configuration(self):
+        if getattr(self, "enable_native_surface_flow", False):
+            from ..common.global_config import GlobalConfig
+            from ..common.logic_name import LogicName
+
+            if GlobalConfig.logic_name != LogicName.ZZMI:
+                raise ValueError("独立表面流光需要 ZZMI（DX11）导出预设")
         conflicts = []
         for item in self.target_items:
             obj = item.target_object
@@ -372,7 +447,11 @@ class SSMTNode_PostProcess_GlowFX(
         content, tail = self.split_auto_appended_tail_content(content)
         sections, preamble = self._parse_ini(content)
 
-        if records is None:
+        native_surface = getattr(self, "enable_native_surface_flow", False)
+        if native_surface:
+            changed = self._apply_native_surface_flow(sections, targets, ini_file)
+            generated = False
+        elif records is None:
             changed, generated = self._apply_fallback_injections(sections, targets)
         else:
             changed = self._apply_material_records(sections, records, targets, "")
@@ -478,7 +557,7 @@ class SSMTNode_PostProcess_GlowFX(
             )
         return changed
 
-    def _apply_fallback_injections(self, sections, targets):
+    def _target_draw_units(self, sections, targets, native_targets=None):
         jobs = []
         seen = set()
         for obj in targets:
@@ -487,12 +566,15 @@ class SSMTNode_PostProcess_GlowFX(
                 print(f"[GlowFX] 跳过 {obj.name}: 无法解析哈希")
                 continue
             suffix_pattern = _normalize_suffix(_extract_resource_suffix(obj.name))
-            for section_name, units in self._collect_target_units(
+            matches = self._collect_target_units(
                 sections,
                 obj,
                 hash_val,
                 suffix_pattern,
-            ):
+            )
+            if native_targets is not None and not matches:
+                native_targets.append(obj)
+            for section_name, units in matches:
                 for unit in units:
                     key = (section_name, int(unit["start"]))
                     if key in seen:
@@ -500,12 +582,105 @@ class SSMTNode_PostProcess_GlowFX(
                     seen.add(key)
                     jobs.append((section_name, unit))
 
-        changed = False
-        for section_name, unit in sorted(
+        return sorted(
             jobs,
             key=lambda item: (item[0], int(item[1]["start"])),
             reverse=True,
-        ):
+        )
+
+    def _apply_native_surface_flow(self, sections, targets, ini_file):
+        from ..common.zzmi_surface_flow import surface_draw_scope, surface_shader_sections
+
+        native_targets = []
+        jobs = self._target_draw_units(sections, targets, native_targets)
+        native_draws = {}
+        for obj in native_targets:
+            identity = ini_scope.mesh_ib_key(obj.name)
+            if not identity or not identity["full"]:
+                print(f"[GlowFX] 跳过 {obj.name}: 原生绘制需要完整的 IB 哈希、索引数和起始索引")
+                continue
+            hash_val, index_count, first_index = identity["full"].split("-")
+            native_draws[(hash_val, int(index_count), int(first_index))] = obj.name
+        if not jobs and not native_draws:
+            return False
+        height_scale = 0.0
+        if getattr(self, "native_surface_mode", "MIRROR") == 'HEIGHT':
+            heights = []
+            for obj in targets:
+                if obj.type == 'MESH':
+                    x, y, z, offset = obj.matrix_world[2]
+                    heights.extend(x * a + y * b + z * c + offset for a, b, c in obj.bound_box)
+            if not heights or max(heights) - min(heights) <= 1e-6:
+                raise ValueError("高光流光需要具有高度的目标网格")
+            height_scale = 1.0 / (max(heights) - min(heights))
+        tag = self._var_tag()
+        texture = None
+        if getattr(self, "native_surface_use_texture", False):
+            texture = f"ResourceZZMISurfaceFlowTexture{tag}"
+            selected = self.native_surface_texture
+            source = (
+                Path(bpy.path.abspath(selected, library=getattr(self.id_data, "library", None)))
+                if selected else Path(__file__).resolve().parents[1] / "resources" / "zzmi_surface_flow.dds"
+            )
+            if not source.is_file():
+                raise ValueError(f"流光贴图不存在：{source}")
+            contents = source.read_bytes()
+            if len(contents) < 128 or contents[:4] != b"DDS ":
+                raise ValueError(f"流光贴图必须是 DDS：{source}")
+            relative = Path("Textures") / f"ZZMISurfaceFlow-{hashlib.sha256(contents).hexdigest()[:16]}.dds"
+            output = Path(ini_file).parent / relative
+            output.parent.mkdir(exist_ok=True)
+            if not output.is_file():
+                output.write_bytes(contents)
+            sections[f"[{texture}]"] = [f"filename = {relative.as_posix()}"]
+            sections[f"[ResourceZZMISurfaceFlowSaved{tag}]"] = []
+        changed = False
+        for section_name, unit in jobs:
+            lines = sections[section_name]
+            start, end = _unit_edit_scope(lines, unit)
+            block = _strip_previous_glowfx_blocks(_strip_previous_blocks(lines[start:end]))
+            block = _strip_material_rabbitfx_lines(_strip_rabbitfx_glow_lines(block, self.fx_profile))
+            draws = [index for index, line in enumerate(block) if _draw_arguments(line) is not None]
+            if not draws:
+                continue
+            for index in reversed(draws):
+                indent = _leading_whitespace(block[index])
+                setup, restore = surface_draw_scope(
+                    tag, f"{start}_{index}",
+                    self.native_surface_speed, self.native_surface_brightness,
+                    self.native_surface_color,
+                    height_scale, texture,
+                )
+                # All draw-specific state is assigned inline while the original PS is bound.
+                _insert_block(block, index + 1, [_CALL_BEGIN, *restore, _CALL_END], indent)
+                _insert_block(block, index, [_PARAM_BEGIN, *setup, _PARAM_END], indent)
+            lines[start:end] = block
+            changed = True
+        for (hash_val, index_count, first_index), object_name in native_draws.items():
+            draw_id = f"{hash_val}_{index_count}_{first_index}"
+            setup, restore = surface_draw_scope(
+                tag, draw_id,
+                self.native_surface_speed, self.native_surface_brightness,
+                self.native_surface_color, height_scale, texture,
+            )
+            sections[f"[TextureOverrideZZMISurfaceFlowNative_{draw_id}]"] = [
+                f"; 原生绘制: {object_name}",
+                f"hash = {hash_val}",
+                f"match_index_count = {index_count}",
+                f"match_first_index = {first_index}",
+                "allow_duplicate_hash = true",
+                *setup,
+                *(line.replace("pre ", "post ", 1) for line in restore),
+            ]
+            changed = True
+        if changed:
+            textured = any(name.startswith("[ResourceZZMISurfaceFlowTexture") for name in sections)
+            sections.update(surface_shader_sections(textured))
+        return changed
+
+    def _apply_fallback_injections(self, sections, targets):
+        changed = False
+        for section_name, unit in self._target_draw_units(sections, targets):
             lines = sections[section_name]
             changed |= self._patch_glow_unit(
                 lines,
@@ -545,15 +720,16 @@ class SSMTNode_PostProcess_GlowFX(
             return False
 
         indent = _leading_whitespace(block[draw_index])
+        emission_only = self.emission_only
         # 只有「仅绘制发光贴图」才需要临时收起原始 draw；默认导出不包任何 guard，
         # 避免把 SlotFix 之类的运行时变量塞在原始 drawindexed 外面（未声明即风险）。
         call_lines = [
             _CALL_BEGIN,
         ]
-        if self.emission_only:
+        if emission_only:
             call_lines.append("endif")
+        call_lines.append(f"{GLOW_RESOURCE}{self._halo_suffix()} = ref {ref}")
         call_lines.extend([
-            f"{GLOW_RESOURCE}{self._halo_suffix()} = ref {ref}",
             f"$glowfx_drawcount = {draw_args[0]}",
             f"$glowfx_drawstart = {draw_args[1]}",
             f"$glowfx_drawbase = {draw_args[2]}",
@@ -576,7 +752,7 @@ class SSMTNode_PostProcess_GlowFX(
         param_lines = [_PARAM_BEGIN]
         if self.enable_glow:
             param_lines.extend(self._build_glow_parameter_lines())
-        if self.emission_only:
+        if emission_only:
             param_lines.extend([
                 "$glowfx_emission_only = 1",
                 "if !$glowfx_emission_only",
