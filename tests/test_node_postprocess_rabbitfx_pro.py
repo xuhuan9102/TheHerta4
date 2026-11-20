@@ -2271,7 +2271,7 @@ class GlowFXTests(unittest.TestCase):
         shader = ROOT / "Toolset" / "glow_fx" / "res" / "glow_fx_ps.hlsl"
         source = shader.read_text(encoding="utf-8")
         self.assertIn(
-            "float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0",
+            "float4 main(float2 uv : TEXCOORD0, float4 position : SV_Position",
             source,
         )
         self.assertIn("float2 texcoord = uv;", source)
