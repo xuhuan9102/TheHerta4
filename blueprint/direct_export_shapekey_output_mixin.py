@@ -831,42 +831,11 @@ class DirectShapeKeyOutputMixin:
             return None
         return raw.reshape(active, per_record), merged_map, freq_indices
 
-    def _pack_half_float3(self, values):
-        """把 (N,3) float32 逐条半精度打包：2 条记录占 3 个 uint32。
-
-        与 Toolset/shapekey_anim_frame_table.hlsl 的 ``frame_table_load`` 严格对齐：
-        偶数记录落在 [w0.lo, w0.hi, w1.lo]，奇数记录落在 [w1.hi, w2.lo, w2.hi]。
-        """
-        try:
-            from ..common.shapekey_native import pack_half_float3
-        except ImportError:
-            pack_half_float3 = None
-        if pack_half_float3 is not None:
-            packed = pack_half_float3(values)
-            if packed is not None:
-                return packed
-        records = np.ascontiguousarray(values, dtype=np.float32)
-        count = records.shape[0]
-        if count == 0:
-            return np.zeros(0, dtype=np.uint32)
-        half_bits = records.astype(np.float16).view(np.uint16).reshape(-1).astype(np.uint32)
-        words = np.zeros(((count + 1) // 2) * 3, dtype=np.uint32)
-
-        even = np.arange(0, count, 2)
-        words[(even // 2) * 3] = half_bits[even * 3] | (half_bits[even * 3 + 1] << 16)
-        words[(even // 2) * 3 + 1] = half_bits[even * 3 + 2]
-
-        odd = np.arange(1, count, 2)
-        if odd.size:
-            words[(odd // 2) * 3 + 1] |= half_bits[odd * 3] << 16
-            words[(odd // 2) * 3 + 2] = half_bits[odd * 3 + 1] | (half_bits[odd * 3 + 2] << 16)
-        return words
-
     def _write_frame_table_files(self, actual_hash, vertex_count, plan, inputs):
         """构建并写出帧表 + 每组顶点局部索引表。
 
         帧表第 m 条 = 组内前 m 个形态键的累积位移（relative to base，不含 base），
-        第 0 条恒为 0——于是「第 K 帧姿态 − base」与累积位移逐位等价。
+        第 0 帧由着色器提供。其余帧按 FP16 位移轨迹去重。
         """
         delta_data, merged_map, freq_indices = inputs
         channel_width = delta_data.shape[1]
@@ -919,9 +888,9 @@ class DirectShapeKeyOutputMixin:
             local_index = np.full(vertex_count, -1, dtype=np.int32)
             local_index[union_rows] = np.arange(union_size, dtype=np.int32)
 
-            frames = np.zeros((len(members) + 1, union_size, channel_width), dtype=np.float32)
+            frames = np.empty((len(members), union_size, channel_width), dtype="<f2")
             accumulator = np.zeros((union_size, channel_width), dtype=np.float32)
-            for step, freq_index in enumerate(members, start=1):
+            for step, freq_index in enumerate(members):
                 for vertices, payload in key_records.get(int(freq_index), ()):
                     # local_index is the already-built exact inverse of union_rows.
                     # Each vertices list is unique; += is equivalent to add.at here,
@@ -930,8 +899,16 @@ class DirectShapeKeyOutputMixin:
                     accumulator[positions] += payload
                 frames[step] = accumulator
 
-            # 每组只收集原始记录。着色器按全局记录索引寻址，组间不能插入填充。
-            table_parts.append(frames.reshape(-1, channel_width))
+            # Compare packed bits across every frame and channel for each vertex.
+            trajectories = np.ascontiguousarray(frames.transpose(1, 0, 2))
+            record_type = np.dtype(f"V{len(members) * channel_width * frames.itemsize}")
+            rows = trajectories.reshape(-1).view(record_type)
+            unique_rows, inverse = np.unique(rows, return_inverse=True)
+            union_size = unique_rows.size
+            local_index[union_rows] = inverse
+            # Keep frames contiguous so neighboring threads sample the same frame.
+            unique_frames = unique_rows.view("<f2").reshape(union_size, len(members), channel_width)
+            table_parts.append(np.ascontiguousarray(unique_frames.transpose(1, 0, 2)))
             # 序号必须连续：并集为空的组会被跳过，沿用 plan 的原始序号会让
             # shader 里的 frame_group_map_N 与 map_register 错位。
             slot_ordinal = len(group_meta)
@@ -950,25 +927,12 @@ class DirectShapeKeyOutputMixin:
         if not group_meta:
             return None
 
-        # 三分量对齐时复用现有半精度打包器，其他布局按全局分量索引打包。
-        try:
-            from ..common.shapekey_native import pack_half_float3_parts
-        except ImportError:
-            pack_half_float3_parts = None
-        if channel_width % 3 == 0:
-            triples = [part.reshape(-1, 3) for part in table_parts]
-            packed = pack_half_float3_parts(triples) if pack_half_float3_parts is not None else None
-            if packed is None:
-                packed = self._pack_half_float3(np.concatenate(triples, axis=0))
-        else:
-            components = np.concatenate(table_parts, axis=0).ravel()
-            # The shader indexes individual halves. Only the end of the global
-            # table can be padded, even when a record spans multiple words.
-            components = np.pad(components, (0, (-components.size) % 3))
-            packed = self._pack_half_float3(components.reshape(-1, 3))
         table_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_frame_table.buf")
         with open(table_path, "wb") as file_obj:
-            file_obj.write(memoryview(packed))
+            for part in table_parts:
+                file_obj.write(memoryview(part))
+            # Preserve global packing alignment, without padding between groups.
+            file_obj.write(bytes((-file_obj.tell()) % 12))
 
         for meta in group_meta:
             map_path = os.path.join(self.meshes_dir, f"{actual_hash}-Position_group_map_{meta['ordinal']}.buf")
