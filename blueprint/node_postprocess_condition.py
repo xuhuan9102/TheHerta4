@@ -1354,23 +1354,32 @@ def _ensure_constants_global(lines, ns, newline, slots=1):
 
     sections = _find_sections(lines)
     tail_index = _auto_appended_tail_index(lines)
+    anim_range = _anim_driver_block_range(lines)
     for name, header_index, body_start, body_end in sections:
         if str(name or "").strip().casefold() == "constants":
+            if _inside_anim_driver(anim_range, header_index):
+                # 动画驱动块内的 [Constants] 会被它整块重建时抹掉。
+                continue
             if tail_index is not None and header_index >= tail_index:
                 # 唯一的 [Constants] 在自动追加尾块里：写进去下次会被尾块节点
                 # 整块重写掉。跳过它，在尾块之前另建一个稳定的 [Constants]。
                 continue
             lines[header_index] = _ensure_newline(lines[header_index], newline)
             insert_at = _clamp_insert_before_tail(lines, body_start)
+            insert_at = _clamp_insert_outside_anim_driver(anim_range, insert_at)
             lines[insert_at:insert_at] = [marker_line, global_line]
             return lines, True
 
-    if tail_index is not None and sections and sections[0][1] >= tail_index:
+    if anim_range is not None:
+        # 块外没有 [Constants]：紧接动画驱动块尾之后新建一个，保证不被重写。
+        insert_at = anim_range[1] + 1
+    elif tail_index is not None and sections and sections[0][1] >= tail_index:
         # 第一个段头也在尾块里：唯一安全落点是尾块标记之前。
         insert_at = tail_index
     else:
         insert_at = sections[0][1] if sections else len(lines)
     insert_at = _clamp_insert_before_tail(lines, insert_at)
+    insert_at = _clamp_insert_outside_anim_driver(anim_range, insert_at)
     if insert_at > 0:
         lines[insert_at - 1] = _ensure_newline(lines[insert_at - 1], newline)
     block = [f"[Constants]{newline}", marker_line, global_line, newline]
@@ -1395,13 +1404,19 @@ def _ensure_check_section(lines, ns, detect_hash, index_count, newline, slot=0):
             return lines, False
 
     insert_at = None
+    anim_range = _anim_driver_block_range(lines)
     for name, header_index, body_start, body_end in sections:
         if str(name or "").strip().casefold() == "constants":
+            if _inside_anim_driver(anim_range, header_index):
+                continue
             last = _last_non_empty_index(lines, body_start, body_end)
             insert_at = (last + 1) if last is not None else body_start
             break
     if insert_at is None:
-        insert_at = sections[0][1] if sections else len(lines)
+        if anim_range is not None:
+            insert_at = anim_range[1] + 1
+        else:
+            insert_at = sections[0][1] if sections else len(lines)
 
     # 已经有本节点的检测段块时，新块必须整块接在最后一个 check-end 之后。
     # 否则（多哈希时）新块会插进上一个块的 check-begin 与段头之间：剥离状态
@@ -1414,6 +1429,7 @@ def _ensure_check_section(lines, ns, detect_hash, index_count, newline, slot=0):
     if last_check_end is not None:
         insert_at = last_check_end + 1
     insert_at = _clamp_insert_before_tail(lines, insert_at)
+    insert_at = _clamp_insert_outside_anim_driver(anim_range, insert_at)
 
     block = [
         f"{COND_MARKER_PREFIX}{ns}:check-begin@@{newline}",
@@ -1515,6 +1531,33 @@ def _auto_appended_tail_index(lines):
     return None
 
 
+def _anim_driver_block_range(lines):
+    """返回动画驱动托管块 ``(start, end)``（含两端行索引）；没有/不完整返回 ``None``。
+
+    动画驱动节点每次导出会用 START/END 标记把整块删掉重建，块内任何其它节点
+    插入的行都会消失；``_auto_appended_tail_index`` 只认 AUTO-APPENDED 前缀，
+    所以条件节点必须自己也把这块排除掉。
+    """
+    start = None
+    for index, line in enumerate(lines or []):
+        text = str(line or "")
+        if start is None and SSMTNode_PostProcess_Base.ANIM_DRIVER_SECTION_MARKER_START in text:
+            start = index
+        elif start is not None and SSMTNode_PostProcess_Base.ANIM_DRIVER_SECTION_MARKER_END in text:
+            return (start, index)
+    return None
+
+
+def _inside_anim_driver(anim_range, index):
+    """``index`` 是否落在动画驱动托管块内（``anim_range`` 为 ``None`` 时恒 False）。"""
+    return bool(anim_range) and anim_range[0] <= index <= anim_range[1]
+
+
+def _clamp_insert_outside_anim_driver(anim_range, index):
+    """段体的末尾注释也可能是托管块起始标记；插入点必须留在标记外。"""
+    return anim_range[0] if _inside_anim_driver(anim_range, index) else index
+
+
 def _clamp_insert_before_tail(lines, insert_at):
     """把插入点夹到自动追加尾块之前；尾块内容不归本节点改写。"""
     tail_index = _auto_appended_tail_index(lines)
@@ -1585,8 +1628,12 @@ def _ensure_present_reset(lines, ns, newline, slots=1):
     post_line = "".join(posts)
 
     tail_index = _auto_appended_tail_index(lines)
+    anim_range = _anim_driver_block_range(lines)
     for name, header_index, body_start, body_end in _find_sections(lines):
         if str(name or "").strip().casefold() != "present":
+            continue
+        if _inside_anim_driver(anim_range, header_index):
+            # 动画驱动块内的 [Present] 会被它整块重建时抹掉。
             continue
         if tail_index is not None and header_index >= tail_index:
             # 唯一的 [Present] 在自动追加尾块里：复位行写进去等于没写。
@@ -1604,11 +1651,20 @@ def _ensure_present_reset(lines, ns, newline, slots=1):
         if unclosed is not None:
             # 落点在未闭合 if 体内：插进去会把 if/endif 劈开，回退到 if 行之前。
             insert_at = unclosed
+        insert_at = _clamp_insert_outside_anim_driver(anim_range, insert_at)
         lines[header_index] = _ensure_newline(lines[header_index], newline)
         lines[insert_at:insert_at] = [marker_line, post_line]
         return lines, "existing"
 
-    insert_at = _present_insert_index(lines)
+    if anim_range is not None:
+        insert_at = anim_range[1] + 1
+    else:
+        insert_at = _present_insert_index(lines)
+    insert_at = _clamp_insert_before_tail(lines, insert_at)
+    unclosed = _innermost_unclosed_if_index(lines, insert_at)
+    if unclosed is not None:
+        insert_at = unclosed
+    insert_at = _clamp_insert_outside_anim_driver(anim_range, insert_at)
     if insert_at > 0:
         lines[insert_at - 1] = _ensure_newline(lines[insert_at - 1], newline)
     lines[insert_at:insert_at] = [f"[Present]{newline}", marker_line, post_line]

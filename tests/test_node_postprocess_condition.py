@@ -337,6 +337,34 @@ def _stripped_lines(text):
 # ---------------------------------------------------------------------------
 
 class ConditionApplyTests(unittest.TestCase):
+    def test_skip_comments_stay_with_their_own_sections_after_gating(self):
+        first, second = '11111111', '22222222'
+        text = skip_module._build_skip_block([(first, None, None), (second, None, None)])
+        updated, _ = module._apply_condition(text, NS, {'TextureOverride_IB_'+first}, DETECT_HASH)
+        sections = {name: updated.splitlines()[body_start:body_end]
+                    for name, _, body_start, body_end in module._find_sections(updated.splitlines())}
+        self.assertNotIn('; skip '+second, sections['TextureOverride_IB_'+first])
+        self.assertIn('; skip '+second, sections['TextureOverride_IB_'+second])
+
+    def test_owned_blocks_survive_animation_driver_rebuild(self):
+        start = module.SSMTNode_PostProcess_Base.ANIM_DRIVER_SECTION_MARKER_START
+        end = module.SSMTNode_PostProcess_Base.ANIM_DRIVER_SECTION_MARKER_END
+        block = (start+'\n[Constants]\nglobal $anim_value = 0\n'
+                 '[Present]\n$anim_value = $anim_value + 1\n'+end+'\n')
+        prefixes = ('', '[Constants]\nglobal $main = 1\n', '[Present]\npost $main = 1\n')
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                source = prefix+block+f'[{TARGET_SECTION}]\nhash = 7fbbcf0d\ndrawindexed = 1260\n'
+                updated, _ = module._apply_condition(source, NS, {TARGET_SECTION}, DETECT_HASH)
+                protected = updated[updated.index(start):updated.index(end)+len(end)]+'\n'
+                self.assertEqual(protected, block)
+                rebuilt = updated.replace(block, '')
+                self.assertIn(f'global $cond_{NS}_cond_active', rebuilt)
+                self.assertIn(f'[TextureOverrideCheckHash_cond_{NS}]', rebuilt)
+                self.assertIn(f'post $cond_{NS}_cond_active', rebuilt)
+                again, _ = module._apply_condition(updated, NS, {TARGET_SECTION}, DETECT_HASH)
+                self.assertEqual(again, updated)
+
     def test_missing_present_section_is_created_with_reset_lines(self):
         updated, stats = module._apply_condition(
             INI_NO_PRESENT, NS, {TARGET_SECTION}, DETECT_HASH
