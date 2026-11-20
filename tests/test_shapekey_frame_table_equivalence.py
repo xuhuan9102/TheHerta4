@@ -11,14 +11,13 @@ import numpy as np
 SOURCE = Path(__file__).resolve().parents[1] / "blueprint/direct_export_shapekey_output_mixin.py"
 module = ast.parse(SOURCE.read_text(encoding="utf-8"))
 definition = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "DirectShapeKeyOutputMixin")
-methods = [n for n in definition.body if isinstance(n, ast.FunctionDef) and n.name in {"_pack_half_float3", "_write_frame_table_files"}]
+methods = [n for n in definition.body if isinstance(n, ast.FunctionDef) and n.name == "_write_frame_table_files"]
 namespace = {"np": np, "os": os, "NO_FREQ_INDEX": 0xffffffff, "__package__": "_frame_equivalence.blueprint"}
 exec(compile(ast.Module(body=methods, type_ignores=[]), str(SOURCE), "exec"), namespace)
 
 
 class Writer:
     FRAME_TABLE_GROUP_MAP_REGISTER_BASE = 52
-    _pack_half_float3 = namespace["_pack_half_float3"]
     _write_frame_table_files = namespace["_write_frame_table_files"]
 
 
@@ -62,6 +61,27 @@ def reference(vertex_count, plan, inputs):
 
 
 class FrameTableEquivalenceTests(unittest.TestCase):
+    def assert_reconstructs_reference(self, root, result, expected, metadata, width):
+        packed = np.fromfile(Path(root) / "hash-Position_frame_table.buf", dtype="<u2")
+        old = np.frombuffer(expected, dtype="<u2")
+        offset = 0
+        self.assertEqual(len(result["groups"]), len(metadata))
+        for ordinal, (actual, (old_offset, old_size, keys, indices)) in enumerate(zip(result["groups"], metadata)):
+            size = actual["union_size"]
+            self.assertEqual((actual["offset"], actual["key_count"]), (offset, keys))
+            self.assertEqual(actual["ordinal"], ordinal)
+            self.assertEqual(actual["map_register"], 52 + ordinal)
+            new_indices = np.fromfile(actual["map_path"], dtype="<i4")
+            active = indices >= 0
+            np.testing.assert_array_equal(new_indices >= 0, active)
+            frames = packed[offset * width:(offset + keys * size) * width].reshape(keys, size, width)
+            old_frames = old[old_offset * width:(old_offset + (keys + 1) * old_size) * width]
+            old_frames = old_frames.reshape(keys + 1, old_size, width)
+            np.testing.assert_array_equal(frames[:, new_indices[active]], old_frames[1:, indices[active]])
+            offset += keys * size
+        self.assertLess(len(packed) - offset * width, 6)
+        self.assertFalse(packed[offset * width:].any())
+
     def test_full_channels_accumulate_across_groups(self):
         # Two groups with an odd record offset between them. The second group
         # also includes a vertex whose delta changes only the tangent.
@@ -80,12 +100,11 @@ class FrameTableEquivalenceTests(unittest.TestCase):
         for channels in (deltas, np.hstack((deltas, extra))):
             with self.subTest(width=channels.shape[1]), tempfile.TemporaryDirectory() as root:
                 inputs = channels, merged, frequencies
-                expected, _ = reference(2, plan, inputs)
+                expected, metadata = reference(2, plan, inputs)
                 writer = Writer()
                 writer.meshes_dir = root
                 result = writer._write_frame_table_files("hash", 2, plan, inputs)
-                self.assertEqual(result["groups"][1]["offset"], 3)
-                self.assertEqual((Path(root) / "hash-Position_frame_table.buf").read_bytes(), expected)
+                self.assert_reconstructs_reference(root, result, expected, metadata, channels.shape[1])
 
     def test_random_groups_and_cross_slot_overlaps_preserve_all_bytes_and_metadata(self):
         for seed in range(12):
@@ -103,13 +122,25 @@ class FrameTableEquivalenceTests(unittest.TestCase):
                 writer = Writer()
                 writer.meshes_dir = root
                 result = writer._write_frame_table_files("hash", vertices, plan, inputs)
-                self.assertEqual((Path(root) / "hash-Position_frame_table.buf").read_bytes(), expected)
-                self.assertEqual(len(result["groups"]), len(metadata))
-                for ordinal, (actual, (offset, size, keys, indices)) in enumerate(zip(result["groups"], metadata)):
-                    self.assertEqual((actual["offset"], actual["union_size"], actual["key_count"]), (offset, size, keys))
-                    self.assertEqual(actual["ordinal"], ordinal)
-                    self.assertEqual(actual["map_register"], 52 + ordinal)
-                    self.assertEqual(Path(actual["map_path"]).read_bytes(), indices.tobytes())
+                self.assert_reconstructs_reference(root, result, expected, metadata, deltas.shape[1])
+
+    def test_identical_packed_trajectories_share_storage(self):
+        inputs = (
+            np.array([[1, 2, 3], [1.0001, 2, 3], [0, 1, 0]], dtype=np.float32),
+            np.array([0, 2, 1, 2, 0, 0, -1, -1], dtype=np.int32),
+            np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.uint32),
+        )
+        plan = {"groups": [{"group": 0, "progress": "$g0", "members": [0, 1]}]}
+        with tempfile.TemporaryDirectory() as root:
+            writer = Writer()
+            writer.meshes_dir = root
+            group, = writer._write_frame_table_files("hash", 4, plan, inputs)["groups"]
+            self.assertEqual(group["union_size"], 2)
+            indices = np.fromfile(group["map_path"], dtype="<i4")
+            self.assertEqual(indices[0], indices[1])
+            self.assertNotEqual(indices[0], indices[2])
+            self.assertEqual(indices[3], -1)
+            self.assertEqual((Path(root) / "hash-Position_frame_table.buf").stat().st_size, 24)
 
     def test_no_matching_group_produces_no_table(self):
         writer = Writer()
