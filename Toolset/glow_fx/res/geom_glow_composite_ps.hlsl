@@ -1,4 +1,3 @@
-Texture2D<float2> HaloCoverage : register(t69);
 Texture2D<float2> CoreCoverage : register(t70);
 Texture1D<float4> IniParams : register(t120);
 Texture2D<float> SceneDepth : register(t67);
@@ -22,6 +21,7 @@ float3 highlightColor(float3 emission)
     return lerp(emission, luminance.xxx, smoothstep(0.1063, 0.8504, luminance));
 }
 
+
 float4 main(float4 position : SV_Position) : SV_Target
 {
     uint width, height;
@@ -34,7 +34,6 @@ float4 main(float4 position : SV_Position) : SV_Target
     float spacing = 2.0 * max(1.0, ceil(radius / 96.0));
     int extent = int(radius / spacing);
     float3 halo = 0;
-    float coverage = 0.0;
     [loop]
     for (int y = -extent; radius > 0 && y <= extent; ++y)
     {
@@ -50,16 +49,33 @@ float4 main(float4 position : SV_Position) : SV_Target
         float2 visibility = float2(occlusionWeight(destinationDepth, row.a),
                                   occlusionWeight(destinationDepth, back.a));
         halo += weight * (row.rgb * visibility.x + back.rgb * visibility.y);
-        coverage += weight * dot(visibility, HaloCoverage.Load(int3(tap, 0)));
     }
     float4 scene = Scene.Load(int3(int2(position.xy), 0));
     float3 core = Mask.Load(int3(pixel, 0)).rgb;
     float coreCoverage = saturate(CoreCoverage.Load(int3(pixel, 0)).x);
-    // Separate emitted color from coverage, so thin bright lines do not
-    // become dim just because most neighboring pixels are empty.
-    float haloOpacity = sqrt(saturate(coverage / haloParameters.y));
-    float3 haloColor = halo / max(coverage, 0.000001);
-    float3 background = scene.rgb + highlightColor(haloColor * haloOpacity);
+    // The horizontal prefilter is already normalized. Normalize the vertical
+    // sum once more so sparse halo fringes cannot turn into HDR spikes.
+    float haloNormalization = max(haloParameters.y, 1.0);
+    float3 haloEmission = halo / haloNormalization;
+    float3 haloColor = highlightColor(haloEmission);
     float3 surface = highlightColor(core / max(coreCoverage, 0.000001));
-    return float4(lerp(background, surface, coreCoverage), scene.a);
+    float alpha = scene.a;
+    if (haloParameters.w > 0.5)
+    {
+        // The game expects straight RGB and premultiplies it at layer composition.
+        // Accumulate the halo once in premultiplied space, then encode that result.
+        // Fade straight RGB as well as alpha before the game's layer grading.
+        // Dividing by the unmodified opacity leaves even the weakest taps saturated.
+        float haloPeak = max(haloColor.x, max(haloColor.y, haloColor.z));
+        float fringeFade = smoothstep(0.0, 0.03, haloPeak);
+        haloColor *= fringeFade;
+        float haloOpacity = saturate(haloPeak) * sqrt(fringeFade);
+        float glowCoverage = lerp(haloOpacity, 1.0, coreCoverage);
+        if (glowCoverage <= 0.0)
+            return scene;
+        alpha = alpha + (1.0 - alpha) * glowCoverage;
+        float3 premultiplied = lerp(scene.rgb * scene.a + haloColor, surface, coreCoverage);
+        return float4(premultiplied / max(alpha, 0.000001), alpha);
+    }
+    return float4(lerp(scene.rgb + haloColor, surface, coreCoverage), alpha);
 }

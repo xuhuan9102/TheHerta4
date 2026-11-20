@@ -114,6 +114,7 @@ def flow_draw_scope(height):
 def flow_shader_sections(tag):
     """Match the native t12 sample, keeping the original code for other draw calls."""
     name = f"ShaderRegexTheHertaZZMINativeHeightFlow_{tag}"
+    uv_name = f"ShaderRegexTheHertaZZMIPrimaryMaterialUV_{tag}"
     return (
         f"[{name}]",
         "shader_model = ps_5_0",
@@ -135,5 +136,25 @@ def flow_shader_sections(tag):
         "${sample}",
         "",
         f"[{name}.InsertDeclarations]",
+        "dcl_resource_texture1d (float,float,float,float) t120",
+        "",
+        f"[{uv_name}]",
+        "shader_model = ps_5_0",
+        "",
+        f"[{uv_name}.Pattern]",
+        r"(?<select>^[ \t]*or r0\.z, r0\.z, r0\.y\r?\n)",
+        r"(?<sample_uv>[ \t]*movc r0\.zw, r0\.zzzz, v0\.zzzw, v0\.xxxy\r?\n)",
+        r"(?=resinfo_indexable\(texture2d\)\(float,float,float,float\) r22\.xy, l\(0\), t50\.xyzw)",
+        "",
+        f"[{uv_name}.Pattern.Replace]",
+        "${select}",
+        r"ld_indexable(texture1d)(float,float,float,float) r0.w, l(499, 0, 0, 0), t120.xxxx\n",
+        r"eq r0.w, r0.w, l(7312401.0)\n",
+        r"if_nz r0.w\n",
+        r"mov r0.yz, l(0.0, 0.0, 0.0, 0.0)\n",
+        r"endif\n",
+        "${sample_uv}",
+        "",
+        f"[{uv_name}.InsertDeclarations]",
         "dcl_resource_texture1d (float,float,float,float) t120",
     )

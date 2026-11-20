@@ -70,6 +70,7 @@ _install_module(
         node_groups=[],
     ),
 )
+_TEST_BPY = sys.modules["bpy"]
 
 
 class _FakeSocketCollection(list):
@@ -262,12 +263,38 @@ def _make_node(node_cls=None, **overrides):
 
 
 _GLOWFX_MODULE = None
+_SURFACE_FLOW_MODULE = None
+_VARIABLE_REGISTRY_MODULE = None
+
+
+def _load_surface_flow_module():
+    global _SURFACE_FLOW_MODULE
+    if _SURFACE_FLOW_MODULE is not None:
+        return _SURFACE_FLOW_MODULE
+    module_name = f"{PKG}.common.zzmi_surface_flow"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / "common" / "zzmi_surface_flow.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    _SURFACE_FLOW_MODULE = module
+    return module
+
+
+def _load_variable_registry_module():
+    global _VARIABLE_REGISTRY_MODULE
+    if _VARIABLE_REGISTRY_MODULE is not None:
+        return _VARIABLE_REGISTRY_MODULE
+    _VARIABLE_REGISTRY_MODULE = _load("variable_registry", "blueprint/variable_registry.py")
+    return _VARIABLE_REGISTRY_MODULE
 
 
 def _load_glowfx_module():
     global _GLOWFX_MODULE
     if _GLOWFX_MODULE is not None:
         return _GLOWFX_MODULE
+    sys.modules["bpy"] = _TEST_BPY
     module_path = ROOT / "blueprint" / "node_postprocess_glow_fx.py"
     if not module_path.is_file():
         raise AssertionError(f"缺少 Glow FX 节点模块: {module_path}")
@@ -2187,6 +2214,184 @@ class GlowFXTests(unittest.TestCase):
         self.assertEqual(node_cls.bl_idname, "SSMTNode_PostProcess_GlowFX")
         self.assertEqual(node_cls.bl_label, "Glow FX着色器")
 
+    def test_glowfx_native_surface_wraps_only_the_selected_draw(self):
+        surface = _load_surface_flow_module()
+        target = _fake_object()
+        target.matrix_world = (None, None, (0, 0, 1, 1))
+        target.bound_box = ((0, 0, 0), (0, 0, 2))
+        node = _make_glowfx_node(
+            enable_native_surface_flow=True,
+            native_surface_color=(0.25, 0.50, 0.75),
+            native_surface_speed=0.125,
+            native_surface_brightness=1.5,
+            target_items=[_item(target)],
+        )
+        _write_ini(self.ini_path, (
+            f"[{GLOW_SECTION}]\n"
+            "hash = fd054d1d\n"
+            f"; [mesh:{MESH_NAME}]\n"
+            "drawindexed = 6,0,0\n"
+            "; [mesh:LOD0.fd054d1d-30030-0.Other]\n"
+            "drawindexed = 3,6,0\n"
+        ))
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+        self.assertLess(content.index("pre x498 = 734125"), content.index("drawindexed = 6,0,0"))
+        self.assertLess(content.index("drawindexed = 6,0,0"), content.index("pre x498 = $"))
+        self.assertLess(content.index("pre x498 = $"), content.index("drawindexed = 3,6,0"))
+        self.assertIn("pre y498 = 0.000000000", content)
+        self.assertIn("mad ${flowh}.xyz, ${flowtex}.xyzx, ${flowa}.wwww, -${flowh}.xyzx", content)
+        self.assertIn("pre x497 = time * -0.125000", content)
+        self.assertIn("pre y497 = 1.500000", content)
+        self.assertIn("ShaderRegexTheHertaZZMISurfaceFlow", content)
+        reference = surface.surface_shader_sections()["[ShaderRegexTheHertaZZMISurfaceFlow.Pattern.Replace]"]
+        self.assertEqual(reference[0], "${anchor}")
+        self.assertEqual(reference.count("${anchor}"), 1)
+        assembly = "\n".join(reference)
+        self.assertIn("add_sat ${flowd}.xyz, -${temp_r15}.xyzx, l(1.0)", assembly)
+        self.assertIn(
+            "min ${flowh}.xyz, ${flowh}.xyzw, ${flowd}.xyzw",
+            assembly,
+        )
+        self.assertIn("pre x496 = 0.250000", content)
+        self.assertIn("pre y496 = 0.500000", content)
+        self.assertIn("pre z496 = 0.750000", content)
+        self.assertNotIn("ps-t119", content)
+        self.assertNotIn("ResourceZZMISurfaceFlow", content)
+        self.assertFalse(list((Path(self.export_dir) / "Textures").glob("ZZMISurfaceFlow-*.dds")))
+        self.assertNotIn("CommandListGlowFXRun", content)
+        node.native_surface_mode = "HEIGHT"
+        node.execute_postprocess(self.export_dir)
+        height_content = _read_ini(self.ini_path)
+        self.assertIn("pre y498 = 0.500000000", height_content)
+        self.assertNotIn("pre y498 = 0.000000000", height_content)
+
+    def test_glowfx_native_surface_texture_is_restored_after_the_draw(self):
+        _load_surface_flow_module()
+        node = _make_glowfx_node(
+            enable_native_surface_flow=True,
+            native_surface_use_texture=True,
+            native_surface_texture="",
+            native_surface_color=(0.25, 0.50, 0.75),
+            native_surface_speed=0.125,
+            native_surface_brightness=1.5,
+            target_items=[_item(_fake_object())],
+        )
+        _write_ini(self.ini_path, (
+            f"[{GLOW_SECTION}]\n"
+            "hash = fd054d1d\n"
+            f"; [mesh:{MESH_NAME}]\n"
+            "drawindexed = 6,0,0\n"
+        ))
+
+        node.execute_postprocess(self.export_dir)
+
+        content = _read_ini(self.ini_path)
+        self.assertIn("[ResourceZZMISurfaceFlowTextureabcd1234]", content)
+        self.assertIn(
+            "pre ps-t119 = ref ResourceZZMISurfaceFlowTextureabcd1234",
+            content,
+        )
+        self.assertIn("pre x498 = 734126", content)
+        self.assertIn("pre ps-t119 = ref ResourceZZMISurfaceFlowSavedabcd1234", content)
+        self.assertIn("dcl_resource_texture2d (float,float,float,float) t119", content)
+        self.assertIn("sample_l_indexable(texture2d)", content)
+        textures = list((Path(self.export_dir) / "Textures").glob(
+            "ZZMISurfaceFlow-*.dds"
+        ))
+        self.assertEqual(len(textures), 1)
+        self.assertEqual(textures[0].read_bytes()[:4], b"DDS ")
+
+    def test_glowfx_native_surface_replay_emits_dedicated_shader(self):
+        _load_surface_flow_module()
+        target = _fake_object()
+        target.matrix_world = (None, None, (0, 0, 1, 1))
+        target.bound_box = ((0, 0, 0), (0, 0, 2))
+        node = _make_glowfx_node(
+            enable_native_surface_flow=True,
+            native_surface_replay=True,
+            native_surface_color=(0.25, 0.50, 0.75),
+            native_surface_speed=0.125,
+            native_surface_brightness=1.5,
+            target_items=[_item(target)],
+        )
+        _write_ini(self.ini_path, (
+            f"[{GLOW_SECTION}]\n"
+            "hash = fd054d1d\n"
+            f"; [mesh:{MESH_NAME}]\n"
+            "drawindexed = 6,0,0\n"
+        ))
+
+        node.execute_postprocess(self.export_dir)
+
+        content = _read_ini(self.ini_path)
+        self.assertIn("$surface_replay_count = 6", content)
+        self.assertIn("$surface_replay_start = 0", content)
+        self.assertIn("$surface_replay_base = 0", content)
+        self.assertIn("run = CommandListZZMISurfaceReplayIndexedabcd1234", content)
+        self.assertIn("[CustomShaderZZMISurfaceReplayIndexed]", content)
+        self.assertIn("[ShaderRegexZZMISurfaceReplayPackedLayout]", content)
+        self.assertNotIn("ShaderRegexTheHertaZZMISurfaceFlow", content)
+        self.assertTrue((Path(self.export_dir) / "res" / "surface_flow_replay_ps.hlsl").is_file())
+        self.assertTrue(
+            (Path(self.export_dir) / "res" / "surface_flow_replay_packed_ps.hlsl").is_file()
+        )
+        self.assertTrue(
+            (Path(self.export_dir) / "res" / "surface_flow_replay_face_ps.hlsl").is_file()
+        )
+
+    def test_glowfx_effect_switch_emits_persistent_variable_and_keyswap(self):
+        _load_variable_registry_module()
+        _install_module(
+            f"{PKG}.blueprint.node_postprocess_custom_material_assign",
+            find_activation_flag_in_sections=lambda _sections: "$active0",
+        )
+        node = _make_glowfx_node(
+            effect_switch_enabled=True,
+            effect_switch_variable="",
+            effect_switch_key="No_Modifiers Numpad1",
+            effect_switch_comment="独立表面流光",
+            target_items=[_item(_fake_object())],
+        )
+        sections = {
+            "[Constants]": ["global $active0"],
+            "[TextureOverrideTest]": ["$active0 = 1"],
+            "[Present]": ["post $active0 = 0"],
+        }
+
+        node._emit_effect_switch(sections)
+
+        variable = node._effect_switch_variable()
+        self.assertEqual(variable, "$glowfx_enabled_abcd1234")
+        self.assertIn(f"global persist {variable} = 1", sections["[Constants]"])
+        keyswap = sections[f"[KeySwap_GlowFX_{variable[1:]}]"]
+        self.assertEqual(keyswap[0], "; 独立表面流光")
+        self.assertEqual(keyswap[1], "condition = $active0 == 1")
+        self.assertEqual(keyswap[2], "key = No_Modifiers Numpad1")
+        self.assertEqual(keyswap[3], "type = cycle")
+        self.assertEqual(keyswap[4], f"{variable} = 0,1")
+
+    def test_glowfx_ignores_saved_height_flow_setting(self):
+        node = _make_glowfx_node(
+            enable_height_flow=True,
+            show_glow=True,
+            show_fx=False,
+            target_items=[_item(_fake_object())],
+        )
+        layout = _FakeLayout()
+
+        node.draw_buttons(None, layout)
+
+        labels = [entry[1] for entry in layout.log if entry[0] == "label"]
+        props = [entry[1] for entry in layout.log if entry[0] == "prop"]
+
+        self.assertIn("发光贴图参数", labels)
+        self.assertIn("FX 贴图参数", labels)
+        self.assertNotIn("enable_height_flow", props)
+        self.assertNotIn("flow_period", props)
+        self.assertIn("enable_reset", props)
+        self.assertIn("preview_use_color", props)
+
     def test_glowfx_is_in_material_resource_menu(self):
         source = (ROOT / "blueprint" / "node_menu.py").read_text(encoding="utf-8")
         material_menu = source.split(
@@ -2256,6 +2461,10 @@ class GlowFXTests(unittest.TestCase):
         hook = sections["[ShaderOverrideGeoGlowWorldHDR]"]
         self.assertIn("hash = 5b043c5784c3b4ed", hook)
         self.assertIn("run = CommandListGeoGlowWorldHDR", hook)
+        layer_hook = sections["[ShaderOverrideGeoGlowAgentSceneHDR]"]
+        self.assertIn("hash = 6443f79de027d780", layer_hook)
+        self.assertIn("run = CommandListGeoGlowAgentSceneHDR", layer_hook)
+        self.assertIn("$geoGlowLayerAlpha = 1", sections["[CommandListGeoGlowAgentSceneHDR]"])
         taa_hook = sections["[ShaderOverrideGeoGlowTAA]"]
         self.assertIn("hash = 7eabecd5696f8d79", taa_hook)
         self.assertIn("run = CommandListGeoGlowTAA", taa_hook)
@@ -2283,6 +2492,31 @@ class GlowFXTests(unittest.TestCase):
         self.assertIn("parameters.w < 0.0 ? depthGap", source)
         self.assertIn("return float4(emission, position.z);", source)
         self.assertIn("SV_IsFrontFace", source)
+
+    def test_glow_fx_halo_normalizes_vertical_axis_once(self):
+        shader = ROOT / "Toolset" / "glow_fx" / "res" / "geom_glow_composite_ps.hlsl"
+        source = shader.read_text(encoding="utf-8")
+        self.assertIn(
+            "float haloNormalization = max(haloParameters.y, 1.0);",
+            source,
+        )
+        self.assertIn(
+            "float3 haloEmission = halo / haloNormalization;",
+            source,
+        )
+        self.assertNotIn("halo / max(coverage, 0.000001)", source)
+        self.assertIn("highlightColor(haloEmission)", source)
+        self.assertIn("highlightColor(core / max(coreCoverage, 0.000001))", source)
+        self.assertIn(
+            "float fringeFade = smoothstep(0.0, 0.03, haloPeak);",
+            source,
+        )
+        self.assertIn(
+            "float haloOpacity = saturate(haloPeak) * sqrt(fringeFade);",
+            source,
+        )
+        self.assertIn("haloParameters.w > 0.5", source)
+        self.assertIn("alpha = alpha + (1.0 - alpha) * glowCoverage;", source)
 
     def test_halo_ranges_keep_separate_runtime_and_work_with_every_glow_mode(self):
         sections = {}

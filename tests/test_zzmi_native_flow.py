@@ -231,6 +231,13 @@ class FlowShaderSectionsTests(unittest.TestCase):
         )
         self.assertIn("l(7312401.0)", text)
 
+    def test_primary_material_uv_override_clears_secondary_selector(self):
+        text = "\n".join(flow.flow_shader_sections("abc123"))
+        self.assertIn("[ShaderRegexTheHertaZZMIPrimaryMaterialUV_abc123]", text)
+        self.assertIn("eq r0.w, r0.w, l(7312401.0)", text)
+        self.assertIn("mov r0.yz, l(0.0, 0.0, 0.0, 0.0)", text)
+        self.assertIn("${sample_uv}", text)
+
 
 if __name__ == "__main__":
     unittest.main()

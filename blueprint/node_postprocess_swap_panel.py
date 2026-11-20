@@ -1008,7 +1008,7 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         return collected
 
     def _collect_custom_material_switch_groups(self):
-        """Collect enabled switch groups from custom material-assign nodes."""
+        """Collect switch groups from custom material and Glow FX nodes."""
         tree = getattr(self, "id_data", None)
         if tree is None:
             return []
@@ -1021,7 +1021,11 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
                 return
             visited.add(tree_key)
             for node in current_tree.nodes:
-                if node.bl_idname == 'SSMTNode_PostProcess_CustomMaterialAssign' and not node.mute:
+                if node.bl_idname == 'SSMTNode_PostProcess_GlowFX' and not node.mute:
+                    group = node.effect_switch_group()
+                    if group is not None:
+                        collected.append((node, None, group))
+                elif node.bl_idname == 'SSMTNode_PostProcess_CustomMaterialAssign' and not node.mute:
                     if bool(getattr(node, "use_global_assign", False)):
                         for group in node.global_switch_groups:
                             if not bool(getattr(group, "enabled", True)):

@@ -1557,7 +1557,7 @@ class PreProcessHelper:
                 skipped_count += 1
                 continue
 
-            if active_uv.name == "TEXCOORD2.xy":
+            if active_uv.name == "TEXCOORD2.xy" or "TEXCOORD.xy" in uv_layers:
                 from ..common.global_config import GlobalConfig
                 from ..common.logic_name import LogicName
 

@@ -412,6 +412,8 @@ class ObjBufferHelper:
                 # uvs_array = uvs_array.reshape(-1, 2)
 
                 result = uvs_array 
+                if d3d11_element_name == "TEXCOORD" and GlobalConfig.logic_name == LogicName.ZZMI:
+                    break
         # TimerUtils.End("GET TEXCOORD")
         return result
 
