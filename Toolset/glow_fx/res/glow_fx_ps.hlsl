@@ -58,15 +58,13 @@ float4 sampleCollapsedSide(float2 uv)
     return sampleColor;
 }
 
-float4 main(float4 uv : TEXCOORD0, float4 position : SV_Position, bool front : SV_IsFrontFace,
+float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0, bool front : SV_IsFrontFace,
             out float2 coverage : SV_Target1) : SV_Target0
 {
     float4 parameters = IniParams[224];
     float sceneDepth = SceneDepth.Load(int3(int2(position.xy), 0));
     float depthGap = position.z - sceneDepth;
-    bool alternate = (!front && material[150].x > 0.5)
-                  || (uv.z > 1.0 && material[150].y > 0.5);
-    float2 texcoord = alternate ? uv.zw : uv.xy;
+    float2 texcoord = uv;
     float2 dx = ddx(texcoord);
     float2 dy = ddy(texcoord);
     float determinant = dx.x * dy.y - dx.y * dy.x;
