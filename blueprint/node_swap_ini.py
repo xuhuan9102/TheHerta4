@@ -77,6 +77,7 @@ class SwapKeyINIGenerator:
         registry: Optional[SwapKeyRegistry] = None,
     ) -> M_IniSection:
         section = M_IniSection(M_SectionType.Key)
+        emitted_count = 0
 
         for fallback_idx, node in enumerate(swap_nodes):
             if node.bl_idname != "SSMTNode_ObjectSwap":
@@ -86,15 +87,17 @@ class SwapKeyINIGenerator:
             config = SwapKeyConfig(
                 node_id=node.name,
                 index=idx,
-                hotkey=getattr(node, "hotkey", "No_Modifiers Numpad3"),
+                hotkey=str(getattr(node, "hotkey", "") or "").strip(),
                 swap_type=getattr(node, "swap_type", "cycle"),
                 option_count=getattr(node, "input_slot_count", 2),
                 comment=getattr(node, "comment", ""),
                 custom_var_name=str(getattr(node, "custom_var_name", "") or "").strip().lstrip("$"),
                 assigned_variable_name=str(ensure_object_swap_variable_name(node)),
             )
+            if not config.hotkey:
+                continue
 
-            if fallback_idx > 0:
+            if emitted_count:
                 section.new_line()
 
             section.append(f"[{config.get_key_swap_section_name()}]")
@@ -104,9 +107,10 @@ class SwapKeyINIGenerator:
             section.append(f"key = {config.hotkey}")
             section.append(f"type = {config.swap_type}")
             section.append(f"{config.get_swap_key_name()} = {','.join(str(i) for i in range(config.option_count))},")
+            emitted_count += 1
 
         if not section.empty():
-            LOG.info(f"生成了 {len(swap_nodes)} 个 KeySwap 段落配置")
+            LOG.info(f"生成了 {emitted_count} 个 KeySwap 段落配置")
 
         return section
 
@@ -222,7 +226,7 @@ class SwapKeyDebugINIWriter:
             if comment:
                 lines.append(f"; {comment}")
             lines.append("condition = $active0 == 1")
-            lines.append(f"key = {getattr(node, 'hotkey', 'No_Modifiers Numpad3')}")
+            lines.append(f"key = {str(getattr(node, 'hotkey', '') or '').strip()}")
             lines.append(f"type = {getattr(node, 'swap_type', 'cycle')}")
             lines.append(f"{var_name} = {','.join(str(i) for i in range(getattr(node, 'input_slot_count', 2)))},")
 

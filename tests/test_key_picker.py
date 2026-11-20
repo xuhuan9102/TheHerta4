@@ -155,6 +155,29 @@ class MainKeyTests(unittest.TestCase):
         self.assertEqual(module.key_picker_display((), ""), "（未设置）")
 
 
+class TargetResolveTests(unittest.TestCase):
+    def test_direct_and_nested_properties_resolve_relative_to_node(self):
+        nested_group = types.SimpleNamespace(key="N")
+        node = types.SimpleNamespace(
+            effect_switch_key="home",
+            nested_group=nested_group,
+            path_resolve=lambda path: nested_group if path == "nested_group" else None,
+        )
+
+        owner, prop_name = module.key_picker_resolve_target(node, "effect_switch_key")
+        self.assertIs(owner, node)
+        self.assertEqual(prop_name, "effect_switch_key")
+
+        owner, prop_name = module.key_picker_resolve_target(node, "nested_group.key")
+        self.assertIs(owner, nested_group)
+        self.assertEqual(prop_name, "key")
+
+    def test_invalid_target_returns_none(self):
+        node = types.SimpleNamespace(effect_switch_key="home", path_resolve=lambda _path: None)
+        self.assertEqual(module.key_picker_resolve_target(node, "nested_group.key"), (None, ""))
+        self.assertEqual(module.key_picker_resolve_target(node, "missing"), (None, ""))
+
+
 def _row_tokens(row_def):
     """一行里真正可点的 token（跳过方向键区的空白占位键）。"""
     return [token for _label, token, _width in row_def if token]

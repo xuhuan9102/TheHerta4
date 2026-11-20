@@ -19,7 +19,7 @@ _is_button_context_menu_hooked = False
 class SwapKeyConfig:
     node_id: str = ""
     index: int = 0
-    hotkey: str = "No_Modifiers Numpad3"
+    hotkey: str = ""
     swap_type: str = "cycle"
     option_count: int = 2
     comment: str = ""
@@ -110,8 +110,8 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
 
     hotkey: bpy.props.StringProperty(
         name="快捷键",
-        description="按键格式: Modifier KeyName，例如 No_Modifiers Numpad3。",
-        default="No_Modifiers Numpad3",
+        description="按键格式: Modifier KeyName；留空时仅通过变量或切换面板控制。",
+        default="",
         update=update_all_properties,
     )
 
@@ -239,7 +239,12 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
         layout.prop(self, "custom_var_name", text="变量名")
         if not str(self.custom_var_name or "").strip() and str(self.assigned_variable_name or "").strip():
             layout.label(text=f"预分配变量: ${self.assigned_variable_name}", icon="INFO")
-        layout.prop(self, "hotkey", text="按键")
+        row = layout.row(align=True)
+        row.prop(self, "hotkey", text="按键")
+        op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+        op.node_name = self.name
+        op.node_tree_name = self.id_data.name
+        op.target_prop = "hotkey"
 
         layout.separator()
         layout.label(text="选项数量:")

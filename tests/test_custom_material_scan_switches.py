@@ -21,7 +21,7 @@ Blender 语义（另一条回归线，实测见 .dbg/cg_probe_fields.py，Blende
 CollectionProperty 移除项后，残留的 Python 引用既不抛 ``ReferenceError`` 也不保留
 数据，而是**静默读回属性默认值**：
 
-    state_count -> 2, bindings -> "", comment -> "", key -> "N",
+    state_count -> 2, bindings -> "", comment -> "", key -> "",
     enabled -> True, object_name -> ""
     （若期间 add 了新项，旧引用还会"附身"到新项内存上）
 
@@ -482,6 +482,26 @@ class CustomMaterialScanSwitchesTests(unittest.TestCase):
             2,
         )
 
+    def test_empty_key_does_not_generate_keyswap_section(self):
+        node = _real_node()
+        _seed_legacy(
+            node,
+            [
+                dict(
+                    object_name=FACE_NAME,
+                    variable="$swapkey150",
+                    material_lists=[["DiffuseMap_颜", "DiffuseMap_颜.001"]],
+                    key="",
+                    comment="脸部切换",
+                )
+            ],
+        )
+
+        sections = {}
+        node.define_swapkeys_in_sections(sections, {"$swapkey150"})
+
+        self.assertNotIn("[KeySwap_Diffuse_swapkey150]", sections)
+
     def test_rescan_normalizes_shared_variable_metadata(self):
         """回归：重扫后同一变量的 备注/按键 必须归一，不能有一半停在 N。"""
         node = _FakeNode()
@@ -498,7 +518,7 @@ class CustomMaterialScanSwitchesTests(unittest.TestCase):
                 self.assertEqual(str(group.comment), "身体涂鸦", group.object_name)
             else:
                 # 归一按变量进行：脸部变量不受身体变量影响
-                self.assertEqual(str(group.key), "N", group.object_name)
+                self.assertEqual(str(group.key), "", group.object_name)
                 self.assertEqual(str(group.comment), "", group.object_name)
 
 

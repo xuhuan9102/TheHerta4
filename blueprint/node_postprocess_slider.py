@@ -45,13 +45,13 @@ class SSMTNode_PostProcess_SliderPanel(SSMTNode_PostProcess_Base):
 
     key_help: bpy.props.StringProperty(
         name="显示/隐藏面板",
-        default="home",
+        default="right",
         description="显示/隐藏滑块面板的快捷键 (如: home, f1, insert 等)"
     )
 
     key_reset: bpy.props.StringProperty(
         name="重置位置",
-        default="ctrl home",
+        default="ctrl right",
         description="重置滑块面板位置的快捷键"
     )
 
@@ -252,11 +252,11 @@ class SSMTNode_PostProcess_SliderPanel(SSMTNode_PostProcess_Base):
         content.extend([
             "\n; 功能区 ---------------------------------------------------------",
             "\n; --- 统一快捷键配置 ---",
-            f"\n[KeyHelp]", "condition = $active == 1", f"key = {self.key_help}", "type = cycle", "$help = 0,1",
-            f"\n[KeyResetPosition]", "condition = $help == 1 && $active == 1", f"key = {self.key_reset}", "type = cycle", *reset_lines,
-            f"\n[KeyZoomIn]", "condition = $help == 1 && $active == 1", f"key = {self.key_zoom_in}", "type = press", "run = CommandListZoomIn",
-            f"\n[KeyZoomOut]", "condition = $help == 1 && $active == 1", f"key = {self.key_zoom_out}", "type = press", "run = CommandListZoomOut",
-            "\n; 鼠标拖拽检测", "[KeyMouseDrag]", "condition = $help == 1 && $active == 1", "key = VK_LBUTTON", "type = hold", "$mouse_clicked = 1",
+            f"\n[Key面板-panel]", "condition = $active == 1", f"key = {self.key_help}", "type = cycle", "$help = 0,1",
+            f"\n[Key重置位置-ResetPosition]", "condition = $help == 1 && $active == 1", f"key = {self.key_reset}", "type = cycle", *reset_lines,
+            f"\n[Key放大-ZoomIn]", "condition = $help == 1 && $active == 1", f"key = {self.key_zoom_in}", "type = press", "run = CommandListZoomIn",
+            f"\n[Key缩小-ZoomOut]", "condition = $help == 1 && $active == 1", f"key = {self.key_zoom_out}", "type = press", "run = CommandListZoomOut",
+            "\n; 鼠标拖拽检测", "[Key鼠标拖动-MouseDrag]", "condition = $help == 1 && $active == 1", "key = VK_LBUTTON", "type = hold", "$mouse_clicked = 1",
             "\n; --- 指令集 ---", "[CommandListZoomIn]", *zoom_in_lines, "\n[CommandListZoomOut]", *zoom_out_lines,
         ])
 
