@@ -614,7 +614,11 @@ class ExportZZMI(ExportUnity):
             # 接缝焊接由蓝图里的「接缝焊接」节点直接触发；节点不存在或没有分组时不焊接。
             self.weld_by_group_enabled = True
             super().__init__(blueprint_model)
-            self._native_flow_height = prepare_native_flow(self.drawib_model_list, reproject_uv2)
+            # 属性缺失就跳过：测试桩会把父类 __init__ 换成 no-op，产品代码要容忍。
+            drawib_models = getattr(self, "drawib_model_list", ())
+            self._native_flow_height = (
+                prepare_native_flow(drawib_models, reproject_uv2) if drawib_models else None
+            )
 
             self.cross_ib_info_dict = blueprint_model.cross_ib_info_dict
             self.cross_ib_method_dict = blueprint_model.cross_ib_method_dict
