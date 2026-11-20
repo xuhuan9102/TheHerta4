@@ -39,6 +39,8 @@ tests/_verify_*.log
 # 评审工作产物整目录不入库（报告 md / 补丁 / 归档 zip / 验证日志 / 临时脚本，
 # 全仓零引用且从未入库；需要把某一份报告留档时用 git add -f 单独强加）
 review-reports/
+# Local PR review worktrees are separate checkouts.
+/_pr-review/
 
 # ZZMI / FrameAnalysis 排查用的临时脚本与日志（本地诊断产物，全仓零引用）
 zzz_diag/
