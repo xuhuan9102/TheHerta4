@@ -58,7 +58,7 @@ float4 sampleCollapsedSide(float2 uv)
     return sampleColor;
 }
 
-float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0, bool front : SV_IsFrontFace,
+float4 main(float2 uv : TEXCOORD0, float4 position : SV_Position, bool front : SV_IsFrontFace,
             out float2 coverage : SV_Target1) : SV_Target0
 {
     float4 parameters = IniParams[224];
