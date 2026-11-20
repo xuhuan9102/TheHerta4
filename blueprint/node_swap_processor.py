@@ -107,7 +107,7 @@ class ObjectSwapChainProcessor:
             config = SwapKeyConfig(
                 node_id=node.name,
                 index=idx,
-                hotkey=getattr(node, "hotkey", "No_Modifiers Numpad3"),
+                hotkey=str(getattr(node, "hotkey", "") or "").strip(),
                 swap_type=getattr(node, "swap_type", "cycle"),
                 option_count=getattr(node, "input_slot_count", 2),
                 comment=getattr(node, "comment", ""),
@@ -116,17 +116,18 @@ class ObjectSwapChainProcessor:
             )
 
             option_sequence = ",".join(str(i) for i in range(config.option_count))
-            result["KeySwap"].extend(
-                [
-                    f"[{config.get_key_swap_section_name()}]",
-                    *([f"; {config.comment}"] if config.comment else []),
-                    "condition = $active0 == 1",
-                    f"key = {config.hotkey}",
-                    f"type = {config.swap_type}",
-                    f"{config.get_swap_key_name()} = {option_sequence},",
-                    "",
-                ]
-            )
+            if config.hotkey:
+                result["KeySwap"].extend(
+                    [
+                        f"[{config.get_key_swap_section_name()}]",
+                        *([f"; {config.comment}"] if config.comment else []),
+                        "condition = $active0 == 1",
+                        f"key = {config.hotkey}",
+                        f"type = {config.swap_type}",
+                        f"{config.get_swap_key_name()} = {option_sequence},",
+                        "",
+                    ]
+                )
             result["Constants"].append(f"{config.get_swap_key_name()} = 0")
             result["Present"].append("post $active0 = 0")
 

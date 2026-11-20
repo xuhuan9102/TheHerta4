@@ -433,8 +433,8 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
 
     create_cumulative_backup: bpy.props.BoolProperty(name="创建累积备份", default=True)
 
-    help_key: bpy.props.StringProperty(name="显示/隐藏面板", default="home")
-    reset_key: bpy.props.StringProperty(name="重置位置", default="ctrl home")
+    help_key: bpy.props.StringProperty(name="显示/隐藏面板", default="right")
+    reset_key: bpy.props.StringProperty(name="重置位置", default="ctrl right")
     zoom_in_key: bpy.props.StringProperty(name="放大", default="up")
     zoom_out_key: bpy.props.StringProperty(name="缩小", default="down")
     drag_key: bpy.props.StringProperty(name="拖拽键", default="VK_LBUTTON")
@@ -648,6 +648,9 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         """判断该段落是否属于本物体切换面板实例（按命名空间段落名识别）。"""
         s = sec_name.strip()
         fixed = [
+            f"[Key面板-panel_{ns}]", f"[Key重置位置-ResetPosition_{ns}]",
+            f"[Key放大-ZoomIn_{ns}]", f"[Key缩小-ZoomOut_{ns}]",
+            f"[Key鼠标拖动-MouseDrag_{ns}]",
             f"[KeyHelp_{ns}]", f"[KeyResetPosition_{ns}]", f"[KeyZoomIn_{ns}]",
             f"[KeyZoomOut_{ns}]", f"[KeyMouseDrag_{ns}]",
             f"[CommandListZoomIn_{ns}]", f"[CommandListZoomOut_{ns}]",
@@ -832,11 +835,18 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
                 ("drag_key", "拖拽键"),
             ):
                 row = col.row(align=True)
-                picker = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+                split = row.split(factor=0.78, align=True)
+                prop_col = split.column(align=True)
+                picker_col = split.column(align=True)
+                prop_split = prop_col.split(factor=0.38, align=True)
+                label_col = prop_split.column(align=True)
+                value_col = prop_split.column(align=True)
+                label_col.label(text=f"{label}:")
+                value_col.prop(self, prop_name, text="")
+                picker = picker_col.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
                 picker.node_name = self.name
                 picker.node_tree_name = self.id_data.name
                 picker.target_prop = prop_name
-                row.prop(self, prop_name, text=label)
         col.prop(self, "gui_only", text="GUI全局模式")
 
         box = col_left.box()
@@ -2584,27 +2594,27 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         zoom_in_lines = [f"${ns}_zoom0 = ${ns}_zoom0 + 0.05"]
         zoom_out_lines = [f"${ns}_zoom0 = ${ns}_zoom0 - 0.05"]
 
-        other_sections[f"[KeyHelp_{ns}]"] = [
+        other_sections[f"[Key面板-panel_{ns}]"] = [
             f"condition = ${ns}_ui_active == 1",
             f"; @@{self.PANEL_TAG}:help_key@@", f"key = {help_key}",
             "type = cycle", f"${ns}_help = 0,1"
         ]
-        other_sections[f"[KeyResetPosition_{ns}]"] = [
+        other_sections[f"[Key重置位置-ResetPosition_{ns}]"] = [
             f"condition = ${ns}_help == 1 && ${ns}_ui_active == 1",
             f"; @@{self.PANEL_TAG}:reset_key@@", f"key = {reset_key}",
             "type = cycle",
         ] + reset_lines
-        other_sections[f"[KeyZoomIn_{ns}]"] = [
+        other_sections[f"[Key放大-ZoomIn_{ns}]"] = [
             f"condition = ${ns}_help == 1 && ${ns}_ui_active == 1",
             f"; @@{self.PANEL_TAG}:zoom_in_key@@", f"key = {zoom_in_key}",
             "type = press", f"run = CommandListZoomIn_{ns}"
         ]
-        other_sections[f"[KeyZoomOut_{ns}]"] = [
+        other_sections[f"[Key缩小-ZoomOut_{ns}]"] = [
             f"condition = ${ns}_help == 1 && ${ns}_ui_active == 1",
             f"; @@{self.PANEL_TAG}:zoom_out_key@@", f"key = {zoom_out_key}",
             "type = press", f"run = CommandListZoomOut_{ns}"
         ]
-        other_sections[f"[KeyMouseDrag_{ns}]"] = [
+        other_sections[f"[Key鼠标拖动-MouseDrag_{ns}]"] = [
             f"condition = ${ns}_help == 1 && ${ns}_ui_active == 1",
             f"; @@{self.PANEL_TAG}:drag_key@@", f"key = {drag_key}",
             "type = hold", f"${ns}_mouse_clicked = 1"
@@ -2848,8 +2858,8 @@ class SSMTNode_PostProcess_CombinedPanel(SSMTNode_PostProcess_Base):
     slider_create_cumulative_backup: bpy.props.BoolProperty(name="创建累积备份", default=True)
     slider_weight_min: bpy.props.FloatProperty(name="滑块下限", default=0.0, min=-4.0, max=4.0, precision=3)
     slider_weight_max: bpy.props.FloatProperty(name="滑块上限", default=1.0, min=-4.0, max=4.0, precision=3)
-    slider_help_key: bpy.props.StringProperty(name="显示/隐藏面板", default="home")
-    slider_reset_key: bpy.props.StringProperty(name="重置位置", default="ctrl home")
+    slider_help_key: bpy.props.StringProperty(name="显示/隐藏面板", default="right")
+    slider_reset_key: bpy.props.StringProperty(name="重置位置", default="ctrl right")
     slider_zoom_in_key: bpy.props.StringProperty(name="放大", default="up")
     slider_zoom_out_key: bpy.props.StringProperty(name="缩小", default="down")
     slider_drag_key: bpy.props.StringProperty(name="拖拽键", default="VK_LBUTTON")
@@ -3105,11 +3115,18 @@ class SSMTNode_PostProcess_CombinedPanel(SSMTNode_PostProcess_Base):
             ("drag_key", "拖拽键"),
         ):
             row = hotkey_col.row(align=True)
-            picker = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
+            split = row.split(factor=0.78, align=True)
+            prop_col = split.column(align=True)
+            picker_col = split.column(align=True)
+            prop_split = prop_col.split(factor=0.38, align=True)
+            label_col = prop_split.column(align=True)
+            value_col = prop_split.column(align=True)
+            label_col.label(text=f"{label}:")
+            value_col.prop(self, prop_name, text="")
+            picker = picker_col.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
             picker.node_name = self.name
             picker.node_tree_name = self.id_data.name
             picker.target_prop = prop_name
-            row.prop(self, prop_name, text=label)
 
         section = left.box()
         section.label(text="角色检测设置", icon='VIEWZOOM')
