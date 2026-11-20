@@ -693,13 +693,15 @@ def _build_skip_block(entries, newline="\n"):
     lines = [SKIP_BLOCK_MARKER]
     for hash_val, index_count, first_index in normalized:
         if index_count is None or first_index is None:
-            lines.append(f"; skip {hash_val}")
             lines.append(f"[TextureOverride_IB_{hash_val}]")
+            # 注释放在段头之后：放在段头之前会落在上一段段尾，被条件节点的
+            # neutral 合并吸进门控 if 体内（注释指向的还是下一段）。
+            lines.append(f"; skip {hash_val}")
             lines.append(f"hash = {hash_val}")
             lines.append("handling = skip")
         else:
-            lines.append(f"; skip {hash_val}_{index_count}_{first_index}")
             lines.append(f"[TextureOverride_IB_{hash_val}_{index_count}_{first_index}]")
+            lines.append(f"; skip {hash_val}_{index_count}_{first_index}")
             lines.append(f"hash = {hash_val}")
             lines.append(f"match_first_index = {first_index}")
             lines.append(f"match_index_count = {index_count}")

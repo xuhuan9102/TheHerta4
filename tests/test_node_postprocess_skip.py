@@ -397,8 +397,8 @@ class SkipBlockTests(unittest.TestCase):
         lines = _stripped_lines(combined)
         expected = [
             "; --- AUTO-APPENDED SKIP BLOCK ---",
-            "; skip 7fbbcf0d_1260_9402",
             "[TextureOverride_IB_7fbbcf0d_1260_9402]",
+            "; skip 7fbbcf0d_1260_9402",
             "hash = 7fbbcf0d",
             "match_first_index = 9402",
             "match_index_count = 1260",
@@ -410,8 +410,8 @@ class SkipBlockTests(unittest.TestCase):
         self.assertEqual(
             [
                 "; --- AUTO-APPENDED SKIP BLOCK ---",
-                "; skip 7fbbcf0d",
                 "[TextureOverride_IB_7fbbcf0d]",
+                "; skip 7fbbcf0d",
                 "hash = 7fbbcf0d",
                 "handling = skip",
             ],
