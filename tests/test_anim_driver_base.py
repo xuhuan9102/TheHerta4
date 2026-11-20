@@ -472,6 +472,62 @@ class AnimDriverBaseTests(unittest.TestCase):
 
         self.assertIn("global persist $seq_paused = 1", ini)
 
+    def test_shapekey_sequence_chain_handoff_and_balanced_conditionals(self):
+        node1 = shapekey_seq_module.SSMTNode_AnimDriver_ShapeKeySequence()
+        node1.name = "Seq1"
+        node1.auto_index = 1
+        node1.id_data = types.SimpleNamespace(nodes=[node1], links=[])
+        node1.default_paused = True
+        node1.custom_paused_var = "$seq_paused1"
+        node1.driven_variable = "$seq_drv1"
+        node1.loop_playback = True
+        node1.shapekey_items = [
+            types.SimpleNamespace(name="Key1", variable="$Freq_Key1", frame_values_csv="0.0,0.5,1.0"),
+        ]
+        node1._find_runtime_node = lambda: types.SimpleNamespace(fps=30, playback_rate=1)
+
+        node2 = shapekey_seq_module.SSMTNode_AnimDriver_ShapeKeySequence()
+        node2.name = "Seq2"
+        node2.auto_index = 2
+        node2.id_data = types.SimpleNamespace(nodes=[node2], links=[])
+        node2.default_paused = False
+        node2.custom_paused_var = "$seq_paused2"
+        node2.driven_variable = "$seq_drv2"
+        node2.loop_playback = True
+        node2.pingpong_playback = True
+        node2.shapekey_items = [
+            types.SimpleNamespace(name="Key2", variable="$Freq_Key2", frame_values_csv="0.2,0.8,0.4"),
+        ]
+        node2._find_runtime_node = lambda: types.SimpleNamespace(fps=30, playback_rate=1)
+
+        # 模拟链条：node1 -> node2
+        node1._get_next_node_in_chain = lambda: node2
+        node1._get_all_next_paused_vars = lambda: ["$seq_paused2"]
+        node2._get_next_node_in_chain = lambda: None
+        node2._get_all_next_paused_vars = lambda: []
+
+        ini1 = node1.generate_ini_segment()
+        # 下游有节点时：上游节点交接下游，暂停自己并激活下游
+        self.assertIn("$seq_paused1 = 0", ini1)
+        self.assertIn("$seq_paused2 = 1", ini1)
+        _assert_balanced_conditionals(self, ini1)
+
+        ini2 = node2.generate_ini_segment()
+        # 下游无节点且开启往返：有方向变量并进行往返循环
+        self.assertIn("global persist $direction2 = 1", ini2)
+        self.assertIn("if $direction2 == 1", ini2)
+        _assert_balanced_conditionals(self, ini2)
+
+    def test_shapekey_sequence_target_objects_names_and_fallback(self):
+        node = shapekey_seq_module.SSMTNode_AnimDriver_ShapeKeySequence()
+        node.target_object = "LegacyMesh"
+        node.target_objects = [
+            types.SimpleNamespace(name="HeadMesh"),
+            types.SimpleNamespace(name="BodyMesh"),
+        ]
+        names = node.get_target_object_names()
+        self.assertEqual(names, ["HeadMesh", "BodyMesh", "LegacyMesh"])
+
     def test_draw_continuous_controls_does_not_allocate_or_write_scene_state(self):
         base_cls = anim_driver_base.SSMTNode_AnimDriver_Base
         node = base_cls()
