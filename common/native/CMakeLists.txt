@@ -18,11 +18,14 @@ endforeach()
 add_subdirectory(dds_png)
 add_subdirectory(export_geometry)
 add_subdirectory(shapekey)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/skeleton_fusion/CMakeLists.txt")
+  add_subdirectory(skeleton_fusion)
+endif()
 
 option(
   HERTA_BUILD_BC7_ENCODER
-  "Build the BC7 encoder and PNG analysis DLLs; requires pinned Basis Universal sources"
-  OFF
+  "Build the BC7 encoder and PNG analysis DLLs from the vendored Basis transcoder"
+  ON
 )
 if(HERTA_BUILD_BC7_ENCODER)
   add_subdirectory(bc7f)

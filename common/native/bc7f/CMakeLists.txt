@@ -3,7 +3,12 @@ project(herta_texture_encoder LANGUAGES CXX)
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "The prebuilt encoder currently targets MSVC Windows x64")
 endif()
-set(BASIS_UNIVERSAL_ROOT "" CACHE PATH "Basis Universal at ee771a7f913a3233a252eb6d281b4446f6a3c9f5")
+set(
+  BASIS_UNIVERSAL_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/vendor/basis_universal"
+  CACHE PATH
+  "Basis Universal at ee771a7f913a3233a252eb6d281b4446f6a3c9f5"
+)
 if(NOT EXISTS "${BASIS_UNIVERSAL_ROOT}/transcoder/basisu_transcoder.cpp")
   message(FATAL_ERROR "Set BASIS_UNIVERSAL_ROOT to the pinned source checkout")
 endif()

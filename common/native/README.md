@@ -41,20 +41,19 @@ cmake --build build/native --config Release
 ```
 
 This builds the DDS decoder, geometry hash/packing, export geometry,
-DDS-to-PNG and ShapeKey DLLs. To build BC7 texture encoding and PNG analysis,
-supply a Basis Universal checkout pinned to
-`ee771a7f913a3233a252eb6d281b4446f6a3c9f5`:
+DDS-to-PNG, ShapeKey, BC7 texture encoding and PNG analysis DLLs. The required
+Basis Universal transcoder snapshot is vendored at commit
+`ee771a7f913a3233a252eb6d281b4446f6a3c9f5`.
+When the ZZMI skeleton-fusion module from PR #87 is present, its CMake target is
+included automatically.
 
 ```powershell
-cmake -S common/native -B build/native -A x64 `
-  -DHERTA_BUILD_BC7_ENCODER=ON `
-  -DBASIS_UNIVERSAL_ROOT=<basis_universal>
+cmake -S common/native -B build/native -A x64
 cmake --build build/native --config Release
 ```
 
 Keep `/fp:precise` and the x64 SSE2 baseline. The BC7 and PNG analysis sources
-are already in `common/native/bc7f`; only their pinned third-party Basis
-dependency remains external.
+and pinned Basis dependency are in `common/native/bc7f`.
 
 ## DDS to PNG
 
