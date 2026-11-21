@@ -571,12 +571,12 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
     def test_other_logics_never_emit_the_ttlmap_channel(self):
         """TTLMap 通道只有 HI3FX 有：其它逻辑的产出必须与改动前完全一致。
 
-        用最敏感的探针——"只挂 TTLMap_ 材质的物体"：它在 RabbitFX / NTEMIFX 档案下
+        用最敏感的探针——"只挂 TTLMap_ 材质的物体"：它在 NTEMIFX 等档案下
         没有对应通道，改动前不参与物体匹配，现在也必须不参与（段落原样保留）。
-        ZZMI 走的是它自己的 ``CommandList\\TTL\\Draw`` 绘制重建协议（既有行为），
-        这里只断言它不会沾上 HI3FX 的命名空间。
+        ZZMI / EFMI 走的是它们自己的 TTL 协议（ZZMI 走 TTLib，EFMI 走 EFMITTL），
+        这里只断言其它普通逻辑不会沾上 HI3FX 的命名空间。
         """
-        for logic in ("GIMI", "EFMI", "NTEMI", "HTMI"):
+        for logic in ("GIMI", "NTEMI", "HTMI"):
             with self.subTest(logic=logic):
                 _fake_bpy.data.objects.clear()
                 node_postprocess_material.clear_name_mapping_cache()
@@ -2913,20 +2913,19 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(second.count(r"CommandList\EFMITTL\Draw"), 1)
 
-    def test_efmi_ttl_is_skipped_when_library_missing(self):
-        """没装 EFMITTL 就保留原绘制并出声——不能把部件画没。"""
-        log_module = sys.modules[f"{PKG}.utils.log_utils"]
+    def test_efmi_ttl_generates_without_library_file_present(self):
+        """无需检测 EFMITTL 库文件是否存在，直接生成 TTL 绘制约定。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             sections, section_name = self._make_efmi_ttl_fixture(
                 temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE")
-            with mock.patch.object(log_module.LOG, "warning") as warning_mock:
-                node = self._run_efmi_ttl(sections, section_name)
+            node = self._run_efmi_ttl(sections, section_name)
 
             body = "\n".join(str(line) for line in sections[section_name])
-            self.assertIn("drawindexedinstanced = 12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", body)
-            self.assertNotIn("EFMITTL", body)
-            self.assertTrue(warning_mock.called)
-            self.assertIn("EFMITTL", str(warning_mock.call_args))
+            self.assertNotIn("drawindexedinstanced", body)
+            self.assertIn(r"run = CommandList\EFMITTL\Draw", body)
+            self.assertIn(r"$\EFMITTL\count = 12", body)
+            self.assertIn(r"$\EFMITTL\first = 34", body)
+            self.assertIn(r"Resource\EFMITTL\Mask = ref Resource_TTLMap_Body", body)
             node._process_ttl_sections.assert_not_called()
 
     def test_efmi_ttl_draw_args_only_accepts_single_instance_draws(self):

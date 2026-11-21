@@ -2612,20 +2612,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
     @staticmethod
     def _efmi_ttl_library_present():
-        """EFMITTL 库是否躺在当前游戏的 Mods 目录里。
-
-        没装时**不能**改写绘制：``run = CommandList\\EFMITTL\\Draw`` 找不到命令列表，
-        这一笔就什么都不画，部件直接消失——比「继续按原来不透明画」糟得多。
-        所以这里只做「装没装」的判断，判断为没装就原样保留绘制并在日志里点名要装什么。
-        """
-        try:
-            mods_folder = GlobalConfig.path_mods_folder()
-        except Exception:
-            return False
-        mods_folder = str(mods_folder or "").strip()
-        if not mods_folder:
-            return False
-        return os.path.isfile(os.path.join(mods_folder, _EFMITTL_LIBRARY_FILE))
+        """历史兼容保留：不再检测库文件存在，直接放行。"""
+        return True
 
     @classmethod
     def _efmi_ttl_draw_args(cls, draw_args):
@@ -2681,13 +2669,6 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         from ..utils.log_utils import LOG as _LOG
         if any(_EFMITTL_DRAW_LINE.casefold() in str(line).casefold() for line in lines):
             # 这个段已经交给库了：重复导出时别把参数行叠第二遍。
-            return next_swap_key_num
-        if not self._efmi_ttl_library_present():
-            _LOG.warning(
-                "      EFMI TTL: 未找到 EFMITTL 库（"
-                + os.path.join("Mods", _EFMITTL_LIBRARY_FILE)
-                + "），本次保留原绘制；装好库再导出即可生成 TTL"
-            )
             return next_swap_key_num
 
         mesh_lines_info = [(i, self.extract_mesh_name(line))
