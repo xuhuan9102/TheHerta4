@@ -113,9 +113,7 @@ _FX_RESET_PARAM_LINES = tuple(
 )
 _FX_RUN_LINES = tuple(profile.run_line for profile in fx_namespace.ALL_PROFILES)
 
-#: 同一次导出里多个切换组填同一个按键时的顺延候选。
-#: 实机现象：衣服（$swapkey150）与身体（$swapkey151）都填 ``N``，按一次 N 两个组
-#: 同时 cycle，衣服和身体一起变、档位互相错位。导出期把后写入的组顺延到这里。
+#: 历史顺延候选按键（保留供外部兼容引用）。
 KEYSWAP_FALLBACK_KEYS = ("M", "B", "V", "K", "L", "J", "H", "G", "T", "Y")
 
 
@@ -136,20 +134,19 @@ def used_keyswap_keys(sections, skip_section=""):
 
 
 def resolve_keyswap_key(sections, section_name, requested_key, log_prefix=""):
-    """多个切换组共用同一个键时顺延到候选键（不改用户节点里的按键配置）。"""
+    """解析 KeySwap 的快捷键。
+
+    支持多个不同切换组共用同一个快捷键（例如同一个按键同时联动控制衣服、身体等多个不同部件的贴图切换）。
+    保持用户在节点中配置的原始快捷键，不再自动强制顺延改写。
+    """
     key = str(requested_key or "").strip()
     if not key:
         return key
     used = used_keyswap_keys(sections, skip_section=section_name)
-    if key.casefold() not in used:
-        return key
-    for candidate in KEYSWAP_FALLBACK_KEYS:
-        if candidate.casefold() not in used:
-            print(
-                f"[{log_prefix or 'KeySwap'}] 切换按键冲突：{section_name} 的 key={key} "
-                f"已被同表其它切换组占用，本次导出改用 {candidate}"
-            )
-            return candidate
+    if key.casefold() in used:
+        print(
+            f"[{log_prefix or 'KeySwap'}] 多个切换组共用快捷键：{section_name} 与同表其它切换组共用 key={key}（支持单按键联动切换）"
+        )
     return key
 
 

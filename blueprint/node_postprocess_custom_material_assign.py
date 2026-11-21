@@ -2287,8 +2287,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         lines = []
         if spec["comment"]:
             lines.append(f"; {spec['comment']}")
-        # 多个切换组共用同一个键时顺延（衣服/身体都填 N → 身体改 M），避免一次按键
-        # 同时 cycle 两个组。只影响本次导出的 ini，不改用户节点里的按键配置。
+        # 多个切换组支持共用同一个键（支持同一个按键同时联动控制多个不同物体的切换组）。
         effective_key = resolve_keyswap_key(
             sections, section_name, spec["key"], log_prefix="材质转资源pro"
         )

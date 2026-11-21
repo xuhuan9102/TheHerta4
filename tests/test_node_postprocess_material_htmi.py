@@ -3674,3 +3674,20 @@ class TtlMutualExclusionTests(HTMIMaterialPostProcessTests):
             dumped = _dump_sections(sections)
             self.assertNotIn(f"Resource{self.BS}TTL{self.BS}TransparencyTex", dumped)
             self.assertEqual(node.ttl_skipped_reason, "transparency_node_present")
+
+    def test_resolve_keyswap_key_preserves_same_key_for_multiple_groups(self):
+        """多个切换组共用同一个按键时保持原键（支持单按键联动切换）。"""
+        resolve_keyswap_key = node_postprocess_material.resolve_keyswap_key
+        used_keyswap_keys = node_postprocess_material.used_keyswap_keys
+        sections = {
+            "[KeySwap_Diffuse_swapkey150]": [
+                "condition = $active0 == 1",
+                "key = N",
+                "type = cycle",
+                "$swapkey150 = 0,1",
+            ]
+        }
+        self.assertIn("n", used_keyswap_keys(sections))
+        # 第二个组也填 N 时，不再顺延到 M，而是保留 N
+        key = resolve_keyswap_key(sections, "[KeySwap_Diffuse_swapkey151]", "N")
+        self.assertEqual("N", key)
