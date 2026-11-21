@@ -1633,7 +1633,36 @@ class BluePrintModel:
             ordered[str(source_key)] = cls._format_sorted_string_list((mapping or {}).get(source_key))
         return ordered
 
+    def _execute_lod_postprocess_nodes(self):
+        pending = getattr(self, "_zzmi_lod_exports", None)
+        if not pending:
+            return False
+        from .export_helper import BlueprintExportHelper
+        from ..common.texture_export_plan import TextureExportPlan
+        from ..common.zzmi_lod_export import publish_lod_exports
+        from ..ui.universal.zzmi import _zzmi_lod_output
+
+        staging, exports, main_ini = pending
+        self._zzmi_lod_exports = None
+        previous_model = BlueprintExportHelper.get_current_blueprint_model()
+        previous_exporter = BlueprintExportHelper.get_current_exporter()
+        try:
+            for _, model, exporter, folder in exports:
+                with _zzmi_lod_output(folder):
+                    BlueprintExportHelper.set_current_blueprint_model(model)
+                    BlueprintExportHelper.set_current_exporter(exporter)
+                    model.execute_postprocess_nodes(folder)
+            TextureExportPlan.finalize(staging.name)
+            publish_lod_exports(exports, main_ini)
+        finally:
+            BlueprintExportHelper.set_current_blueprint_model(previous_model)
+            BlueprintExportHelper.set_current_exporter(previous_exporter)
+            staging.cleanup()
+        return True
+
     def execute_postprocess_nodes(self, mod_export_path: str):
+        if self._execute_lod_postprocess_nodes():
+            return
         if not self.postprocess_nodes:
             return
         for pp_node in self.postprocess_nodes:

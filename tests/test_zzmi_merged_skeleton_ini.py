@@ -1978,7 +1978,7 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
             body,
             [
                 "vs-t0 = ResourceZZMergedSkeleton_G0_s1",
-                "so0 = ref ResourceZZRedirectSO_G0_s1",
+                "so0 = ref ResourceZZRedirectSO_G0_s1->Region(120, 185720)",
                 "vb2 = Resourceb20f90eaBlend",
                 "vb0 = Resourceb20f90eaPosition",
                 "draw = 4643, 0",

@@ -251,6 +251,9 @@ def install_progress_bridge(stage_path: str) -> bool:
     if callable(original_postprocess):
         def _execute_postprocess_nodes(self, mod_export_path, _model_cls=BluePrintModel, _log=bridge_log):
             # 与 model.py::execute_postprocess_nodes 原逻辑一致，只在节点循环里加上报
+            split_postprocess = getattr(self, "_execute_lod_postprocess_nodes", None)
+            if split_postprocess and split_postprocess():
+                return
             postprocess_nodes = list(getattr(self, "postprocess_nodes", None) or [])
             if not postprocess_nodes:
                 return

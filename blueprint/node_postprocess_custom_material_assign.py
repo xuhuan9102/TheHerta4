@@ -2758,10 +2758,20 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
             if nested_mesh_found:
                 continue
 
+            depths = ini_scope.line_depths(lines)
+            # A same-depth section marker starts the tail that restores draw state.
+            tail = next(
+                (
+                    index for index in range(block_start + 1, block_end)
+                    if depths[index] == depths[block_start] + 1
+                    and ini_scope.classify_line(lines[index]) == "mark"
+                ),
+                block_end,
+            )
             ranges = self._find_flat_region_target_ranges(
                 lines,
                 block_start + 1,
-                block_end,
+                tail,
                 units=units,
             )
             if not ranges:
@@ -2773,7 +2783,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 moved_segments.insert(0, lines[start:end])
                 del lines[start:end]
                 removed_count += end - start
-            insert_at = block_end - removed_count
+            insert_at = tail - removed_count
             for segment in moved_segments:
                 lines[insert_at:insert_at] = segment
                 insert_at += len(segment)
