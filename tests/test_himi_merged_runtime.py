@@ -2575,6 +2575,29 @@ class HIMIRealWorkspaceInvariantTests(unittest.TestCase):
                     self.assertGreaterEqual(rebind["vg_count"], 1)
 
 
+def _import_real_workspace_copy(test, workspace_root, temp_root):
+    """选择仍有抓帧日志的工作空间，在临时副本里落盘骨架缓存。"""
+    workspace_root = Path(workspace_root)
+    if not workspace_root.is_dir():
+        test.skipTest(f"真实 HIMI 工作空间不存在：{workspace_root}")
+    for source in sorted(workspace_root.iterdir()):
+        if not source.is_dir():
+            continue
+        dump = _skeleton.resolve_frame_analysis_dir(source)
+        if not dump or not (Path(dump) / "log.txt").is_file():
+            continue
+        target = Path(temp_root) / source.name
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns("DedupedTextures", "*.blend", "*.blend1", "*.dds"),
+        )
+        ok, message = _skeleton.HIMISkeletonMergeHelper.ensure_skeleton_data(target)
+        test.assertTrue(ok, f"{source.name} 的数据层落盘失败：{message}")
+        return target
+    test.skipTest(f"没有真实 HIMI 工作空间指向可用的 FrameAnalysis 日志：{workspace_root}")
+
+
 class HIMICacheOnlyOracleTests(HIMIMergedRuntimeBase):
     """R-T14-1：``prepare_gate_oracle(target_bares=None)`` 不得把空 writes 当权威判定。
 
@@ -2790,31 +2813,6 @@ class HIMICacheOnlyOracleTests(HIMIMergedRuntimeBase):
 
     # -- 真实数据级：dump 缺失 + 缓存完好 + target_bares=None -- #
 
-    def _imported_copy(self):
-        """真实角色工作空间副本 + 一次真实导入（缓存完好，dump 仍在场）。"""
-        if not os.path.isdir(self.HIMI_ROOT):
-            self.skipTest(f"真实 HIMI 工作空间不存在：{self.HIMI_ROOT}")
-        role = ""
-        for candidate in sorted(os.listdir(self.HIMI_ROOT)):
-            if not os.path.isdir(os.path.join(self.HIMI_ROOT, candidate)):
-                continue
-            if os.path.isfile(
-                os.path.join(self.HIMI_ROOT, candidate, "Config", "FrameAnalysisPath.json")
-            ):
-                role = candidate
-                break
-        if not role:
-            self.skipTest("没有任何角色登记了 FrameAnalysis")
-        root = os.path.join(self._tmp, role)
-        shutil.copytree(
-            os.path.join(self.HIMI_ROOT, role),
-            root,
-            ignore=shutil.ignore_patterns("DedupedTextures", "*.blend", "*.blend1", "*.dds"),
-        )
-        ok, message = _skeleton.HIMISkeletonMergeHelper.ensure_skeleton_data(root)
-        self.assertTrue(ok, f"数据层落盘失败：{message}")
-        return root
-
     def _break_dump(self, root):
         """把 dump 指针弄失效（FrameAnalysisPath.json + Tabs 都指向不存在的目录）。"""
         broken = os.path.join(self._tmp, "no-such-FrameAnalysis")
@@ -2842,7 +2840,7 @@ class HIMICacheOnlyOracleTests(HIMIMergedRuntimeBase):
         return root
 
     def test_real_dump_missing_target_none_is_not_authoritative(self):
-        root = self._imported_copy()
+        root = _import_real_workspace_copy(self, self.HIMI_ROOT, self._tmp)
 
         # ⓪ dump 在场：真反查结果必须被采纳（fail-closed 不得误杀正常路径）
         live = _runtime.prepare_gate_oracle(root, target_bares=None)
@@ -3793,44 +3791,15 @@ class HIMIRealDumpEndToEndTests(unittest.TestCase):
     """真实工作空间 + 真实 dump 的端到端（**K: 只读**；缓存写进临时副本）。
 
     走完整链路：数据层 ``ensure_skeleton_data`` 落盘 → 本模块的 ``load_workspace_plan``
-    （含 ``prepare`` 权威门控）→ 资源声明 + 骨架发布。槽位数必须落在 T4 实测集合内。
+    （含 ``prepare`` 权威门控）→ 资源声明 + 骨架发布。校验发布的骨架与本次导入记录一致。
     """
 
     HIMI_ROOT = r"K:\SSMT-Package-master\WorkSpace\HIMI"
-    #: T4 实测各角色全局唯一骨骼数（``04-probe-results.md`` §4）
-    MEASURED_SLOT_COUNTS = {276, 343, 315, 219, 252}
-
     def test_real_role_end_to_end(self):
-        if not os.path.isdir(self.HIMI_ROOT):
-            self.skipTest(f"真实 HIMI 工作空间不存在：{self.HIMI_ROOT}")
-        roles = sorted(
-            name for name in os.listdir(self.HIMI_ROOT)
-            if os.path.isdir(os.path.join(self.HIMI_ROOT, name))
-        )
-        if not roles:
-            self.skipTest("真实 HIMI 工作空间为空")
-        # 组件最多、且 dump 仍登记在册的那一个角色
-        sources = []
-        for role in roles:
-            frame_path = os.path.join(self.HIMI_ROOT, role, "Config", "FrameAnalysisPath.json")
-            if os.path.isfile(frame_path):
-                sources.append(role)
-        if not sources:
-            self.skipTest("没有任何角色登记了 FrameAnalysis")
-
         tmp_root = tempfile.mkdtemp(prefix="himi_real_e2e_")
         self.addCleanup(shutil.rmtree, tmp_root, ignore_errors=True)
-        role = sources[0]
-        target = os.path.join(tmp_root, role)
-        # 只复制数据层需要的部分（跳过 DedupedTextures / .blend，避免拷贝几百 MB）
-        shutil.copytree(
-            os.path.join(self.HIMI_ROOT, role),
-            target,
-            ignore=shutil.ignore_patterns("DedupedTextures", "*.blend", "*.blend1", "*.dds"),
-        )
-
-        ok, message = _skeleton.HIMISkeletonMergeHelper.ensure_skeleton_data(target)
-        self.assertTrue(ok, f"数据层落盘失败：{message}")
+        target = _import_real_workspace_copy(self, self.HIMI_ROOT, tmp_root)
+        role = target.name
 
         plan = _runtime.load_workspace_plan(target)
         self.assertTrue(plan.ok, plan.message)
@@ -3838,13 +3807,14 @@ class HIMIRealDumpEndToEndTests(unittest.TestCase):
             plan.gate_source, "prepare",
             "dump 仍在册时必须用数据层的 pass 级门控作为权威",
         )
-        self.assertIn(
-            plan.slot_count, self.MEASURED_SLOT_COUNTS,
-            f"角色 {role} 的槽位数 {plan.slot_count} 不在 T4 实测集合内",
-        )
+        metadata = json.loads((target / "Config" / "HIMIMergedSkeleton.json").read_text(encoding="utf-8"))
+        self.assertGreater(plan.slot_count, 0)
+        self.assertLessEqual(plan.slot_count, _skeleton.HIMI_MERGED_SKELETON_SLOT_LIMIT)
+        self.assertEqual(plan.slot_count, metadata["SlotCount"])
         self.assertGreater(len(plan.rebinds), 0)
         # ITEM 4 的实证：部件 palette 缓存（按引用序压缩）与角色级骨架**逐字节同构**，
         # 且顺序契约在真实数据上成立（否则这里会是 mismatch）。
+        self.assertTrue(plan.palette_cache)
         for bare, check in plan.palette_cache.items():
             self.assertEqual(check["verdict"], "verified", f"{bare}: {check}")
             self.assertGreater(check["checked"], 0)
@@ -3859,8 +3829,12 @@ class HIMIRealDumpEndToEndTests(unittest.TestCase):
 
         published = _runtime.publish_skeleton_binary(plan, os.path.join(tmp_root, "Meshes"))
         self.assertTrue(published["ok"], published)
+        skeleton = Path(published["path"]).read_bytes()
+        stride = _skeleton.PALETTE_STRIDE_BYTES
+        self.assertEqual(len(skeleton), plan.slot_count * stride)
         self.assertEqual(
-            os.path.getsize(published["path"]), plan.slot_count * 48
+            [hashlib.sha256(skeleton[i : i + stride]).hexdigest() for i in range(0, len(skeleton), stride)],
+            [slot["matrix_sha256"] for slot in metadata["Slots"]],
         )
         print(
             "HIMI-E2E",

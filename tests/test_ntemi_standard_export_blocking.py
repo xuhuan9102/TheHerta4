@@ -100,6 +100,7 @@ _install_module(
     BlueprintExportHelper=types.SimpleNamespace(
         get_selected_blueprint_tree=lambda **_kwargs: None,
         get_current_blueprint_tree=lambda **_kwargs: None,
+        validate_object_info_references=lambda _tree, _output_node=None: None,
         set_runtime_blueprint_tree=lambda *_args, **_kwargs: None,
         reset_direct_export_runtime_state=lambda *_args, **_kwargs: None,
         has_shapekey_postprocess_node=lambda *_args, **_kwargs: False,
