@@ -669,6 +669,7 @@ class PanelBasicInformation(bpy.types.Panel):
         if GlobalConfig.logic_name == LogicName.ZZMI:
             layout.prop(global_properties, "cross_group_merged_vgmap_test")
             layout.prop(global_properties, "zzmi_fusion_per_lod")
+            layout.prop(global_properties, "zzmi_fusion_from_workspace")
             # RedirectSO 跨 DrawIB 重定向在部分运行时顺序下会丢失合并几何，
             # 但仍按用户要求默认开启；保留显式开关用于出问题时对照关闭。
             # 关闭时仍使用合并骨架与单一合并对象。

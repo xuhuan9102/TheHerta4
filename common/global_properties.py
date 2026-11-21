@@ -297,6 +297,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    zzmi_fusion_from_workspace: bpy.props.BoolProperty(
+        name="使用 SSMT4 提取的骨骼数据",
+        description="融合时只使用新版 SSMT4 提取到各 LOD 工作页的骨骼矩阵、对象变换和绘制记录",
+        default=False,
+    ) # type: ignore
+
     zzmi_fusion_per_lod: bpy.props.BoolProperty(
         name="按 LOD 融合骨骼",
         description="每个 LOD 独立生成骨骼池。切换后重新导入，按 LOD 分别导出",
@@ -649,6 +655,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     def set_import_merged_vgmap(cls, value: bool):
         """显式切换合并 VGMap；预生成失败时用于保持导入与后续导出同一模式。"""
         setattr(cls._instance(), "import_merged_vgmap", bool(value))
+
+    @classmethod
+    def zzmi_fusion_from_workspace(cls):
+        return cls._bool_attr("zzmi_fusion_from_workspace")
 
     @classmethod
     def zzmi_fusion_per_lod(cls):

@@ -663,6 +663,9 @@ def ImprotFromWorkSpaceFull(self, context):
         GlobalConfig.logic_name == LogicName.ZZMI
         and GlobalProterties.import_merged_vgmap()
     )
+    zzmi_workspace_fusion = (
+        zzmi_merged_consumption and GlobalProterties.zzmi_fusion_from_workspace()
+    )
     zzmi_merged_metadata_missing = False
     if GlobalConfig.logic_name == LogicName.ZZMI:
         try:
@@ -685,6 +688,9 @@ def ImprotFromWorkSpaceFull(self, context):
                 unique_str_list=import_keys,
             )
             print(f"[ZZMI骨骼合并] {message}")
+            if not ok and zzmi_workspace_fusion:
+                self.report({'ERROR'}, f"无法使用 SSMT4 提取的骨骼数据：{message}")
+                return False
             merged_vgmap_ready = bool(ok)
             if merged_vgmap_ready and zzmi_merged_consumption:
                 # ok 只说「骨骼数据在/写下去了」；开着跨组合并时还要确认这份数据
@@ -748,6 +754,9 @@ def ImprotFromWorkSpaceFull(self, context):
             import traceback
             print(f"[ZZMI骨骼合并] 预生成失败（不阻断导入）: {e}")
             traceback.print_exc()
+            if zzmi_workspace_fusion:
+                self.report({'ERROR'}, f"读取 SSMT4 骨骼数据失败：{e}")
+                return False
             if zzmi_merged_consumption:
                 self.report({'WARNING'}, f"ZZMI 骨骼合并预生成异常，已回退普通导入：{e}")
 
