@@ -276,7 +276,7 @@ class ZZMIPaletteConvOrderTests(unittest.TestCase):
 # 整条 VB 的重放块：绑换算 palette → 引 SO → 拿宿主（carrier）的原生 vb0/vb2 → 画全部行。
 _REPLAY_BLOCK = re.compile(
     r"    vs-t0 = ResourceZZPaletteConv_C(\d+)_s(\d+)\n"
-    r"    so0 = ref ResourceZZRedirectSO_G3_s\2\n"
+    r"    so0 = ref ResourceZZRedirectSO_G3_s\2->Region\(120, 751040\)\n"
     r"    vb2 = Resourceb20f90eaBlend\n"
     r"    vb0 = Resourceb20f90eaPosition\n"
     r"    draw = 18776, 0\n"

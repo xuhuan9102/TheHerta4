@@ -89,6 +89,19 @@ _ZZMI_MERGE_MODE_CROSS = "cross_group"
 _ZZMI_MERGE_MODE_GROUP = "group"
 
 
+def fusion_lod(unique_str: str) -> str:
+    prefix = str(unique_str).split(".", 1)[0].upper()
+    return prefix if re.fullmatch(r"LOD[0-9]+", prefix) else "LOD0"
+
+
+def use_lod_fusion() -> bool:
+    try:
+        from .global_properties import GlobalProterties
+        return GlobalProterties.zzmi_fusion_per_lod()
+    except (ImportError, AttributeError):
+        return False
+
+
 class ZZMILogParser:
     """解析 ZZZ FrameAnalysis/log.txt，提供 deform pass 与资源绑定查询。
 
@@ -766,6 +779,25 @@ class ZZMISkeletonMergeHelper:
             # 随便挑一个最新 FrameAnalysis，尤其不能把相似模型的 CB1 混进来。
             return ""
         return EFMISkeletonMergeHelper.resolve_frame_analysis_dir(workspace_root)
+    @classmethod
+    def _resolve_lod_frame_analysis_dir(cls, workspace_root: str, lod: str) -> str:
+        """A configured LOD uses its own work-page dump or its saved buffers."""
+        config = os.path.join(workspace_root, "Config")
+        tabs = JsonUtils.LoadFromFile(os.path.join(config, "WorkPageTabs.json")) or {}
+        if isinstance(tabs, dict):
+            for tab in tabs.get("tabs", ()) or ():
+                if not isinstance(tab, dict) or str(tab.get("name", "")).strip().upper() != lod:
+                    continue
+                tab_id = str(tab.get("id", ""))
+                if tab_id and os.path.basename(tab_id) == tab_id:
+                    payload = JsonUtils.LoadFromFile(os.path.join(config, "Tabs", tab_id + ".json"))
+                    if isinstance(payload, dict):
+                        path = str(payload.get("frameAnalysisFolderPath", "") or "").strip()
+                        if path:
+                            return path if os.path.isdir(path) else ""
+                break
+        return ""
+
     _resolve_submesh_json_path = staticmethod(
         EFMISkeletonMergeHelper._resolve_submesh_json_path
     )
@@ -1345,7 +1377,7 @@ class ZZMISkeletonMergeHelper:
         """
         if not workspace_root or not unique_str_list:
             return False
-        expect_cross = cls._cross_numbering_expected(workspace_root)
+        per_lod = use_lod_fusion()
         for unique_str in unique_str_list:
             json_path = cls._resolve_submesh_json_path(workspace_root, unique_str)
             if not json_path:
@@ -1358,7 +1390,9 @@ class ZZMISkeletonMergeHelper:
                 continue
             if payload.get("GPU-PreSkinning") is False:
                 continue
-            if not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
+            lod = fusion_lod(unique_str) if per_lod else ""
+            expect_cross = cls._cross_numbering_expected(os.path.join(workspace_root, lod))
+            if payload.get("SkeletonMergeLOD", "") != lod or not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
                 return True
             if not cls._zzmi_cache_intact(
                 payload, json_path, unique_str, expect_cross=expect_cross
@@ -1386,7 +1420,7 @@ class ZZMISkeletonMergeHelper:
         """
         if not workspace_root or not unique_str_list:
             return 0
-        expect_cross = cls._cross_numbering_expected(workspace_root)
+        per_lod = use_lod_fusion()
         ready = 0
         for unique_str in unique_str_list:
             json_path = cls._resolve_submesh_json_path(workspace_root, unique_str)
@@ -1400,7 +1434,9 @@ class ZZMISkeletonMergeHelper:
                 continue
             if payload.get("GPU-PreSkinning") is False:
                 continue
-            if not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
+            lod = fusion_lod(unique_str) if per_lod else ""
+            expect_cross = cls._cross_numbering_expected(os.path.join(workspace_root, lod))
+            if payload.get("SkeletonMergeLOD", "") != lod or not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
                 continue
             if not cls._zzmi_cache_intact(
                 payload, json_path, unique_str, expect_cross=expect_cross
@@ -1550,6 +1586,8 @@ class ZZMISkeletonMergeHelper:
         workspace_root: str,
         unique_str_list: list[str],
         force: bool = False,
+        *,
+        _lod: str | None = None,
     ) -> tuple[bool, str]:
         """为 ZZMI 工作空间的子网格生成并写回骨骼合并数据（幂等）。
 
@@ -1558,7 +1596,34 @@ class ZZMISkeletonMergeHelper:
         if not unique_str_list:
             return False, "没有子网格需要处理。"
 
-        frame_analysis_dir = cls.resolve_frame_analysis_dir(workspace_root)
+        if _lod is None and use_lod_fusion():
+            partitions = {}
+            for identity in unique_str_list:
+                partitions.setdefault(fusion_lod(identity), []).append(identity)
+            import_path = os.path.join(workspace_root, "Import.json")
+            known = JsonUtils.LoadFromFile(import_path) if os.path.isfile(import_path) else {}
+            if isinstance(known, dict):
+                for identity in known:
+                    if "." not in identity or not re.match(r"(?i)^LOD[0-9]+\.", identity):
+                        continue
+                    lod = fusion_lod(identity)
+                    if lod in partitions and cls._resolve_submesh_json_path(workspace_root, identity):
+                        partitions[lod].append(identity)
+            results = [
+                (lod, cls.ensure_skeleton_data(workspace_root, members, force, _lod=lod))
+                for lod, members in sorted(partitions.items())
+            ]
+            cls.cross_group_profile = None
+            cls.cross_group_profile_path = None
+            return all(ok for _, (ok, _) in results), "\n".join(
+                f"{lod}: {message}" for lod, (_, message) in results
+            )
+
+        profile_root = os.path.join(workspace_root, _lod or "")
+        frame_analysis_dir = (
+            cls._resolve_lod_frame_analysis_dir(workspace_root, _lod)
+            if _lod else cls.resolve_frame_analysis_dir(workspace_root)
+        )
         log_path = os.path.join(frame_analysis_dir, "log.txt") if frame_analysis_dir else ""
         parser = None
         resolver = None
@@ -1631,7 +1696,7 @@ class ZZMISkeletonMergeHelper:
                 from .zzmi_cross_group_palette import get_profile_path
 
                 pool_profile_ready = os.path.isfile(
-                    get_profile_path(workspace_root)
+                    get_profile_path(profile_root)
                 )
             except Exception:  # pragma: no cover - 磁盘异常
                 pool_profile_ready = False
@@ -1693,6 +1758,8 @@ class ZZMISkeletonMergeHelper:
             cache_intact = cls._zzmi_cache_intact(
                 submesh_json, json_path, unique_str, expect_cross=cross_mode_ready
             )
+            scope_matches = submesh_json.get("SkeletonMergeLOD", "") == (_lod or "")
+            cache_intact = cache_intact and scope_matches
             if (
                 cache_intact
                 and parser is not None
@@ -1731,6 +1798,7 @@ class ZZMISkeletonMergeHelper:
             _group_members.setdefault(draw_ib_for_migration, set()).add(unique_str)
             if (
                 not cache_intact
+                and scope_matches
                 and not force
                 and cls._zzmi_cache_usable_for_migration(
                     submesh_json, json_path, unique_str
@@ -2244,7 +2312,7 @@ class ZZMISkeletonMergeHelper:
             # 属性上会丢，掉盘后就按历史分组发 ini，跨组等于白算。
             try:
                 from .zzmi_cross_group_palette import write_profile
-                cls.cross_group_profile_path = write_profile(workspace_root, profile)
+                cls.cross_group_profile_path = write_profile(profile_root, profile)
             except Exception as exc:  # pragma: no cover - 磁盘异常
                 cls.cross_group_profile_path = None
                 print(f"[ZZMI骨骼合并] 骨骼池方案落盘失败（导出会退回历史分组）：{exc}")
@@ -2266,7 +2334,7 @@ class ZZMISkeletonMergeHelper:
             cls.cross_group_profile = None
             try:
                 from .zzmi_cross_group_palette import get_profile_path
-                stale_path = get_profile_path(workspace_root)
+                stale_path = get_profile_path(profile_root)
                 if os.path.isfile(stale_path):
                     os.remove(stale_path)
             except Exception:
@@ -2377,6 +2445,7 @@ class ZZMISkeletonMergeHelper:
                 # 编号域：cross_group = 骨骼池槽位；group = 历史分组编号。快路径靠它
                 # 区分两种 VGMap——只看「有 VGMap」会把历史编号当成合并成果。
                 submesh_json["SkeletonMergeMode"] = merge_mode
+                submesh_json["SkeletonMergeLOD"] = _lod or ""
                 # t75 通道计划：唯一判定口径的产物 + 复核素材。缺失/版本不符时
                 # `_zzmi_cache_intact` 拒绝复用（显式重建，不静默退化）。
                 submesh_json["ChannelPlanVersion"] = ZZMI_CHANNEL_PLAN_VERSION

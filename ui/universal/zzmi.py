@@ -1,6 +1,7 @@
 import json
 import os
 import hashlib
+import math
 import re
 import copy
 import zlib
@@ -24,7 +25,9 @@ from ...utils.json_utils import JsonUtils
 from ...utils.format_utils import Fatal
 from ...utils.timer_utils import TimerUtils
 from .unity import ExportUnity
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from functools import wraps
 
 # 「条件判断」后处理节点需要知道每个 ini 段属于哪个 draw_ib：导出期用
 # ``register.draw_ib_context(draw_ib)`` 包住「构建该 draw_ib 的 ini 段」的代码，
@@ -108,12 +111,73 @@ except Exception:  # pragma: no cover
         return False
 
 
+_lod_fusion_scope = ContextVar("zzmi_lod_fusion_scope", default=None)
+
+
+def _zzmi_scope_lod():
+    scope = _lod_fusion_scope.get()
+    return scope[0] if scope else "LOD0"
+
+
+@contextmanager
+def _zzmi_lod_output(path):
+    original = vars(GlobalConfig)["path_generate_mod_folder"]
+    GlobalConfig.path_generate_mod_folder = classmethod(lambda cls: path)
+    try:
+        yield
+    finally:
+        GlobalConfig.path_generate_mod_folder = original
+
+
+def _in_lod_fusion_scope(method):
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        if method.__name__ == "__init__":
+            self._lod_fusion_data = None
+            if _zzmi_prop_flag("zzmi_fusion_per_lod", False) and GlobalProterties.import_merged_vgmap():
+                from ...common.zzmi_skeleton import fusion_lod
+                from ...common.zzmi_cross_group_palette import load_profile
+
+                blueprint = args[0] if args else kwargs["blueprint_model"]
+                batches = {}
+                for draw in blueprint.ordered_draw_obj_data_model_list:
+                    lod = fusion_lod(draw.get_workspace_unique_str())
+                    batches.setdefault(lod, []).append(draw)
+                if len(batches) > 1:
+                    self.blueprint_model = blueprint
+                    self._lod_fusion_batches = batches
+                    self.drawib_model_list = []
+                    return None
+                if batches:
+                    lod = next(iter(batches))
+                    root = GlobalConfig.path_workspace_folder()
+                    profile = load_profile(os.path.join(root, lod), required=False)
+                    for draw in blueprint.ordered_draw_obj_data_model_list:
+                        identity = draw.get_workspace_unique_str()
+                        path = self._zzmi_workspace_part_json_path(identity)
+                        data = JsonUtils.LoadFromFile(path) if path else None
+                        if data and data.get("VGMap") and data.get("SkeletonMergeLOD") != lod:
+                            raise Fatal(f"{identity} 的骨骼缓存仍是工作空间范围，请勾选后重新导入。")
+                    self._lod_fusion_data = (lod, profile)
+        if method.__name__ in {"export", "export_buffers_only"} and getattr(self, "_lod_fusion_batches", None):
+            return self._export_lod_batches(method.__name__)
+        token = _lod_fusion_scope.set(getattr(self, "_lod_fusion_data", None))
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _lod_fusion_scope.reset(token)
+    return invoke
+
+
 def _merged_palette_profile() -> dict | None:
     """本次会话算出来的骨骼池方案（导入期算好，挂在骨架助手类上）。
 
     会话里没有就去工作区读导入期落盘的那一份：导出经常发生在「重开 Blender
     以后」，只靠类属性会让跨组方案在导出时凭空消失，退回不含锚点链的历史分组。
     """
+    scope = _lod_fusion_scope.get()
+    if scope is not None:
+        return scope[1]
     try:
         from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
     except Exception:
@@ -583,12 +647,16 @@ class ExportZZMI(ExportUnity):
         ZZMITextureMarkName.ZglowMap: r"Resource\ZZMI\GlowMap",
     }
 
+    @_in_lod_fusion_scope
     def __init__(self, blueprint_model):
         # ZZMI 骨骼合并（分支选项）：复选框开启时，为「DrawIB 内存在但蓝图里没有对象」
         # 的部件自动创建极限小三角面占位对象（必须在 super().__init__ 组装模型之前注入）
         self.blueprint_model = blueprint_model
         self._zzmi_stub_object_names = []
         self._zzmi_stub_draw_calls = []
+        self._zzmi_weight_retargeted_parts = set()
+        self._zzmi_complete_group_exports = {}
+        self._zzmi_independent_skin_plans = {}
         # 合并物体身份账本。Blender 中一个合并物体的显示名称通常会带新的
         # 顶点/索引数量（例如 ``8c8de427-24180-0``），而工作区身份仍然是
         # 目标 IB 的原始前缀（``8c8de427-798-0``）。如果在构造
@@ -607,6 +675,8 @@ class ExportZZMI(ExportUnity):
                 for obj in (self._zzmi_drawcall_object(draw),)
             )
             if GlobalProterties.import_merged_vgmap():
+                self._zzmi_normalize_complete_group_joins(blueprint_model)
+                self._zzmi_retarget_weight_limited_joins(blueprint_model)
                 # 占位是合并骨架渲染身份完整性的硬前提。创建失败时中止导出，
                 # 不能回退到旧的 ib=null/IB skip 路径让部件静默消失并串扰其它 hash。
                 self._zzmi_stub_object_names = self._ensure_stub_objects_for_missing_parts(blueprint_model)
@@ -663,6 +733,423 @@ class ExportZZMI(ExportUnity):
     # ------------------------------------------------------------------
     # 合并物体身份（Blender 侧一个对象 -> 一个目标 IB 前缀）
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _zzmi_weight_target_layout(payload: dict) -> tuple[int, list]:
+        """Read the native blend capacity and the layout of the other attributes."""
+        elements = [
+            element
+            for buffer in payload.get("CategoryBufferList", ())
+            for element in buffer.get("D3D11ElementList", ())
+        ]
+        indices = next(
+            (element for element in elements if element.get("SemanticName") == "BLENDINDICES"),
+            {},
+        )
+        fmt = str(indices.get("Format", ""))
+        match = re.fullmatch(r"R32(?:G32(?:B32A32)?)?_(?:UINT|SINT)", fmt)
+        capacity = fmt.count("32") if match else 0
+        if capacity and str(indices.get("ByteWidth")) != str(capacity * 4):
+            capacity = 0
+        return capacity, [element for element in elements if element.get("Category") != "Blend"]
+
+    def _zzmi_normalize_complete_group_joins(self, blueprint_model) -> None:
+        """Use a deterministic four-influence layout for an entire joined group."""
+        cross_pool = _merged_palette_route_active()
+        merge_mode = "cross_group" if cross_pool else "group"
+        ordered = getattr(blueprint_model, "ordered_draw_obj_data_model_list", ())
+        root = GlobalConfig.path_workspace_folder()
+        map_path = os.path.join(root, _zzmi_scope_lod(), "DrawIB-Component.json")
+        if (
+            not getattr(blueprint_model, "quick_export", True)
+            or getattr(blueprint_model, "has_cross_ib", False)
+            or getattr(blueprint_model, "has_shader_replace", False)
+            or not ordered
+            or not os.path.isfile(map_path)
+        ):
+            return
+        component_map = JsonUtils.LoadFromFile(map_path)
+        if not isinstance(component_map, dict):
+            return
+
+        occupied = {}
+        for draw_call in ordered:
+            identity = draw_call.get_workspace_unique_str()
+            if identity.startswith(_zzmi_scope_lod() + "."):
+                occupied.setdefault(identity.split(".", 1)[1], []).append(draw_call)
+
+        groups = {}
+        for components in component_map.values():
+            for bare in sorted(set(components.values())):
+                path = self._zzmi_workspace_part_json_path(_zzmi_scope_lod() + "." + bare)
+                payload = JsonUtils.LoadFromFile(path) if path else None
+                if not isinstance(payload, dict) or payload.get("SkeletonMergeMode") != merge_mode:
+                    continue
+                if not payload.get("VGMap") or payload.get("VGMapDedupExcluded"):
+                    continue
+                group = payload.get("SkeletonGroup")
+                if group is not None:
+                    groups.setdefault(group, {})[bare] = payload
+
+        for group, members in groups.items():
+            present = [draw for bare in members for draw in occupied.get(bare, ())]
+            if len(members) < 2 or len(present) != 1:
+                continue
+            draw_call = present[0]
+            obj = self._zzmi_drawcall_object(draw_call)
+            if getattr(obj, "type", None) != "MESH" or obj.get("ZZMI_STUB") or obj.data.shape_keys:
+                continue
+            identity = draw_call.get_workspace_unique_str()
+            source = members[identity.split(".", 1)[1]]
+            if len(obj.data.vertices) <= int(source.get("OriginalVertexCount", 0)):
+                continue
+            # Imported identity is DrawIB-index count-first index. The exported
+            # joined mesh must account for the whole group before absorbing peers.
+            parts = {bare: re.fullmatch(r"[0-9a-f]{8}-(\d+)-(\d+)", bare) for bare in members}
+            if any(part is None for part in parts.values()):
+                continue
+            counts = {bare: int(part[1]) for bare, part in parts.items()}
+            index_count = sum((len(poly.vertices) - 2) * 3 for poly in obj.data.polygons)
+            if index_count != sum(counts.values()):
+                if not cross_pool or index_count > sum(counts.values()):
+                    continue
+                from ...common.zzmi_fusion_spaces import count_imported_indices
+
+                imported_count = 0
+                for bare, count in counts.items():
+                    path = self._zzmi_workspace_part_json_path(_zzmi_scope_lod() + "." + bare)
+                    if path is None:
+                        imported_count = -1
+                        break
+                    index_path = os.path.splitext(path)[0] + ".ib"
+                    actual_count = count_imported_indices(index_path, count)
+                    if actual_count is None:
+                        imported_count = -1
+                        break
+                    imported_count += actual_count
+                if imported_count != index_count:
+                    continue
+                print(f"[ZZMI 跨组融合] {group}: 导入清理后索引数 {imported_count}")
+            names = [group.name for group in obj.vertex_groups]
+            slots = {
+                int(names[weight.group])
+                for vertex in obj.data.vertices for weight in vertex.groups
+                if weight.weight > 0 and names[weight.group].isascii() and names[weight.group].isdigit()
+            }
+            available = set().union(*(payload["VGMap"].values() for payload in members.values()))
+            if not slots or not slots <= available:
+                continue
+            candidates = [
+                bare for bare, payload in members.items()
+                if self._zzmi_weight_target_layout(payload)[0] == 4 and int(parts[bare][2]) == 0
+            ]
+            if not candidates:
+                continue
+            if cross_pool:
+                target = min(candidates, key=lambda bare: (
+                    -sum(int(e["ByteWidth"]) for e in self._zzmi_weight_target_layout(members[bare])[1]),
+                    -counts[bare], bare,
+                ))
+            else:
+                target = min(candidates, key=lambda bare: (-counts[bare], bare))
+            self._zzmi_rebind_drawcall_to_merged_object(
+                draw_call, {"target_workspace_unique_str": _zzmi_scope_lod() + "." + target, "object": obj}
+            )
+            self._zzmi_weight_retargeted_parts.update(set(members) - {target})
+            self._zzmi_complete_group_exports[int(group)] = {
+                "target_ib": target.split("-", 1)[0],
+                "material_part": identity,
+                "cross_pool": cross_pool,
+                "parts": tuple(members),
+                "draw_ibs": {bare.split("-", 1)[0] for bare in members},
+                "slots": slots,
+            }
+            print(f"[ZZMI骨骼合并] 完整组 {group}: {identity} -> {_zzmi_scope_lod()}.{target}, {len(slots)} 个骨骼槽")
+
+    def _zzmi_build_independent_skin_plans(self) -> None:
+        """Check the actual exported layout, capture hashes and bone coverage."""
+        models = {model.draw_ib: model for model in self.drawib_model_list}
+        blend_hashes = [
+            model.category_hash_dict.get("Blend", "") for model in models.values()
+        ]
+        for group, complete in self._zzmi_complete_group_exports.items():
+            target_ib = complete["target_ib"]
+            target = models[target_ib]
+            ids = self._merged_group_component_ids(group)
+            providers = [self.merged_skeleton_components[cid] for cid in ids]
+            if {p["draw_ib"] for p in providers} != complete["draw_ibs"]:
+                raise RuntimeError(f"ZZMI 完整组 {group} 缺少供骨部件")
+            if not complete["slots"] <= set().union(*(p["vg_map"].values() for p in providers)):
+                raise RuntimeError(f"ZZMI 完整组 {group} 缺少骨骼槽")
+            for provider in providers:
+                capture_hash = models[provider["draw_ib"]].category_hash_dict.get("Blend", "")
+                if not re.fullmatch(r"[0-9a-f]{8}", capture_hash) or blend_hashes.count(capture_hash) != 1:
+                    raise RuntimeError(f"ZZMI 完整组 {group} 供骨 Blend 哈希缺失或重复: {capture_hash}")
+
+            material_part = complete["material_part"]
+            material_ib = material_part.split(".", 1)[1].split("-", 1)[0]
+            material_model = models[material_ib]
+            material_submesh = next(
+                submesh for submesh in material_model.submesh_model_list
+                if submesh.workspace_unique_str == material_part
+            )
+            plan = {
+                "target_ib": target_ib,
+                "material_ib": material_ib,
+                "material_suffix": material_model.get_submesh_texture_override_suffix(material_submesh),
+                "material_textures": material_model.get_submesh_texture_markup_info_list(material_submesh),
+                "deform_draws": [
+                    (
+                        f"ResourceZZGroupPosition_G{group}",
+                        f"ResourceZZGroupBlend_G{group}",
+                        target.draw_number,
+                    )
+                ],
+                "deform_draw_ibs": [target_ib],
+                "so_stride": ZZMI_MERGED_SKIN_POSITION_ROW_BYTES,
+                "anchor_layout": self._drawib_category_layout(target_ib, "Blend"),
+                "required_component_ids": ids,
+                "independent_output": True,
+            }
+            if not self._merged_skin_publish_supported(plan):
+                details = ", ".join(self._merged_skin_layout_mismatches(plan))
+                raise RuntimeError(f"ZZMI 完整组 {group} 的蒙皮布局不匹配: {details}")
+            if complete["cross_pool"]:
+                self._zzmi_build_cross_space_draws(group, plan, complete, providers, models)
+            self._zzmi_independent_skin_plans[group] = plan
+
+    def _zzmi_build_cross_space_draws(self, group, plan, complete, providers, models):
+        """Use one mesh and bone pool across the required native render spaces."""
+        from ...common.zzmi_skeleton import ZZMIBoneMapBuilder, ZZMISkeletonMergeHelper, assign_skeleton_groups
+        from ...common.zzmi_fusion_spaces import partition_triangles, repack_texcoords, restore_native_slots
+
+        target = models[plan["target_ib"]]
+        carrier = next(part for part in target.submesh_model_list if str(part.match_first_index) == "0")
+        transforms = {}
+        first_parts = {}
+        source_paths = {}
+        for bare in complete["parts"]:
+            ib, count, first = bare.split("-")
+            identity = _zzmi_scope_lod() + "." + bare
+            path = self._zzmi_workspace_part_json_path(identity)
+            source_paths[(ib, first)] = os.path.splitext(path)[0]
+            if ib not in transforms:
+                payload = JsonUtils.LoadFromFile(path)
+                if payload.get("ObjectCB1CacheValid") is not True:
+                    raise Fatal(f"ZZMI 跨组融合缺少绘制空间缓存：{identity}")
+                cb1 = ZZMISkeletonMergeHelper._runtime_cache_path(
+                    payload, path, identity, cb1_file_name="ObjectCB1"
+                )
+                transform = ZZMIBoneMapBuilder.parse_object_transform(
+                    cb1, ZZMISkeletonMergeHelper._parse_first_constant(
+                        payload.get("ObjectCB1FirstConstant", 0)
+                    ),
+                )
+                if transform is None:
+                    raise Fatal(f"ZZMI 跨组融合无法解析绘制空间：{identity}")
+                transforms[ib] = transform
+            if first == "0":
+                first_parts[ib] = int(count)
+
+        spaces = assign_skeleton_groups(transforms)
+        bone_spaces = {}
+        shared_between_spaces = False
+        for part in providers:
+            for slot in part["vg_map"].values():
+                space = spaces[part["draw_ib"]]
+                shared_between_spaces |= bone_spaces.setdefault(slot, space) != space
+
+        indices = target.submesh_ib_dict[carrier.unique_str]
+        blend_buffer = target.category_buffer_dict["Blend"]
+        blend = blend_buffer.tobytes()
+        if shared_between_spaces:
+            import numpy as np
+
+            private_slots = {}
+            for provider in providers:
+                owner = provider["draw_ib"]
+                private_slots[owner] = {}
+                base = int(provider["vg_offset"])
+                for local, slot in provider["vg_map"].items():
+                    private = base + int(local)
+                    if private_slots[owner].setdefault(slot, private) != private:
+                        raise Fatal(f"ZZMI 跨组融合无法唯一还原 {owner} 的骨骼槽位 {slot}")
+            sources = {
+                key: (path + "-Position.buf", path + ".ib", private_slots[key[0]])
+                for key, path in source_paths.items()
+            }
+            try:
+                ordered_indices, source_ranges, blend = restore_native_slots(
+                    target.category_buffer_dict["Position"].tobytes(), blend, indices, sources
+                )
+            except (ValueError, OSError) as exc:
+                raise Fatal(f"ZZMI 跨组融合：{exc}") from exc
+            target.category_buffer_dict["Blend"] = np.frombuffer(
+                blend, dtype=blend_buffer.dtype
+            ).reshape(blend_buffer.shape)
+            ranges_and_providers = {
+                key: (span, [key[0]]) for key, span in source_ranges.items()
+            }
+        else:
+            try:
+                ordered_indices, ranges = partition_triangles(blend, indices, bone_spaces)
+            except ValueError as exc:
+                raise Fatal(f"ZZMI 跨组融合：{exc}") from exc
+            ranges_and_providers = {}
+            for space, span in ranges.items():
+                members = [ib for ib, value in spaces.items() if value == space]
+                representatives = [ib for ib in members if ib in first_parts]
+                if not representatives:
+                    raise Fatal(f"ZZMI 跨组融合缺少绘制入口：{members}")
+                anchor = min(representatives, key=lambda ib: (-first_parts[ib], ib))
+                ranges_and_providers[(anchor, "0")] = (span, members)
+
+        source_layout = self._drawib_category_layout(target.draw_ib, "Texcoord")
+        texcoords = target.category_buffer_dict["Texcoord"].tobytes()
+        native_texcoords = {}
+        draws = {}
+        for (anchor, first), ((start, count), members) in ranges_and_providers.items():
+            if anchor not in native_texcoords:
+                layout = self._drawib_category_layout(anchor, "Texcoord")
+                try:
+                    data = repack_texcoords(texcoords, source_layout, layout)
+                except ValueError as exc:
+                    raise Fatal(f"ZZMI 跨组融合：{anchor} {exc}") from exc
+                native_texcoords[anchor] = {"stride": layout["stride"], "data": data}
+            draws[(anchor, first)] = {
+                "start": start,
+                "count": count,
+                "providers": [self.merged_skeleton_component_id_dict[ib] for ib in members],
+            }
+            print(f"[ZZMI 跨组融合] G{group} {anchor}/{first}: {count} indices at {start}; providers {members}")
+
+        target.submesh_ib_dict[carrier.unique_str] = ordered_indices.tolist()
+        plan["native_space_draws"] = draws
+        plan["native_texcoords"] = native_texcoords
+        plan["index_resource"] = target.get_submesh_ib_resource_name(carrier)
+        plan["draw_calls"] = carrier.drawcall_model_list
+
+    def _zzmi_independent_skin_group(self, draw_ib: str) -> int | None:
+        component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
+        if component_id is None:
+            return None
+        group = int(self.merged_skeleton_components[component_id]["skeleton_group"])
+        return group if group in getattr(self, "_zzmi_independent_skin_plans", {}) else None
+
+    @staticmethod
+    def _zzmi_native_so_var(component_id: int) -> str:
+        return f"$zz_group_native_so_{component_id}"
+
+    def _zzmi_append_group_palette_capture(self, ini_builder, drawib_model) -> None:
+        draw_ib = drawib_model.draw_ib
+        cid = self.merged_skeleton_component_id_dict[draw_ib]
+        section = M_IniSection(M_SectionType.TextureOverrideVB)
+        section.append(f"[TextureOverride_ZZGroupPalette_{draw_ib}]")
+        section.append("hash = " + drawib_model.category_hash_dict["Blend"])
+        seen = self._merged_seen_var(cid, 1)
+        native_so = self._zzmi_native_so_var(cid)
+        capture = "@so0 != 0 && @vs-t0 != 0"
+        section.append(f"{seen} = {seen} + ({capture} && @so0 != {native_so})")
+        section.append(f"if {capture}")
+        section.append(f"    {native_so} = @so0")
+        section.append(f"    {self._merged_palette_name(draw_ib, 1)} = copy vs-t0")
+        section.append("endif")
+        section.append("run = " + self._merged_attach_name(cid, 1))
+        section.new_line()
+        ini_builder.append_section(section)
+
+    def _zzmi_retarget_weight_limited_joins(self, blueprint_model) -> None:
+        """Choose a wider native export identity before extracting vertex weights."""
+        ordered = getattr(blueprint_model, "ordered_draw_obj_data_model_list", ())
+        root = GlobalConfig.path_workspace_folder()
+        map_path = os.path.join(root, _zzmi_scope_lod(), "DrawIB-Component.json")
+        if not ordered or not os.path.isfile(map_path):
+            return
+        component_map = JsonUtils.LoadFromFile(map_path)
+        if not isinstance(component_map, dict):
+            return
+
+        from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
+
+        def load_payload(identity):
+            path = ZZMISkeletonMergeHelper._resolve_submesh_json_path(root, identity)
+            payload = JsonUtils.LoadFromFile(path) if path else None
+            if isinstance(payload, dict) and payload.get("VGMap") and not payload.get("VGMapDedupExcluded"):
+                return payload
+            return {}
+
+        draw_ibs = [getattr(draw, "match_draw_ib", "") for draw in ordered]
+        occupied = set(draw_ibs)
+        for draw_call, source_ib in zip(ordered, draw_ibs):
+            identity = draw_call.get_workspace_unique_str()
+            if not identity.startswith(_zzmi_scope_lod() + ".") or draw_ibs.count(source_ib) != 1:
+                continue
+            obj = self._zzmi_drawcall_object(draw_call)
+            if getattr(obj, "type", None) != "MESH" or obj.get("ZZMI_STUB"):
+                continue
+            source = load_payload(identity)
+            original_count = int(source.get("OriginalVertexCount", 0))
+            if not 0 < original_count < len(obj.data.vertices) or source.get("SkeletonGroup") is None:
+                continue
+            capacity, attributes = self._zzmi_weight_target_layout(source)
+            if capacity not in (1, 2):
+                continue
+            names = [group.name for group in obj.vertex_groups]
+            required = 0
+            slots = set()
+            wide_slots = set()
+            for vertex in obj.data.vertices:
+                used = {
+                    int(names[group.group])
+                    for group in vertex.groups
+                    if group.weight > 0 and math.isfinite(group.weight)
+                    and names[group.group].isascii() and names[group.group].isdigit()
+                }
+                required = max(required, len(used))
+                slots.update(used)
+                if len(used) > capacity:
+                    wide_slots.update(used)
+            if required <= capacity or slots <= set(source["VGMap"].values()):
+                continue
+
+            candidates = []
+            owned_slots = set()
+            for draw_ib, components in component_map.items():
+                for bare in sorted(components.values()):
+                    target = _zzmi_scope_lod() + "." + bare
+                    payload = load_payload(target)
+                    if payload.get("SkeletonGroup") != source["SkeletonGroup"]:
+                        continue
+                    if payload.get("SkeletonMergeMode") != source.get("SkeletonMergeMode"):
+                        continue
+                    part_slots = set(payload["VGMap"].values())
+                    start = int(payload.get("VGOffset", 0))
+                    end = start + int(payload.get("VGCount", 0))
+                    owned_slots.update(slot for slot in part_slots if start <= slot < end)
+                    # Same-group accessories can supply their own slots via
+                    # stub draws. The wide target must still cover the vertices
+                    # that actually need more influences than the active part.
+                    if draw_ib in occupied or not wide_slots <= part_slots:
+                        continue
+                    width, target_attributes = self._zzmi_weight_target_layout(payload)
+                    if width >= required and target_attributes == attributes:
+                        candidates.append((width, int(payload["IndexOffset"]), target, part_slots))
+            candidates = [
+                (width, first, target)
+                for width, first, target, part_slots in candidates
+                if slots <= part_slots | owned_slots
+            ]
+            # Two different DrawIBs covering the same weights do not identify
+            # which geometry was joined. Keep the original identity in that case.
+            if len({self._zzmi_bare_workspace_unique(row[2]).split("-", 1)[0] for row in candidates}) != 1:
+                continue
+            _, _, target = min(candidates)
+            self._zzmi_rebind_drawcall_to_merged_object(
+                draw_call, {"target_workspace_unique_str": target, "object": obj}
+            )
+            occupied.add(draw_call.match_draw_ib)
+            self._zzmi_weight_retargeted_parts.add(self._zzmi_bare_workspace_unique(identity))
+            print(f"[ZZMI骨骼合并] {identity} 的合并网格需要 {required} 条骨骼影响，改用 {target} 导出")
 
     @staticmethod
     def _zzmi_bare_workspace_unique(value: str) -> str:
@@ -1072,7 +1559,7 @@ class ExportZZMI(ExportUnity):
         返回创建的对象名列表（export() 结束后清理）。
         """
         workspace_root = GlobalConfig.path_workspace_folder()
-        component_map_path = os.path.join(workspace_root, "LOD0", "DrawIB-Component.json")
+        component_map_path = os.path.join(workspace_root, _zzmi_scope_lod(), "DrawIB-Component.json")
         if not os.path.isfile(component_map_path):
             return []
         component_map = JsonUtils.LoadFromFile(component_map_path)
@@ -1142,6 +1629,7 @@ class ExportZZMI(ExportUnity):
         # 缺的只是「决策 → 模型列表」这一步传播。
         skipped_identities: set[str] = set()
 
+        retargeted_parts = getattr(self, "_zzmi_weight_retargeted_parts", set())
         created = []
         for draw_ib, comp_dict in component_map.items():
             members = sorted(str(v) for v in (comp_dict or {}).values())
@@ -1153,6 +1641,8 @@ class ExportZZMI(ExportUnity):
                 stub_members = [
                     member for member in members if member not in scene_present
                 ]
+            elif retargeted_parts.intersection(members):
+                stub_members = [member for member in members if member in retargeted_parts]
             else:
                 # 整个 DrawIB 在场景里缺席：判定几何是否被合并进其它对象
                 # （`any(member in present ...)` 这条"有声明身份"的旧分支已并入：
@@ -1260,7 +1750,7 @@ class ExportZZMI(ExportUnity):
         """
         all_slots: set[int] = set()
         own_segment_slots: set[int] = set()
-        lod0_dir = os.path.join(workspace_root, "LOD0")
+        lod0_dir = os.path.join(workspace_root, _zzmi_scope_lod())
         if not os.path.isdir(lod0_dir):
             return all_slots, own_segment_slots
         for name in os.listdir(lod0_dir):
@@ -1408,7 +1898,7 @@ class ExportZZMI(ExportUnity):
         value = str(workspace_unique_str or "").strip()
         if not workspace_root or not value:
             return None
-        lod_name, bare = "LOD0", value
+        lod_name, bare = _zzmi_scope_lod(), value
         if "." in value:
             head, tail = value.split(".", 1)
             if head.upper().startswith("LOD"):
@@ -1609,7 +2099,7 @@ class ExportZZMI(ExportUnity):
         """
         workspace_unique_str = bare_unique_str
         if not workspace_unique_str.upper().startswith("LOD"):
-            workspace_unique_str = "LOD0." + workspace_unique_str
+            workspace_unique_str = _zzmi_scope_lod() + "." + workspace_unique_str
 
         mesh = None
         obj = None
@@ -1653,7 +2143,7 @@ class ExportZZMI(ExportUnity):
         搜索顺序：LOD0 目录 -> 工作空间根目录兜底（ZZZ 常规在 LOD0）。
         """
         base = GlobalConfig.path_workspace_folder()
-        for root in (os.path.join(base, "LOD0"), base):
+        for root in (os.path.join(base, _zzmi_scope_lod()), base):
             submesh_dir = os.path.join(root, bare_unique_str)
             if not os.path.isdir(submesh_dir):
                 continue
@@ -1685,7 +2175,7 @@ class ExportZZMI(ExportUnity):
         LOD0 目录 -> 工作空间根目录兜底。
         """
         base = GlobalConfig.path_workspace_folder()
-        for root in (os.path.join(base, "LOD0"), base):
+        for root in (os.path.join(base, _zzmi_scope_lod()), base):
             submesh_dir = os.path.join(root, bare_unique_str)
             if not os.path.isdir(submesh_dir):
                 continue
@@ -3277,7 +3767,12 @@ class ExportZZMI(ExportUnity):
                 section.append(
                     "flags = optimization_level3 all_resources_bound skip_validation"
                 )
-                section.append(f"cs = ./res/{self._merged_skin_shader_filename()}")
+                independent = group_plan.get("independent_output", False)
+                shader = (
+                    "zzmi_merged_skin_group.hlsl" if independent
+                    else self._merged_skin_shader_filename()
+                )
+                section.append(f"cs = ./res/{shader}")
                 # x1 有双重身份，**不要删除、不要改语义**：
                 # ① 本 carrier 的合并几何行数（导出侧口径）；
                 # ② skin CS 判定 ini 参数纹理布局（fork 相关：本 fork 从 [1] 起、
@@ -3301,9 +3796,9 @@ class ExportZZMI(ExportUnity):
                 # 「该部件」= `so_owner_ib`（写这份 SO 几何的部件），不是目标 IB：
                 # target 只有占位几何时两者不同，绑 target 的换算 ⇒ 全部顶点被同一份
                 # 常量仿射左乘（实机：整体刚性下沉、插进地里）。
-                section.append(
-                    "cs-t2 = ref "
-                    + self._merged_deform_palette_name(
+                palette = (
+                    self._merged_skeleton_name(skeleton_group, slot)
+                    if group_plan.get("native_space_draws") else self._merged_deform_palette_name(
                         self._merged_so_space_palette_ib(
                             group_plan, str(group_plan.get("target_ib", ""))
                         ),
@@ -3311,8 +3806,9 @@ class ExportZZMI(ExportUnity):
                         slot,
                     )
                 )
+                section.append(f"cs-t2 = ref {palette}")
                 section.append(
-                    "cs-u0 = ref "
+                    ("cs-u0 = ref raw " if independent else "cs-u0 = ref ")
                     + (
                         self._merged_skin_out_name(skeleton_group, slot)
                         if use_skin_out
@@ -4990,7 +5486,9 @@ class ExportZZMI(ExportUnity):
                         f"    vs-t0 = {self._merged_deform_palette_name(draw_ib, skeleton_group, slot)}"
                     )
                     texture_override_vb_section.append(
-                        f"    so0 = ref {self._merged_redirect_so_name(skeleton_group, slot)}"
+                        "    so0 = ref " + self._merged_replay_so_region(
+                            skeleton_group, slot, group_plan, carrier_count
+                        )
                     )
                     texture_override_vb_section.append(
                         f"    vb2 = Resource{draw_ib}Blend"
@@ -5269,6 +5767,16 @@ class ExportZZMI(ExportUnity):
             if plan.get("so_owner_ib") == draw_ib
         )
 
+    def _merged_replay_so_region(self, skeleton_group, slot, plan, row_count):
+        resource = self._merged_redirect_so_name(skeleton_group, slot)
+        prefix = int(plan.get("so_prefix_rows", 0))
+        if prefix and not plan.get("target_has_real_geometry", True):
+            # Binding a captured SO reference starts at byte zero. The
+            # carrier's drawindexed skips the stub prefix, so preserve it.
+            stride = int(plan["so_stride"])
+            resource += f"->Region({prefix * stride}, {row_count * stride})"
+        return resource
+
     def _append_merged_target_slot_guards(
         self,
         section,
@@ -5286,6 +5794,8 @@ class ExportZZMI(ExportUnity):
         guard_component_ids = plan.get("required_component_ids") or (
             self._merged_group_component_ids(skeleton_group)
         )
+        deform_draws = plan.get("deform_draws", [])
+        row_count = sum(int(count) for _, _, count in deform_draws)
         for slot in slots:
             # 每槽守卫：本槽 SO 别名当帧已（由捕获者）刷新 + 几何引用的骨骼所属
             # 部件在该槽都已当帧到达（或按上一帧预测本槽不会到）才重放；if 内只有
@@ -5313,9 +5823,11 @@ class ExportZZMI(ExportUnity):
                 f"    vs-t0 = {self._merged_deform_palette_name(replay_palette_ib, skeleton_group, slot)}"
             )
             section.append(
-                f"    so0 = ref {self._merged_redirect_so_name(skeleton_group, slot)}"
+                "    so0 = ref " + self._merged_replay_so_region(
+                    skeleton_group, slot, plan, row_count
+                )
             )
-            for vb0_resource, vb2_resource, draw_count in plan.get("deform_draws", []):
+            for vb0_resource, vb2_resource, draw_count in deform_draws:
                 section.append(f"    vb2 = {vb2_resource}")
                 section.append(f"    vb0 = {vb0_resource}")
                 section.append(f"    draw = {int(draw_count)}, 0")
@@ -5779,6 +6291,10 @@ class ExportZZMI(ExportUnity):
         仅当 _zzmi_pose_expand_groups 判定需要展开时才写；正常角色不会多出任何文件。
         """
         super().generate_buffer_files(output_folder)
+        for group, plan in getattr(self, "_zzmi_independent_skin_plans", {}).items():
+            for ib, texcoord in plan.get("native_texcoords", {}).items():
+                path = os.path.join(output_folder, f"zzmi-fusion-G{group}-{ib}-Texcoord.buf")
+                self._atomic_write_binary(path, texcoord["data"])
 
         for drawib_model in self.drawib_model_list:
             expand_groups = self._zzmi_pose_expand_groups(drawib_model)
@@ -5814,6 +6330,9 @@ class ExportZZMI(ExportUnity):
     def add_unity_vs_texture_override_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
         d3d11_game_type = drawib_model.d3d11GameType
         draw_ib = drawib_model.draw_ib
+        if self._zzmi_independent_skin_group(draw_ib) is not None:
+            self._zzmi_append_group_palette_capture(ini_builder, drawib_model)
+            return
 
         # 一个 DrawIB 配了多次预蒙皮 draw 时（例如翅膀的 4 个推进器），
         # 为每个组件各生成一组 VB 覆盖段；否则走下面的原逻辑（行为与改动前一致）。
@@ -5927,6 +6446,8 @@ class ExportZZMI(ExportUnity):
         if d3d11_game_type is None or not getattr(d3d11_game_type, "GPU_PreSkinning", False):
             return
         draw_ib = drawib_model.draw_ib
+        if self._zzmi_independent_skin_group(draw_ib) is not None:
+            return
         redirect_carrier = self._redirect_carrier_map.get(draw_ib)
         redirect_target = self._redirect_target_map.get(draw_ib)
         if redirect_carrier is None and redirect_target is None:
@@ -6693,6 +7214,8 @@ class ExportZZMI(ExportUnity):
         }
 
         for skeleton_group, components in groups.items():
+            if skeleton_group in getattr(self, "_zzmi_independent_skin_plans", {}):
+                continue
             legal: set[int] = set()
             for component in components:
                 for bone_id in range(
@@ -7438,9 +7961,7 @@ class ExportZZMI(ExportUnity):
         if _zzmi_prop_flag("cross_group_merged_vgmap_test", True):
             from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
 
-            profile = getattr(
-                ZZMISkeletonMergeHelper, "cross_group_profile", None
-            )
+            profile = _merged_palette_profile()
             if profile is None:
                 print(
                     "[ZZMI骨骼合并] 跨组开关开着，但本次会话没有骨骼池方案数据，"
@@ -7597,6 +8118,39 @@ class ExportZZMI(ExportUnity):
                 section.append("array = " + str(int(rows)))
                 section.append("bind_flags = unordered_access vertex_buffer")
                 section.new_line()
+
+        independent_plans = getattr(self, "_zzmi_independent_skin_plans", {})
+        for group, plan in sorted(independent_plans.items()):
+            from ...blueprint.export_helper import BlueprintExportHelper
+
+            mesh_folder = BlueprintExportHelper.get_current_buffer_folder_name()
+            target_ib = plan["target_ib"]
+            for category, stride in (("Position", 40), ("Blend", 32)):
+                section.append(f"[ResourceZZGroup{category}_G{group}]")
+                section.append("type = StructuredBuffer")
+                section.append(f"stride = {stride}")
+                section.append("bind_flags = shader_resource")
+                section.append(f"filename = {mesh_folder}/{target_ib}-{category}.buf")
+                section.new_line()
+            for ib, texcoord in plan.get("native_texcoords", {}).items():
+                section.append(f"[ResourceZZFusionTexcoord_G{group}_{ib}]")
+                section.append("type = Buffer")
+                section.append(f"stride = {texcoord['stride']}")
+                section.append(f"filename = {mesh_folder}/zzmi-fusion-G{group}-{ib}-Texcoord.buf")
+                section.new_line()
+            rows = self._merged_skin_out_row_count(plan)
+            section.append(f"[{self._merged_skin_out_name(group, 1)}]")
+            section.append("type = ByteAddressBuffer")
+            section.append(f"stride = {ZZMI_MERGED_SKIN_POSITION_ROW_BYTES}")
+            section.append(f"array = {rows}")
+            section.append("bind_flags = unordered_access vertex_buffer")
+            section.new_line()
+            for slot in (0, 1, 3):
+                section.append(f"[ResourceZZGroupBackup_G{group}_vb{slot}]")
+                section.new_line()
+            for cid in plan["required_component_ids"]:
+                constants_section.append(f"global {self._zzmi_native_so_var(cid)} = 0")
+            self._append_merged_skin_cs_sections(section, group, plan, (1,), use_skin_out=True)
 
         # RedirectSO 使用 DrawIndexed 的 base_vertex 读取合并 Position；D3D11 会
         # 将这个偏移同时应用到 vb1，因此必须给每个 carrier 的 Texcoord 前面补
@@ -7968,6 +8522,9 @@ class ExportZZMI(ExportUnity):
         # 窗口内使用，渲染段不引用，无需帧末复位。
         present_section = M_IniSection(M_SectionType.Present)
         present_section.SectionName = "Present"
+        for plan in independent_plans.values():
+            for cid in plan["required_component_ids"]:
+                present_section.append(f"{self._zzmi_native_so_var(cid)} = 0")
         for component_id in range(len(self.merged_skeleton_components)):
             for slot in slots:
                 present_section.append(
@@ -8004,6 +8561,8 @@ class ExportZZMI(ExportUnity):
             "zzmi_merged_skeleton_attach.hlsl",
             self._merged_skin_shader_filename(),
         ]
+        if getattr(self, "_zzmi_independent_skin_plans", {}):
+            shader_names.append("zzmi_merged_skin_group.hlsl")
         if _merged_palette_route_active():
             # 骨骼池路线：deform 之前要把池里每根 canonical 骨换算到本部件空间，
             # 少了这个着色器整条路线静默失效（palette 空 ⇒ 全塌到原点）。
@@ -8072,6 +8631,7 @@ class ExportZZMI(ExportUnity):
     def add_unity_vs_texture_override_ib_sections(self, ini_builder: M_IniBuilder, drawib_model):
         texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
         draw_ib = drawib_model.draw_ib
+        independent_group = self._zzmi_independent_skin_group(draw_ib)
         flow_height = getattr(self, "_native_flow_height", None)
         if flow_height is not None:
             from ...common.zzmi_native_flow import flow_draw_scope
@@ -8111,7 +8671,28 @@ class ExportZZMI(ExportUnity):
         texture_override_ib_section.append("handling = skip")
         texture_override_ib_section.new_line()
 
+        native_draw = None
+        if independent_group is not None:
+            plan = self._zzmi_independent_skin_plans[independent_group]
+            ini_builder.append_section(texture_override_ib_section)
+            native_draws = plan.get("native_space_draws", {})
+            if native_draws:
+                if draw_ib not in plan["native_texcoords"]:
+                    return
+            elif draw_ib != plan["target_ib"]:
+                return
+            with _section_registry_context(plan["material_ib"]):
+                texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
+
         for submesh_model in drawib_model.submesh_model_list:
+            if independent_group is not None:
+                first = str(submesh_model.match_first_index)
+                if native_draws:
+                    native_draw = native_draws.get((draw_ib, first))
+                    if native_draw is None:
+                        continue
+                elif first != "0":
+                    continue
             if expand_render_suffix:
                 _submesh_suffix = str(
                     getattr(submesh_model, "workspace_unique_str", "")
@@ -8122,8 +8703,17 @@ class ExportZZMI(ExportUnity):
                     # 否则每次实例 draw 都会重画全部组件 → 带偏移索引越界（扭曲）
                     # 且多份几何深度冲突（高频闪烁）。见本方法开头的判定。
                     continue
-            texture_override_name_suffix = drawib_model.get_submesh_texture_override_suffix(submesh_model)
-            ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
+            texture_override_name_suffix = (
+                plan["material_suffix"] if independent_group is not None
+                else drawib_model.get_submesh_texture_override_suffix(submesh_model)
+            )
+            if native_draw is not None:
+                texture_override_name_suffix += f"_ZZFusion_{draw_ib}"
+                if first != "0":
+                    texture_override_name_suffix += f"_{first}"
+                ib_resource_name = plan["index_resource"]
+            else:
+                ib_resource_name = drawib_model.get_submesh_ib_resource_name(submesh_model)
 
             current_ib_key = self._get_submesh_ib_key(submesh_model, draw_ib)
             is_cross_ib_source = current_ib_key in self.cross_ib_info_dict
@@ -8239,6 +8829,32 @@ class ExportZZMI(ExportUnity):
                 texture_override_ib_section.new_line()
                 continue
 
+            if independent_group is not None:
+                cid = self.merged_skeleton_component_id_dict[draw_ib]
+                guard = [f"@vb0 == {self._zzmi_native_so_var(cid)}"]
+                dependencies = (
+                    native_draw["providers"] if native_draw is not None else plan["required_component_ids"]
+                )
+                guard.extend(f"{self._merged_seen_var(dep, 1)} == 1" for dep in dependencies)
+                texture_override_ib_section.append("if " + " && ".join(guard))
+                texture_override_ib_section.append(
+                    f"run = {self._merged_skin_cs_name(independent_group, 1, 0)}"
+                )
+                for slot in (0, 1, 3):
+                    texture_override_ib_section.append(f"ResourceZZGroupBackup_G{independent_group}_vb{slot} = ref vb{slot}")
+                output = self._merged_skin_out_name(independent_group, 1)
+                texture_override_ib_section.append(f"vb0 = {output}")
+                texcoord = (
+                    f"ResourceZZFusionTexcoord_G{independent_group}_{draw_ib}"
+                    if native_draw is not None else f"Resource{draw_ib}Texcoord"
+                )
+                texture_override_ib_section.append(f"vb1 = {texcoord}")
+                # Motion-vector passes can read the previous native stream in vb3.
+                # The prototype has no previous-pose stream for the joined geometry.
+                texture_override_ib_section.append("if @vb3 != 0")
+                texture_override_ib_section.append(f"    vb3 = {output}")
+                texture_override_ib_section.append("endif")
+
             texture_override_ib_section.append("ib = " + ib_resource_name)
 
             if flow_setup:
@@ -8264,13 +8880,17 @@ class ExportZZMI(ExportUnity):
                     )
                     texture_override_ib_section.append(f"vb1 = {texcoord_resource_name}")
             elif (
-                int(getattr(submesh_model, "vertex_count", 0) or 0)
+                native_draw is None
+                and int(getattr(submesh_model, "vertex_count", 0) or 0)
                 > int(getattr(submesh_model, "original_vertex_count", 0) or 0)
                 and int(getattr(submesh_model, "original_vertex_count", 0) or 0) > 0
             ):
                 texture_override_ib_section.append(f"vb1 = Resource{draw_ib}Texcoord")
 
-            texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+            texture_markup_info_list = (
+                plan["material_textures"] if independent_group is not None
+                else drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+            )
             if not GlobalProterties.forbid_auto_texture_ini() and texture_markup_info_list:
                 slot_fix_enabled = GlobalProterties.zzz_use_slot_fix()
                 uses_slot_fix = False
@@ -8364,7 +8984,24 @@ class ExportZZMI(ExportUnity):
                 )
             else:
                 print(f"[CrossIB ZZMI] 非源块绘制物体: {len(submesh_model.drawcall_model_list)} 个")
-                if split_draws_emitted:
+                if independent_group is not None:
+                    # Preserve the source mesh identity for the material node.
+                    named_draws = []
+                    offsets = {}
+                    calls = plan["draw_calls"] if native_draw is not None else submesh_model.drawcall_model_list
+                    for drawcall in calls:
+                        named_draw = copy.copy(drawcall)
+                        named_draw.obj_name = drawcall.get_blender_obj_name()
+                        if native_draw is not None:
+                            named_draw.index_count = native_draw["count"]
+                            offsets[named_draw.obj_name] = native_draw["start"]
+                        else:
+                            offsets[named_draw.obj_name] = drawib_model.obj_name_draw_offset.get(
+                                drawcall.obj_name, drawcall.index_offset
+                            )
+                        named_draws.append(named_draw)
+                    self._append_drawindexed_lines(texture_override_ib_section, named_draws, offsets)
+                elif split_draws_emitted:
                     # 合并网格已按来源拆成多次 drawindexed（每次带自己的 vs-cb1）：
                     # 这里绝不能再发一次单次合并绘制，否则会被画两遍。
                     print("[CrossIB ZZMI] 合并网格已按来源拆分绘制，跳过单次合并绘制")
@@ -8455,6 +9092,13 @@ class ExportZZMI(ExportUnity):
                 # 因为换绑 IB 后，ZZMI 的 post 检查可能找不到原来的渲染段。
                 texture_override_ib_section.extend(flow_restore)
 
+            if independent_group is not None:
+                if not flow_restore:
+                    texture_override_ib_section.append(";MARK:ZZMIGroupBufferRestore")
+                for slot in (0, 1, 3):
+                    texture_override_ib_section.append(f"vb{slot} = ref ResourceZZGroupBackup_G{independent_group}_vb{slot}")
+                texture_override_ib_section.append("endif")
+
         ini_builder.append_section(texture_override_ib_section)
 
     def _warn_missing_drawib_parts(self):
@@ -8503,15 +9147,67 @@ class ExportZZMI(ExportUnity):
             )
         return missing_report
 
+    def _export_lod_batches(self, method_name):
+        from tempfile import TemporaryDirectory
+        from ...common.texture_export_plan import TextureExportPlan
+        from ...common.zzmi_lod_export import publish_lod_exports
+
+        main_ini = GlobalConfig.path_generate_mod_ini()
+        exports = []
+        models = []
+        seen_ibs = set()
+        workspace = GlobalConfig.path_workspace_folder()
+        for lod in sorted(self._lod_fusion_batches):
+            map_path = os.path.join(workspace, lod, "DrawIB-Component.json")
+            mapping = JsonUtils.LoadFromFile(map_path) if os.path.isfile(map_path) else {}
+            ibs = set(mapping or {}) | {draw.match_draw_ib for draw in self._lod_fusion_batches[lod]}
+            conflicts = seen_ibs & ibs
+            if conflicts:
+                raise Fatal(f"多个 LOD 共用绘制哈希，无法安全区分：{', '.join(sorted(conflicts))}")
+            seen_ibs.update(ibs)
+
+        staging = TemporaryDirectory(prefix="zzmi_lod_export_")
+        try:
+            for lod, draws in sorted(self._lod_fusion_batches.items()):
+                child = copy.copy(self.blueprint_model)
+                child.ordered_draw_obj_data_model_list = [copy.copy(draw) for draw in draws]
+                child._zzmi_lod_exports = None
+                folder = os.path.join(staging.name, lod)
+                os.makedirs(folder, exist_ok=True)
+                print(f"[ZZMI 按 LOD 导出] {lod}")
+                with _zzmi_lod_output(folder):
+                    exporter = ExportZZMI(child)
+                    getattr(exporter, method_name)()
+                exports.append((lod, child, exporter, folder))
+                models.extend(exporter.drawib_model_list)
+
+            self.drawib_model_list = models
+            if method_name == "export" and getattr(self.blueprint_model, "postprocess_nodes", ()):
+                self.blueprint_model._zzmi_lod_exports = (staging, exports, main_ini)
+                return
+            TextureExportPlan.finalize(staging.name)
+            publish_lod_exports(exports, main_ini, buffers_only=method_name == "export_buffers_only")
+        except Exception:
+            staging.cleanup()
+            raise
+        staging.cleanup()
+
+    @_in_lod_fusion_scope
     def export(self):
         try:
             self._export_impl()
         finally:
             self._cleanup_stub_objects()
 
+    @_in_lod_fusion_scope
     def export_buffers_only(self):
         """多轮导出的纯缓冲路径也必须闭合占位对象事务。"""
         try:
+            if self._zzmi_complete_group_exports:
+                self.merged_skeleton_components, self.merged_skeleton_component_id_dict = (
+                    self._collect_merged_skeleton_components()
+                )
+                self._zzmi_build_independent_skin_plans()
             return super().export_buffers_only()
         finally:
             self._cleanup_stub_objects()
@@ -8531,6 +9227,7 @@ class ExportZZMI(ExportUnity):
             self._collect_merged_skeleton_components()
         )
         self._enforce_merged_skeleton_contract()
+        self._zzmi_build_independent_skin_plans()
 
         TimerUtils.start_stage("缓冲文件生成")
         # 后台导出的状态栏细分文本：基础导出（写 .buf 资源）是本次导出里最长的

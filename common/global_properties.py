@@ -297,6 +297,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    zzmi_fusion_per_lod: bpy.props.BoolProperty(
+        name="按 LOD 融合骨骼",
+        description="每个 LOD 独立生成骨骼池。切换后重新导入，按 LOD 分别导出",
+        default=False,
+    ) # type: ignore
+
     cross_group_merged_vgmap_test: bpy.props.BoolProperty(
         name="跨组融合统一顶点组测试",
         description=(
@@ -643,6 +649,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     def set_import_merged_vgmap(cls, value: bool):
         """显式切换合并 VGMap；预生成失败时用于保持导入与后续导出同一模式。"""
         setattr(cls._instance(), "import_merged_vgmap", bool(value))
+
+    @classmethod
+    def zzmi_fusion_per_lod(cls):
+        return cls._bool_attr("zzmi_fusion_per_lod")
 
     @classmethod
     def cross_group_merged_vgmap_test(cls):

@@ -67,7 +67,11 @@ StructuredBuffer<ZZBlend32> src_blend : register(t1);
 // 同一处「声明步长 vs 视图元素尺寸」不匹配（AMD 驱动按 SBS 取址 → 索引放大 3 倍）。
 Buffer<float4> merged_skeleton : register(t2);
 // 目标 SO：uav_byte_stride = 4 ⇒ 4 字节元素的结构化 UAV
+#ifdef ZZMI_GROUP_RAW_OUTPUT
+RWByteAddressBuffer dst_rows : register(u0);
+#else
 RWStructuredBuffer<float> dst_rows : register(u0);
+#endif
 
 // ini 参数纹理。**不在编译期绑定索引**（[0]/[1] 的归属随 fork 变化），
 // 具体取哪一组由 main 里按「资源行数」判据在运行时决定。
@@ -129,6 +133,12 @@ void zz_skin_vertex(
 
 void zz_write_row(uint row, float3 pos, float3 nrm, float3 tan, float tan_w, uint stride_f)
 {
+#ifdef ZZMI_GROUP_RAW_OUTPUT
+    uint base = row * stride_f * 4u;
+    dst_rows.Store3(base, asuint(pos));
+    dst_rows.Store3(base + 12u, asuint(nrm));
+    dst_rows.Store4(base + 24u, asuint(float4(tan, tan_w)));
+#else
     uint base = row * stride_f;
     dst_rows[base + 0] = pos.x;
     dst_rows[base + 1] = pos.y;
@@ -140,6 +150,7 @@ void zz_write_row(uint row, float3 pos, float3 nrm, float3 tan, float tan_w, uin
     dst_rows[base + 7] = tan.y;
     dst_rows[base + 8] = tan.z;
     dst_rows[base + 9] = tan_w;
+#endif
 }
 
 [numthreads(64, 1, 1)]
