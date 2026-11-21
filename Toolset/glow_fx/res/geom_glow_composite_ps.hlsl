@@ -58,7 +58,7 @@ float4 main(float4 position : SV_Position) : SV_Target
     float haloNormalization = max(haloParameters.y, 1.0);
     float3 haloEmission = halo / haloNormalization;
     float3 haloColor = highlightColor(haloEmission);
-    float3 surface = highlightColor(core / max(coreCoverage, 0.000001));
+    float3 surface = coreCoverage > 0.0 ? highlightColor(core / coreCoverage) : 0.0;
     float alpha = scene.a;
     if (haloParameters.w > 0.5)
     {

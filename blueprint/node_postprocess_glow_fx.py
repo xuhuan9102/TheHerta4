@@ -34,6 +34,7 @@ from .node_postprocess_rabbitfx_pro import (
     _unit_edit_scope,
 )
 from .node_postprocess_base import SSMTNode_PostProcess_Base
+from ..common.ttl_protocol import parse_efmi_ttl_draw_call, parse_ttl_draw_call
 from .node_postprocess_rabbitfx import (
     _extract_hash_from_object,
     _extract_resource_suffix,
@@ -41,6 +42,8 @@ from .node_postprocess_rabbitfx import (
 
 NODE_IDNAME = "SSMTNode_PostProcess_GlowFX"
 RUN_LINE = "run = CommandListGlowFXRun"
+_TTL_DRAW_LINE = r"run = CommandList\TTL\Draw".casefold()
+_EFMI_TTL_DRAW_LINE = r"run = CommandList\EFMITTL\Draw".casefold()
 _DRAW_GUARD = 'if !$\\SlotFix\\is_outline_shader'
 GLOW_RESOURCE = "ResourceGlowFXMap"
 _DEFAULT_HALO_RADIUS = 40
@@ -48,10 +51,21 @@ _LOCAL_GLOW_REF_RE = re.compile(r"^ResourceGlowFXMap(?:_r\d+)?\s*=\s*ref\s+(\S+)
 _RUNTIME_NAME_RE = re.compile(r"\b(?:\w*GeoGlow\w*|ResourceGlowFXMap|CommandListGlowFXRun)\b", re.IGNORECASE)
 _LEGACY_RUN_LINE = r"run = CommandList\GlowFX\Run"
 _LEGACY_GLOW_REF_RE = re.compile(r"^Resource\\GlowFX\\Glowmap\s*=\s*ref\s+(\S+)", re.IGNORECASE)
+_EFMI_GLOW_REF_RE = re.compile(r"^Resource\\EFMITTL\\GlowFXMap\s*=\s*ref\s+(\S+)", re.IGNORECASE)
 
 
 def _glowfx_param(name):
     return f"$glowfx_{name.lower()}"
+
+
+def _halo_normalization(radius):
+    spacing = 2 * max(1, (radius + 95) // 96)
+    total = 1.0
+    for offset in range(spacing, radius, spacing):
+        fraction = offset / radius
+        edge = 1.0 - fraction * fraction * (3.0 - 2.0 * fraction)
+        total += 2.0 * 2.0 ** (-4.0 * fraction * fraction) * edge
+    return total
 
 
 _PARAM_BEGIN = "; === GlowFX Params ==="
@@ -197,12 +211,23 @@ def _draw_arguments(line):
     return args
 
 
-def _first_draw_after(lines, start):
-    for index in range(max(0, start), len(lines)):
-        args = _draw_arguments(lines[index])
-        if args is not None:
-            return index, args
-    return -1, None
+def _glow_draws(lines):
+    for index, line in enumerate(lines):
+        command = str(line).partition(";")[0].strip().casefold()
+        if command == _TTL_DRAW_LINE:
+            parsed = parse_ttl_draw_call(lines, index)
+            if parsed is not None:
+                start, args = parsed
+                yield start, index, args, "TTL"
+        elif command == _EFMI_TTL_DRAW_LINE:
+            parsed = parse_efmi_ttl_draw_call(lines, index)
+            if parsed is not None:
+                start, args = parsed
+                yield start, index, (*args, 0), "EFMITTL"
+        else:
+            args = _draw_arguments(line)
+            if args is not None:
+                yield index, index, args, None
 
 
 def _surface_mode_get(node):
@@ -566,7 +591,15 @@ class SSMTNode_PostProcess_GlowFX(
             return False
         self._emit_effect_switch(sections)
         if generated:
-            self._embed_glow_runtime(sections)
+            run = (RUN_LINE + self._halo_suffix()).casefold()
+            if any(line.strip().casefold() == run for lines in sections.values() for line in lines):
+                self._embed_glow_runtime(sections)
+            else:
+                constants = sections.setdefault("[Constants]", [])
+                for name, default in (("h", 0), ("s", 0), ("v", 0), ("brightness", 1), ("interpolate", 0)):
+                    declaration = f"global $glowfx_{name} = {default}"
+                    if declaration not in constants:
+                        constants.append(declaration)
             if self.enable_glow and self._breathing():
                 self._ensure_glow_constants(sections)
                 self._ensure_breath_clock(sections)
@@ -911,7 +944,9 @@ class SSMTNode_PostProcess_GlowFX(
         ref = record_ref or _block_resource_ref(block, self.fx_profile)
         if not ref:
             for line in block:
-                match = _LEGACY_GLOW_REF_RE.match(line.strip()) or _LOCAL_GLOW_REF_RE.match(line.strip())
+                stripped = line.strip()
+                match = (_LEGACY_GLOW_REF_RE.match(stripped) or _LOCAL_GLOW_REF_RE.match(stripped)
+                         or _EFMI_GLOW_REF_RE.match(stripped))
                 if match:
                     ref = match.group(1)
                     break
@@ -923,11 +958,20 @@ class SSMTNode_PostProcess_GlowFX(
         block = _strip_rabbitfx_glow_lines(block, self.fx_profile)
         block = _strip_material_rabbitfx_lines(block)
 
-        draw_index, draw_args = _first_draw_after(block, 0)
-        if draw_index < 0:
-            print(f"[GlowFX] 跳过 {unit.get('mesh', '')}: 找不到三参数 drawindexed")
+        draws = list(_glow_draws(block))
+        if not draws:
+            print(f"[GlowFX] 跳过 {unit.get('mesh', '')}: 找不到绘制参数")
             return False
 
+        for start_index, draw_index, draw_args, ttl in reversed(draws):
+            if ttl == "EFMITTL":
+                self._insert_efmi_glow_draw(block, start_index, draw_index, ref)
+            else:
+                self._insert_glow_draw(block, start_index, draw_index, draw_args, ref, ttl == "TTL")
+        lines[start:end] = block
+        return True
+
+    def _insert_glow_draw(self, block, start_index, draw_index, draw_args, ref, ttl):
         indent = _leading_whitespace(block[draw_index])
         emission_only = self.emission_only
         switch = self._effect_switch_variable()
@@ -938,14 +982,23 @@ class SSMTNode_PostProcess_GlowFX(
         ]
         if emission_only:
             call_lines.append("endif")
+            if ttl:
+                call_lines.extend([
+                    "if $glowfx_emission_only",
+                    r"run = CommandList\TTL\ResetCallParams",
+                    r"Resource\TTL\TransparencyTex = null",
+                    "endif",
+                ])
         if switch:
             call_lines.append(f"if {switch} != 0")
-        call_lines.append(f"{GLOW_RESOURCE}{self._halo_suffix()} = ref {ref}")
+        suffix = self._halo_suffix()
+        if not ttl:
+            call_lines.append(f"{GLOW_RESOURCE}{suffix} = ref {ref}")
         call_lines.extend([
             f"$glowfx_drawcount = {draw_args[0]}",
             f"$glowfx_drawstart = {draw_args[1]}",
             f"$glowfx_drawbase = {draw_args[2]}",
-            RUN_LINE + self._halo_suffix(),
+            RUN_LINE + suffix,
         ])
         if self.enable_reset:
             call_lines.extend(
@@ -967,15 +1020,49 @@ class SSMTNode_PostProcess_GlowFX(
         if self.enable_glow:
             param_lines.extend(self._build_glow_parameter_lines())
         if emission_only:
+            param_lines.append(
+                f"$glowfx_emission_only = ({switch} != 0)" if switch else "$glowfx_emission_only = 1"
+            )
+        if ttl:
+            if switch:
+                param_lines.append(f"if {switch} != 0")
             param_lines.extend([
-                f"$glowfx_emission_only = ({switch} != 0)" if switch else "$glowfx_emission_only = 1",
-                "if !$glowfx_emission_only",
+                f"{GLOW_RESOURCE}{suffix} = ref {ref}",
+                f"run = CommandListGeoGlowPrepareTTL{suffix}",
             ])
+            if switch:
+                param_lines.append("endif")
+        if emission_only:
+            param_lines.append("if !$glowfx_emission_only")
         param_lines.append(_PARAM_END)
-        _insert_block(block, draw_index, param_lines, indent)
+        _insert_block(block, start_index, param_lines, indent)
 
-        lines[start:end] = block
-        return True
+    def _insert_efmi_glow_draw(self, block, start_index, draw_index, ref):
+        indent = _leading_whitespace(block[draw_index])
+        switch = self._effect_switch_variable()
+        setup = [_PARAM_BEGIN]
+        if self.enable_glow:
+            setup.extend(self._build_glow_parameter_lines())
+        if switch:
+            setup.append(f"if {switch} != 0")
+        setup.extend([
+            rf"Resource\EFMITTL\GlowFXMap = ref {ref}",
+            r"$\EFMITTL\glowfx_hue = ($glowfx_h / 360.0) * $glowfx_interpolate",
+            r"$\EFMITTL\glowfx_saturation = ($glowfx_s / 100.0) * $glowfx_interpolate",
+            r"$\EFMITTL\glowfx_value = ($glowfx_v / 100.0) * $glowfx_interpolate",
+            r"$\EFMITTL\glowfx_brightness = $glowfx_brightness",
+            rf"$\EFMITTL\glowfx_only = {int(self.emission_only)}",
+            rf"$\EFMITTL\glowfx_radius = {self.halo_radius}",
+            rf"$\EFMITTL\glowfx_normalization = {_halo_normalization(self.halo_radius):.8f}",
+        ])
+        if switch:
+            setup.append("endif")
+        setup.append(_PARAM_END)
+        _insert_block(block, draw_index + 1, [
+            _CALL_BEGIN, "$glowfx_h = 0", "$glowfx_s = 0", "$glowfx_v = 0",
+            "$glowfx_brightness = 1", "$glowfx_interpolate = 0", _CALL_END,
+        ], indent)
+        _insert_block(block, start_index, setup, indent)
 
     def _build_glow_parameter_lines(self):
         if self._breathing():
@@ -1056,18 +1143,16 @@ class SSMTNode_PostProcess_GlowFX(
         with open(template, encoding="utf-8") as handle:
             source = handle.read()
         radius = self.halo_radius
-        normalization = 1.0
-        spacing = 2 * max(1, (radius + 95) // 96)
-        for offset in range(spacing, radius, spacing):
-            fraction = offset / radius
-            edge = 1.0 - fraction * fraction * (3.0 - 2.0 * fraction)
-            normalization += 2.0 * 2.0 ** (-4.0 * fraction * fraction) * edge
+        normalization = _halo_normalization(radius)
         source = source.replace("__GLOW_RADIUS__", str(radius))
         source = source.replace("__GLOW_NORMALIZATION__", f"{normalization:.8f}")
         suffix = self._halo_suffix()
         if suffix:
             source = _RUNTIME_NAME_RE.sub(lambda match: match.group() + suffix, source)
         runtime, _ = self._parse_ini(source)
+        ttl_setup = f"run = CommandListGeoGlowPrepareTTL{suffix}".casefold()
+        if not any(line.strip().casefold() == ttl_setup for lines in sections.values() for line in lines):
+            runtime.pop(f"[CommandListGeoGlowPrepareTTL{suffix}]")
         constants = sections.setdefault("[Constants]", [])
         existing = {line.strip().casefold() for line in constants}
         constants.extend(line for line in runtime.pop("[Constants]") if line.casefold() not in existing)
@@ -1085,6 +1170,7 @@ class SSMTNode_PostProcess_GlowFX(
         os.makedirs(target_dir, exist_ok=True)
         for filename in (
             "glow_fx_ps.hlsl",
+            "glow_fx_emission.hlsli",
             "geom_glow_vs.hlsl",
             "geom_glow_visibility_ps.hlsl",
             "geom_glow_layers.hlsli",

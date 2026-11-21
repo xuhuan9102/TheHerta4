@@ -298,6 +298,11 @@ def _load_glowfx_module():
     module_path = ROOT / "blueprint" / "node_postprocess_glow_fx.py"
     if not module_path.is_file():
         raise AssertionError(f"缺少 Glow FX 节点模块: {module_path}")
+    protocol = importlib.util.spec_from_file_location(
+        f"{PKG}.common.ttl_protocol", ROOT / "common" / "ttl_protocol.py"
+    )
+    sys.modules[protocol.name] = importlib.util.module_from_spec(protocol)
+    protocol.loader.exec_module(sys.modules[protocol.name])
     _GLOWFX_MODULE = _load("node_postprocess_glow_fx", module_path)
     return _GLOWFX_MODULE
 
@@ -2486,7 +2491,9 @@ class GlowFXTests(unittest.TestCase):
         self.assertIn("GlowMap.SampleLevel(MaterialSampler, texcoord, 0.0)", source)
         self.assertIn("GlowMap.SampleGrad(MaterialSampler, texcoord, dx, dy)", source)
         self.assertIn("IniParams[224]", source)
-        self.assertIn("float brightness = abs(parameters.w);", source)
+        shared = shader.with_name("glow_fx_emission.hlsli").read_text(encoding="utf-8")
+        self.assertIn('"glow_fx_emission.hlsli"', source)
+        self.assertIn("float brightness = abs(parameters.w);", shared)
         self.assertIn("parameters.w < 0.0 ? depthGap", source)
         self.assertIn("return float4(emission, position.z);", source)
         self.assertIn("SV_IsFrontFace", source)
@@ -2504,7 +2511,7 @@ class GlowFXTests(unittest.TestCase):
         )
         self.assertNotIn("halo / max(coverage, 0.000001)", source)
         self.assertIn("highlightColor(haloEmission)", source)
-        self.assertIn("highlightColor(core / max(coreCoverage, 0.000001))", source)
+        self.assertIn("coreCoverage > 0.0 ? highlightColor(core / coreCoverage)", source)
         self.assertIn(
             "float fringeFade = smoothstep(0.0, 0.03, haloPeak);",
             source,
@@ -2606,6 +2613,61 @@ class GlowFXTests(unittest.TestCase):
             "geom_glow_composite_ps.hlsl",
         ):
             self.assertTrue(os.path.isfile(os.path.join(self.export_dir, "res", filename)))
+
+    def test_glowfx_preserves_ttl_draw_and_primes_its_emission(self):
+        marker = "; MaterialRabbitFX glow-ttl"
+        section = (
+            f"[{GLOW_SECTION}]\n"
+            f"[mesh:{MESH_NAME}]\n"
+            "hash = fd054d1d\n"
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+            f"{marker}\n"
+            r"Resource\TTL\TransparencyTex = ref Resource_TTLMap_Silk" "\n"
+            r"$\TTL\alpha = 0.6" "\n"
+            r"$\TTL\_1 = 52688" "\n"
+            r"$\TTL\_2 = 10" "\n"
+            r"$\TTL\_3 = 3" "\n"
+            r"run = CommandList\TTL\Draw" "\n"
+        )
+        _write_ini(self.ini_path, section)
+        self._register_glow_record(marker)
+        node = _make_glowfx_node(target_items=[_item(_fake_object())])
+        node.execute_postprocess(self.export_dir)
+        content = _read_ini(self.ini_path)
+        self.assertLess(content.index(r"$\TTL\alpha = 0.6"), content.index("run = CommandListGeoGlowPrepareTTL"))
+        self.assertLess(content.index("run = CommandListGeoGlowPrepareTTL"), content.index(r"$\TTL\_1 = 52688"))
+        self.assertIn("\n".join([r"$\TTL\_1 = 52688", r"$\TTL\_2 = 10", r"$\TTL\_3 = 3", r"run = CommandList\TTL\Draw"]), content)
+        self.assertLess(content.index(r"run = CommandList\TTL\Draw"), content.index("run = CommandListGlowFXRun"))
+        self.assertIn("$glowfx_drawstart = 10\n$glowfx_drawbase = 3", content)
+        self.assertIn(r"Resource\TTL\GlowFXMap = ref ResourceGlowFXMap", content)
+        self.assertNotIn("drawindexed = 52688", content)
+
+    def test_efmittl_glow_preserves_native_draw_and_uses_efmi_capture(self):
+        marker = "; MaterialRabbitFX glow-efmittl"
+        source = "\n".join([
+            f"[{GLOW_SECTION}]", f"[mesh:{MESH_NAME}]", "hash = fd054d1d",
+            r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal", marker,
+            r"Resource\EFMITTL\Mask = ref Resource_TTLMap_Silk", r"$\EFMITTL\alpha = 0.6",
+            r"$\EFMITTL\count = 52688", r"$\EFMITTL\first = 10",
+            r"run = CommandList\EFMITTL\Draw", "",
+        ])
+        _write_ini(self.ini_path, source)
+        self._register_glow_record(marker)
+        node = _make_glowfx_node(target_items=[_item(_fake_object())], emission_only=True, halo_radius=18)
+        node.execute_postprocess(self.export_dir)
+        result = _read_ini(self.ini_path)
+
+        setup = r"Resource\EFMITTL\GlowFXMap = ref Resource_Glowmap_Personal"
+        native_call = "\n".join(source.splitlines()[-3:])
+        self.assertLess(result.index(setup), result.index(native_call))
+        self.assertIn(r"$\EFMITTL\glowfx_only = 1", result)
+        self.assertIn(r"$\EFMITTL\glowfx_radius = 18", result)
+        self.assertRegex(result, r"\$\\EFMITTL\\glowfx_normalization = [1-9]\d*\.\d+")
+        self.assertIn(r"Resource\EFMITTL\Mask = ref Resource_TTLMap_Silk", result)
+        self.assertIn(r"$\EFMITTL\alpha = 0.6", result)
+        self.assertEqual(result.count(r"run = CommandList\EFMITTL\Draw"), 1)
+        self.assertNotIn("CommandListGlowFXRun", result)
+        self.assertNotIn("SlotFix", result)
 
     def test_glowfx_removes_all_rabbitfx_runtime_elements_from_export(self):
         marker = "; MaterialRabbitFX glow-fx"
