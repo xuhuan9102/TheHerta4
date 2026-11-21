@@ -418,6 +418,18 @@ class SkipBlockTests(unittest.TestCase):
             _stripped_lines(hash_only),
         )
 
+        long_hash_only = module._append_skip_block("", ["7664f7059abfa451"])
+        self.assertEqual(
+            [
+                "; --- AUTO-APPENDED SKIP BLOCK ---",
+                "[ShaderOverride_7664f7059abfa451]",
+                "; skip 7664f7059abfa451",
+                "hash = 7664f7059abfa451",
+                "handling = skip",
+            ],
+            _stripped_lines(long_hash_only),
+        )
+
     def test_apply_skip_block_is_idempotent(self):
         first = module._apply_skip_block(INI_BODY, [(DRAW_IB, 1260, 9402)])
         second = module._apply_skip_block(first, [(DRAW_IB, 1260, 9402)])
@@ -430,6 +442,36 @@ class SkipBlockTests(unittest.TestCase):
         entries = module._entries_from_names([PART_NAME])
 
         self.assertEqual([(DRAW_IB, 1260, 9402)], entries)
+
+    def test_parse_part_draw_and_hash_support_long_hash(self):
+        self.assertEqual(
+            ("7664f7059abfa451", 6462, 17946),
+            module._parse_part_draw("LOD0.7664f7059abfa451-6462-17946.前发"),
+        )
+        self.assertEqual(
+            "7664f7059abfa451",
+            module._parse_part_hash("7664f7059abfa451.前发"),
+        )
+        self.assertEqual(
+            "7664f7059abfa451",
+            module._parse_part_hash("LOD0.7664f7059abfa451.前发"),
+        )
+
+    def test_skip_section_name_and_is_long_hash(self):
+        self.assertTrue(module._is_long_hash("7664f7059abfa451"))
+        self.assertFalse(module._is_long_hash("7fbbcf0d"))
+        self.assertEqual(
+            "ShaderOverride_7664f7059abfa451",
+            module._skip_section_name(("7664f7059abfa451", None, None)),
+        )
+        self.assertEqual(
+            "TextureOverride_IB_7fbbcf0d",
+            module._skip_section_name(("7fbbcf0d", None, None)),
+        )
+        self.assertEqual(
+            "TextureOverride_IB_7664f7059abfa451_6462_17946",
+            module._skip_section_name(("7664f7059abfa451", 6462, 17946)),
+        )
 
     def test_skip_marker_is_known_auto_appended_tail(self):
         self.assertTrue(
@@ -657,15 +699,26 @@ class ManualHashEntryTests(unittest.TestCase):
 
         entry, error = module._normalize_manual_hash_item("nope")
         self.assertIsNone(entry)
-        self.assertIn("8 位十六进制", error)
+        self.assertIn("十六进制", error)
 
-        entry, error = module._normalize_manual_hash_item("1234567")
+        entry, error = module._normalize_manual_hash_item("7664f7059abfa45g")
         self.assertIsNone(entry)
-        self.assertIn("8 位十六进制", error)
+        self.assertIn("十六进制", error)
 
-        entry, error = module._normalize_manual_hash_item("123456789")
-        self.assertIsNone(entry)
-        self.assertIn("8 位十六进制", error)
+    def test_normalize_accepts_long_hash_64bit(self):
+        """支持 64 位等长哈希（如 16 位十六进制 7664f7059abfa451）。"""
+        self.assertEqual(
+            (("7664f7059abfa451", None, None), ""),
+            module._normalize_manual_hash_item("7664f7059abfa451"),
+        )
+        self.assertEqual(
+            (("7664f7059abfa451", None, None), ""),
+            module._normalize_manual_hash_item(" 0x7664F7059ABFA451 "),
+        )
+        self.assertEqual(
+            (("7664f7059abfa451", 6462, 17946), ""),
+            module._normalize_manual_hash_item("7664f7059abfa451", "6462", "17946"),
+        )
 
     def test_normalize_rejects_half_or_non_numeric_range(self):
         entry, error = module._normalize_manual_hash_item("7fbbcf0d", "1260")
@@ -700,7 +753,7 @@ class ManualHashEntryTests(unittest.TestCase):
         self.assertEqual(1, len(invalid))
         position, hash_text, reason = invalid[0]
         self.assertEqual((3, "nope"), (position, hash_text))
-        self.assertIn("8 位十六进制", reason)
+        self.assertIn("十六进制", reason)
 
     def test_collect_entries_handles_empty(self):
         self.assertEqual(([], []), module._collect_manual_hash_entries(None))
@@ -741,7 +794,7 @@ class ManualHashEntryTests(unittest.TestCase):
 
         ok, message = module._add_manual_hash_item(node, "nope")
         self.assertFalse(ok)
-        self.assertIn("8 位十六进制", message)
+        self.assertIn("十六进制", message)
         self.assertEqual(2, len(node.manual_hash_items))
 
     def test_add_manual_hash_goes_into_unified_skip_list(self):
@@ -776,6 +829,19 @@ class ManualHashEntryTests(unittest.TestCase):
             [("7fbbcf0d", None, None), ("999bff94", 1260, 9402)], entries
         )
         self.assertEqual([], invalid)
+
+    def test_add_manual_hash_64bit_long_hash_into_unified_skip_list(self):
+        """测试 64 位长哈希（如 7664f7059abfa451）加入统一跳过列表。"""
+        node = _FakeUnifiedSkipNode()
+
+        ok, message = module._add_manual_skip_item(node, "7664f7059abfa451")
+        self.assertTrue(ok)
+        self.assertEqual("7664f7059abfa451", message)
+        self.assertEqual(1, len(node.skip_objects))
+        item = node.skip_objects[0]
+        self.assertTrue(item.is_manual)
+        self.assertEqual("7664f7059abfa451", item.manual_hash)
+        self.assertIn("手动哈希 7664f7059abfa451", module._manual_skip_item_label(item))
 
     def test_migrate_legacy_manual_hashes_moves_into_unified_list(self):
         """旧工程的 manual_hash_items 首次绘制/导出时并入统一列表。"""
@@ -883,6 +949,56 @@ class ManualHashExecuteTests(unittest.TestCase):
             self.assertTrue(
                 any("手动哈希 1 个" in text for text in _log.texts("info")),
                 _log.records,
+            )
+
+    def test_unified_list_manual_hash_64bit_long_hash_exports(self):
+        """测试 64 位长哈希（如 7664f7059abfa451）在跳过节点正常导出。"""
+        registry = _FakeRegistry()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _prepare_export_state(tmp)
+            node = _make_node(part_names=[])
+            node.skip_objects = _FakeSkipCollection()
+            ok, _message = module._add_manual_skip_item(
+                node, "7664f7059abfa451", "6462", "17946"
+            )
+            self.assertTrue(ok)
+
+            with _RegistryPatch(registry):
+                self.assertTrue(node.execute_postprocess(tmp))
+
+            updated = Path(path).read_text(encoding="utf-8")
+            self.assertIn("[TextureOverride_IB_7664f7059abfa451_6462_17946]", updated)
+            self.assertIn("hash = 7664f7059abfa451", updated)
+            self.assertIn("match_first_index = 17946", updated)
+            self.assertIn("match_index_count = 6462", updated)
+            self.assertIn("handling = skip", updated)
+            self.assertEqual(
+                ("TextureOverride_IB_7664f7059abfa451_6462_17946", "TextureOverrideIB", "7664f7059abfa451"),
+                registry.registered[0],
+            )
+
+    def test_unified_list_manual_hash_64bit_long_hash_direct_skip_exports(self):
+        """测试 64 位长哈希直着跳过（无 indexCount/firstIndex）生成 ShaderOverride_ 并登记。"""
+        registry = _FakeRegistry()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _prepare_export_state(tmp)
+            node = _make_node(part_names=[])
+            node.skip_objects = _FakeSkipCollection()
+            ok, _message = module._add_manual_skip_item(node, "7664f7059abfa451")
+            self.assertTrue(ok)
+
+            with _RegistryPatch(registry):
+                self.assertTrue(node.execute_postprocess(tmp))
+
+            updated = Path(path).read_text(encoding="utf-8")
+            self.assertIn("[ShaderOverride_7664f7059abfa451]", updated)
+            self.assertIn("; skip 7664f7059abfa451", updated)
+            self.assertIn("hash = 7664f7059abfa451", updated)
+            self.assertIn("handling = skip", updated)
+            self.assertNotIn("[TextureOverride_IB_7664f7059abfa451]", updated)
+            self.assertEqual(
+                ("ShaderOverride_7664f7059abfa451", "ShaderOverride", "7664f7059abfa451"),
+                registry.registered[0],
             )
 
     def test_manual_hash_only_appends_without_selected_objects(self):

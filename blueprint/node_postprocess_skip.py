@@ -24,7 +24,7 @@
 --------------------------------
 若某个 draw_ib 在本次导出里**没有登记段**（该 IB 是游戏原生绘制、不在本 mod 的
 接管范围里），节点**不再早退**：直接追加跳过段（完整三元组形式；解析不出三段
-时是 ``[TextureOverride_IB_<hash>]`` + ``hash`` + ``handling = skip``）让原生绘制
+时是 ``[TextureOverride_IB_<hash>]`` 或长哈希直着跳过 ``[ShaderOverride_<hash>]`` + ``hash`` + ``handling = skip``）让原生绘制
 被跳过（没有段可删，删除步骤为 0 段）。有导出段的 IB 仍走「先删段、再追加」，
 删除范围**仍按 draw_ib 集合**（不变）。
 
@@ -40,7 +40,7 @@
 - 三行都填：完整三段跳过段（``match_first_index = FirstIndex``、
   ``match_index_count = IndexCount``）。
 
-``Hash`` 是 8 位十六进制（大小写不限，可带 ``0x`` 前缀）；``IndexCount`` /
+``Hash`` 是十六进制（支持 8 位 32 位哈希、16 位 64 位长哈希等，大小写不限，可带 ``0x`` 前缀）；``IndexCount`` /
 ``FirstIndex`` 必须是非负整数（``IndexCount`` 还要大于 0），且**要么都填、要么
 都留空**——只填一项或填非数字时会提示原因并拒绝。添加时按
 ``(hash, indexCount, firstIndex)`` 去重，重复条目静默忽略。
@@ -72,10 +72,17 @@ IB），这些段仍按节点语义先删除、再追加跳过段，避免同一
 解析实现见 :func:`_parse_part_draw` / :func:`_normalize_manual_hash_item`。
 
 物体名解析不出三段时（例如老工程里的 ``Body_copy``）或手动条目只填了 ``Hash``
-时**回退为只 hash 的旧形式**::
+时**回退为只 hash 的形式**（8 位短哈希用 ``TextureOverride_IB_``，16 位 64 位长哈希用 ``ShaderOverride_`` 直着跳过）::
 
+    ; 8 位短哈希：
     ; skip <hash>
     [TextureOverride_IB_<hash>]
+    hash = <hash>
+    handling = skip
+
+    ; 16 位 64 位长哈希（如着色器哈希）：
+    [ShaderOverride_<hash>]
+    ; skip <hash>
     hash = <hash>
     handling = skip
 
@@ -137,19 +144,19 @@ _AUTO_APPENDED_OTHER_PREFIX = "; --- AUTO-APPENDED "
 
 #: 物体名前缀里的「三段绘制信息」：``<hash>-<indexCount>-<firstIndex>``。
 #: 例：``LOD0.999bff94-6462-17946.前发`` -> ``999bff94`` / ``6462`` / ``17946``。
-#: 后面允许跟分隔符（``.`` / ``_`` / ``-``）或字符串结束。
-_PART_DRAW_RE = re.compile(r"^([0-9a-fA-F]{8})-(\d+)-(\d+)(?:[._\-]|$)")
+#: 后面允许跟分隔符（``.`` / ``_`` / ``-``）或字符串结束（支持 8 位或 16 位等十六进制哈希）。
+_PART_DRAW_RE = re.compile(r"^([0-9a-fA-F]{8,64})-(\d+)-(\d+)(?:[._\-]|$)")
 
 #: 物体名可选的 ``LODx.`` 前缀（``LOD0.`` / ``LOD1.`` ...）。
 _PART_LOD_PREFIX_RE = re.compile(r"^LOD\d+[.]", re.IGNORECASE)
 
 #: 只 hash 的兜底解析口径（与 ``node_postprocess_condition._parse_hash_from_object_name``
-#: 同口径）：先看开头 8 位十六进制，再找前后带分隔符的 8 位十六进制。
-_PART_HASH_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8}")
-_PART_HASH_FALLBACK_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{8})(?=[-_.]|$)")
+#: 同口径）：先看开头十六进制 hash，再找前后带分隔符的十六进制 hash。
+_PART_HASH_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8,64}")
+_PART_HASH_FALLBACK_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{8,64})(?=[-_.]|$)")
 
-#: 手动哈希输入框里的合法哈希值：8 位十六进制（大小写不限，调用方先剥 ``0x``）。
-_MANUAL_HASH_VALUE_RE = re.compile(r"^[0-9a-fA-F]{8}$")
+#: 手动哈希输入框里的合法哈希值：十六进制（支持 8 位 32 位哈希、16 位 64 位长哈希等，大小写不限，调用方先剥 ``0x``）。
+_MANUAL_HASH_VALUE_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 #: 不参与跳过删除的段名前缀（小写比较）：资源声明段与条件判断节点的检测段
 #: （与 ``node_postprocess_condition._EXCLUDED_SECTION_PREFIXES`` 同口径，改动要同步）。
@@ -179,7 +186,7 @@ def _parse_part_draw(name):
         [LODx.]<hash>-<indexCount>-<firstIndex>[.<部件名>[.<序号>]]
 
     - 去首尾空白；``LOD\\d+.`` 前缀可缺省；
-    - 必须**三段齐全**（hash 8 位十六进制 + 两个非负整数）才算完整，否则 ``None``
+    - 必须**三段齐全**（hash 十六进制 + 两个非负整数）才算完整，否则 ``None``
       —— 缺段的条目由调用方回退成只 hash 的旧形式；
     - hash 统一小写，``index_count`` / ``first_index`` 转 ``int``。
 
@@ -187,6 +194,8 @@ def _parse_part_draw(name):
 
         >>> _parse_part_draw("LOD0.999bff94-6462-17946.前发")
         ('999bff94', 6462, 17946)
+        >>> _parse_part_draw("LOD0.7664f7059abfa451-6462-17946.前发")
+        ('7664f7059abfa451', 6462, 17946)
         >>> _parse_part_draw("LOD0.38b3bd13-4086-0.麻花辫.001")
         ('38b3bd13', 4086, 0)
         >>> _parse_part_draw("随便一个物体") is None
@@ -206,7 +215,7 @@ def _parse_part_draw(name):
 
 
 def _parse_part_hash(name):
-    """只解析物体名里的 8 位 IB hash（三段解析失败时的兜底）；失败返回 ""。"""
+    """只解析物体名里的 IB hash（三段解析失败时的兜底）；失败返回 ""。"""
     value = str(name or "").strip()
     if not value:
         return ""
@@ -227,7 +236,7 @@ def _normalize_manual_hash_item(hash_text, index_count_text="", first_index_text
 
     规则（与节点三行输入框一一对应）::
 
-        Hash       8 位十六进制，大小写不限，可带 ``0x`` / ``0X`` 前缀
+        Hash       十六进制，大小写不限，可带 ``0x`` / ``0X`` 前缀（支持 8 位、16 位等长哈希）
         IndexCount 可选；填了就必须是大于 0 的十进制整数
         FirstIndex 可选；填了就必须是非负十进制整数
         IndexCount / FirstIndex 要么都填、要么都留空（只填一项算无效条目）
@@ -236,6 +245,8 @@ def _normalize_manual_hash_item(hash_text, index_count_text="", first_index_text
 
         >>> _normalize_manual_hash_item("0X7FBBCF0D")
         (('7fbbcf0d', None, None), '')
+        >>> _normalize_manual_hash_item("7664f7059abfa451")
+        (('7664f7059abfa451', None, None), '')
         >>> _normalize_manual_hash_item("999bff94", "1260", "9402")
         (('999bff94', 1260, 9402), '')
         >>> _normalize_manual_hash_item("999bff94", "1260")
@@ -247,7 +258,7 @@ def _normalize_manual_hash_item(hash_text, index_count_text="", first_index_text
     if raw_hash[:2].lower() == "0x":
         raw_hash = raw_hash[2:].strip()
     if not _MANUAL_HASH_VALUE_RE.match(raw_hash):
-        return None, "Hash 必须是 8 位十六进制"
+        return None, "Hash 必须是十六进制"
 
     count_text = str(index_count_text or "").strip()
     first_text = str(first_index_text or "").strip()
@@ -547,10 +558,17 @@ def _hash_only_entries(values):
     return entries
 
 
+def _is_long_hash(hash_val):
+    """判断是否为长哈希（如 16 位 64 位着色器哈希，十六进制长度大于 8 位）。"""
+    return len(str(hash_val or "").strip()) > 8
+
+
 def _skip_section_name(entry):
-    """条目对应的段名：三段齐全用完整名，否则退回 ``TextureOverride_IB_<hash>``。"""
+    """条目对应的段名：三段齐全用完整名，长哈希直着跳过用 ``ShaderOverride_<hash>``，普通只 hash 退回 ``TextureOverride_IB_<hash>``。"""
     hash_val, index_count, first_index = entry
     if index_count is None or first_index is None:
+        if _is_long_hash(hash_val):
+            return f"ShaderOverride_{hash_val}"
         return f"TextureOverride_IB_{hash_val}"
     return f"TextureOverride_IB_{hash_val}_{index_count}_{first_index}"
 
@@ -693,7 +711,10 @@ def _build_skip_block(entries, newline="\n"):
     lines = [SKIP_BLOCK_MARKER]
     for hash_val, index_count, first_index in normalized:
         if index_count is None or first_index is None:
-            lines.append(f"[TextureOverride_IB_{hash_val}]")
+            if _is_long_hash(hash_val):
+                lines.append(f"[ShaderOverride_{hash_val}]")
+            else:
+                lines.append(f"[TextureOverride_IB_{hash_val}]")
             # 注释放在段头之后：放在段头之前会落在上一段段尾，被条件节点的
             # neutral 合并吸进门控 if 体内（注释指向的还是下一段）。
             lines.append(f"; skip {hash_val}")
@@ -1005,7 +1026,7 @@ class SSMTNode_PostProcess_Skip(SSMTNode_PostProcess_Base):
     active_manual_hash: bpy.props.IntProperty(default=0)  # type: ignore
     temp_manual_hash: bpy.props.StringProperty(  # type: ignore
         name="Hash",
-        description="要跳过但没有导入 Blender 的 IB 哈希（8 位十六进制）",
+        description="要跳过但没有导入 Blender 的 IB 哈希（十六进制，支持 8 位或 16 位长哈希）",
         default="",
     )
     temp_index_count: bpy.props.StringProperty(  # type: ignore
@@ -1270,9 +1291,15 @@ class SSMTNode_PostProcess_Skip(SSMTNode_PostProcess_Base):
             for entry in entries:
                 hash_val = entry[0]
                 try:
+                    section_name = _skip_section_name(entry)
+                    section_type = (
+                        "ShaderOverride"
+                        if (entry[1] is None or entry[2] is None) and _is_long_hash(hash_val)
+                        else "TextureOverrideIB"
+                    )
                     registry.register_section(
-                        _skip_section_name(entry),
-                        section_type="TextureOverrideIB",
+                        section_name,
+                        section_type=section_type,
                         draw_ib=hash_val,
                         ini_path=target_ini,
                     )
