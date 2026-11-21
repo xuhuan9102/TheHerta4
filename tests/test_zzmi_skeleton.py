@@ -1018,6 +1018,64 @@ class ZZMIWorkspaceCacheOnlyTests(unittest.TestCase):
         root = Path(self.tmp)
         self.dump, self.ws, self.unique_strs = _make_zzmi_dump_and_workspace(root)
 
+    def test_each_lod_uses_its_work_page_dump_and_log_signature(self):
+        lod1_dump = Path(self.tmp) / "lod1-dump"
+        shutil.copytree(self.dump, lod1_dump)
+        log0 = self.dump / "log.txt"
+        log1 = lod1_dump / "log.txt"
+        log1.write_text(log1.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        config = self.ws / "Config"
+        tabs_dir = config / "Tabs"
+        tabs_dir.mkdir()
+        tabs = []
+        for lod, dump in (("LOD0", self.dump), ("LOD1", lod1_dump)):
+            tab_id = f"ws-tab-{lod}"
+            tabs.append({"id": tab_id, "name": lod})
+            (tabs_dir / f"{tab_id}.json").write_text(
+                json.dumps({"frameAnalysisFolderPath": str(dump)}), encoding="utf-8"
+            )
+        (config / "WorkPageTabs.json").write_text(
+            json.dumps({"tabs": tabs}), encoding="utf-8"
+        )
+        # The workspace default points to the active LOD1 page.
+        (config / "FrameAnalysisPath.json").write_text(
+            json.dumps({"frameAnalysisFolderPath": str(lod1_dump)}), encoding="utf-8"
+        )
+        (self.ws / "LOD1").mkdir()
+        old_key = self.unique_strs[1]
+        lod1_key = old_key.replace("LOD0.", "LOD1.", 1)
+        bare = old_key.split(".", 1)[1]
+        (self.ws / "LOD0" / bare).rename(self.ws / "LOD1" / bare)
+        import_file = self.ws / "Import.json"
+        imports = json.loads(import_file.read_text(encoding="utf-8"))
+        imports[lod1_key] = imports.pop(old_key)
+        import_file.write_text(json.dumps(imports), encoding="utf-8")
+
+        keys = [self.unique_strs[0], lod1_key]
+        ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(str(self.ws), keys)
+        self.assertTrue(ok, message)
+        for key, log in zip(keys, (log0, log1)):
+            json_path = ZZMISkeletonMergeHelper._resolve_submesh_json_path(str(self.ws), key)
+            metadata = json.loads(Path(json_path).read_text(encoding="utf-8"))
+            self.assertEqual(
+                metadata["FrameAnalysisLogSignature"],
+                ZZMISkeletonMergeHelper._frame_analysis_log_signature(str(log)),
+            )
+            self.assertEqual(metadata["VGOffset"], 0)
+            self.assertEqual(metadata["VGMap"], {"0": 0})
+        ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(str(self.ws), keys)
+        self.assertTrue(ok, message)
+        self.assertIn("幂等跳过", message)
+
+    def test_unconfigured_workspace_does_not_use_latest_game_dump(self):
+        (self.ws / "Config" / "FrameAnalysisPath.json").unlink()
+        with mock.patch.object(
+            _efmi.EFMISkeletonMergeHelper,
+            "resolve_frame_analysis_dir",
+            return_value=str(self.dump),
+        ):
+            self.assertEqual(ZZMISkeletonMergeHelper.resolve_frame_analysis_dir(str(self.ws)), "")
+
     def test_dump_moved_rebuilds_via_deduped_fallback(self):
         ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
             workspace_root=str(self.ws), unique_str_list=self.unique_strs

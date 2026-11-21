@@ -729,43 +729,48 @@ class ZZMISkeletonMergeHelper:
     cross_group_profile: dict | None = None
 
     @staticmethod
-    def _configured_frame_analysis_paths(workspace_root: str) -> list[str]:
-        """读取 ZZMI 工作区显式记录的 FrameAnalysis 路径。"""
-        paths: list[str] = []
-        config_path = os.path.join(workspace_root, "Config", "FrameAnalysisPath.json")
-        if os.path.isfile(config_path):
+    def _configured_frame_analysis_paths_by_lod(workspace_root: str) -> dict[str, str]:
+        """读取工作页登记的目录，保留路径失效或未登记目录的工作页。"""
+        lod_map: dict[str, str] = {}
+        work_page_path = os.path.join(workspace_root, "Config", "WorkPageTabs.json")
+        tabs_dir = os.path.join(workspace_root, "Config", "Tabs")
+        if os.path.isfile(work_page_path):
             try:
-                payload = JsonUtils.LoadFromFile(config_path)
-                path = str(payload.get("frameAnalysisFolderPath", "") or "").strip()
-                if path:
-                    paths.append(path)
+                payload = JsonUtils.LoadFromFile(work_page_path)
+                for tab in payload.get("tabs", []) or []:
+                    tab_name = str(tab.get("name", "") or "").strip().upper()
+                    tab_id = str(tab.get("id", "") or "").strip()
+                    if not (tab_name.startswith("LOD") and tab_name[3:].isdigit() and tab_id):
+                        continue
+                    lod_map.setdefault(tab_name, "")
+                    tab_file = os.path.join(tabs_dir, tab_id + ".json")
+                    if not os.path.isfile(tab_file):
+                        continue
+                    try:
+                        tab_payload = JsonUtils.LoadFromFile(tab_file)
+                    except Exception:
+                        continue
+                    fa_path = str(
+                        tab_payload.get("frameAnalysisFolderPath", "") or ""
+                    ).strip()
+                    if fa_path:
+                        lod_map[tab_name] = fa_path
             except Exception:
                 pass
+        return lod_map
 
-        tabs_dir = os.path.join(workspace_root, "Config", "Tabs")
-        if os.path.isdir(tabs_dir):
-            for tab_file in sorted(os.listdir(tabs_dir)):
-                if not tab_file.startswith("ws-tab-") or not tab_file.endswith(".json"):
-                    continue
-                try:
-                    payload = JsonUtils.LoadFromFile(os.path.join(tabs_dir, tab_file))
-                    path = str(payload.get("frameAnalysisFolderPath", "") or "").strip()
-                    if path:
-                        paths.append(path)
-                except Exception:
-                    continue
-        return paths
+    @staticmethod
+    def resolve_frame_analysis_dir(workspace_root: str) -> str:
+        """读取旧工作空间显式登记的抓帧目录。"""
+        config_path = os.path.join(workspace_root, "Config", "FrameAnalysisPath.json")
+        if os.path.isfile(config_path):
+            payload = JsonUtils.LoadFromFile(config_path)
+            if isinstance(payload, dict):
+                path = str(payload.get("frameAnalysisFolderPath", "") or "").strip()
+                if os.path.isdir(path):
+                    return path
+        return ""
 
-    @classmethod
-    def resolve_frame_analysis_dir(cls, workspace_root: str) -> str:
-        """定位 ZZMI 的 FrameAnalysis；显式失效路径不自动偷换成另一帧。"""
-        configured_paths = cls._configured_frame_analysis_paths(workspace_root)
-        if configured_paths and not any(os.path.isdir(path) for path in configured_paths):
-            # 工作区已经记录过提取源，但该源被用户删除/搬走：优先使用导入时
-            # 搬进 ModImpRuntime 的 palette/ObjectCB1 缓存，不能从当前游戏目录
-            # 随便挑一个最新 FrameAnalysis，尤其不能把相似模型的 CB1 混进来。
-            return ""
-        return EFMISkeletonMergeHelper.resolve_frame_analysis_dir(workspace_root)
     _resolve_submesh_json_path = staticmethod(
         EFMISkeletonMergeHelper._resolve_submesh_json_path
     )
@@ -1345,7 +1350,8 @@ class ZZMISkeletonMergeHelper:
         """
         if not workspace_root or not unique_str_list:
             return False
-        expect_cross = cls._cross_numbering_expected(workspace_root)
+        cross_by_lod: dict[str, bool] = {}
+        require_lod = cls._requires_lod_cache(workspace_root, unique_str_list)
         for unique_str in unique_str_list:
             json_path = cls._resolve_submesh_json_path(workspace_root, unique_str)
             if not json_path:
@@ -1360,8 +1366,13 @@ class ZZMISkeletonMergeHelper:
                 continue
             if not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
                 return True
+            lod = cls._bone_lod(unique_str)
+            if require_lod and payload.get("SkeletonMergeLOD") != lod:
+                return True
+            if lod not in cross_by_lod:
+                cross_by_lod[lod] = cls._cross_numbering_expected(workspace_root, lod)
             if not cls._zzmi_cache_intact(
-                payload, json_path, unique_str, expect_cross=expect_cross
+                payload, json_path, unique_str, expect_cross=cross_by_lod[lod]
             ):
                 return True
         return False
@@ -1386,7 +1397,8 @@ class ZZMISkeletonMergeHelper:
         """
         if not workspace_root or not unique_str_list:
             return 0
-        expect_cross = cls._cross_numbering_expected(workspace_root)
+        cross_by_lod: dict[str, bool] = {}
+        require_lod = cls._requires_lod_cache(workspace_root, unique_str_list)
         ready = 0
         for unique_str in unique_str_list:
             json_path = cls._resolve_submesh_json_path(workspace_root, unique_str)
@@ -1402,15 +1414,20 @@ class ZZMISkeletonMergeHelper:
                 continue
             if not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
                 continue
+            lod = cls._bone_lod(unique_str)
+            if require_lod and payload.get("SkeletonMergeLOD") != lod:
+                continue
+            if lod not in cross_by_lod:
+                cross_by_lod[lod] = cls._cross_numbering_expected(workspace_root, lod)
             if not cls._zzmi_cache_intact(
-                payload, json_path, unique_str, expect_cross=expect_cross
+                payload, json_path, unique_str, expect_cross=cross_by_lod[lod]
             ):
                 continue
             ready += 1
         return ready
 
     @classmethod
-    def _cross_numbering_expected(cls, workspace_root: str) -> bool:
+    def _cross_numbering_expected(cls, workspace_root: str, lod: str = "LOD0") -> bool:
         """本工作空间是否应按**骨骼池编号**判定缓存是否可用。
 
         开关开着、并且池方案文件就在盘上时才成立：没有方案文件时历史分组编号
@@ -1422,7 +1439,7 @@ class ZZMISkeletonMergeHelper:
         try:
             from .zzmi_cross_group_palette import get_profile_path
 
-            return os.path.isfile(get_profile_path(workspace_root))
+            return os.path.isfile(get_profile_path(workspace_root, lod))
         except Exception:  # pragma: no cover - 磁盘异常
             return False
 
@@ -1544,6 +1561,16 @@ class ZZMISkeletonMergeHelper:
             "warnings": list(plan_warnings or ()),
         }
 
+    @staticmethod
+    def _bone_lod(unique_str: str) -> str:
+        return EFMISkeletonMergeHelper._parse_lod_name(unique_str).upper() or "LOD0"
+
+    @classmethod
+    def _requires_lod_cache(cls, workspace_root: str, unique_str_list: list[str]) -> bool:
+        lods = {cls._bone_lod(key) for key in unique_str_list}
+        paths = cls._configured_frame_analysis_paths_by_lod(workspace_root)
+        return bool((lods | paths.keys()) - {"LOD0"})
+
     @classmethod
     def ensure_skeleton_data(
         cls,
@@ -1551,46 +1578,47 @@ class ZZMISkeletonMergeHelper:
         unique_str_list: list[str],
         force: bool = False,
     ) -> tuple[bool, str]:
-        """为 ZZMI 工作空间的子网格生成并写回骨骼合并数据（幂等）。
-
-        返回 (是否成功, 描述)。
-        """
+        """按 LOD 独立生成合并骨骼。"""
         if not unique_str_list:
             return False, "没有子网格需要处理。"
-
-        frame_analysis_dir = cls.resolve_frame_analysis_dir(workspace_root)
-        log_path = os.path.join(frame_analysis_dir, "log.txt") if frame_analysis_dir else ""
-        parser = None
-        resolver = None
-        frame_analysis_signature = ""
-        if frame_analysis_dir:
-            if not os.path.isfile(log_path):
-                print(
-                    f"[ZZMI骨骼合并] 提示: FrameAnalysis 缺少 log.txt（{log_path}），"
-                    "将仅用工作空间缓存重建"
-                )
-            else:
-                parser = ZZMILogParser(log_path)
-                resolver = ZZMIDeformResolver(parser)
-                frame_analysis_signature = cls._frame_analysis_log_signature(log_path)
-                if not resolver.passes:
-                    print(
-                        "[ZZMI骨骼合并] 提示: FrameAnalysis log 中未识别到 deform pass，"
-                        "将仅用工作空间缓存重建"
-                    )
-                    parser = None
-                    resolver = None
-        else:
-            # dump 目录已被删除：上次导入已把 palette / 对象变换 CB 复制进工作空间
-            # ModImpRuntime，缓存完整的子网格可以脱离 dump 重建。工作区已记录过提取源
-            # 时**不会**自动改用游戏目录里的其它帧（防跨帧/跨模型混用，见
-            # resolve_frame_analysis_dir）：要换用新的提取文件，请在面板重新选择
-            # 提取源后重新导入。
-            print(
-                "[ZZMI骨骼合并] 提示: 未找到 FrameAnalysis 目录（记录过的提取源已被"
-                "删除/搬走），本次仅用工作空间缓存重建；如需改用新的提取文件，"
-                "请重新选择提取源后重新导入"
+        targets_by_lod: dict[str, list[str]] = {}
+        for key in unique_str_list:
+            targets_by_lod.setdefault(cls._bone_lod(key), []).append(key)
+        lod_paths = cls._configured_frame_analysis_paths_by_lod(workspace_root)
+        legacy_path = cls.resolve_frame_analysis_dir(workspace_root) if not lod_paths else ""
+        require_lod = bool((targets_by_lod.keys() | lod_paths.keys()) - {"LOD0"})
+        results = {}
+        for lod, keys in sorted(targets_by_lod.items()):
+            frame_analysis_dir = lod_paths.get(lod, legacy_path if lod == "LOD0" else "")
+            results[lod] = cls._ensure_lod_skeleton_data(
+                workspace_root, keys, force, lod, frame_analysis_dir, require_lod,
             )
+        if len(results) == 1:
+            return next(iter(results.values()))
+        return all(ok for ok, _ in results.values()), "；".join(
+            f"{lod}: {message}" for lod, (_, message) in results.items()
+        )
+
+    @classmethod
+    def _ensure_lod_skeleton_data(
+        cls, workspace_root: str, unique_str_list: list[str], force: bool,
+        lod: str, frame_analysis_dir: str, require_lod: bool,
+    ) -> tuple[bool, str]:
+        parser = resolver = None
+        frame_analysis_signature = ""
+        log_path = os.path.join(frame_analysis_dir, "log.txt") if frame_analysis_dir else ""
+        if log_path and os.path.isfile(log_path):
+            parser = ZZMILogParser(log_path)
+            resolver = ZZMIDeformResolver(parser)
+            if resolver.passes:
+                frame_analysis_signature = cls._frame_analysis_log_signature(log_path)
+            else:
+                parser = resolver = None
+                print(f"[ZZMI骨骼合并] {lod}: {frame_analysis_dir} 未识别到 deform pass，仅用工作空间缓存")
+        elif frame_analysis_dir:
+            print(f"[ZZMI骨骼合并] {lod}: 找不到 {log_path}，仅用工作空间缓存")
+        else:
+            print(f"[ZZMI骨骼合并] {lod}: 未登记抓帧目录，仅用工作空间缓存")
 
         # 第一遍：收集每个子网格信息并按 DrawIB 分组（同 DrawIB 的拆分子网格共享
         # 同一 deform pass / palette / VGMap，只参与一次去重）。
@@ -1625,18 +1653,7 @@ class ZZMISkeletonMergeHelper:
         # 池槽位，并且池方案文件得在盘上（两者缺一就无法确认编号域，而「看起来
         # 有 VGMap」正是把历史分组编号当成合并成果的入口）。
         expect_cross = bool(cls.cross_group_merged_enabled())
-        pool_profile_ready = False
-        if expect_cross:
-            try:
-                from .zzmi_cross_group_palette import get_profile_path
-
-                pool_profile_ready = os.path.isfile(
-                    get_profile_path(workspace_root)
-                )
-            except Exception:  # pragma: no cover - 磁盘异常
-                pool_profile_ready = False
-        # 编号域校验只在池方案在盘上时才有意义：没有方案文件时历史分组编号就是
-        # 本工作空间的正常态，判据由下面的「池方案不在 ⇒ 强制重建」承担。
+        pool_profile_ready = cls._cross_numbering_expected(workspace_root, lod)
         cross_mode_ready = expect_cross and pool_profile_ready
 
         for unique_str in unique_str_list:
@@ -1690,7 +1707,8 @@ class ZZMISkeletonMergeHelper:
             if bool(submesh_json.get("VGMapDedupExcluded")):
                 group["dedup_excluded"] = True
 
-            cache_intact = cls._zzmi_cache_intact(
+            lod_cache_matches = not require_lod or submesh_json.get("SkeletonMergeLOD") == lod
+            cache_intact = lod_cache_matches and cls._zzmi_cache_intact(
                 submesh_json, json_path, unique_str, expect_cross=cross_mode_ready
             )
             if (
@@ -1732,6 +1750,7 @@ class ZZMISkeletonMergeHelper:
             if (
                 not cache_intact
                 and not force
+                and lod_cache_matches
                 and cls._zzmi_cache_usable_for_migration(
                     submesh_json, json_path, unique_str
                 )
@@ -2239,14 +2258,18 @@ class ZZMISkeletonMergeHelper:
             # 跨组：整只角色共用一个骨骼池，槽位由锚点链算（参考实现 loyaltools 路线）。
             # 池槽位 = 部件基址 + 本地骨号；canonical 号只当身份用，正好当全局骨号下发。
             profile = cross_plan["profile"]
-            cls.cross_group_profile = profile
+            if lod == "LOD0":
+                cls.cross_group_profile = profile
             # 落盘：导出可能发生在这个会话之外（重开 Blender 再导出），只挂在类
             # 属性上会丢，掉盘后就按历史分组发 ini，跨组等于白算。
             try:
                 from .zzmi_cross_group_palette import write_profile
-                cls.cross_group_profile_path = write_profile(workspace_root, profile)
+                path = write_profile(workspace_root, profile, lod=lod)
+                if lod == "LOD0":
+                    cls.cross_group_profile_path = path
             except Exception as exc:  # pragma: no cover - 磁盘异常
-                cls.cross_group_profile_path = None
+                if lod == "LOD0":
+                    cls.cross_group_profile_path = None
                 print(f"[ZZMI骨骼合并] 骨骼池方案落盘失败（导出会退回历史分组）：{exc}")
             for warning in cross_plan["warnings"]:
                 print(f"[ZZMI骨骼合并] {warning}")
@@ -2263,15 +2286,17 @@ class ZZMISkeletonMergeHelper:
             # 历史路线（含「开关开着但锚点链算不出来」的回落）：清掉上一次会话残留的
             # 骨骼池方案——内存和磁盘都要清，否则导出侧会按上一次的池槽位发 ini，
             # 而这次的 VGMap 是历史编号，两者对不上就是满屏错位。
-            cls.cross_group_profile = None
+            if lod == "LOD0":
+                cls.cross_group_profile = None
             try:
                 from .zzmi_cross_group_palette import get_profile_path
-                stale_path = get_profile_path(workspace_root)
+                stale_path = get_profile_path(workspace_root, lod)
                 if os.path.isfile(stale_path):
                     os.remove(stale_path)
             except Exception:
                 pass
-            cls.cross_group_profile_path = None
+            if lod == "LOD0":
+                cls.cross_group_profile_path = None
             # 组内去重（组内槽位 0 起）
             local_maps: dict[str, dict] = {}
             local_offsets: dict[str, int] = {}
@@ -2300,7 +2325,7 @@ class ZZMISkeletonMergeHelper:
 
         merge_mode = (
             _ZZMI_MERGE_MODE_CROSS
-            if cls.cross_group_profile is not None
+            if cross_plan is not None
             else _ZZMI_MERGE_MODE_GROUP
         )
         vg_maps: dict[str, dict] = {}
@@ -2421,6 +2446,7 @@ class ZZMISkeletonMergeHelper:
                 # 骨架分组（渲染 cb1 对象变换配对）：导出侧把 deform pass 换绑到本组
                 # ResourceZZMergedSkeleton_G<N>；VGMap/VGOffset 为全局骨骼编号（组基址拼接）
                 submesh_json["SkeletonGroup"] = skeleton_group
+                submesh_json["SkeletonMergeLOD"] = lod
                 # 导出侧守卫元数据：本部件 deform pass 的 draw 序号（组内时序校验——
                 # 合并网格必须由组内最后一个 deform draw 蒙皮，否则其它部件骨骼
                 # 还是上一帧内容）+ 原部件顶点数（渲染 vb1 换绑判定）
@@ -2485,7 +2511,7 @@ class ZZMISkeletonMergeHelper:
         success_message = (
             f"已为 {written} 个子网格生成骨骼合并数据"
             f"（{len(ready_groups)} 个部件 / {len(group_members)} 个骨架组，"
-            f"全局共 {total_slots} 槽）"
+            f"本 LOD 共 {total_slots} 槽）"
         )
         # 完整性报告：只要还有目标未处理（部件未生成 / 目标无法解析 / json 写回
         # 失败），就不能报告完整成功——部分完成必须大声暴露，否则调用方会把

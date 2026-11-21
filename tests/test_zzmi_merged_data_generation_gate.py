@@ -149,7 +149,7 @@ class SwitchIndependenceTests(unittest.TestCase):
             "自愈判据必须包含快路径完整性检查，否则旧算法版本/缺字段不会自愈",
         )
         self.assertIn(
-            "expect_cross=expect_cross",
+            "expect_cross=cross_by_lod[lod]",
             source,
             "自愈判据必须同时校验编号域：开着跨组合并时，历史分组编号的 VGMap"
             "看起来齐全却是各部件局部槽位，不校验就会被当成合并成果跳过",

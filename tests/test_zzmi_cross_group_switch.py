@@ -208,7 +208,7 @@ class CrossGroupConsumerContractTests(unittest.TestCase):
         return self.source.split(header, 1)[1]
 
     def test_gate_reads_switch_with_true_default(self):
-        body = self._block("def _merged_cross_group_enabled() -> bool:")
+        body = self._block("def _merged_cross_group_enabled(self, skeleton_group: int) -> bool:")
         body = body.split("\n    @staticmethod", 1)[0]
         self.assertIn(
             f'_zzmi_prop_flag("{PROPERTY_KEY}", True)',
@@ -219,7 +219,7 @@ class CrossGroupConsumerContractTests(unittest.TestCase):
     def test_detection_short_circuits_when_disabled(self):
         body = self._block("def _merged_cross_group_component_ids(self, skeleton_group: int)")
         body = body.split("\n    def ", 1)[0]
-        self.assertIn("if not self._merged_cross_group_enabled():", body)
+        self.assertIn("if not self._merged_cross_group_enabled(skeleton_group):", body)
         self.assertIn("return []", body)
         # 判据必须与「几何被吸收」同源：引用骨骼并集 − 本组合法槽位
         self.assertIn("offending = referenced - legal", body)
@@ -240,7 +240,7 @@ class CrossGroupConsumerContractTests(unittest.TestCase):
 
     def test_guard_is_switch_aware_but_keeps_legacy_text(self):
         body = self._block("def _warn_cross_group_bone_references(self):")
-        self.assertIn("cross_enabled = self._merged_cross_group_enabled()", body)
+        self.assertIn("cross_enabled = self._merged_cross_group_enabled(skeleton_group)", body)
         self.assertIn("禁止跨组别骨骼合并", body, "关闭时仍要保留历史报警文案")
 
 

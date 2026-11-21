@@ -108,40 +108,30 @@ except Exception:  # pragma: no cover
         return False
 
 
-def _merged_palette_profile() -> dict | None:
-    """本次会话算出来的骨骼池方案（导入期算好，挂在骨架助手类上）。
+def _zzmi_bone_lod(unique_str: str) -> str:
+    head, sep, _ = str(unique_str or "").upper().partition(".")
+    return head if sep and head.startswith("LOD") and head[3:].isdigit() else "LOD0"
 
-    会话里没有就去工作区读导入期落盘的那一份：导出经常发生在「重开 Blender
-    以后」，只靠类属性会让跨组方案在导出时凭空消失，退回不含锚点链的历史分组。
-    """
+
+def _merged_palette_profile(lod: str = "LOD0") -> dict | None:
+    """读取工作空间中指定 LOD 的骨骼池方案。"""
     try:
-        from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
-    except Exception:
-        return None
-    profile = getattr(ZZMISkeletonMergeHelper, "cross_group_profile", None)
-    if isinstance(profile, dict):
-        return profile
-    try:
-        from ...common.zzmi_cross_group_palette import load_profile
         workspace_folder = str(GlobalConfig.path_workspace_folder() or "")
     except Exception:
-        return None
-    if not workspace_folder:
-        return None
+        workspace_folder = ""
     try:
-        loaded = load_profile(workspace_folder, required=False)
+        if workspace_folder:
+            from ...common.zzmi_cross_group_palette import load_profile
+            return load_profile(workspace_folder, required=False, lod=lod)
+        if lod == "LOD0":
+            from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
+            return getattr(ZZMISkeletonMergeHelper, "cross_group_profile", None)
     except Exception:
         return None
-    if isinstance(loaded, dict) and loaded.get("components"):
-        try:
-            ZZMISkeletonMergeHelper.cross_group_profile = loaded
-        except Exception:
-            pass
-        return loaded
     return None
 
 
-def _merged_pool_segments() -> dict[str, tuple[int, int]]:
+def _merged_pool_segments(lod: str = "LOD0") -> dict[str, tuple[int, int]]:
     """骨骼池方案里每个 DrawIB 自己的池段：``{ib_hash: (起点, 终点)}``。
 
     站位（占位小三角）判定用。池方案下同一个 DrawIB 的全部部件共享一段
@@ -150,7 +140,7 @@ def _merged_pool_segments() -> dict[str, tuple[int, int]]:
     拿不到方案数据时返回空 dict，调用方必须退回历史口径（VGMap 值域，见
     `_collect_foreign_used_group_ids`）。
     """
-    profile = _merged_palette_profile()
+    profile = _merged_palette_profile(lod)
     cache = globals().get("_MERGED_POOL_SEGMENTS_CACHE")
     if isinstance(cache, tuple) and cache[0] is profile:
         return cache[1]
@@ -170,7 +160,7 @@ def _merged_pool_segments() -> dict[str, tuple[int, int]]:
 
 def _merged_pool_segment_of(unique_str: str) -> tuple[int, int] | None:
     """部件身份 → 它自己在骨骼池里的段；没有池方案 / 认不出部件时返回 ``None``。"""
-    segments = _merged_pool_segments()
+    segments = _merged_pool_segments(_zzmi_bone_lod(unique_str))
     if not segments:
         return None
     value = str(unique_str or "").strip()
@@ -186,41 +176,6 @@ def _merged_pool_segment_of(unique_str: str) -> tuple[int, int] | None:
         if value.startswith(ib_hash + "-"):
             return segment
     return None
-
-
-def _merged_palette_conv_component_ids() -> set:
-    """有「换算 palette」缓冲的部件下标 —— 只有方案里真正参与合并的那些。
-
-    没参与合并的部件（形态键 / 和角色不共用骨骼）在池尾占自己的私有段，骨骼矩阵
-    就在自己空间里，直接绑骨架缓冲就对了；给它们也发换算缓冲没有意义（换算 CS 的
-    部件表里没有它们，`x1` 会指到界外），所以这里按方案成员过滤。
-    """
-    profile = _merged_palette_profile() or {}
-    cache = globals().get("_MERGED_CONV_IDS_CACHE")
-    if isinstance(cache, tuple) and cache[0] is profile:
-        return cache[1]
-    try:
-        from ...common.zzmi_cross_group_palette import merged_components
-        ids = {int(component["component_id"]) for component in merged_components(profile)}
-    except Exception:
-        ids = set()
-    globals()["_MERGED_CONV_IDS_CACHE"] = (profile, ids)
-    return ids
-
-
-def _merged_palette_route_active() -> bool:
-    """跨组骨骼合并是否走「骨骼池 + 换算 palette」路线（参考实现 loyaltools 的做法）。
-
-    成立条件两条：开关打开 **且** 本次会话真的算出了骨骼池方案。缺一样就退回历史
-    行为——没有方案数据却按新路线发射，会拿到空池和全零换算表。
-
-    这条路线与历史的「按来源拆分绘制 + 每骨架组一份 cb1 + 换绑 vs-cb1」互斥：
-    合成一个物体以后，每个参与部件都用**自己算出来的 palette** 画整份合并几何，
-    压根不需要对象变换，也就不需要 cb1。所以本函数为真时旧路线必须整体让位。
-    """
-    if not _zzmi_prop_flag("cross_group_merged_vgmap_test", True):
-        return False
-    return _merged_palette_profile() is not None
 
 
 def _zzmi_prop_flag(name: str, default: bool) -> bool:
@@ -966,6 +921,19 @@ class ExportZZMI(ExportUnity):
         if not active_records:
             return
 
+        if GlobalProterties.import_merged_vgmap():
+            for record in active_records.values():
+                target_lod = _zzmi_bone_lod(record["target_workspace_unique_str"])
+                mixed_lods = {
+                    _zzmi_bone_lod(source["workspace_unique_str"])
+                    for source in record["sources"] if source.get("workspace_unique_str")
+                } - {target_lod}
+                if mixed_lods:
+                    raise RuntimeError(
+                        f"[ZZMI] {record['object_name']}: 合并网格包含 {target_lod} "
+                        f"和 {', '.join(sorted(mixed_lods))} 的部件，骨骼矩阵无法共用。"
+                    )
+
         kept = []
         kept_record_ids = set()
         for draw_call in list(ordered):
@@ -1072,11 +1040,18 @@ class ExportZZMI(ExportUnity):
         返回创建的对象名列表（export() 结束后清理）。
         """
         workspace_root = GlobalConfig.path_workspace_folder()
-        component_map_path = os.path.join(workspace_root, "LOD0", "DrawIB-Component.json")
-        if not os.path.isfile(component_map_path):
+        if not workspace_root or not os.path.isdir(workspace_root):
             return []
-        component_map = JsonUtils.LoadFromFile(component_map_path)
-        if not isinstance(component_map, dict) or not component_map:
+        component_maps = {}
+        for lod in sorted(os.listdir(workspace_root)):
+            if _zzmi_bone_lod(lod + ".part") != lod:
+                continue
+            path = os.path.join(workspace_root, lod, "DrawIB-Component.json")
+            if os.path.isfile(path):
+                component_map = JsonUtils.LoadFromFile(path)
+                if isinstance(component_map, dict) and component_map:
+                    component_maps[lod] = component_map
+        if not component_maps:
             return []
 
         ordered = getattr(blueprint_model, "ordered_draw_obj_data_model_list", None)
@@ -1095,7 +1070,7 @@ class ExportZZMI(ExportUnity):
             except Exception:
                 continue
             if unique_str:
-                present.add(self._zzmi_bare_workspace_unique(unique_str))
+                present.add((_zzmi_bone_lod(unique_str), self._zzmi_bare_workspace_unique(unique_str)))
             # 阻断修复（t80 §2.3 实测）：`ordered` 里的名字来自**蓝图声明**，
             # 声明了但场景里没有对象的部件（实测 19 件声明 / 4 个 mesh）**不能**被
             # 当成 present——否则占位注入整段被跳过，紧接着 SubMeshModel 会因为
@@ -1109,7 +1084,7 @@ class ExportZZMI(ExportUnity):
             if not self._zzmi_drawcall_object_present(draw_call):
                 continue
             if unique_str:
-                scene_present.add(self._zzmi_bare_workspace_unique(unique_str))
+                scene_present.add((_zzmi_bone_lod(unique_str), self._zzmi_bare_workspace_unique(unique_str)))
 
         # 兼容兜底：蓝图里**一个** DrawCall 都解析不到场景对象时（轻量测试宿主 /
         # 拿不到真实 bpy 数据），退回按声明名判定 —— 宁可不插桩，也不要在信息不足
@@ -1128,11 +1103,18 @@ class ExportZZMI(ExportUnity):
                 record.get("target_workspace_unique_str", "") or ""
             ).strip()
             if target_workspace:
-                present.add(self._zzmi_bare_workspace_unique(target_workspace))
+                present.add((_zzmi_bone_lod(target_workspace), self._zzmi_bare_workspace_unique(target_workspace)))
 
         # 惰性计算：首个「整个 DrawIB 缺席」需要判定时才算。
         # 只收「引用方自己没声明过」的槽位（局部顶点组归属口径）。
-        foreign_used_group_ids = None
+        foreign_slots_by_lod: dict[str, set[int]] = {}
+        drawcalls_by_lod: dict[str, list] = {}
+        for draw_call in ordered:
+            try:
+                key = draw_call.get_workspace_unique_str()
+            except Exception:
+                key = ""
+            drawcalls_by_lod.setdefault(_zzmi_bone_lod(key), []).append(draw_call)
 
         # 阻断修复（t81 阻断④）：本次决策为「按用户意图不生成」的部件身份集合。
         # 光 `continue` 只表示**不建占位**，DrawCall 仍留在
@@ -1140,29 +1122,33 @@ class ExportZZMI(ExportUnity):
         # `bpy.data.objects` 找那个**不存在**的对象并 `Fatal`（实测
         # `LOD0.611df76d-132-0`）。手改参考版里这些部件 total=0 ⇒ 决策本身是对的，
         # 缺的只是「决策 → 模型列表」这一步传播。
-        skipped_identities: set[str] = set()
+        skipped_identities: set[tuple[str, str]] = set()
 
         created = []
-        for draw_ib, comp_dict in component_map.items():
+        for lod, draw_ib, comp_dict in (
+            (lod, draw_ib, parts)
+            for lod, component_map in component_maps.items()
+            for draw_ib, parts in component_map.items()
+        ):
             members = sorted(str(v) for v in (comp_dict or {}).values())
             if not members:
                 continue
 
-            if any(member in scene_present for member in members):
+            if any((lod, member) in scene_present for member in members):
                 # 部分缺失：缺失组件补占位（判据只看**场景里真实存在的对象**）
                 stub_members = [
-                    member for member in members if member not in scene_present
+                    member for member in members if (lod, member) not in scene_present
                 ]
             else:
                 # 整个 DrawIB 在场景里缺席：判定几何是否被合并进其它对象
                 # （`any(member in present ...)` 这条"有声明身份"的旧分支已并入：
                 #  两种情况下都只能靠几何吸收证据决定补不补占位）。
-                if foreign_used_group_ids is None:
-                    foreign_used_group_ids = self._collect_foreign_used_group_ids(
-                        ordered
+                if lod not in foreign_slots_by_lod:
+                    foreign_slots_by_lod[lod] = self._collect_foreign_used_group_ids(
+                        drawcalls_by_lod.get(lod, [])
                     )
                 if self._is_drawib_absorbed(
-                    draw_ib, workspace_root, foreign_used_group_ids
+                    draw_ib, workspace_root, foreign_slots_by_lod[lod], lod
                 ):
                     stub_members = members
                     print(
@@ -1174,18 +1160,19 @@ class ExportZZMI(ExportUnity):
                         f"[ZZMI骨骼合并] DrawIB {draw_ib} 无对象且本部件专属骨骼槽位"
                         "未被其它模型引用，按用户意图不生成"
                     )
-                    skipped_identities.update(members)
+                    skipped_identities.update((lod, member) for member in members)
                     continue
 
             for member in stub_members:
-                if self._is_component_dedup_excluded(member):
+                key = member if lod == "LOD0" else f"{lod}.{member}"
+                if self._is_component_dedup_excluded(key):
                     print(
                         f"[ZZMI骨骼合并] 部件 {member} 已标记 VGMapDedupExcluded，"
                         "按用户意图不生成占位（游戏保留原版绘制）"
                     )
-                    skipped_identities.add(member)
+                    skipped_identities.add((lod, member))
                     continue
-                obj_name = self._create_stub_object(member)
+                obj_name = self._create_stub_object(key)
                 if obj_name:
                     # 必须在任何后续构造步骤之前登记到实例；否则批量创建中途
                     # 失败时 helper 尚未返回，__init__ 的异常回滚拿不到先前对象。
@@ -1214,13 +1201,12 @@ class ExportZZMI(ExportUnity):
             kept = []
             removed = []
             for draw_call in ordered:
-                identity = self._zzmi_bare_workspace_unique(
-                    self._draw_call_object_name(draw_call)
-                )
+                key = self._draw_call_object_name(draw_call)
+                identity = (_zzmi_bone_lod(key), self._zzmi_bare_workspace_unique(key))
                 if identity in skipped_identities and not self._zzmi_drawcall_object_present(
                     draw_call
                 ):
-                    removed.append(identity)
+                    removed.append(identity[1])
                     continue
                 kept.append(draw_call)
             if removed:
@@ -1235,7 +1221,7 @@ class ExportZZMI(ExportUnity):
         return created
 
     def _load_drawib_vg_slots(
-        self, draw_ib: str, workspace_root: str
+        self, draw_ib: str, workspace_root: str, lod: str = "LOD0"
     ) -> tuple[set[int], set[int]]:
         """读取 DrawIB 全部组件写回的 VGMap 值域，并区分「本部件自属槽位」。
 
@@ -1260,13 +1246,13 @@ class ExportZZMI(ExportUnity):
         """
         all_slots: set[int] = set()
         own_segment_slots: set[int] = set()
-        lod0_dir = os.path.join(workspace_root, "LOD0")
-        if not os.path.isdir(lod0_dir):
+        lod_dir = os.path.join(workspace_root, lod)
+        if not os.path.isdir(lod_dir):
             return all_slots, own_segment_slots
-        for name in os.listdir(lod0_dir):
+        for name in os.listdir(lod_dir):
             if not name.startswith(draw_ib + "-"):
                 continue
-            submesh_dir = os.path.join(lod0_dir, name)
+            submesh_dir = os.path.join(lod_dir, name)
             if not os.path.isdir(submesh_dir):
                 continue
             for type_dir in os.listdir(submesh_dir):
@@ -1310,6 +1296,7 @@ class ExportZZMI(ExportUnity):
         draw_ib: str,
         workspace_root: str,
         foreign_used_group_ids: set[int],
+        lod: str = "LOD0",
     ) -> bool:
         """判定整个缺席的 DrawIB 的**几何**是否已被合并进其它对象（几何归属口径）。
 
@@ -1369,7 +1356,7 @@ class ExportZZMI(ExportUnity):
         （无校准模式下已禁止）。
         """
         all_slots, own_segment_slots = self._load_drawib_vg_slots(
-            draw_ib, workspace_root
+            draw_ib, workspace_root, lod
         )
         if not all_slots:
             return False
@@ -1652,8 +1639,13 @@ class ExportZZMI(ExportUnity):
         （局部命名空间/无反查数据）时返回 "0"（与旧行为一致）。
         搜索顺序：LOD0 目录 -> 工作空间根目录兜底（ZZZ 常规在 LOD0）。
         """
+        lod = _zzmi_bone_lod(bare_unique_str)
+        bare_unique_str = self._zzmi_bare_workspace_unique(bare_unique_str)
         base = GlobalConfig.path_workspace_folder()
-        for root in (os.path.join(base, "LOD0"), base):
+        roots = (os.path.join(base, lod),)
+        if lod == "LOD0":
+            roots += (base,)
+        for root in roots:
             submesh_dir = os.path.join(root, bare_unique_str)
             if not os.path.isdir(submesh_dir):
                 continue
@@ -1684,8 +1676,13 @@ class ExportZZMI(ExportUnity):
         则相反（即使被引用也不插桩）。搜索顺序同 _resolve_stub_registered_slot：
         LOD0 目录 -> 工作空间根目录兜底。
         """
+        lod = _zzmi_bone_lod(bare_unique_str)
+        bare_unique_str = self._zzmi_bare_workspace_unique(bare_unique_str)
         base = GlobalConfig.path_workspace_folder()
-        for root in (os.path.join(base, "LOD0"), base):
+        roots = (os.path.join(base, lod),)
+        if lod == "LOD0":
+            roots += (base,)
+        for root in roots:
             submesh_dir = os.path.join(root, bare_unique_str)
             if not os.path.isdir(submesh_dir):
                 continue
@@ -1773,6 +1770,16 @@ class ExportZZMI(ExportUnity):
 
         for drawib_model in self.drawib_model_list:
             draw_ib = str(drawib_model.draw_ib)
+            if checkbox_enabled:
+                lods = {
+                    _zzmi_bone_lod(getattr(part, "unique_str", ""))
+                    for part in drawib_model.submesh_model_list
+                }
+                if len(lods) > 1:
+                    raise RuntimeError(
+                        f"[ZZMI] DrawIB {draw_ib} 由 {', '.join(sorted(lods))} 共用，"
+                        "请分别导出这些 LOD，以保持骨骼缓冲区独立。"
+                    )
             for submesh_model in drawib_model.submesh_model_list:
                 vg_count = int(getattr(submesh_model, "vg_count", 0) or 0)
                 if vg_count <= 0:
@@ -1942,9 +1949,23 @@ class ExportZZMI(ExportUnity):
                 })
                 break
         if components:
-            buffer_slots = max(c["vg_offset"] + c["vg_count"] for c in components)
+            lod_widths: dict[str, int] = {}
+            group_keys = set()
+            for component in components:
+                lod = _zzmi_bone_lod(component["unique_str"])
+                component["lod"] = lod
+                width = component["vg_offset"] + component["vg_count"]
+                lod_widths[lod] = max(lod_widths.get(lod, 0), width)
+                group_keys.add((lod, component["skeleton_group"]))
+            if len(lod_widths) > 1:
+                group_ids = {key: index for index, key in enumerate(sorted(group_keys))}
+                for component in components:
+                    component["skeleton_group"] = group_ids[
+                        component["lod"], component["skeleton_group"]
+                    ]
             valid_components = []
             for component in components:
+                buffer_slots = lod_widths[component["lod"]]
                 invalid_slots = sorted({
                     slot for slot in component["vg_map"].values()
                     if slot >= buffer_slots
@@ -2714,22 +2735,42 @@ class ExportZZMI(ExportUnity):
             f"_g{int(host_group)}_s{slot}"
         )
 
-    @staticmethod
-    def _merged_cross_group_enabled() -> bool:
-        """跨组骨骼合并总开关（`cross_group_merged_vgmap_test`）。
+    def _merged_cross_group_enabled(self, skeleton_group: int) -> bool:
+        return _zzmi_prop_flag("cross_group_merged_vgmap_test", True) and (
+            self._merged_profile_for_lod(self._merged_group_lod(skeleton_group)) is None
+        )
 
-        关闭时保持历史行为：跨组件骨骼只写自己组（实机上会让被吸收的顶点塌陷），
-        并由 `_warn_cross_group_bone_references` 大声报警。开启后由 `_merged_cross_*`
-        系列把它们的骨骼写进**吸收它的宿主组**缓冲。
-        """
-        return bool(
-            _zzmi_prop_flag("cross_group_merged_vgmap_test", True)
-        ) and not _merged_palette_route_active()
+    def _merged_group_lod(self, skeleton_group: int) -> str:
+        for component in self.merged_skeleton_components:
+            if int(component["skeleton_group"]) == int(skeleton_group):
+                return component.get("lod", "LOD0")
+        return "LOD0"
+
+    def _merged_profile_for_lod(self, lod: str) -> dict | None:
+        profiles = getattr(self, "_zzmi_profiles_by_lod", None)
+        if profiles is None:
+            profiles = self._zzmi_profiles_by_lod = {}
+        if lod not in profiles:
+            profiles[lod] = _merged_palette_profile(lod) if _zzmi_prop_flag(
+                "cross_group_merged_vgmap_test", True
+            ) else None
+        return profiles[lod]
+
+    def _merged_component_has_conversion(self, component_id: int) -> bool:
+        component = self.merged_skeleton_components[component_id]
+        profile = self._merged_profile_for_lod(component.get("lod", "LOD0"))
+        if not profile:
+            return False
+        from ...common.zzmi_cross_group_palette import merged_components
+
+        return any(
+            item["ib_hash"] == component["draw_ib"]
+            for item in merged_components(profile)
+        )
 
     @staticmethod
-    def _merged_palette_enabled() -> bool:
-        """骨骼池路线总开关（与 `_merged_cross_group_enabled` 互斥）。"""
-        return _merged_palette_route_active()
+    def _merged_lod_suffix(lod: str) -> str:
+        return "" if lod == "LOD0" else f"_{lod}"
 
     def _merged_deform_palette_name(
         self, ib_key, skeleton_group: int, slot: int
@@ -2740,9 +2781,9 @@ class ExportZZMI(ExportUnity):
         组骨架缓冲（直拷、按池槽位索引）。两者布局完全不同，混绑会让顶点按别人的
         对象空间蒙皮 —— 这正是跨组要修的东西，所以每次绑 vs-t0 都必须过这里。
         """
-        if _merged_palette_route_active():
+        if self._merged_profile_for_lod(self._merged_group_lod(skeleton_group)):
             component_id = self.merged_skeleton_component_id_dict.get(str(ib_key))
-            if component_id is not None and int(component_id) in _merged_palette_conv_component_ids():
+            if component_id is not None and self._merged_component_has_conversion(int(component_id)):
                 return self._merged_palette_conv_name(int(component_id), int(slot))
             # 本部件没参与合并（形态键 / 与角色不共用骨骼）：它的顶点组仍是自己的
             # 局部骨号，池槽位索引与它对不上。绑它自己的 palette 原始副本（本帧
@@ -2766,7 +2807,10 @@ class ExportZZMI(ExportUnity):
 
         历史路线（非池）没有换算，各消费部件用自己的空间重放。
         """
-        if not self._merged_palette_enabled():
+        component_id = self.merged_skeleton_component_id_dict.get(str(target_ib))
+        if component_id is None or not self._merged_profile_for_lod(
+            self.merged_skeleton_components[int(component_id)].get("lod", "LOD0")
+        ):
             return consumer_ib or target_ib
         owner_ib = ""
         if group_plan:
@@ -3345,7 +3389,7 @@ class ExportZZMI(ExportUnity):
         if cached is not None:
             return cached
         plan_map: dict = {}
-        if self.has_merged_skeleton and self._merged_cross_group_enabled():
+        if self.has_merged_skeleton:
             for skeleton_group in self._merged_skeleton_groups():
                 cross_component_ids = self._merged_cross_group_component_ids(
                     skeleton_group
@@ -3535,8 +3579,12 @@ class ExportZZMI(ExportUnity):
             return []
         index_count = len(index_data) // 4
         # 各组件的 vg_map 值域 → 骨架组
+        component_id = self.merged_skeleton_component_id_dict.get(str(draw_ib))
+        lod = self.merged_skeleton_components[component_id].get("lod", "LOD0") if component_id is not None else "LOD0"
         ranges: list[tuple[int, int, int]] = []
         for component in self.merged_skeleton_components:
+            if component.get("lod", "LOD0") != lod:
+                continue
             vg_map = component.get("vg_map") or {}
             values = [int(v) for v in vg_map.values()]
             if not values:
@@ -3811,7 +3859,8 @@ class ExportZZMI(ExportUnity):
         再用每个组件的 `[vg_offset, vg_offset+vg_count)` 反查骨骼归属组件。
         关闭开关时返回空列表（保持历史行为，由守卫报警）。
         """
-        if not self._merged_cross_group_enabled():
+        lod = self._merged_group_lod(skeleton_group)
+        if not self._merged_cross_group_enabled(skeleton_group):
             return []
         member_ids = [int(cid) for cid in self._merged_group_component_ids(skeleton_group)]
         legal: set[int] = set()
@@ -3827,7 +3876,7 @@ class ExportZZMI(ExportUnity):
         member_set = set(member_ids)
         owners: list[int] = []
         for component_id, component in enumerate(self.merged_skeleton_components):
-            if component_id in member_set:
+            if component_id in member_set or component.get("lod", "LOD0") != lod:
                 continue
             offset = int(component["vg_offset"])
             if any(
@@ -3877,7 +3926,7 @@ class ExportZZMI(ExportUnity):
         「本组哪个部件的导出网格里混进了别组顶点」——它就是合并几何的**宿主**，
         其 SO 引用必须被捕获，跨组重发布（蒙皮 CS）才有落点。
         """
-        if not self._merged_cross_group_enabled():
+        if not self._merged_cross_group_component_ids(skeleton_group):
             return set()
         offending = self._merged_cross_group_offending_bone_ids(skeleton_group)
         if not offending:
@@ -4914,7 +4963,7 @@ class ExportZZMI(ExportUnity):
         #      用户实测导致「两侧都抖、骨骼矩阵不对」——原因见 3) 上方注释。
 
         # 5) 换绑骨架：骨骼池路线绑换算后的那份（本部件空间），历史路线绑本组缓冲。
-        if self._merged_palette_enabled() and int(component_id) in _merged_palette_conv_component_ids():
+        if self._merged_component_has_conversion(int(component_id)):
             palette_source = self._merged_palette_conv_name(component_id, slot_first)
         else:
             palette_source = self._merged_skeleton_name(skeleton_group, slot_first)
@@ -5411,13 +5460,11 @@ class ExportZZMI(ExportUnity):
               ∪ ④跨组重放宿主（`_append_merged_cross_group_replays`）。
         ①②③④ 由分支互斥地生效，这里取并集 ⇒ 是**按需集合的上界**：最多多发一
         份本段用不到的换算（代价一次 Dispatch），少发则退回陈旧快照。结果再与
-        `_merged_palette_conv_component_ids()` 求交——不在骨池里的部件没有换算
+        本 LOD 参与换算的部件求交——不在骨池里的部件没有换算
         段可 `run`，`_merged_deform_palette_name` 对它返回的是原始捕获。
         """
-        if not self._merged_palette_enabled():
-            return []
-        conv_ids = _merged_palette_conv_component_ids()
-        if not conv_ids:
+        source_lod = self.merged_skeleton_components[int(component_id)].get("lod", "LOD0")
+        if not self._merged_profile_for_lod(source_lod):
             return []
         candidates: list[int] = [int(component_id)]
         # ②：重放绑的是 SO 所属空间（so_owner），target 只有占位几何时它们不同 ——
@@ -5440,7 +5487,11 @@ class ExportZZMI(ExportUnity):
                 candidates.append(int(host["component_id"]))
         ordered: list[int] = []
         for candidate in candidates:
-            if candidate in conv_ids and candidate not in ordered:
+            if (
+                self.merged_skeleton_components[candidate].get("lod", "LOD0") == source_lod
+                and self._merged_component_has_conversion(candidate)
+                and candidate not in ordered
+            ):
                 ordered.append(candidate)
         return ordered
 
@@ -6167,17 +6218,11 @@ class ExportZZMI(ExportUnity):
         """
         if not self.merged_skeleton_components:
             return
-        if _merged_palette_route_active():
-            # 骨骼池路线：顶点里的骨号是 canonical 身份号，本来就不落在任何部件的
-            # 池槽位区间里；跨空间由换算段解决。这里按槽位区间判"越界引用"会全量
-            # 误报，所以整段跳过。
-            return
-        cross_enabled = self._merged_cross_group_enabled()
         unknown_group = int(type(self).UNKNOWN_BONE_GROUP)
         # 每组合法骨骼 id 集合 = 该组全部导出组件槽位并集（缺席部件的骨骼不会
         # attach，也不可被引用——同组缺席部件被并入现成对象同样会报警）
         group_legal: dict[int, set[int]] = {}
-        id_to_group: dict[int, int] = {}
+        id_to_group: dict[tuple[str, int], int] = {}
         for component in self.merged_skeleton_components:
             # 组号先归一成 int：它既做 `group_legal`/`id_to_group` 的键，又直接进
             # 下面的 `sorted`（混排 str 与 int 会抛 TypeError）。
@@ -6187,11 +6232,14 @@ class ExportZZMI(ExportUnity):
                 component["vg_offset"], component["vg_offset"] + component["vg_count"]
             ):
                 legal.add(bone_id)
-                id_to_group.setdefault(bone_id, skeleton_group)
+                id_to_group.setdefault((component.get("lod", "LOD0"), bone_id), skeleton_group)
 
         for component in self.merged_skeleton_components:
             draw_ib = component["draw_ib"]
             skeleton_group = int(component["skeleton_group"])
+            lod = component.get("lod", "LOD0")
+            if self._merged_profile_for_lod(lod):
+                continue
             legal = group_legal[skeleton_group]
             _refs = self._collect_drawib_referenced_bone_ids(draw_ib)
             offending = sorted(bone_id for bone_id in _refs if bone_id not in legal)
@@ -6204,7 +6252,7 @@ class ExportZZMI(ExportUnity):
             # 中止在守卫里）。`int(...)` 同时兜住「组号是数字字符串」的历史缓存记录。
             offending_group_ids_set: set[int] = set()
             for bone_id in offending:
-                owner = id_to_group.get(bone_id, unknown_group)
+                owner = id_to_group.get((lod, bone_id), unknown_group)
                 offending_group_ids_set.add(
                     unknown_group if owner == unknown_group else int(owner)
                 )
@@ -6213,6 +6261,7 @@ class ExportZZMI(ExportUnity):
                 "未知（不在导出组件范围）" if group_id == unknown_group else group_id
                 for group_id in offending_group_ids
             ]
+            cross_enabled = self._merged_cross_group_enabled(skeleton_group)
             if cross_enabled:
                 print(
                     f"[ZZMI骨骼合并] 跨组骨骼合并已接入（按来源拆分绘制）: DrawIB {draw_ib} "
@@ -7357,7 +7406,15 @@ class ExportZZMI(ExportUnity):
         # 全宽口径：全局骨骼编号空间的大小 = 全部组件 max(vg_offset+vg_count)
         # （导出子集时 vg_offset 是工作空间全局槽位，可能远超导出内 sum——
         # 同组 3 部件 0~10/11~30/31~50 且中间缺席时 sum=31 但 max=51，按 max 声明）。
-        bones_count = max(c["vg_offset"] + c["vg_count"] for c in self.merged_skeleton_components)
+        lod_widths: dict[str, int] = {}
+        for component in self.merged_skeleton_components:
+            lod = component.get("lod", "LOD0")
+            width = component["vg_offset"] + component["vg_count"]
+            lod_widths[lod] = max(lod_widths.get(lod, 0), width)
+        for lod in lod_widths:
+            profile = self._merged_profile_for_lod(lod)
+            if profile:
+                lod_widths[lod] = int(profile.get("pool_bones") or profile["bones_count"])
 
         # 每部件每槽 palette 持久副本资源声明（deform VB 段里 copy vs-t0 写入当帧
         # 内容）。type=stride 必须显式声明，否则空声明的 SRV 视图格式不受控。
@@ -7408,7 +7465,7 @@ class ExportZZMI(ExportUnity):
             # deform 用 canonical 去查 vs-t0（换算后的 palette，按 canonical 索引），
             # attach 必须按池槽位落笔，所以这张表在池路线下写「基址 + 本地骨号」。
             # 历史路线两者是同一个数，保持原样。
-            _pool_route = _merged_palette_route_active()
+            _pool_route = self._merged_profile_for_lod(component.get("lod", "LOD0")) is not None
             _slot_base = int(component.get("vg_offset") or 0)
             payload = b"".join(
                 _struct.pack(
@@ -7435,76 +7492,42 @@ class ExportZZMI(ExportUnity):
         # 骨骼池路线也要这两张整数表（部件表喂锚点链、重映射表做 canonical→池槽），
         # 只是不需要 cb1 / 拆分绘制那套运行时。这里按**原始开关**判，好让「开关开着
         # 但本次会话没有方案数据」也能落一条可见的提示，而不是静默退回历史产物。
-        if _zzmi_prop_flag("cross_group_merged_vgmap_test", True):
-            from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
-
-            profile = getattr(
-                ZZMISkeletonMergeHelper, "cross_group_profile", None
+        for lod, bones_count in sorted(lod_widths.items()):
+            profile = self._merged_profile_for_lod(lod)
+            if not profile:
+                continue
+            from ...common.zzmi_cross_group_palette import (
+                merged_components,
+                runtime_component_table,
             )
-            if profile is None:
-                print(
-                    "[ZZMI骨骼合并] 跨组开关开着，但本次会话没有骨骼池方案数据，"
-                    "本次按历史行为发射（不跨组）。重新导入一次骨架数据再导出即可。"
-                )
-            else:
-                from ...common.zzmi_cross_group_palette import (
-                    merged_components,
-                    runtime_component_table,
-                )
 
-                table = runtime_component_table(profile)
-                section.append("[ResourceZZMSComponents]")
+            suffix = self._merged_lod_suffix(lod)
+            table = runtime_component_table(profile)
+            filename = f"zz_cgcomponents{suffix}.buf"
+            section.append(f"[ResourceZZMSComponents{suffix}]")
+            section.append("type = Buffer")
+            section.append("format = R32G32B32A32_UINT")
+            section.append(f"filename = Meshes/{filename}")
+            section.new_line()
+            self._atomic_write_binary(
+                os.path.join(mod_meshes_dir, filename),
+                b"".join(
+                    _struct.pack("<I", int(value) & 0xFFFFFFFF) for value in table
+                ),
+            )
+
+            components = merged_components(profile)
+            for index in range(len(components)):
+                filename = f"zz_cgparams{suffix}_C{index}.buf"
+                section.append(f"[ResourceZZCgParams{suffix}_C{index}]")
                 section.append("type = Buffer")
                 section.append("format = R32G32B32A32_UINT")
-                section.append("filename = Meshes/zz_cgcomponents.buf")
+                section.append(f"filename = Meshes/{filename}")
                 section.new_line()
                 self._atomic_write_binary(
-                    os.path.join(mod_meshes_dir, "zz_cgcomponents.buf"),
-                    b"".join(
-                        _struct.pack(
-                            "<4I",
-                            *(int(value) & 0xFFFFFFFF for value in table[index:index + 4]),
-                        )
-                        for index in range(0, len(table), 4)
-                    ),
+                    os.path.join(mod_meshes_dir, filename),
+                    _struct.pack("<4I", index, len(components), bones_count, 0),
                 )
-
-                # 池宽口径：没参与合并的部件也把骨骼落在池尾，骨架/换算缓冲必须按
-                # **整池**开（`pool_bones`），否则它们的槽位在缓冲之外，attach 写出
-                # 边界被丢弃、蒙皮读到没写过的空间 —— 实测整块炸开。
-                bones_count = int(
-                    profile.get("pool_bones") or profile.get("bones_count") or 0
-                )
-                # 每部件一份 Params（参考实现的 `Buffer<uint4> Params : register(t2)`）：
-                # `Params[0] = (本部件在部件表里的下标, 合并部件数, 池骨骼数, 0)`。
-                # 换算 CS 只认这张表，索引口径是**池槽位**，没有 remap 层。
-                component_count = len(merged_components(profile))
-                for component_index, component in enumerate(
-                    merged_components(profile)
-                ):
-                    draw_ib = component["ib_hash"]
-                    section.append(
-                        f"[ResourceZZCgParams_C{int(component_index)}]"
-                    )
-                    section.append("type = Buffer")
-                    section.append("format = R32G32B32A32_UINT")
-                    section.append(
-                        f"filename = Meshes/zz_cgparams_C{int(component_index)}.buf"
-                    )
-                    section.new_line()
-                    self._atomic_write_binary(
-                        os.path.join(
-                            mod_meshes_dir,
-                            f"zz_cgparams_C{int(component_index)}.buf",
-                        ),
-                        _struct.pack(
-                            "<4I",
-                            int(component_index) & 0xFFFFFFFF,
-                            int(component_count) & 0xFFFFFFFF,
-                            int(bones_count) & 0xFFFFFFFF,
-                            0,
-                        ),
-                    )
 
         # 跨组：每骨架组一份「对象→世界 cb1」捕获资源（**拆分绘制**用）。
         # 合并网格按来源拆成多次绘制时，每次绘制要绑**该来源自己**的对象变换，而
@@ -7520,8 +7543,8 @@ class ExportZZMI(ExportUnity):
         # 资源不声明 type/stride：`copy vs-cb1` 是常量块整体拷贝，尺寸与布局由源视图
         # 决定；随后被 `vs-cb1 = ResourceZZCb1_G<N>` 整块绑回常量槽（与已投产的
         # `ResourceCaptureCB1_*` 完全同型，用户实测有效）。
-        if self._merged_cross_group_enabled():
-            for skeleton_group in groups:
+        for skeleton_group in groups:
+            if self._merged_cross_group_enabled(skeleton_group):
                 section.append(
                     f"[{self._merged_cb1_capture_name(int(skeleton_group))}]"
                 )
@@ -7671,7 +7694,7 @@ class ExportZZMI(ExportUnity):
                 # 完全正确但 4 个 SO 全部 100% 零）。
                 section.append("type = RWBuffer")
                 section.append("format = R32G32B32A32_FLOAT")
-                section.append("array = " + str(bones_count * 3))
+                section.append("array = " + str(lod_widths[self._merged_group_lod(skeleton_group)] * 3))
                 section.append("bind_flags = shader_resource unordered_access")
                 section.new_line()
 
@@ -7718,13 +7741,15 @@ class ExportZZMI(ExportUnity):
                 )
                 section.append(f"Dispatch = {dispatch_count}, 1, 1")
                 section.append("cs-u0 = null")
-                if self._merged_palette_enabled() and int(component_id) in _merged_palette_conv_component_ids():
+                if self._merged_component_has_conversion(int(component_id)):
                     # 池（骨架缓冲）是混合空间，deform 直接读会把别人的骨骼按错误
                     # 的空间蒙皮；这一段用锚点链把每根异物骨骼搬到本部件空间，
                     # 输出缓冲按 canonical 槽位索引 —— 与 vg_map 天生对齐，网格
                     # 与权重不用改任何数字。
-                    profile = _merged_palette_profile() or {}
-                    bones_total = int(profile.get("bones_count", 0))
+                    lod = component.get("lod", "LOD0")
+                    profile = self._merged_profile_for_lod(lod)
+                    suffix = self._merged_lod_suffix(lod)
+                    bones_total = lod_widths[lod]
                     if bones_total <= 0:
                         bones_total = int(component["vg_offset"]) + vg_count
                     conv_name = self._merged_palette_conv_name(component_id, slot)
@@ -7767,9 +7792,9 @@ class ExportZZMI(ExportUnity):
                             int(component["skeleton_group"]), slot
                         )
                     )
-                    section.append("cs-t1 = ref ResourceZZMSComponents")
+                    section.append(f"cs-t1 = ref ResourceZZMSComponents{suffix}")
                     section.append(
-                        f"cs-t2 = ref ResourceZZCgParams_C{conv_index}"
+                        f"cs-t2 = ref ResourceZZCgParams{suffix}_C{conv_index}"
                     )
                     section.append(f"cs-u0 = ref {conv_name}")
                     section.append(
@@ -7818,28 +7843,27 @@ class ExportZZMI(ExportUnity):
             cross_component_ids = self._merged_cross_group_component_ids(skeleton_group)
             if not cross_component_ids:
                 continue
-            if self._merged_cross_group_enabled():
-                offending = sorted(
-                    self._merged_cross_group_offending_bone_ids(skeleton_group)
-                )
-                self._append_merged_diag(
-                    section,
-                    self._merged_diag(
-                        ZZMI_MERGE_DIAG_CROSS_GROUP_ATTACH,
-                        "跨组骨骼合并（F1）：别组部件的骨骼写入吸收它的宿主组缓冲。",
-                        group=f"G{int(skeleton_group)}",
-                        components=",".join(str(int(cid)) for cid in cross_component_ids),
-                        bone_ids=",".join(str(int(bone_id)) for bone_id in offending),
-                        owner_groups=",".join(
-                            sorted(
-                                {
-                                    f"G{int(self.merged_skeleton_components[cid]['skeleton_group'])}"
-                                    for cid in cross_component_ids
-                                }
-                            )
-                        ),
+            offending = sorted(
+                self._merged_cross_group_offending_bone_ids(skeleton_group)
+            )
+            self._append_merged_diag(
+                section,
+                self._merged_diag(
+                    ZZMI_MERGE_DIAG_CROSS_GROUP_ATTACH,
+                    "跨组骨骼合并（F1）：别组部件的骨骼写入吸收它的宿主组缓冲。",
+                    group=f"G{int(skeleton_group)}",
+                    components=",".join(str(int(cid)) for cid in cross_component_ids),
+                    bone_ids=",".join(str(int(bone_id)) for bone_id in offending),
+                    owner_groups=",".join(
+                        sorted(
+                            {
+                                f"G{int(self.merged_skeleton_components[cid]['skeleton_group'])}"
+                                for cid in cross_component_ids
+                            }
+                        )
                     ),
-                )
+                ),
+            )
             for cross_component_id in cross_component_ids:
                 cross_component = self.merged_skeleton_components[cross_component_id]
                 vg_count = int(cross_component["vg_count"])
@@ -8004,7 +8028,7 @@ class ExportZZMI(ExportUnity):
             "zzmi_merged_skeleton_attach.hlsl",
             self._merged_skin_shader_filename(),
         ]
-        if _merged_palette_route_active():
+        if any(self._merged_profile_for_lod(c.get("lod", "LOD0")) for c in self.merged_skeleton_components):
             # 骨骼池路线：deform 之前要把池里每根 canonical 骨换算到本部件空间，
             # 少了这个着色器整条路线静默失效（palette 空 ⇒ 全塌到原点）。
             shader_names.append("zzmi_cross_group_palette.hlsl")
@@ -8203,7 +8227,7 @@ class ExportZZMI(ExportUnity):
             # last-wins：同组各部件写的是同一个矩阵（分组的定义就是对象变换逐位相同），
             # 覆盖无害。每个 DrawIB 只在本段的第一条子网格处追加一次（该 DrawIB 的
             # 所有子网格共用同一个渲染段对象）。
-            if self.has_merged_skeleton and self._merged_cross_group_enabled():
+            if self.has_merged_skeleton and _zzmi_prop_flag("cross_group_merged_vgmap_test", True):
                 first_indices = self._drawib_first_match_first_index(draw_ib)
                 if first_indices and int(override_first_index) == int(first_indices[0]):
                     capture_component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
@@ -8214,10 +8238,11 @@ class ExportZZMI(ExportUnity):
                             )
                             or 0
                         )
-                        texture_override_ib_section.append(
-                            f"{self._merged_cb1_capture_name(capture_group)}"
-                            " = copy vs-cb1 unless_null"
-                        )
+                        if self._merged_cross_group_enabled(capture_group):
+                            texture_override_ib_section.append(
+                                f"{self._merged_cb1_capture_name(capture_group)}"
+                                " = copy vs-cb1 unless_null"
+                            )
 
             # 2026-09 多实例分离 v2（用户实测通过）：carrier 的渲染 draw
             # **不再覆写 vb0**。旧实现 `vb0 = ResourceZZRedirectSO_<target>` 把该
@@ -8522,6 +8547,7 @@ class ExportZZMI(ExportUnity):
         # 骨骼引用缓存按本次导出的几何状态重算（导出流程内顶点组只读；缓存条目
         # 自身也带结构签名，见 `_collect_drawib_referenced_bone_ids`）。
         self._zzmi_drawib_bone_refs_cache = {}
+        self._zzmi_profiles_by_lod = {}
         # ZZMI 骨骼合并（B1 契约接线）：组件扫描 + 契约判定必须**先于任何写盘**。
         # 下面的 generate_buffer_files 是本次导出的第一个落盘点（Meshes/*.buf），
         # 契约 error 时不得留下半成品 Mod 产物（.buf / .ini / res/*.hlsl）。

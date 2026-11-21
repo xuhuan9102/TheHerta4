@@ -44,8 +44,7 @@ PKG = base.PKG
 ZZMI_MODULE = base._zzmi_module
 
 # zzmi.py 在函数内按相对导入取 ...common.zzmi_cross_group_palette（真实实现、
-# 只依赖 numpy）。不登记它 ⇒ _merged_palette_conv_component_ids() 永远空集，
-# 骨骼池路线在测试里彻底失活。
+# 只依赖 numpy），用于验证换算表和每个 LOD 的骨骼池。
 _PALETTE = base._load_real_module(
     f"{PKG}.common.zzmi_cross_group_palette", "common/zzmi_cross_group_palette.py"
 )
@@ -168,9 +167,6 @@ def _enable_palette_route(case):
     )
     patcher.start()
     case.addCleanup(patcher.stop)
-    # 缓存以方案对象身份为键（globals 里的 _MERGED_CONV_IDS_CACHE）。
-    case.addCleanup(ZZMI_MODULE.__dict__.pop, "_MERGED_CONV_IDS_CACHE", None)
-    ZZMI_MODULE.__dict__.pop("_MERGED_CONV_IDS_CACHE", None)
     return profile
 
 
@@ -203,8 +199,8 @@ class ZZMIPaletteConvOrderTests(unittest.TestCase):
     def test_fixture_runs_the_palette_route(self):
         """前置断言：骨骼池路线已激活，且本段换算集合 = 自身 ∪ 重放宿主。"""
         exporter, _models = self._make_exporter()
-        self.assertTrue(exporter._merged_palette_enabled())
-        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(), {0, 1, 2})
+        self.assertIsNotNone(exporter._merged_profile_for_lod("LOD0"))
+        self.assertTrue(all(exporter._merged_component_has_conversion(i) for i in range(3)))
         absorbed_hosts = exporter._merged_group_absorbed_hosts(0)
         # 宿主段：只有自己（几何被吸收，重放的就是自己那份）
         self.assertEqual(
@@ -220,6 +216,42 @@ class ZZMIPaletteConvOrderTests(unittest.TestCase):
             ),
             [1, 0],
         )
+
+    def test_lod_skeleton_buffers_and_component_tables_are_independent(self):
+        exporter, models = self._make_exporter()
+        raw_profiles = {}
+        for lod, part in enumerate(_palette_profile()["components"]):
+            model = models[lod]
+            submesh = model.submesh_model_list[0]
+            submesh.unique_str = submesh.unique_str.replace("LOD0.", f"LOD{lod}.", 1)
+            submesh.vg_offset = 0
+            submesh.vg_map = {i: i for i in range(part["vg_count"])}
+            part["component_id"] = 0
+            part["vg_offset"] = 0
+            part["vg_map"] = {str(i): i for i in range(part["vg_count"])}
+            part["anchor_self_slot"] = 0
+            raw_profiles[f"LOD{lod}"] = _PALETTE.validate_profile({
+                "mode": _PALETTE.PROFILE_MODE,
+                "format_version": _PALETTE.PROFILE_FORMAT_VERSION,
+                "components": [part],
+            })
+        exporter._zzmi_profiles_by_lod = raw_profiles
+        (
+            exporter.merged_skeleton_components,
+            exporter.merged_skeleton_component_id_dict,
+        ) = exporter._collect_merged_skeleton_components()
+        builder = base._FakeIniBuilder()
+        exporter.add_merged_skeleton_sections(builder)
+        ini = "\n".join(base._all_builder_lines(builder))
+        for index, bones in enumerate((105, 51, 14)):
+            suffix = "" if index == 0 else f"_LOD{index}"
+            skeleton = f"ResourceZZMergedSkeleton_G{index}_s1"
+            resource = ini.split(f"[{skeleton}]", 1)[1].split("[", 1)[0]
+            self.assertIn(f"array = {bones * 3}\n", resource)
+            conversion = ini.split(f"[CustomShaderZZMSPaletteConv_C{index}_s1]", 1)[1].split("[", 1)[0]
+            self.assertIn(f"cs-t0 = ref {skeleton}\n", conversion)
+            self.assertIn(f"cs-t1 = ref ResourceZZMSComponents{suffix}\n", conversion)
+            self.assertIn(f"cs-t2 = ref ResourceZZCgParams{suffix}_C0\n", conversion)
 
     def test_every_conv_binding_has_prior_conv_run(self):
         """核心不变量：三段里每个 Conv palette 绑定之前都有对应的换算 run。"""
@@ -478,7 +510,7 @@ class ZZMIPaletteConvSoOwnerSpaceTests(base._ZZMIGroup3RedirectFixture, unittest
             ),
             [0, 1],
         )
-        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(), {0, 1, 2})
+        self.assertTrue(all(exporter._merged_component_has_conversion(i) for i in range(3)))
 
     def test_all_conv_bindings_are_audited_clean(self):
         """整份 VB 产物过审计：换算 run 先于绑定、且不在 if 内。"""

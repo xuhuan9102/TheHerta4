@@ -69,8 +69,9 @@ class ZZMICrossGroupPaletteError(ValueError):
 # 配置契约
 # ---------------------------------------------------------------------------
 
-def get_profile_path(workspace_folder: str) -> str:
-    return os.path.join(os.path.abspath(str(workspace_folder)), PROFILE_FILENAME)
+def get_profile_path(workspace_folder: str, lod: str = "LOD0") -> str:
+    filename = PROFILE_FILENAME if lod == "LOD0" else f"{PROFILE_FILENAME[:-5]}_{lod}.json"
+    return os.path.join(os.path.abspath(str(workspace_folder)), filename)
 
 
 def _as_int(value, field_name: str, minimum: int | None = 0) -> int:
@@ -253,8 +254,8 @@ def validate_profile(profile: dict) -> dict:
     return result
 
 
-def load_profile(workspace_folder: str, required: bool = True) -> dict | None:
-    path = get_profile_path(workspace_folder)
+def load_profile(workspace_folder: str, required: bool = True, *, lod: str = "LOD0") -> dict | None:
+    path = get_profile_path(workspace_folder, lod)
     if not os.path.isfile(path):
         if required:
             raise ZZMICrossGroupPaletteError(
@@ -270,9 +271,9 @@ def load_profile(workspace_folder: str, required: bool = True) -> dict | None:
     return validate_profile(profile)
 
 
-def write_profile(workspace_folder: str, profile: dict) -> str:
+def write_profile(workspace_folder: str, profile: dict, *, lod: str = "LOD0") -> str:
     normalized = validate_profile(profile)
-    path = get_profile_path(workspace_folder)
+    path = get_profile_path(workspace_folder, lod)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as file:
         json.dump(normalized, file, ensure_ascii=False, indent=4)
