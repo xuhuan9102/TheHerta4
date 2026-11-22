@@ -108,6 +108,7 @@ _install_module(
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.modules[f"{PKG}.toolkit"].__path__ = [str(ROOT / "toolkit")]
 
 
 def _load_blueprint_module(module_name):
@@ -3088,6 +3089,54 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
 
 
 class MaterialProExportTests(unittest.TestCase):
+    def test_rgb_png_copy_is_written_as_rgba(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source.png"
+            Image.new("RGB", (4, 3), (70, 130, 190)).save(source, format="PNG")
+            target_dir = Path(temp_dir) / "out"
+            image = _FakeImage(str(source))
+            material = types.SimpleNamespace(name="DiffuseMap_Test")
+            node = node_postprocess_material.SSMTNode_PostProcess_Material()
+            node.material_to_resource_override = False
+            node.export_textures_as_dds = False
+
+            filename = node.copy_texture_file(
+                image,
+                str(target_dir),
+                material,
+                forced_filename="source.png",
+            )
+
+            self.assertEqual(filename, "source.png")
+            with Image.open(target_dir / filename) as exported:
+                self.assertEqual(exported.mode, "RGBA")
+                self.assertEqual(exported.getpixel((0, 0)), (70, 130, 190, 255))
+
+    def test_same_path_png_export_does_not_rewrite_source(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source.png"
+            Image.new("RGB", (4, 3), (70, 130, 190)).save(source, format="PNG")
+            image = _FakeImage(str(source))
+            material = types.SimpleNamespace(name="DiffuseMap_Test")
+            node = node_postprocess_material.SSMTNode_PostProcess_Material()
+            node.material_to_resource_override = True
+            node.export_textures_as_dds = False
+
+            filename = node.copy_texture_file(
+                image,
+                temp_dir,
+                material,
+                forced_filename="source.png",
+            )
+
+            self.assertEqual(filename, "source.png")
+            with Image.open(source) as untouched:
+                self.assertEqual(untouched.mode, "RGB")
+
     def test_pro_preserves_named_transparency_when_pure_texture_adds_switch(self):
         config = node_postprocess_material.GlobalConfig
         self.addCleanup(setattr, config, "logic_name", config.logic_name)
