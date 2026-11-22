@@ -160,8 +160,12 @@ def recover_join_face_sources(obj, paths):
         if not path:
             continue
         stem = os.path.splitext(path)[0]
-        points = np.fromfile(stem + "-Position.buf", dtype="<f4").reshape(-1, 10)[:, :3]
-        source = np.fromfile(stem + ".ib", dtype="<u4").reshape(-1, 3)
+        pos_path = stem + "-Position.buf"
+        ib_path = stem + ".ib"
+        if not (os.path.isfile(pos_path) and os.path.isfile(ib_path)):
+            continue
+        points = np.fromfile(pos_path, dtype="<f4").reshape(-1, 10)[:, :3]
+        source = np.fromfile(ib_path, dtype="<u4").reshape(-1, 3)
         if not len(source) or len(source) * 3 != int(bare.split("-")[1]):
             continue
         used, compact = np.unique(source, return_inverse=True)

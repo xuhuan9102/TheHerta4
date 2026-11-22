@@ -38,6 +38,7 @@ _REAL_MODULES = (
 	("utils", "json_utils"),
 	("common", "efmi_skeleton"),
 	("common", "zzmi_skeleton"),
+	("common", "zzmi_fusion_spaces"),
 	# 形态键「顶点命中索引」：纯 numpy/标准库的叶子模块，blueprint 侧的
 	# node_postprocess_shapekey.py 与 direct_export_shapekey_output_mixin.py 都依赖它。
 	("blueprint", "shapekey_sparse_index"),

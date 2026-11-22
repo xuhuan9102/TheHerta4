@@ -537,7 +537,7 @@ class ExportUtils:
         TimerUtils.end_stage("ShapeKey计算")
 
         zzmi_face_sources = None
-        if GlobalConfig.logic_name == LogicName.ZZMI:
+        if getattr(LogicName, "ZZMI", None) is not None and GlobalConfig.logic_name in {LogicName.ZZMI, getattr(LogicName, "ZZMIDX12", "ZZMIDX12")}:
             from ..common.zzmi_fusion_spaces import read_face_sources
 
             zzmi_face_sources = read_face_sources(element_context.mesh, len(ib))
@@ -718,24 +718,27 @@ class ExportUtils:
         deduplicate_element_set = ExportUtils._deduplicate_element_set_for_export()
 
         face_sources = None
-        if GlobalConfig.logic_name == LogicName.ZZMI:
+        if getattr(LogicName, "ZZMI", None) is not None and GlobalConfig.logic_name in {LogicName.ZZMI, getattr(LogicName, "ZZMIDX12", "ZZMIDX12")}:
             from ..common.zzmi_fusion_spaces import read_face_sources
 
             tags = read_face_sources(mesh, len(mesh.loops))
             if tags is not None and len(numpy.unique(tags)) > 1:
                 face_sources = numpy.repeat(tags, 3)
 
+        call_kwargs = dict(
+            mesh=mesh,
+            element_vertex_ndarray=element_vertex_ndarray,
+            dtype=dtype,
+            d3d11_game_type=d3d11_game_type,
+            deduplicate_element_set=deduplicate_element_set,
+            deduplicate_ignore_vertex_id=ExportUtils._deduplicate_ignore_vertex_id(),
+            flip_triangles=False,
+        )
+        if face_sources is not None:
+            call_kwargs["loop_source_ids"] = face_sources
+
         ib, _, _, unique_element_vertex_ndarray, unique_first_loop_indices = \
-            ObjBufferHelper.calc_index_vertex_buffer_wwmi_v2(
-                mesh=mesh,
-                element_vertex_ndarray=element_vertex_ndarray,
-                dtype=dtype,
-                d3d11_game_type=d3d11_game_type,
-                deduplicate_element_set=deduplicate_element_set,
-                deduplicate_ignore_vertex_id=ExportUtils._deduplicate_ignore_vertex_id(),
-                flip_triangles=False,
-                loop_source_ids=face_sources,
-            )
+            ObjBufferHelper.calc_index_vertex_buffer_wwmi_v2(**call_kwargs)
 
         index_loop_id_dict = dict(enumerate(unique_first_loop_indices.tolist()))
 

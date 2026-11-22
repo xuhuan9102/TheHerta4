@@ -1098,7 +1098,11 @@ class ExportZZMI(ExportUnity):
                 raise Fatal(f"ZZMI {ib} 无法唯一还原本部件骨骼编号")
 
             layout = self._drawib_blend_layout(ib)
-            element = next(e for e in layout["elements"] if e["semantic"] == "BLENDINDICES")
+            if not layout or "Blend" not in model.category_buffer_dict:
+                continue
+            element = next((e for e in layout.get("elements", []) if e.get("semantic") == "BLENDINDICES"), None)
+            if not element:
+                continue
             dtype = np.dtype(FormatUtils.get_nptype_from_format(element["format"]))
             channels = element["byte_width"] // dtype.itemsize
             packed = model.category_buffer_dict["Blend"].copy()

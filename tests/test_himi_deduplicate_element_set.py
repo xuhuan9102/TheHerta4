@@ -110,6 +110,8 @@ _LOGIC_NAME = types.SimpleNamespace(
     EFMI="EFMI",
     IdentityV="IdentityV",
     HTMI="HTMI",
+    ZZMI="ZZMI",
+    ZZMIDX12="ZZMIDX12",
 )
 _GLOBAL_CONFIG = types.SimpleNamespace(logic_name="HIMI")
 
@@ -257,6 +259,7 @@ class _RecordingObjBufferHelper:
         deduplicate_element_set=None,
         deduplicate_ignore_vertex_id=False,
         flip_triangles=False,
+        **kwargs,
     ):
         color_seen = None
         if element_vertex_ndarray is not None and "COLOR" in (element_vertex_ndarray.dtype.names or ()):
