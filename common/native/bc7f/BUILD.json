@@ -2,6 +2,9 @@
   "abi": 1,
   "cpu": "Windows x64 SSE2 baseline",
   "basis_commit": "ee771a7f913a3233a252eb6d281b4446f6a3c9f5",
+  "basis_source_path": "common/native/bc7f/vendor/basis_universal/transcoder",
+  "basis_license": "common/native/bc7f/vendor/basis_universal/LICENSE",
+  "basis_notice": "common/native/bc7f/vendor/basis_universal/NOTICE",
   "stb_blob": "9eedabedc45b3e6fd88fae6f14a160b4d53272ec",
   "files": [
     {

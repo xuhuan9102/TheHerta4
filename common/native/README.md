@@ -21,8 +21,9 @@ python scripts/build_dds_native.py --vcvars '<Visual Studio>/VC/Auxiliary/Build/
 ```
 
 Tables are generated from the decoder's existing constants. The source, table
-generator and tests are included; build intermediates are stored in the system
-temporary directory. Close worker processes using the DLL before rebuilding it.
+generator, generated `dds_tables.h` and tests are included; build intermediates
+are stored in the system temporary directory. Close worker processes using the
+DLL before rebuilding it.
 
 Validation:
 
@@ -30,13 +31,37 @@ Validation:
 python -m unittest discover -s tests -p test_dds_native.py
 ```
 
+## Source build
+
+The checked-in source can build the independent native modules with:
+
+```powershell
+cmake -S common/native -B build/native -A x64
+cmake --build build/native --config Release
+```
+
+This builds the DDS decoder, geometry hash/packing, export geometry,
+DDS-to-PNG, ShapeKey, BC7 texture encoding and PNG analysis DLLs. The required
+Basis Universal transcoder snapshot is vendored at commit
+`ee771a7f913a3233a252eb6d281b4446f6a3c9f5`.
+When the ZZMI skeleton-fusion module from PR #87 is present, its CMake target is
+included automatically.
+
+```powershell
+cmake -S common/native -B build/native -A x64
+cmake --build build/native --config Release
+```
+
+Keep `/fp:precise` and the x64 SSE2 baseline. The BC7 and PNG analysis sources
+and pinned Basis dependency are in `common/native/bc7f`.
+
 ## DDS to PNG
 
 `herta_dds_png_windows_x64.dll` provides ABI 1 for an in-process, lossless PNG
-conversion pipeline. The source is maintained in `v4806/herta-bc7-native`, under
-`addon_native/dds_png`; build with that repository's CMake project. The shipped
-DLL includes the Herta BC7 kernel with standard endpoint bit replication,
-bcdec's BC6H decoder and libdeflate. See `DDS_PNG_THIRD_PARTY.txt` for licenses.
+conversion pipeline. Its complete source and pinned bcdec/libdeflate dependencies
+are in `common/native/dds_png`; the root native CMake project builds it. The
+snapshot origin and hashes are recorded in `dds_png/BUILD.json`. See
+`DDS_PNG_THIRD_PARTY.txt` for licenses.
 
 BC7/BC6H, common RGBA/BGRA DDS, and half/float DDS are supported. HDR becomes
 16-bit RGBA without a gamma transform. sRGB inputs get sRGB/gAMA chunks; linear

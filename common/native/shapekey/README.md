@@ -1,17 +1,17 @@
 # ShapeKey native kernels (Windows x64, ABI 1)
 
 Runtime: `../herta_shapekey_windows_x64.dll`. Python adapter:
-`common/shapekey_native.py`. Source/build project:
+`common/shapekey_native.py`. Source: `shapekey_sample.cpp` beside this file.
+`CMakeLists.txt` builds the DLL directly. The source snapshot came from
 <https://github.com/v4806/herta-bc7-native>, `addon_native/shapekey_sample.cpp`.
-The source repository retains its existing visibility. `BUILD.json` records the
-exact source and DLL SHA256 used in this installation.
+`BUILD.json` records that provenance and the exact source and DLL SHA256.
 
 The C ABI provides batched relative-key evaluation, stable packed slot deltas,
 and float32-to-float16 float3 packing. Compile with MSVC x64 C++20, `/O2 /MD
 /EHsc /fp:precise`. SSE2 is sufficient; fast-math and FMA contraction must not be
 enabled. Default worker count is four; small batches stay single-threaded.
-Build out of tree with the source repository's `addon_native/CMakeLists.txt` and
-`-DHERTA_BUILD_BC7_ENCODER=OFF` if only geometry/ShapeKey modules are needed.
+Build from the repository's `common/native/CMakeLists.txt`, or use this
+directory's standalone CMake project for only the ShapeKey module.
 
 Blender RNA is read on its owning thread. Native workers access only owned
 NumPy arrays. Sampling bypasses dependency evaluation only for relative keys

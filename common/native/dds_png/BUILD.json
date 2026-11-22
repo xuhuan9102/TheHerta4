@@ -1,0 +1,14 @@
+{
+  "abi": 1,
+  "source_repository": "https://github.com/v4806/herta-bc7-native",
+  "source_commit": "01666fd884b4c09e964b94831826dffb78f3c64f",
+  "upstream_source_path": "addon_native/dds_png",
+  "local_source_path": "common/native/dds_png",
+  "source_sha256": "2387fcefdc6b3b9c6ca3f0432a8f8c58ceeb4f3656a948fdaa34222b087fc8cb",
+  "dll_sha256": "3bef6950ac723e16771b5e29744e67961f43f2c60d1be56e51efb86e49610414",
+  "compiler": "MSVC 14.50 x64 /O2 /MD /fp:precise",
+  "vendored_dependencies": {
+    "bcdec": "80859ed3b7afb1c527a2a99d70c61457bea72d0c",
+    "libdeflate": "92e6a0db9fa848d742f9eb286c92afc60f2c3dda"
+  }
+}
