@@ -38,9 +38,11 @@ ZZMI（绝区零）骨骼合并支持模块
 """
 
 import hashlib
+import json
 import math
 import os
 import re
+from time import perf_counter
 
 import numpy
 
@@ -87,6 +89,19 @@ ZZMI_VG_MAP_ALGORITHM_VERSION = _ZZMI_VG_MAP_ALGORITHM_VERSION
 # 部件仍各在各的局部空间」。开跨组合并时宁可重建，也不能拿错口径的 VGMap 顶上。
 _ZZMI_MERGE_MODE_CROSS = "cross_group"
 _ZZMI_MERGE_MODE_GROUP = "group"
+
+
+def fusion_lod(unique_str: str) -> str:
+    prefix = str(unique_str).split(".", 1)[0].upper()
+    return prefix if re.fullmatch(r"LOD[0-9]+", prefix) else "LOD0"
+
+
+def use_lod_fusion() -> bool:
+    try:
+        from .global_properties import GlobalProterties
+        return GlobalProterties.zzmi_fusion_per_lod()
+    except (ImportError, AttributeError):
+        return False
 
 
 class ZZMILogParser:
@@ -335,7 +350,7 @@ class ZZMILogParser:
         """生成 deduped 候选路径：log 记录的原路径 + dump 目录 deduped/ 下的同名文件。"""
         candidates = []
         if dst_path:
-            candidates.append(dst_path)
+            candidates.append(os.path.join(self.base_dir, dst_path))
             basename = os.path.basename(dst_path)
             if basename:
                 candidates.append(os.path.join(self.base_dir, "deduped", basename))
@@ -408,7 +423,7 @@ class ZZMILogParser:
         # 兜底：按 draw+槽位前缀匹配（逻辑名可能缺 -vs= 尾段）
         prefix = logical_filename.split("=", 1)[0] + "="
         for src, dst2 in self.dump_map.items():
-            if src.startswith(prefix):
+            if src.startswith((prefix, prefix.removesuffix("=") + "-vs=")):
                 for candidate in self._deduped_candidates(dst2):
                     if os.path.isfile(candidate):
                         return candidate
@@ -766,6 +781,25 @@ class ZZMISkeletonMergeHelper:
             # 随便挑一个最新 FrameAnalysis，尤其不能把相似模型的 CB1 混进来。
             return ""
         return EFMISkeletonMergeHelper.resolve_frame_analysis_dir(workspace_root)
+    @classmethod
+    def _resolve_lod_frame_analysis_dir(cls, workspace_root: str, lod: str) -> str:
+        """A configured LOD uses its own work-page dump or its saved buffers."""
+        config = os.path.join(workspace_root, "Config")
+        tabs = JsonUtils.LoadFromFile(os.path.join(config, "WorkPageTabs.json")) or {}
+        if isinstance(tabs, dict):
+            for tab in tabs.get("tabs", ()) or ():
+                if not isinstance(tab, dict) or str(tab.get("name", "")).strip().upper() != lod:
+                    continue
+                tab_id = str(tab.get("id", ""))
+                if tab_id and os.path.basename(tab_id) == tab_id:
+                    payload = JsonUtils.LoadFromFile(os.path.join(config, "Tabs", tab_id + ".json"))
+                    if isinstance(payload, dict):
+                        path = str(payload.get("frameAnalysisFolderPath", "") or "").strip()
+                        if path:
+                            return path if os.path.isdir(path) else ""
+                break
+        return ""
+
     _resolve_submesh_json_path = staticmethod(
         EFMISkeletonMergeHelper._resolve_submesh_json_path
     )
@@ -853,7 +887,9 @@ class ZZMISkeletonMergeHelper:
                 "diffusion_points": points,
                 "diffusion_weights": weights,
                 "diffusion_radius": EFMIBoneMapBuilder._diffusion_radius(points),
-                "diffusion_normals": EFMIBoneMapBuilder._estimate_diffusion_normals(points),
+                "diffusion_normals": EFMIBoneMapBuilder._estimate_diffusion_normals(
+                    points, use_native=True,
+                ),
             }
         return merged
 
@@ -1288,6 +1324,53 @@ class ZZMISkeletonMergeHelper:
         return digest.hexdigest()
 
     @classmethod
+    def _workspace_fusion_input_signature(
+        cls, workspace_root, sources, members, lod, expect_cross,
+    ) -> str | None:
+        """Fingerprint the SSMT4 source and geometry used by this fusion scope."""
+        input_fields = ("CategoryBufferList", "CategoryHash", "VertexLimitVB", "VGMapDedupExcluded")
+        digest = hashlib.sha256(b"ZZMIWorkspaceFusion/v1")
+        file_digests = {}
+
+        def add_record(record):
+            digest.update(json.dumps(record, sort_keys=True).encode("utf-8"))
+            digest.update(b"\n")
+
+        def file_digest(path):
+            if path not in file_digests:
+                file_digests[path] = cls._frame_analysis_log_signature(path)
+            return file_digests[path]
+
+        add_record((lod, expect_cross, _ZZMI_VG_MAP_ALGORITHM_VERSION, ZZMI_CHANNEL_PLAN_VERSION))
+        try:
+            for source_lod, (_, _, log_signature) in sorted(sources.items()):
+                add_record((source_lod, log_signature))
+                source_dir = os.path.join(workspace_root, source_lod, "ZZMISkeletonSource", "deduped")
+                for name in sorted(os.listdir(source_dir)):
+                    add_record((name, file_digest(os.path.join(source_dir, name))))
+            for identity, path, metadata in members:
+                add_record((identity, os.path.relpath(path, workspace_root),
+                            [metadata.get(key) for key in input_fields]))
+                stem = os.path.splitext(path)[0]
+                add_record([file_digest(stem + suffix) for suffix in ("-Blend.buf", "-Position.buf")])
+                lod_dir = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+                draws_path = os.path.join(lod_dir, "ComponentName_DrawCallIndexList.json")
+                add_record(file_digest(draws_path) if os.path.isfile(draws_path) else None)
+        except OSError:
+            return None
+        return digest.hexdigest()
+
+    @classmethod
+    def _workspace_fusion_cache_signature(cls, input_signature, profile_path) -> str | None:
+        if input_signature is None:
+            return None
+        try:
+            profile = cls._frame_analysis_log_signature(profile_path) if os.path.isfile(profile_path) else ""
+        except OSError:
+            return None
+        return f"{input_signature}:{profile}"
+
+    @classmethod
     def _zzmi_source_cache_intact(
         cls,
         submesh_json: dict,
@@ -1345,7 +1428,7 @@ class ZZMISkeletonMergeHelper:
         """
         if not workspace_root or not unique_str_list:
             return False
-        expect_cross = cls._cross_numbering_expected(workspace_root)
+        per_lod = use_lod_fusion()
         for unique_str in unique_str_list:
             json_path = cls._resolve_submesh_json_path(workspace_root, unique_str)
             if not json_path:
@@ -1358,7 +1441,9 @@ class ZZMISkeletonMergeHelper:
                 continue
             if payload.get("GPU-PreSkinning") is False:
                 continue
-            if not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
+            lod = fusion_lod(unique_str) if per_lod else ""
+            expect_cross = cls._cross_numbering_expected(os.path.join(workspace_root, lod))
+            if payload.get("SkeletonMergeLOD", "") != lod or not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
                 return True
             if not cls._zzmi_cache_intact(
                 payload, json_path, unique_str, expect_cross=expect_cross
@@ -1386,7 +1471,7 @@ class ZZMISkeletonMergeHelper:
         """
         if not workspace_root or not unique_str_list:
             return 0
-        expect_cross = cls._cross_numbering_expected(workspace_root)
+        per_lod = use_lod_fusion()
         ready = 0
         for unique_str in unique_str_list:
             json_path = cls._resolve_submesh_json_path(workspace_root, unique_str)
@@ -1400,7 +1485,9 @@ class ZZMISkeletonMergeHelper:
                 continue
             if payload.get("GPU-PreSkinning") is False:
                 continue
-            if not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
+            lod = fusion_lod(unique_str) if per_lod else ""
+            expect_cross = cls._cross_numbering_expected(os.path.join(workspace_root, lod))
+            if payload.get("SkeletonMergeLOD", "") != lod or not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
                 continue
             if not cls._zzmi_cache_intact(
                 payload, json_path, unique_str, expect_cross=expect_cross
@@ -1550,6 +1637,10 @@ class ZZMISkeletonMergeHelper:
         workspace_root: str,
         unique_str_list: list[str],
         force: bool = False,
+        *,
+        _lod: str | None = None,
+        settings: dict | None = None,
+        progress=None,
     ) -> tuple[bool, str]:
         """为 ZZMI 工作空间的子网格生成并写回骨骼合并数据（幂等）。
 
@@ -1558,39 +1649,85 @@ class ZZMISkeletonMergeHelper:
         if not unique_str_list:
             return False, "没有子网格需要处理。"
 
-        frame_analysis_dir = cls.resolve_frame_analysis_dir(workspace_root)
-        log_path = os.path.join(frame_analysis_dir, "log.txt") if frame_analysis_dir else ""
-        parser = None
-        resolver = None
-        frame_analysis_signature = ""
-        if frame_analysis_dir:
-            if not os.path.isfile(log_path):
-                print(
-                    f"[ZZMI骨骼合并] 提示: FrameAnalysis 缺少 log.txt（{log_path}），"
-                    "将仅用工作空间缓存重建"
+        per_lod = settings["per_lod"] if settings is not None else use_lod_fusion()
+        if _lod is None and per_lod:
+            partitions = {}
+            for identity in unique_str_list:
+                partitions.setdefault(fusion_lod(identity), []).append(identity)
+            import_path = os.path.join(workspace_root, "Import.json")
+            known = JsonUtils.LoadFromFile(import_path) if os.path.isfile(import_path) else {}
+            if isinstance(known, dict):
+                for identity in known:
+                    if "." not in identity or not re.match(r"(?i)^LOD[0-9]+\.", identity):
+                        continue
+                    lod = fusion_lod(identity)
+                    if lod in partitions and cls._resolve_submesh_json_path(workspace_root, identity):
+                        partitions[lod].append(identity)
+            results = []
+            for index, (lod, members) in enumerate(sorted(partitions.items())):
+                def report_lod(fraction, message):
+                    progress((index + fraction) / len(partitions), f"{lod} · {message}")
+
+                result = cls.ensure_skeleton_data(
+                    workspace_root, members, force, _lod=lod, settings=settings,
+                    progress=report_lod if progress else None,
                 )
-            else:
-                parser = ZZMILogParser(log_path)
-                resolver = ZZMIDeformResolver(parser)
-                frame_analysis_signature = cls._frame_analysis_log_signature(log_path)
-                if not resolver.passes:
-                    print(
-                        "[ZZMI骨骼合并] 提示: FrameAnalysis log 中未识别到 deform pass，"
-                        "将仅用工作空间缓存重建"
-                    )
-                    parser = None
-                    resolver = None
-        else:
-            # dump 目录已被删除：上次导入已把 palette / 对象变换 CB 复制进工作空间
-            # ModImpRuntime，缓存完整的子网格可以脱离 dump 重建。工作区已记录过提取源
-            # 时**不会**自动改用游戏目录里的其它帧（防跨帧/跨模型混用，见
-            # resolve_frame_analysis_dir）：要换用新的提取文件，请在面板重新选择
-            # 提取源后重新导入。
-            print(
-                "[ZZMI骨骼合并] 提示: 未找到 FrameAnalysis 目录（记录过的提取源已被"
-                "删除/搬走），本次仅用工作空间缓存重建；如需改用新的提取文件，"
-                "请重新选择提取源后重新导入"
+                results.append((lod, result))
+            cls.cross_group_profile = None
+            cls.cross_group_profile_path = None
+            return all(ok for _, (ok, _) in results), "\n".join(
+                f"{lod}: {message}" for lod, (_, message) in results
             )
+
+        started = perf_counter()
+        profile_root = os.path.join(workspace_root, _lod or "")
+        if settings is not None:
+            workspace_source = settings["workspace_source"]
+        else:
+            try:
+                from .global_properties import GlobalProterties
+                workspace_source = GlobalProterties.zzmi_fusion_from_workspace()
+            except (ImportError, AttributeError):
+                workspace_source = False
+
+        if progress:
+            progress(0, "读取骨骼来源并检查缓存")
+
+        def read_source(folder):
+            log_path = os.path.join(folder, "log.txt") if folder else ""
+            if not os.path.isfile(log_path):
+                return None, None, ""
+            source_parser = ZZMILogParser(log_path)
+            source_resolver = ZZMIDeformResolver(source_parser)
+            if not source_resolver.passes:
+                return None, None, ""
+            return source_parser, source_resolver, cls._frame_analysis_log_signature(log_path)
+
+        if workspace_source:
+            sources = {
+                lod: read_source(os.path.join(workspace_root, lod, "ZZMISkeletonSource"))
+                for lod in sorted({fusion_lod(identity) for identity in unique_str_list})
+            }
+            missing_lods = [lod for lod, (parser, _, _) in sources.items() if parser is None]
+            if missing_lods:
+                return False, (
+                    f"{'、'.join(missing_lods)} 缺少可用的 SSMT4 骨骼数据（ZZMISkeletonSource），"
+                    "请在新版 SSMT4 中重新提取对应工作页。"
+                )
+            print("[ZZMI骨骼合并] 读取 SSMT4 提取到工作空间的骨骼数据")
+        else:
+            if _lod:
+                folder = cls._resolve_lod_frame_analysis_dir(workspace_root, _lod)
+            elif settings is not None:
+                folder = settings["frame_analysis_dir"]
+            else:
+                folder = cls.resolve_frame_analysis_dir(workspace_root)
+            sources = {"": read_source(folder)}
+            if sources[""][0] is None:
+                print("[ZZMI骨骼合并] 未找到可用的 FrameAnalysis 蒙皮记录，将使用工作空间缓存")
+
+        def source_for(identity):
+            return sources[fusion_lod(identity) if workspace_source else ""]
 
         # 第一遍：收集每个子网格信息并按 DrawIB 分组（同 DrawIB 的拆分子网格共享
         # 同一 deform pass / palette / VGMap，只参与一次去重）。
@@ -1610,6 +1747,7 @@ class ZZMISkeletonMergeHelper:
         # 引用的骨骼缓存文件必须真实存在。否则（复制失败 / 工作空间搬迁漏掉
         # ModImpRuntime / 旧算法缓存）整批重建，绝不允许带着半成品永久幂等跳过。
         groups: dict[str, dict] = {}
+        workspace_members = []
         stale = 0
         # 阻断修复（t80 §2.4）：本次调用里「旧版但仅凭 VGMap 可升级」的 DrawIB 集合。
         # 只有**全部成员**都可升级的 DrawIB 才就地升级——通道计划是共享骨连通分量
@@ -1624,14 +1762,14 @@ class ZZMISkeletonMergeHelper:
         # 快路径必须按**本次要的口径**校验：开跨组合并时，缓存里的 VGMap 必须是
         # 池槽位，并且池方案文件得在盘上（两者缺一就无法确认编号域，而「看起来
         # 有 VGMap」正是把历史分组编号当成合并成果的入口）。
-        expect_cross = bool(cls.cross_group_merged_enabled())
+        expect_cross = settings["cross_group"] if settings is not None else cls.cross_group_merged_enabled()
         pool_profile_ready = False
-        if expect_cross:
+        if expect_cross and not workspace_source:
             try:
                 from .zzmi_cross_group_palette import get_profile_path
 
                 pool_profile_ready = os.path.isfile(
-                    get_profile_path(workspace_root)
+                    get_profile_path(profile_root)
                 )
             except Exception:  # pragma: no cover - 磁盘异常
                 pool_profile_ready = False
@@ -1690,9 +1828,16 @@ class ZZMISkeletonMergeHelper:
             if bool(submesh_json.get("VGMapDedupExcluded")):
                 group["dedup_excluded"] = True
 
+            if workspace_source:
+                workspace_members.append((unique_str, json_path, submesh_json))
+                continue
+
+            parser, _, frame_analysis_signature = source_for(unique_str)
             cache_intact = cls._zzmi_cache_intact(
                 submesh_json, json_path, unique_str, expect_cross=cross_mode_ready
             )
+            scope_matches = submesh_json.get("SkeletonMergeLOD", "") == (_lod or "")
+            cache_intact = cache_intact and scope_matches
             if (
                 cache_intact
                 and parser is not None
@@ -1731,6 +1876,7 @@ class ZZMISkeletonMergeHelper:
             _group_members.setdefault(draw_ib_for_migration, set()).add(unique_str)
             if (
                 not cache_intact
+                and scope_matches
                 and not force
                 and cls._zzmi_cache_usable_for_migration(
                     submesh_json, json_path, unique_str
@@ -1741,6 +1887,35 @@ class ZZMISkeletonMergeHelper:
                 )
                 continue  # 留到重建阶段统一升级（见下"v4→v5 就地升级"）
             stale += 1
+
+        workspace_input_signature = None
+        if workspace_source:
+            from .zzmi_cross_group_palette import get_profile_path
+
+            profile_path = get_profile_path(profile_root)
+            if workspace_members and not unresolved_targets:
+                workspace_input_signature = cls._workspace_fusion_input_signature(
+                    workspace_root, sources, workspace_members, _lod or "", expect_cross,
+                )
+            if not force and workspace_input_signature:
+                cache_signature = cls._workspace_fusion_cache_signature(
+                    workspace_input_signature, profile_path,
+                )
+                if cache_signature and (not expect_cross or os.path.isfile(profile_path)) and all(
+                    metadata.get("ZZMIWorkspaceFusionSignature") == cache_signature
+                    and metadata.get("SkeletonMergeLOD", "") == (_lod or "")
+                    and metadata.get("SkeletonMergeMode") == (
+                        _ZZMI_MERGE_MODE_CROSS if expect_cross else _ZZMI_MERGE_MODE_GROUP
+                    )
+                    and cls._zzmi_cache_intact(metadata, path, identity, expect_cross=expect_cross)
+                    and cls._zzmi_source_cache_intact(metadata, path, identity)
+                    for identity, path, metadata in workspace_members
+                ):
+                    return True, (
+                        f"已复用 {len(workspace_members)} 个子网格的 SSMT4 骨骼融合结果"
+                        f"（校验 {perf_counter() - started:.2f} 秒）。"
+                    )
+            stale = len(workspace_members)
 
         # 只有**全部成员**都可升级的 DrawIB 才就地升级（组级口径：通道计划是共享骨
         # 连通分量的性质，半个组升级会让组内两套口径并存）。
@@ -1791,8 +1966,16 @@ class ZZMISkeletonMergeHelper:
                 )
             return True, f"所有 {total} 个子网格均已有骨骼合并数据（幂等跳过）。"
 
+        prepared_at = perf_counter()
+        signature_seconds = 0.0
+        group_total = len(groups)
         # 第二遍：逐组反查 deform pass -> palette，读取 Blend.buf 得 vg_count
-        for draw_ib, group in groups.items():
+        for group_index, (draw_ib, group) in enumerate(groups.items()):
+            if progress:
+                progress(0.12 + 0.70 * group_index / group_total,
+                         f"计算骨骼统计 · 部件 {group_index + 1}/{group_total}")
+            parser, resolver, signature = source_for(group["representative"])
+            group["frame_analysis_signature"] = signature
             if group.get("skip_reason") and parser is None:
                 continue
             representative = group["representative"]
@@ -1836,6 +2019,12 @@ class ZZMISkeletonMergeHelper:
             if deform_pass is not None:
                 palette_logical = f"{draw_index}-vs-t0={deform_pass['palette_hash']}"
             palette_path = parser.get_deduped_path(palette_logical) if parser is not None else None
+            if not palette_path and workspace_source:
+                group["skip_reason"] = (
+                    f"{fusion_lod(group['representative'])} 的 SSMT4 骨骼数据缺少可用的骨骼矩阵"
+                    f"或蒙皮绘制记录（{palette_logical or draw_ib}），请重新提取对应工作页"
+                )
+                continue
             if not palette_path:
                 # dump 被删除/搬走后的兜底：上次导入已把 palette 复制到工作空间
                 # ModImpRuntime/<bare>-BoneMatrix.buf（导出侧同款缓存）。同 DrawIB
@@ -1989,9 +2178,14 @@ class ZZMISkeletonMergeHelper:
                     os.path.dirname(member_json_path),
                     os.path.splitext(os.path.basename(member_json_path))[0] + "-Position.buf",
                 )
+                signature_started = perf_counter()
                 try:
                     member_signatures = EFMIBoneMapBuilder.compute_driven_signatures(
-                        position_buf_path, blend_buf_path, member_json
+                        position_buf_path, blend_buf_path, member_json,
+                        blend_data=(
+                            blend_indices, blend_weights, valid_mask, blend_indices.shape[1],
+                        ),
+                        use_native_normals=True,
                     )
                     combined_signatures = cls._merge_driven_signatures(
                         combined_signatures, member_signatures
@@ -2001,6 +2195,8 @@ class ZZMISkeletonMergeHelper:
                         f"[ZZMI骨骼合并] 提示 {member}: 驱动签名计算失败"
                         f"（刚性命中对将拆开）: {e}"
                     )
+                finally:
+                    signature_seconds += perf_counter() - signature_started
 
             if member_parse_failed:
                 print(f"[ZZMI骨骼合并] 跳过 {draw_ib}: {group['skip_reason']}")
@@ -2045,7 +2241,7 @@ class ZZMISkeletonMergeHelper:
             cb1_cache_first_constants: dict[str, int] = {}
             cb1_cache_required = False
             cb1_cache_contract_unknown = False
-            for member in group["members"]:
+            for member in (() if workspace_source else group["members"]):
                 member_json_path = group["json_paths"].get(member, "")
                 if not member_json_path:
                     continue
@@ -2086,6 +2282,13 @@ class ZZMISkeletonMergeHelper:
                 if parser is not None and parser.get_ib_hash(render_draw) != draw_ib:
                     continue
                 candidate = parser.get_render_cb1_path(render_draw) if parser is not None else None
+                if workspace_source and not candidate and render_draw in parser.render_cb1_dumps:
+                    group["skip_reason"] = (
+                        f"{fusion_lod(representative)} 的 SSMT4 骨骼数据缺少绘制 {render_draw} "
+                        "的对象变换文件，请重新提取对应工作页"
+                    )
+                    group["palette"] = None
+                    break
                 if candidate:
                     dump_cb1_seen = True
                     if not first_dump_cb1_path:
@@ -2106,6 +2309,9 @@ class ZZMISkeletonMergeHelper:
                         dump_transform_candidates.append(
                             (transform, candidate, first_constant)
                         )
+
+            if group["palette"] is None:
+                continue
 
             # 一个 DrawIB 可能在同一帧被多个实例绘制；它们的 IB/VB hash 相同，
             # 但对象 CB1 不同。旧实现无条件取第一个 CB1，随后把所有实例当成
@@ -2219,6 +2425,9 @@ class ZZMISkeletonMergeHelper:
                 return False, "没有子网格成功生成骨骼数据（" + "；".join(failure_parts) + "）"
             return False, "没有子网格成功生成骨骼数据。"
 
+        profiled_at = perf_counter()
+        if progress:
+            progress(0.83, "匹配骨骼并生成骨骼池")
         # 第三遍：按对象变换分组（跨组绝不共享骨架），组内 bitwise + 刚性门控去重得
         # 组内槽位；然后按组基址拼接成**全局骨骼编号**（Blender 侧全局命名空间，
         # 组内 join 无歧义）。运行时每组骨架为全宽 buffer，**只直拷本组骨骼**——
@@ -2232,7 +2441,7 @@ class ZZMISkeletonMergeHelper:
 
         cross_plan = (
             cls._cross_group_plan_or_none(ready_groups)
-            if cls.cross_group_merged_enabled()
+            if expect_cross
             else None
         )
         if cross_plan is not None:
@@ -2244,7 +2453,7 @@ class ZZMISkeletonMergeHelper:
             # 属性上会丢，掉盘后就按历史分组发 ini，跨组等于白算。
             try:
                 from .zzmi_cross_group_palette import write_profile
-                cls.cross_group_profile_path = write_profile(workspace_root, profile)
+                cls.cross_group_profile_path = write_profile(profile_root, profile)
             except Exception as exc:  # pragma: no cover - 磁盘异常
                 cls.cross_group_profile_path = None
                 print(f"[ZZMI骨骼合并] 骨骼池方案落盘失败（导出会退回历史分组）：{exc}")
@@ -2266,7 +2475,7 @@ class ZZMISkeletonMergeHelper:
             cls.cross_group_profile = None
             try:
                 from .zzmi_cross_group_palette import get_profile_path
-                stale_path = get_profile_path(workspace_root)
+                stale_path = get_profile_path(profile_root)
                 if os.path.isfile(stale_path):
                     os.remove(stale_path)
             except Exception:
@@ -2353,6 +2562,16 @@ class ZZMISkeletonMergeHelper:
         channel_plan = select_channel_plan(channel_components)
         channel_plan_digest = channel_plan_digest_value(channel_plan)
 
+        workspace_cache_signature = None
+        if workspace_source and not unprocessed_groups and not unresolved_targets:
+            if not expect_cross or cls.cross_group_profile_path:
+                workspace_cache_signature = cls._workspace_fusion_cache_signature(
+                    workspace_input_signature, profile_path,
+                )
+
+        publishing_at = perf_counter()
+        if progress:
+            progress(0.95, "写入融合结果")
         # 写回工作空间 json + 复制 palette 缓存（组内所有子网格写相同结果）
         written = 0
         for draw_ib, group in ready_groups.items():
@@ -2377,6 +2596,11 @@ class ZZMISkeletonMergeHelper:
                 # 编号域：cross_group = 骨骼池槽位；group = 历史分组编号。快路径靠它
                 # 区分两种 VGMap——只看「有 VGMap」会把历史编号当成合并成果。
                 submesh_json["SkeletonMergeMode"] = merge_mode
+                submesh_json["SkeletonMergeLOD"] = _lod or ""
+                if workspace_cache_signature:
+                    submesh_json["ZZMIWorkspaceFusionSignature"] = workspace_cache_signature
+                else:
+                    submesh_json.pop("ZZMIWorkspaceFusionSignature", None)
                 # t75 通道计划：唯一判定口径的产物 + 复核素材。缺失/版本不符时
                 # `_zzmi_cache_intact` 拒绝复用（显式重建，不静默退化）。
                 submesh_json["ChannelPlanVersion"] = ZZMI_CHANNEL_PLAN_VERSION
@@ -2416,8 +2640,8 @@ class ZZMISkeletonMergeHelper:
                         slot_weights_by_draw_ib.get(draw_ib, {}).items()
                     )
                 }
-                if frame_analysis_signature:
-                    submesh_json["FrameAnalysisLogSignature"] = frame_analysis_signature
+                if group["frame_analysis_signature"]:
+                    submesh_json["FrameAnalysisLogSignature"] = group["frame_analysis_signature"]
                 # 骨架分组（渲染 cb1 对象变换配对）：导出侧把 deform pass 换绑到本组
                 # ResourceZZMergedSkeleton_G<N>；VGMap/VGOffset 为全局骨骼编号（组基址拼接）
                 submesh_json["SkeletonGroup"] = skeleton_group
@@ -2481,6 +2705,16 @@ class ZZMISkeletonMergeHelper:
                     continue
 
                 written += 1
+
+        if workspace_source:
+            print(
+                f"[ZZMI骨骼合并] {_lod or '工作空间'} 耗时 "
+                f"来源与输入校验 {prepared_at - started:.2f}s，"
+                f"读取与统计 {profiled_at - prepared_at:.2f}s"
+                f"（驱动签名 {signature_seconds:.2f}s），"
+                f"匹配与排布 {publishing_at - profiled_at:.2f}s，"
+                f"写入 {perf_counter() - publishing_at:.2f}s"
+            )
 
         success_message = (
             f"已为 {written} 个子网格生成骨骼合并数据"

@@ -14,16 +14,26 @@ class NonMirrorWorkflowHelper:
         cls._process_objects(imported_objects, stage_name="导入")
 
     @classmethod
+    def iter_imported_objects(cls, imported_objects: list[bpy.types.Object]):
+        yield from cls._iter_process_objects(imported_objects, stage_name="导入")
+
+    @classmethod
     def restore_export_objects(cls, export_objects: list[bpy.types.Object]):
         cls._process_objects(export_objects, stage_name="导出前处理")
 
     @classmethod
     def _process_objects(cls, objects: list[bpy.types.Object], stage_name: str):
+        for _ in cls._iter_process_objects(objects, stage_name):
+            pass
+
+    @classmethod
+    def _iter_process_objects(cls, objects: list[bpy.types.Object], stage_name: str):
         processed_count = 0
         skipped_count = 0
         failed_count = 0
 
-        for obj in objects:
+        for index, obj in enumerate(objects):
+            yield index
             if not obj or obj.type != "MESH" or not getattr(obj, "data", None):
                 skipped_count += 1
                 continue
