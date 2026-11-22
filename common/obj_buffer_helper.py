@@ -912,7 +912,8 @@ class ObjBufferHelper:
         d3d11_game_type:D3D11GameType,
         deduplicate_element_set:set = None,
         deduplicate_ignore_vertex_id: bool = True,
-        flip_triangles: bool = True):
+        flip_triangles: bool = True,
+        loop_source_ids=None):
         '''
         - 用 numpy 将结构化顶点视图为一行字节，避免逐顶点 bytes() 与 dict 哈希。
         - 使用 numpy.unique(..., axis=0, return_index=True, return_inverse=True) 在 C 层完成唯一化与逆映射。
@@ -1008,7 +1009,12 @@ class ObjBufferHelper:
 
         # Combine row bytes + vid bytes, but to make numpy.unique faster we pad the
         # combined row to a multiple of 8 bytes and view it as uint64 blocks.
-        total_bytes = filtered_row_size + vid_width
+        source_bytes = (
+            numpy.ascontiguousarray(loop_source_ids, dtype=numpy.int32).view(numpy.uint8).reshape(n_loops, 4)
+            if loop_source_ids is not None else None
+        )
+        source_offset = filtered_row_size + vid_width
+        total_bytes = source_offset + (4 if source_bytes is not None else 0)
         pad = (-total_bytes) % 8
         padded_width = total_bytes + pad
 
@@ -1023,6 +1029,9 @@ class ObjBufferHelper:
         combined_padded[:, :filtered_row_size] = filtered_row_bytes
         if vid_bytes is not None:
             combined_padded[:, filtered_row_size:filtered_row_size+4] = vid_bytes
+
+        if source_bytes is not None:
+            combined_padded[:, source_offset:source_offset + 4] = source_bytes
 
         native_unique = None
         try:

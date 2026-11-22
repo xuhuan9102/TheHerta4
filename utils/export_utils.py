@@ -45,6 +45,7 @@ class UnityBufferBuildResult:
     category_buffer_dict: dict = field(default_factory=dict, repr=False)
     index_loop_id_dict: Optional[dict] = field(default=None, repr=False)
     unique_first_loop_indices: Optional[numpy.ndarray] = field(default=None, repr=False)
+    zzmi_face_sources: Optional[numpy.ndarray] = field(default=None, repr=False)
     shape_key_buffer_dict: dict = field(default_factory=dict, repr=False)
 
 
@@ -535,6 +536,12 @@ class ExportUtils:
             )
         TimerUtils.end_stage("ShapeKey计算")
 
+        zzmi_face_sources = None
+        if GlobalConfig.logic_name == LogicName.ZZMI:
+            from ..common.zzmi_fusion_spaces import read_face_sources
+
+            zzmi_face_sources = read_face_sources(element_context.mesh, len(ib))
+
         return UnityBufferBuildResult(
             obj_name=element_context.obj_name,
             dtype=element_context.total_structured_dtype,
@@ -543,6 +550,7 @@ class ExportUtils:
             category_buffer_dict=category_buffer_dict,
             index_loop_id_dict=index_loop_id_dict,
             unique_first_loop_indices=unique_first_loop_indices,
+            zzmi_face_sources=zzmi_face_sources,
             shape_key_buffer_dict=shape_key_buffer_dict,
         )
 
@@ -709,6 +717,14 @@ class ExportUtils:
         )
         deduplicate_element_set = ExportUtils._deduplicate_element_set_for_export()
 
+        face_sources = None
+        if GlobalConfig.logic_name == LogicName.ZZMI:
+            from ..common.zzmi_fusion_spaces import read_face_sources
+
+            tags = read_face_sources(mesh, len(mesh.loops))
+            if tags is not None and len(numpy.unique(tags)) > 1:
+                face_sources = numpy.repeat(tags, 3)
+
         ib, _, _, unique_element_vertex_ndarray, unique_first_loop_indices = \
             ObjBufferHelper.calc_index_vertex_buffer_wwmi_v2(
                 mesh=mesh,
@@ -718,6 +734,7 @@ class ExportUtils:
                 deduplicate_element_set=deduplicate_element_set,
                 deduplicate_ignore_vertex_id=ExportUtils._deduplicate_ignore_vertex_id(),
                 flip_triangles=False,
+                loop_source_ids=face_sources,
             )
 
         index_loop_id_dict = dict(enumerate(unique_first_loop_indices.tolist()))

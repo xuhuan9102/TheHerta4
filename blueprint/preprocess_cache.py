@@ -366,6 +366,17 @@ class PreProcessCache:
 
         if obj.type == 'MESH' and obj.data:
             mesh = obj.data
+            attributes = getattr(mesh, "attributes", None)
+            source = None
+            if attributes is not None:
+                from ..common.zzmi_fusion_spaces import FACE_SOURCE_ATTRIBUTE
+
+                source = attributes.get(FACE_SOURCE_ATTRIBUTE)
+            if source is not None:
+                values = numpy.empty(len(source.data), dtype=numpy.int32)
+                source.data.foreach_get("value", values)
+                hasher.update(b"zzmi-face-sources")
+                hasher.update(values.tobytes())
             if preserve_shapes:
                 from .frame_table_cache import hash_mesh_topology
 

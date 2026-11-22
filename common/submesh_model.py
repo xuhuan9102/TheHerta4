@@ -95,6 +95,7 @@ class SubMeshModel:
     # 必须是 init 字段：导出器在构造时按关键字注入（ui/universal/export_helper.py:61），
     # 写成 init=False 会让 dataclass 生成的 __init__ 不认这个关键字，所有导出直接 TypeError。
     seam_weld_config:dict = field(default=None, repr=False)
+    export_game_type: D3D11GameType | None = field(default=None, repr=False)
     # 焊接：焊后 mesh 顶点 -> 原物体 id / 导出顶点池行归属
     weld_vertex_owner_map:numpy.ndarray = field(init=False, default=None, repr=False)
     weld_pool_owner_rows:dict = field(init=False, default_factory=dict, repr=False)
@@ -123,7 +124,7 @@ class SubMeshModel:
         folder_name = self.workspace_unique_str or self.unique_str
 
         submesh_metadata = SubmeshMetadataResolver.resolve(folder_name)
-        self.d3d11_game_type = submesh_metadata.d3d11_game_type
+        self.d3d11_game_type = self.export_game_type or submesh_metadata.d3d11_game_type
         self.match_cs = getattr(submesh_metadata, "match_cs", "") or ""
         self.match_uav_bytes = int(getattr(submesh_metadata, "match_uav_bytes", 0) or 0)
         # EFMI 骨骼合并元数据（反查写回；无则 0/空，合并段输出时据此校验）
@@ -570,6 +571,7 @@ class SubMeshModel:
             d3d11_game_type=self.d3d11_game_type,
         )
         self.ib = obj_buffer_result.ib
+        self.zzmi_face_sources = obj_buffer_result.zzmi_face_sources
         self.category_buffer_dict = obj_buffer_result.category_buffer_dict
         self.index_vertex_id_dict = obj_buffer_result.index_loop_id_dict
         self.unique_first_loop_indices = obj_buffer_result.unique_first_loop_indices
