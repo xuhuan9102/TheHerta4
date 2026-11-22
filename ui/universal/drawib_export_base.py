@@ -25,6 +25,7 @@ class DrawIBExportBase:
             blueprint_model=blueprint_model,
             combine_ib=combine_ib,
             weld_by_group=weld_by_group,
+            export_game_types=getattr(self, "_zzmi_export_game_types", None),
         )
 
     def generate_buffer_files(self, output_folder: str):

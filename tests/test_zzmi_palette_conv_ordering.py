@@ -204,7 +204,10 @@ class ZZMIPaletteConvOrderTests(unittest.TestCase):
         """前置断言：骨骼池路线已激活，且本段换算集合 = 自身 ∪ 重放宿主。"""
         exporter, _models = self._make_exporter()
         self.assertTrue(exporter._merged_palette_enabled())
-        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(), {0, 1, 2})
+        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(exporter.merged_skeleton_component_id_dict), {0, 1, 2})
+        runtime_ids = {ib: cid + 4 for ib, cid in exporter.merged_skeleton_component_id_dict.items()}
+        runtime_ids["deadbeef"] = 0
+        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(runtime_ids), {4, 5, 6})
         absorbed_hosts = exporter._merged_group_absorbed_hosts(0)
         # 宿主段：只有自己（几何被吸收，重放的就是自己那份）
         self.assertEqual(
@@ -478,7 +481,7 @@ class ZZMIPaletteConvSoOwnerSpaceTests(base._ZZMIGroup3RedirectFixture, unittest
             ),
             [0, 1],
         )
-        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(), {0, 1, 2})
+        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(exporter.merged_skeleton_component_id_dict), {0, 1, 2})
 
     def test_all_conv_bindings_are_audited_clean(self):
         """整份 VB 产物过审计：换算 run 先于绑定、且不在 if 内。"""

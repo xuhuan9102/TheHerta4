@@ -78,7 +78,12 @@ class SSMTImportHelper:
 			wwmi_vg_count=submesh_json.VGCount,
 		)
 		if obj is not None:
-			obj["3DMigoto:WorkspaceUniqueStr"] = SSMTImportHelper._build_workspace_unique_str_from_json_path(json_file_path)
+			identity = SSMTImportHelper._build_workspace_unique_str_from_json_path(json_file_path)
+			obj["3DMigoto:WorkspaceUniqueStr"] = identity
+			if logic_name == "ZZMI" and wwmi_vg_map:
+				from .zzmi_fusion_spaces import tag_face_sources
+
+				tag_face_sources(obj.data, identity)
 			obj["3DMigoto:MatchFirstIndex"] = int(submesh_json.JsonDict.get("IndexOffset", 0))
 			obj["3DMigoto:IndexCount"] = int(submesh_json.JsonDict.get("IndexCount", 0))
 		return obj

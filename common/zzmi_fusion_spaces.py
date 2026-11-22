@@ -1,126 +1,116 @@
 
 """Prepare shared ZZMI indices and per-layout UV streams for native rendering."""
 
+import os
+import zlib
+
 import numpy as np
 
 
-def count_imported_indices(path, declared_count):
-    """Match mesh.validate's removal of repeated and degenerate triangles."""
-    try:
-        indices = np.fromfile(path, dtype="<u4")
-    except OSError:
+FACE_SOURCE_ATTRIBUTE = "herta_zzmi_face_source"
+
+
+def face_source_id(identity):
+    return (zlib.crc32(identity.split(".", 1)[-1].encode("utf8")) & 0x7fffffff) or 1
+
+
+def tag_face_sources(mesh, identity):
+    ids = np.full(len(mesh.polygons), face_source_id(identity), dtype=np.int32)
+    write_face_sources(mesh, ids)
+
+
+def read_face_sources(mesh, index_count=None):
+    attribute = mesh.attributes.get(FACE_SOURCE_ATTRIBUTE)
+    if attribute is None or attribute.domain != "FACE" or attribute.data_type != "INT":
         return None
-    if len(indices) != declared_count or len(indices) % 3:
-        return None
-    triangles = np.sort(indices.reshape(-1, 3), axis=1)
-    nondegenerate = (triangles[:, 0] != triangles[:, 1]) & (triangles[:, 1] != triangles[:, 2])
-    return len(np.unique(triangles[nondegenerate], axis=0)) * 3
+    count = len(mesh.polygons)
+    if index_count is not None:
+        if count * 3 != index_count:
+            return None
+        starts = np.empty(count, dtype=np.int32)
+        mesh.polygons.foreach_get("loop_start", starts)
+        if not np.array_equal(starts, np.arange(count) * 3):
+            return None
+    ids = np.empty(count, dtype=np.int32)
+    attribute.data.foreach_get("value", ids)
+    return ids
 
 
-def partition_triangles(blend_bytes, indices, bone_spaces):
-    packed = np.frombuffer(blend_bytes, dtype="<u4").reshape(-1, 8)
-    weights = packed[:, :4].copy().view("<f4")
-    bones = packed[:, 4:]
-    slot_space = np.full(max(bone_spaces) + 1, -1, dtype=np.int32)
-    for slot, space in bone_spaces.items():
-        slot_space[slot] = space
+def restore_native_slots(blend_bytes, indices, sources, face_sources):
+    """Use the imported face source to assign index ranges and native bone slots."""
+    if face_sources is None or len(face_sources) * 3 != len(indices):
+        raise ValueError("导出网格缺少完整的原生面来源")
+    by_tag = {face_source_id(bare): bare for bare in sources}
+    if set(np.unique(face_sources)) != by_tag.keys():
+        raise ValueError("导出网格的原生面来源与绘制计划不一致")
 
-    positive = weights > 0
-    if (bones[positive] >= len(slot_space)).any():
-        raise ValueError("权重引用了骨骼池以外的槽位")
-    influences = slot_space[np.where(positive, bones, 0)]
-    if (influences[positive] < 0).any():
-        raise ValueError("部分骨骼没有对应的绘制空间")
-
-    triangles = np.asarray(indices, dtype="<u4").reshape(-1, 3)
-    spaces = influences[triangles].reshape(-1, 12)
-    used = positive[triangles].reshape(-1, 12)
-    high = np.max(np.where(used, spaces, -1), axis=1)
-    low = np.min(np.where(used, spaces, len(bone_spaces)), axis=1)
-    if (low != high).any():
-        raise ValueError("存在无权重或权重跨越原生绘制空间的三角面")
-
-    order = np.argsort(high, kind="stable")
-    cursor = 0
-    ranges = {}
-    for space, faces in zip(*np.unique(high, return_counts=True)):
-        count = int(faces) * 3
-        ranges[int(space)] = (cursor, count)
-        cursor += count
-    return triangles[order].reshape(-1), ranges
-
-
-def restore_native_slots(position_bytes, blend_bytes, indices, sources):
-    """Recover source draw ranges and private palette slots from the imported triangles."""
-    def triangle_keys(positions, triangles):
-        for corners in positions[triangles]:
-            yield tuple(sorted(map(tuple, corners)))
-
-    source_for_triangle = {}
-    for section, (position_path, index_path, _) in sources.items():
-        points = np.fromfile(position_path, dtype="<f4").reshape(-1, 10)[:, :3]
-        triangles = np.fromfile(index_path, dtype="<u4").reshape(-1, 3)
-        for key in triangle_keys(points, triangles):
-            if source_for_triangle.setdefault(key, section) != section:
-                source_for_triangle[key] = None
-
-    positions = np.frombuffer(position_bytes, dtype="<f4").reshape(-1, 10)[:, :3]
     triangles = np.asarray(indices, dtype="<u4").reshape(-1, 3)
     packed = np.frombuffer(blend_bytes, dtype="<u4").reshape(-1, 8).copy()
     positive = packed[:, :4].copy().view("<f4") > 0
-    by_section = {section: [] for section in sources}
-    for index, key in enumerate(triangle_keys(positions, triangles)):
-        section = source_for_triangle.get(key)
-        if section is None:
-            raise ValueError(f"三角面 {index} 无法唯一匹配原生部件")
-        by_section[section].append(index)
-
-    remapped_vertices = {}
+    remapped_vertices = np.full(len(packed), -1, dtype=np.int32)
     result = []
     ranges = {}
     cursor = 0
-    for section, indices_in_section in by_section.items():
-        if not indices_in_section:
-            continue
-        source_tris = triangles[indices_in_section].reshape(-1)
-        lookup = sources[section][2]
-        for vertex in np.unique(source_tris):
-            mask = positive[vertex]
-            canonical = packed[vertex, 4:][mask]
-            previous = remapped_vertices.get(int(vertex))
-            if previous is not None:
-                if previous != section[0]:
-                    raise ValueError(f"顶点 {vertex} 跨部件共用，无法保留各自蒙皮")
-                continue
-            try:
-                packed[vertex, 4:][mask] = [lookup[int(slot)] for slot in canonical]
-            except KeyError as exc:
-                raise ValueError(f"{section} 缺少顶点使用的骨骼槽位 {exc.args[0]}") from exc
-            remapped_vertices[int(vertex)] = section[0]
+    for tag, bare in by_tag.items():
+        source_tris = triangles[face_sources == tag].reshape(-1)
+        vertices = np.unique(source_tris)
+        if (remapped_vertices[vertices] != -1).any():
+            raise ValueError(f"{bare} 与其他部件共用导出顶点，无法保留各自蒙皮")
+        remapped_vertices[vertices] = tag
+        vertex_rows, columns = np.nonzero(positive[vertices])
+        rows = vertices[vertex_rows]
+        canonical = packed[rows, columns + 4]
+        lookup = sources[bare]
+        try:
+            mapped = {int(slot): lookup[int(slot)] for slot in np.unique(canonical)}
+        except KeyError as exc:
+            raise ValueError(f"{bare} 缺少顶点使用的骨骼槽位 {exc.args[0]}") from exc
+        for slot, native in mapped.items():
+            keep = canonical == slot
+            packed[rows[keep], columns[keep] + 4] = native
         result.append(source_tris)
         count = len(source_tris)
-        ranges[section] = (cursor, count)
+        ranges[bare] = (cursor, count)
         cursor += count
     return np.concatenate(result), ranges, packed.tobytes()
 
 
+TEXCOORD_FORMATS = {
+    "R32G32_FLOAT": ("<f4", 2),
+    "R16G16_FLOAT": ("<f2", 2),
+    "R32G32B32A32_FLOAT": ("<f4", 4),
+    "R8G8B8A8_UNORM": ("u1", 4),
+}
+
+
+def union_texcoord_elements(elements):
+    """Keep every native input and use the widest representation of each."""
+    result = {}
+    for element in elements:
+        key = element["SemanticName"], int(element["SemanticIndex"])
+        existing = result.setdefault(key, element)
+        if element["Format"] == existing["Format"]:
+            continue
+        old_format = TEXCOORD_FORMATS.get(existing["Format"])
+        new_format = TEXCOORD_FORMATS.get(element["Format"])
+        if old_format is None or new_format is None or old_format[1] != new_format[1]:
+            raise ValueError(f"原生顶点属性 {key} 的格式无法合并")
+        if int(element["ByteWidth"]) > int(existing["ByteWidth"]):
+            result[key] = element
+    return [result[key] for key in sorted(result)]
+
+
 def repack_texcoords(data, source, destination):
-    formats = {
-        "R32G32_FLOAT": ("<f4", 2),
-        "R16G16_FLOAT": ("<f2", 2),
-        "R32G32B32A32_FLOAT": ("<f4", 4),
-        "R8G8B8A8_UNORM": ("u1", 4),
-    }
     source_elements = {(e["semantic"], e["index"]): e for e in source["elements"]}
     count = len(data) // source["stride"]
     output = bytearray(count * destination["stride"])
     for element in destination["elements"]:
         key = element["semantic"], element["index"]
         original = source_elements.get(key)
-        dest_format = formats.get(element["format"])
-        if not original or not dest_format or original["format"] not in formats:
+        dest_format = TEXCOORD_FORMATS.get(element["format"])
+        if not original or not dest_format or original["format"] not in TEXCOORD_FORMATS:
             raise ValueError(f"无法匹配原生顶点属性 {key}")
-        source_dtype, cols = formats[original["format"]]
+        source_dtype, cols = TEXCOORD_FORMATS[original["format"]]
         dest_dtype, dest_cols = dest_format
         if cols != dest_cols:
             raise ValueError(f"顶点属性分量不一致 {key}")
@@ -129,7 +119,12 @@ def repack_texcoords(data, source, destination):
             strides=(source["stride"], np.dtype(source_dtype).itemsize),
         )
         if dest_dtype == "u1" and source_dtype != "u1":
-            values = np.rint(np.clip(values, 0, 1) * 255)
+            values = np.clip(values, 0, 1)
+            if key[0] == "COLOR":
+                from ..utils.color_attribute_utils import linear_to_srgb
+
+                values[:, :3] = linear_to_srgb(values[:, :3])
+            values = np.rint(values * 255)
         elif source_dtype == "u1" and dest_dtype != "u1":
             values = values.astype(np.float32) / 255
         target = np.ndarray(
@@ -138,3 +133,70 @@ def repack_texcoords(data, source, destination):
         )
         target[:] = values
     return bytes(output)
+
+def write_face_sources(mesh, ids):
+    attribute = mesh.attributes.get(FACE_SOURCE_ATTRIBUTE)
+    if attribute is None:
+        attribute = mesh.attributes.new(name=FACE_SOURCE_ATTRIBUTE, type="INT", domain="FACE")
+    attribute.data.foreach_set("value", ids)
+
+
+def recover_join_face_sources(obj, paths):
+    """Verify the source blocks left by Blender Join in an unedited legacy mesh."""
+    mesh = obj.data
+    if len(mesh.loops) != len(mesh.polygons) * 3:
+        raise ValueError("旧网格包含修改过的面，请从工作空间重新导入后再合并")
+    vertices = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", vertices)
+    vertices = vertices.reshape(-1, 3)
+    triangles = np.empty(len(mesh.loops), dtype=np.int32)
+    mesh.loops.foreach_get("vertex_index", triangles)
+    triangles = triangles.reshape(-1, 3)
+    low = triangles.min(axis=1)
+    high = triangles.max(axis=1)
+
+    candidates = {}
+    for bare, path in paths.items():
+        if not path:
+            continue
+        stem = os.path.splitext(path)[0]
+        points = np.fromfile(stem + "-Position.buf", dtype="<f4").reshape(-1, 10)[:, :3]
+        source = np.fromfile(stem + ".ib", dtype="<u4").reshape(-1, 3)
+        if not len(source) or len(source) * 3 != int(bare.split("-")[1]):
+            continue
+        used, compact = np.unique(source, return_inverse=True)
+        if used[-1] >= len(points):
+            continue
+        for block, indices in ((points, source), (points[used], compact.reshape(-1, 3))):
+            ordered = np.sort(indices, axis=1)
+            keep = (ordered[:, 0] != ordered[:, 1]) & (ordered[:, 1] != ordered[:, 2])
+            candidates.setdefault(bare, {})[len(block)] = (block, np.unique(ordered[keep], axis=0))
+
+    result = np.zeros(len(triangles), dtype=np.int32)
+    start = 0
+    matched = set()
+    while start < len(vertices):
+        possibilities = []
+        for bare, variants in candidates.items():
+            if bare in matched:
+                continue
+            for size, (points, source) in variants.items():
+                end = start + size
+                block = vertices[start:end]
+                if len(block) != size or not (
+                    np.array_equal(block, points)
+                    or np.array_equal(block, points * (-1, 1, 1))
+                ):
+                    continue
+                mask = (low >= start) & (high < end)
+                local = np.sort(triangles[mask] - start, axis=1)
+                if len(local) == len(source) and np.array_equal(np.unique(local, axis=0), source):
+                    possibilities.append((bare, end, mask))
+        if len(possibilities) != 1:
+            raise ValueError(f"顶点 {start} 的原生部件无法唯一确认，请重新导入源部件后再合并")
+        bare, start, mask = possibilities[0]
+        result[mask] = face_source_id(bare)
+        matched.add(bare)
+    if not result.all():
+        raise ValueError("旧网格的部分面跨越了原生部件，请重新导入源部件后再合并")
+    return result

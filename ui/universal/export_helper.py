@@ -28,6 +28,7 @@ class ExportHelper:
     def parse_submesh_model_list_from_blueprint_model(
         blueprint_model:BluePrintModel,
         seam_weld_config=None,
+        export_game_types=None,
     ) -> list[SubMeshModel]:
         '''
         从蓝图中解析出一个Submesh Model列表
@@ -63,6 +64,8 @@ class ExportHelper:
                 source_obj_unique_str_count=source_obj_unique_str_count,
                 has_multi_file_export_nodes=has_multi_file_export_nodes,
                 seam_weld_config=seam_weld_config,
+                **({"export_game_type": export_game_types.get(draw_call_model_list[0].match_draw_ib)}
+                   if export_game_types else {}),
             )
             submesh_model_list.append(submesh_model)
         
@@ -73,6 +76,7 @@ class ExportHelper:
         blueprint_model:BluePrintModel,
         combine_ib:bool,
         weld_by_group:bool = False,
+        export_game_types=None,
     ) -> list[DrawIBModel]:
         '''
         从蓝图中解析出一个DrawIB Model列表
@@ -109,6 +113,7 @@ class ExportHelper:
         submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(
             blueprint_model,
             seam_weld_config=seam_weld_config,
+            export_game_types=export_game_types,
         )
         return ExportHelper.parse_drawib_model_list_from_submesh_model_list(
             submesh_model_list=submesh_model_list,
