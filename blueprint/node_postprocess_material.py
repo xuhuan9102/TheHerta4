@@ -18,7 +18,6 @@ import glob
 import hashlib
 import re
 from collections import OrderedDict
-import shutil
 
 from ..common.global_config import GlobalConfig
 from ..common.logic_name import LogicName
@@ -1267,7 +1266,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 target_abs = os.path.abspath(target_path)
                 if source_abs != target_abs:
                     if self.material_to_resource_override or not os.path.exists(target_path):
-                        shutil.copy2(source_path, target_path)
+                        from ..toolkit.png_rgba import copy_png_rgba
+
+                        copy_png_rgba(source_path, target_path)
             except Exception as e:
                 print(f"复制工作空间贴图失败: {e}")
                 return None, None
@@ -1665,7 +1666,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 and is_dds_file(target_path)
             ):
                 return new_filename
-            shutil.copy2(source_path, target_path)
+            from ..toolkit.png_rgba import copy_png_rgba
+
+            copy_png_rgba(source_path, target_path)
             return new_filename
         except Exception as e:
             print(f"复制纹理文件失败: {e}")

@@ -38,6 +38,7 @@ for package_name in (PKG, f"{PKG}.common", f"{PKG}.blueprint", f"{PKG}.toolkit")
     package.__path__ = []
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.modules[f"{PKG}.toolkit"].__path__ = [os.path.join(ROOT, "toolkit")]
 
 
 def _load(name, relative_path):
@@ -233,6 +234,31 @@ class TextureExportPlanTests(unittest.TestCase):
         self.assertEqual(TextureExportPlan.stats()["written"], written_first)
         self.assertEqual(self._files(), ["once.png"])
 
+    def test_rgb_png_copy_is_materialized_as_rgba(self):
+        from PIL import Image
+
+        self._configure()
+        source = os.path.join(self.source_dir, "rgb_source.png")
+        Image.new("RGB", (4, 3), (70, 130, 190)).save(source, format="PNG")
+        self._registered(source, "rgb_output.png", owner="material")
+        TextureExportPlan.finalize(self.tmp)
+
+        with Image.open(os.path.join(self.textures, "rgb_output.png")) as exported:
+            self.assertEqual(exported.mode, "RGBA")
+            self.assertEqual(exported.getpixel((0, 0)), (70, 130, 190, 255))
+
+    def test_same_path_png_copy_does_not_rewrite_source(self):
+        from PIL import Image
+
+        source = os.path.join(self.textures, "same.png")
+        Image.new("RGB", (4, 3), (70, 130, 190)).save(source, format="PNG")
+        self._configure()
+        self._registered(source, "same.png", owner="material", overwrite_policy="overwrite")
+        TextureExportPlan.finalize(self.tmp)
+
+        with Image.open(source) as untouched:
+            self.assertEqual(untouched.mode, "RGB")
+
     def test_convert_failure_fallback_rewrites_ini(self):
         """转 DDS 失败：回退源扩展名并重写 ini 的 filename。"""
         ini_path = os.path.join(self.tmp, "test.ini")
@@ -255,6 +281,25 @@ class TextureExportPlanTests(unittest.TestCase):
             content = handle.read()
         self.assertIn("filename = Textures/body.png", content)
         self.assertTrue(os.path.exists(os.path.join(self.textures, "body.png")))
+
+    def test_convert_failure_fallback_rgb_png_is_rgba(self):
+        from PIL import Image
+
+        self._configure()
+        source = os.path.join(self.source_dir, "body_rgb.png")
+        Image.new("RGB", (4, 3), (70, 130, 190)).save(source, format="PNG")
+        TextureExportPlan._converter_override = lambda *_args, **_kwargs: (False, "boom")
+        self._registered(
+            source,
+            "body.dds",
+            owner="material",
+            spec=("dds", "DiffuseMap", ""),
+            convert_kwargs={"texture_type": "DiffuseMap"},
+        )
+        TextureExportPlan.finalize(self.tmp)
+
+        with Image.open(os.path.join(self.textures, "body.png")) as exported:
+            self.assertEqual(exported.mode, "RGBA")
 
     def test_disabled_register_returns_none(self):
         """未启用（蓝图无资源合并节点 / 开关关闭）：register 不参与，调用方走旧路径。"""

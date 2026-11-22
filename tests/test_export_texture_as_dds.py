@@ -94,6 +94,7 @@ _install_module(f"{PKG}.blueprint.export_progress", report_stage=_record_progres
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.modules[f"{PKG}.toolkit"].__path__ = [str(ROOT / "toolkit")]
 
 
 def _load_blueprint_module(module_name):
