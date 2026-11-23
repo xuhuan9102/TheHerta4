@@ -78,6 +78,13 @@ $script:DisplayRoot = ''
 # ---------------------------------------------------------------------------
 # 输出
 # ---------------------------------------------------------------------------
+# Background export decodes redirected stdout as UTF-8.
+if ([Console]::IsOutputRedirected) {
+    $utf8Out = [IO.StreamWriter]::new([Console]::OpenStandardOutput(), [Text.UTF8Encoding]::new($false))
+    $utf8Out.AutoFlush = $true
+    [Console]::SetOut($utf8Out)
+}
+
 function Write-Line {
     param([string]$Text)
     [Console]::Out.WriteLine($Text)
@@ -436,13 +443,18 @@ function Get-ConditionVars {
 }
 
 function Measure-SectionDepth {
-    param([string[]]$Lines, [int]$Start, [int]$End, $Runs)
+    param([string[]]$Lines, $Section, $Runs)
+
+    # These ShaderRegex subsections contain regex or DXBC text.
+    if ($Section.Name -match '^ShaderRegex[^.]*\.(?:Pattern(?:\.Replace)?|InsertDeclarations)$') {
+        return [pscustomobject]@{ Depth = 0; Negative = $false }
+    }
 
     $depth = 0
     $neg = $false
     $stack = New-Object System.Collections.ArrayList
 
-    for ($i = $Start; $i -lt $End; $i++) {
+    for ($i = $Section.BodyStart; $i -lt $Section.BodyEnd; $i++) {
         $t = $Lines[$i].Trim()
         if ($t.Length -eq 0) { continue }
         if ($t.StartsWith(';') -or $t.StartsWith('//')) { continue }
@@ -475,7 +487,7 @@ function Measure-SectionDepth {
 function Test-SectionDepth {
     param($Issues, $Doc, $Sections, [string]$Id)
     foreach ($sec in $Sections) {
-        $stats = Measure-SectionDepth $Doc.Lines $sec.BodyStart $sec.BodyEnd $null
+        $stats = Measure-SectionDepth $Doc.Lines $sec $null
         if ($stats.Depth -ne 0 -or $stats.Negative) {
             Add-Fail $Issues $Id $Doc.Path ($sec.Header + 1) ('section [' + $sec.Name + '] if/endif unbalanced depth=' + $stats.Depth + ' negative=' + ([string]$stats.Negative))
         }
@@ -1379,7 +1391,7 @@ function Invoke-Verify {
         $fileKeys = 0
         foreach ($sec in $sections) {
             $runs = New-Object System.Collections.ArrayList
-            $stats = Measure-SectionDepth $doc.Lines $sec.BodyStart $sec.BodyEnd $runs
+            $stats = Measure-SectionDepth $doc.Lines $sec $runs
             if ($stats.Depth -ne 0 -or $stats.Negative) {
                 Add-Fail $issues 'V5' $doc.Path ($sec.Header + 1) ('section [' + $sec.Name + '] if/endif unbalanced depth=' + $stats.Depth + ' negative=' + ([string]$stats.Negative))
             }
