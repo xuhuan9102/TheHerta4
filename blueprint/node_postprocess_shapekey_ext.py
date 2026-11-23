@@ -1279,6 +1279,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
     PANEL_TAG = "ShapeKeyExt"
     BLOCK_BEGIN = "; @@ShapeKeyExt:BLOCK:BEGIN:{ns}@@"
     BLOCK_END = "; @@ShapeKeyExt:BLOCK:END:{ns}@@"
+    SLIDER_DETECT_PREFIX = "; @@ShapeKeyExt:SLIDER_DETECT:"
     SLIDERCONST_BEGIN = "; @@ShapeKeyExt:SLIDERCONST:BEGIN@@"
     SLIDERCONST_END = "; @@ShapeKeyExt:SLIDERCONST:END@@"
     SLIDER_PRESENT_BEGIN = "; ========== SLIDER PANEL CUSTOM LOGIC (appended) =========="
@@ -2784,7 +2785,8 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                     slider_to_group[idx] = gid
         return slider_to_group
 
-    def _apply_slider_panel(self, mod_export_path, target_ini_file, sections, exclude_vars=None):
+    def _apply_slider_panel(self, mod_export_path, target_ini_file, sections,
+                            exclude_vars=None, previous_detection=None):
         """【已合并】生成滑块面板-自定义配置并合并到 sections（不写盘）。
 
         exclude_vars: 不给这些变量生成滑块。用于「未分配形态键」——它们的引用会被
@@ -3195,7 +3197,27 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             detect_lines.append(f"match_index_count = {detect_index_count_val}")
             has_any_check = True
         detect_lines.append("$ui_active = 1")
-        if has_any_check:
+        from .node_postprocess_condition import _collect_detect_section_names, _section_body_insert_index
+
+        # Reuse the exported model's draw overrides instead of competing for the same hash.
+        detection_sections = {
+            f"[{name}]".casefold()
+            for name in _collect_detect_section_names(detect_hash, target_ini_file)
+        } if detect_hash else set()
+        detect_hash_key = detect_hash.lower().removeprefix("0x")
+        if not detection_sections and previous_detection:
+            detection_sections = previous_detection.get(detect_hash_key, set())
+        uses_model_detection = False
+        for section_name, body in sections.items():
+            if section_name.casefold() in detection_sections:
+                set_active = "$ui_active = 1"
+                if set_active not in body:
+                    insert_at = _section_body_insert_index(body, 0, len(body))
+                    body[insert_at:insert_at] = [
+                        f"{self.SLIDER_DETECT_PREFIX}{detect_hash_key}@@", set_active,
+                    ]
+                uses_model_detection = True
+        if has_any_check and not uses_model_detection:
             other_sections["[TextureOverrideCheckHash]"] = detect_lines
 
         other_sections["[ResourceImageToRender0]"] = ["filename = ./res/0.png"]
@@ -3531,7 +3553,9 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             "hs = null", "ds = null", "gs = null", "cs = null",
             "vs = ./res/draw_2d.hlsl", "ps = ./res/draw_2d.hlsl",
             "blend = ADD SRC_ALPHA INV_SRC_ALPHA", "cull = none",
-            "topology = triangle_strip", "o0 = set_viewport bb", "Draw = 4,0", "clear = ps-t100"
+            "topology = triangle_strip", "scissor_enable = false",
+            "depth_enable = false", "stencil_enable = false", "od = null",
+            "o0 = set_viewport bb", "Draw = 4,0", "clear = ps-t100"
         ]
 
         if '[Constants]' not in sections:
@@ -3879,7 +3903,16 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             return False
         sections, preserved_tail_content, preserved_driver_content = result
 
+        previous_detection = {}
         if _in_place:
+            for section_name, body in sections.items():
+                for index in range(len(body) - 2, -1, -1):
+                    marker = body[index].strip()
+                    if (marker.startswith(self.SLIDER_DETECT_PREFIX) and marker.endswith("@@")
+                            and body[index + 1].strip() == "$ui_active = 1"):
+                        hash_key = marker[len(self.SLIDER_DETECT_PREFIX):-2]
+                        previous_detection.setdefault(hash_key, set()).add(section_name.casefold())
+                        del body[index:index + 2]
             self._remove_owned_config(sections, ns)
             # 旧格式（无标识）无法自动移除时提示
             if any("形态键扩展配置：组内变量同步" in l for l in sections.get('[Present]', [])):
@@ -4094,7 +4127,8 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         # 并生成 `$paramN = $被屏蔽变量` 这类读取已注释声明变量的行。
         if self.use_slider_panel:
             self._apply_slider_panel(
-                mod_export_path, target_ini_file, sections, exclude_vars=masked_vars
+                mod_export_path, target_ini_file, sections, exclude_vars=masked_vars,
+                previous_detection=previous_detection,
             )
 
         # ---- 未分配形态键屏蔽：把变量声明 / Present 赋值 / Shader 输入注释掉 ----
