@@ -548,18 +548,15 @@ class ExportUtils:
 
     @staticmethod
     def _deduplicate_ignore_vertex_id() -> bool:
-        """读「缝合标记特殊去重」开关，读不到/非法时回退 True（兼容老属性组与测试替身）。
-
-        默认开着是安全的：只有网格里标了缝合边的顶点才走特殊通道。
-        """
+        """读取「缝合标记特殊去重」开关，缺省关闭。"""
         getter = getattr(GlobalProterties, "deduplicate_ignore_vertex_id", None)
         if callable(getter):
             try:
                 return bool(getter())
             except Exception:
-                return True
+                return False
         if getter is None:
-            return True
+            return False
         return bool(getter)
 
     @staticmethod

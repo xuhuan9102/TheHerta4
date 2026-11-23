@@ -544,9 +544,7 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
-    # 默认开启＝缝合标记特殊通道。只有被标记了缝合边(use_seam)的顶点才走
-    # 「忽略顶点编号、只比 POSITION + TEXCOORD」的特殊去重；没标记的顶点照旧按
-    # 上面勾选的类型 + 顶点编号去重。所以不标记就等于没有这套机制，默认开着是安全的。
+    # 缝合标记特殊去重默认关闭。
     deduplicate_ignore_vertex_id: bpy.props.BoolProperty(
         name="缝合标记特殊去重",
         description=(
@@ -556,7 +554,7 @@ class GlobalProterties(bpy.types.PropertyGroup):
             "合并行取最先出现的那个 loop 的其余字段（法线/切线/顶点色/骨骼）；"
             "比较是字节级精确比较，不是容差——位置有微小差异就不会合并"
         ),
-        default=True,
+        default=False,
     ) # type: ignore
 
     @classmethod
@@ -823,7 +821,7 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def deduplicate_ignore_vertex_id(cls) -> bool:
         """去重时是否把顶点编号摘出去重键（跨顶点合并）。缺省 False＝保持原口径。"""
-        return cls._bool_attr("deduplicate_ignore_vertex_id", True)
+        return cls._bool_attr("deduplicate_ignore_vertex_id", False)
 
 
 def register():
