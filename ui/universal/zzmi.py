@@ -133,9 +133,16 @@ def _merged_palette_profile() -> dict | None:
         except Exception:
             lod_profile_path = ""
         if lod_profile_path and os.path.isfile(lod_profile_path):
-            loaded = load_profile(lod_folder, required=False)
+            try:
+                loaded = load_profile(lod_folder, required=False)
+            except Exception:
+                loaded = None
             if isinstance(loaded, dict) and loaded.get("components"):
                 return loaded
+        # per-LOD 模式下**不能**回落到单例：类属性里是最后一批导入算的方案
+        # （别的 LOD 的池表），拿它发 ini 会让本 LOD 的槽位整片错位。
+        if per_lod:
+            return None
     profile = getattr(ZZMISkeletonMergeHelper, "cross_group_profile", None)
     if isinstance(profile, dict):
         return profile
@@ -8735,12 +8742,15 @@ class ExportZZMI(ExportUnity):
             # 注意：pre-87 基底里没有「后处理节点接管 _zzmi_lod_exports」的读者，
             # 所以这里必须**当场发布**；把 staging 塞给 blueprint 再 return 会让
             # 主 ini / 资源永远不落盘（带后处理节点的蓝图必现）。
-            # 发布前先按真实 Mod 目录做一次 skip 预判：staging 是空的，贴图计划的
-            # "目标已存在就不覆盖用户文件"在这层永远判不出来，不预判会覆盖手改贴图。
+            # 发布前按**每个 LOD 的 staging 根**做 skip 预判：真实 Mod 里贴图落到
+            # <Mod>/Textures/…，而 staging 里是 <staging>/<LOD>/Textures/…，必须按
+            # LOD 目录分别算相对路径，否则永远判不到已存在的文件、手改贴图被覆盖。
             try:
-                skipped = TextureExportPlan.skip_entries_existing_in(
-                    staging.name, os.path.dirname(main_ini)
-                )
+                skipped = 0
+                for _lod_name, _child, _exporter, _folder in exports:
+                    skipped += TextureExportPlan.skip_entries_existing_in(
+                        _folder, os.path.dirname(main_ini)
+                    )
                 if skipped:
                     print(f"[ZZMI 按 LOD 导出] 跳过 {skipped} 个真实 Mod 已存在的贴图（不覆盖用户文件）")
             except Exception as exc:  # pragma: no cover - 保守：预判失败不阻塞发布
@@ -8914,3 +8924,5 @@ class ExportZZMI(ExportUnity):
 
 
 ModModelZZMI = ExportZZMI
+
+

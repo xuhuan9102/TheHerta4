@@ -1428,6 +1428,16 @@ class ZZMISkeletonMergeHelper:
         """
         if not cls.cross_group_merged_enabled():
             return False
+        # 按 LOD 分批时方案文件在 <工作区>/<LOD>/ 下，根文件通常不存在：
+        # 这时仍应按"跨组编号"校验（缺本 LOD 方案 ⇒ 缓存判 stale 重建），
+        # 否则历史分组编号的旧缓存会被当成完整缓存永久跳过。
+        try:
+            from .global_properties import GlobalProterties
+
+            if GlobalProterties.zzmi_fusion_per_lod():
+                return True
+        except (ImportError, AttributeError):
+            pass
         try:
             from .zzmi_cross_group_palette import get_profile_path
 
@@ -2549,6 +2559,7 @@ class ZZMISkeletonMergeHelper:
         if failure_parts:
             return False, success_message + "；" + "；".join(failure_parts)
         return written > 0, success_message
+
 
 
 
