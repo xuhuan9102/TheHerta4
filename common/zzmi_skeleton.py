@@ -1561,8 +1561,6 @@ class ZZMISkeletonMergeHelper:
         force: bool = False,
         *,
         _lod: str | None = None,
-        settings: dict | None = None,
-        progress=None,
     ) -> tuple[bool, str]:
         """为 ZZMI 工作空间的子网格生成并写回骨骼合并数据（幂等）。
 
@@ -1605,10 +1603,10 @@ class ZZMISkeletonMergeHelper:
                 )
             print("[ZZMI骨骼合并] 使用 SSMT4 提取到工作空间的骨骼数据重新计算")
         else:
-            folder = (
-                cls._resolve_lod_frame_analysis_dir(workspace_root, _lod)
-                if _lod
-                else cls.resolve_frame_analysis_dir(workspace_root)
+            # pre-87 基底只有"整个工作区一个 FrameAnalysis"；指定了 _lod 时按
+            # <工作区>/<LOD> 找，找不到就退回工作区级（不抛 NameError）。
+            folder = cls.resolve_frame_analysis_dir(
+                os.path.join(workspace_root, _lod) if _lod else workspace_root
             )
             sources = {"": read_source(folder)}
             if sources[""][0] is None:
@@ -1715,6 +1713,10 @@ class ZZMISkeletonMergeHelper:
                 groups[draw_ib] = group
             group["members"].append(unique_str)
             group["json_paths"][unique_str] = json_path
+            # 本组的输入源随组带着走：后面的第二遍/写回必须用**这个组自己的**源，
+            # 不能吃循环里最后一次赋值的残留（工作空间模式下跨 LOD 会串帧）。
+            if "source" not in group:
+                group["source"] = (parser, resolver, frame_analysis_signature)
             if bool(submesh_json.get("VGMapDedupExcluded")):
                 group["dedup_excluded"] = True
 
@@ -1821,6 +1823,7 @@ class ZZMISkeletonMergeHelper:
 
         # 第二遍：逐组反查 deform pass -> palette，读取 Blend.buf 得 vg_count
         for draw_ib, group in groups.items():
+            parser, resolver, frame_analysis_signature = group.get("source", (None, None, ""))
             if group.get("skip_reason") and parser is None:
                 continue
             representative = group["representative"]

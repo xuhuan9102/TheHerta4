@@ -8574,9 +8574,9 @@ class ExportZZMI(ExportUnity):
                 models.extend(exporter.drawib_model_list)
 
             self.drawib_model_list = models
-            if method_name == "export" and getattr(self.blueprint_model, "postprocess_nodes", ()):
-                self.blueprint_model._zzmi_lod_exports = (staging, exports, main_ini)
-                return
+            # 注意：pre-87 基底里没有「后处理节点接管 _zzmi_lod_exports」的读者，
+            # 所以这里必须**当场发布**；把 staging 塞给 blueprint 再 return 会让
+            # 主 ini / 资源永远不落盘（带后处理节点的蓝图必现）。
             TextureExportPlan.finalize(staging.name)
             publish_lod_exports(exports, main_ini, buffers_only=method_name == "export_buffers_only")
         except Exception:
