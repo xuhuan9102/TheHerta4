@@ -1605,9 +1605,10 @@ class ZZMISkeletonMergeHelper:
         else:
             # pre-87 基底只有"整个工作区一个 FrameAnalysis"；指定了 _lod 时按
             # <工作区>/<LOD> 找，找不到就退回工作区级（不抛 NameError）。
-            folder = cls.resolve_frame_analysis_dir(
-                os.path.join(workspace_root, _lod) if _lod else workspace_root
-            )
+            # pre-87 基底一个工作区只有一份 FrameAnalysis 配置（<工作区>/Config），
+            # LOD 子目录里没有 Config；按 LOD 去 resolve 会落到"游戏目录最新 dump"，
+            # 所有 LOD 一起取错帧。这里始终按工作区根解析。
+            folder = cls.resolve_frame_analysis_dir(workspace_root)
             sources = {"": read_source(folder)}
             if sources[""][0] is None:
                 print("[ZZMI骨骼合并] 提示: 未找到可用的 FrameAnalysis 蒙皮记录，将使用工作空间缓存")
@@ -2261,6 +2262,9 @@ class ZZMISkeletonMergeHelper:
         for draw_ib, group_index in group_of.items():
             group_members.setdefault(group_index, []).append(draw_ib)
 
+        # 每个 LOD 各写自己的骨骼池方案：profile 是**工作区单文件**，
+        # 逐 LOD 共用会让后一个 LOD 覆盖前一个（前一个 LOD 的 VGMap 与最终方案不符）。
+        profile_root = os.path.join(workspace_root, _lod) if _lod else workspace_root
         cross_plan = (
             cls._cross_group_plan_or_none(ready_groups)
             if cls.cross_group_merged_enabled()
@@ -2275,7 +2279,7 @@ class ZZMISkeletonMergeHelper:
             # 属性上会丢，掉盘后就按历史分组发 ini，跨组等于白算。
             try:
                 from .zzmi_cross_group_palette import write_profile
-                cls.cross_group_profile_path = write_profile(workspace_root, profile)
+                cls.cross_group_profile_path = write_profile(profile_root, profile)
             except Exception as exc:  # pragma: no cover - 磁盘异常
                 cls.cross_group_profile_path = None
                 print(f"[ZZMI骨骼合并] 骨骼池方案落盘失败（导出会退回历史分组）：{exc}")
@@ -2297,7 +2301,7 @@ class ZZMISkeletonMergeHelper:
             cls.cross_group_profile = None
             try:
                 from .zzmi_cross_group_palette import get_profile_path
-                stale_path = get_profile_path(workspace_root)
+                stale_path = get_profile_path(profile_root)
                 if os.path.isfile(stale_path):
                     os.remove(stale_path)
             except Exception:
@@ -2543,3 +2547,5 @@ class ZZMISkeletonMergeHelper:
         if failure_parts:
             return False, success_message + "；" + "；".join(failure_parts)
         return written > 0, success_message
+
+

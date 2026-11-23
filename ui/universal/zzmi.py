@@ -127,6 +127,12 @@ def _merged_palette_profile() -> dict | None:
     try:
         from ...common.zzmi_cross_group_palette import load_profile
         workspace_folder = str(GlobalConfig.path_workspace_folder() or "")
+        # 按 LOD 分批导出时，每个 LOD 有自己的方案文件（<工作区>/<LOD>/ZZMI_CrossGroupPalette.json）；
+        # 目录不存在或没文件时退回工作区级（单 LOD 行为不变）。
+        if workspace_folder and _zzmi_prop_flag("zzmi_fusion_per_lod", False):
+            lod_folder = os.path.join(workspace_folder, _zzmi_scope_lod())
+            if os.path.isdir(lod_folder):
+                workspace_folder = lod_folder
     except Exception:
         return None
     if not workspace_folder:
