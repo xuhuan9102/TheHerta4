@@ -205,6 +205,7 @@ class DragTearTests(unittest.TestCase):
                 output = render.resource("ResourceDragTearTTL_abc123P0M1_unit")
                 render.sections["[ResourceDragTearSavedTTL_unit]"] = [
                     "type = Texture2D", "width = 4", "height = 4", "format = R32G32B32A32_FLOAT",
+                    "array = 1", "msaa = 1", "mips = 1",
                 ]
                 original_mask = render.resource("ResourceDragTearSavedTTL_unit")
                 channels = (ctypes.c_float * 4)(0.2, 0.4, 0.6, 0.8)

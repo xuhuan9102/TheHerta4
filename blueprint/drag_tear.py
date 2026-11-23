@@ -156,7 +156,8 @@ def _emit_part(sections, comp, part_id, ns, gesture_shader):
 def _mask_texture(format):
     return [
         "type = Texture2D", f"width = {MASK_SIZE}", f"height = {MASK_SIZE}",
-        "mips = 1", f"format = {format}", "bind_flags = shader_resource unordered_access",
+        "mips = 1", "array = 1", "msaa = 1", "msaa_quality = 0",
+        f"format = {format}", "bind_flags = shader_resource unordered_access",
     ]
 
 

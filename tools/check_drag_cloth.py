@@ -26,8 +26,8 @@ spec.loader.exec_module(base)
 
 
 class GPU(base.D3D):
-    def texture2d(self, width, height, fmt, *, staging=False):
-        desc = (ct.c_uint * 11)(width, height, 1, 1, fmt, 1, 0,
+    def texture2d(self, width, height, fmt, *, array=1, msaa=1, mips=1, staging=False):
+        desc = (ct.c_uint * 11)(width, height, mips, array, fmt, msaa, 0,
                                3 if staging else 0, 0 if staging else 8 | 128,
                                0x20000 if staging else 0, 0)
         texture = ct.c_void_p()
@@ -262,7 +262,9 @@ class GeneratedCloth:
         )
         if decl.get("type", "").casefold() == "texture2d":
             width, height = int(decl["width"]), int(decl["height"])
-            resource = Resource(self.gpu.texture2d(width, height, fmt), width * height * element, element, fmt)
+            texture = self.gpu.texture2d(width, height, fmt, array=int(decl.get("array", 0)),
+                                         msaa=int(decl.get("msaa", 0)), mips=int(decl.get("mips", 0)))
+            resource = Resource(texture, width * height * element, element, fmt)
             resource.texture = (width, height)
             self.resources[name] = resource
             return resource
