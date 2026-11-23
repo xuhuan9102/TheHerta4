@@ -1087,6 +1087,12 @@ class PreProcessHelper:
 
                 obj_copy = obj.copy()
                 obj_copy.name = copy_name
+                for modifier in list(obj_copy.modifiers):
+                    if (
+                        modifier.type == 'ARMATURE' and modifier.object is not None
+                        and modifier.object.get("SSMT:WorkspaceImportRig", False)
+                    ):
+                        obj_copy.modifiers.remove(modifier)
 
                 if obj.data:
                     obj_copy.data = obj.data.copy()

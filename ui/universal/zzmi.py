@@ -9003,7 +9003,6 @@ class ExportZZMI(ExportUnity):
             # 开关开启 = F1 写进宿主组缓冲 + F2 渲染 cb1 校准）
             self._warn_cross_group_bone_references()
             # 仅为 SO owner 与可见载体一致的组合构建自动重定向计划。
-            # 关闭实验开关时保留原始 DrawIB/Blend 布局和合并骨架，走宿主直连重放。
             self._redirect_carrier_map, self._redirect_target_map, unredirected = (
                 self._build_merged_mesh_redirect_plan()
             )
@@ -9013,9 +9012,7 @@ class ExportZZMI(ExportUnity):
                 self._redirect_carrier_map = {}
                 self._redirect_target_map = {}
                 print(
-                    "[ZZMI骨骼合并] RedirectSO 自动重定向已关闭；"
-                    "保留单一合并对象，改走组内宿主直连重放。"
-                    "如需复核跨 DrawIB 重定向，请打开实验开关。"
+                    "[ZZMI骨骼合并] RedirectSO 自动重定向已关闭，走组内宿主直连重放。"
                 )
             # 无法自动重定向的合并网格（缺反查缓存/跨 IB）大声报警
             self._warn_merged_mesh_timing(unredirected)

@@ -1414,6 +1414,7 @@ class SSMT_MT_NodeMenu_PostProcess_Dynamic(bpy.types.Menu):
         layout = self.layout
         _add_node_entry(layout, "形态键配置", 'SHAPEKEY_DATA', "SSMTNode_PostProcess_ShapeKey")
         _add_node_entry(layout, "形态键扩展配置", 'ACTION', "SSMTNode_PostProcess_ShapeKeyExt")
+        _add_node_entry(layout, "骨骼矩阵控制", 'ARMATURE_DATA', "SSMTNode_PostProcess_BoneMatrix")
         _add_node_entry(layout, "UV偏移", 'DRIVER', "SSMTNode_PostProcess_UVOffset")
         _add_node_entry(layout, "多文件配置", 'FILE_FOLDER', "SSMTNode_PostProcess_MultiFile")
 

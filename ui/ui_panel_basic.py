@@ -664,15 +664,7 @@ class PanelBasicInformation(bpy.types.Panel):
         # _merged_skeleton_cache_logic_names()（EFMI/ZZMI/HIMI，WWMI 保持不可用）。
         if GlobalConfig.logic_name in _merged_skeleton_logic_names():
             layout.prop(global_properties, "import_merged_vgmap")
-        # ZZMI 专用开关：跨组融合统一顶点组测试（默认开启）。
-        # 与上面已验证可用的合并骨骼**完全分离**（同组内合并不受影响）；关掉本开关
-        # 时跨 SkeletonGroup（对象变换不同）的部件退回历史路线、逐字节不变。
         if GlobalConfig.logic_name == LogicName.ZZMI:
-            layout.prop(global_properties, "cross_group_merged_vgmap_test")
-            # RedirectSO 跨 DrawIB 重定向在部分运行时顺序下会丢失合并几何，
-            # 但仍按用户要求默认开启；保留显式开关用于出问题时对照关闭。
-            # 关闭时仍使用合并骨架与单一合并对象。
-            layout.prop(global_properties, "zzmi_merged_redirect_enabled")
             # 按 LOD 融合：每个 LOD 只读自己的提取目录、各自算一套合并骨骼，
             # 产物仍合并进同一个 Mod（同名资源按 LOD 前缀改名）。
             layout.prop(global_properties, "zzmi_fusion_per_lod")

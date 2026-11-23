@@ -299,7 +299,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
 
     import_merged_vgmap: bpy.props.BoolProperty(
         name="使用融合统一顶点组",
-        description="导入时是否导入融合后的顶点组 (Unreal的合并顶点组技术会用到)，一般鸣潮Mod需要勾选来降低制作Mod的复杂度；ZZMI/EFMI 模式下同时作为骨骼合并（Merged Skeleton）开关：勾选 = 导入全局顶点组、导出走合并骨架；不勾选 = 完全维持原路线",
+        description=(
+            "导入并导出融合后的全局顶点组。ZZMI 开启时同时启用跨组融合、"
+            "合并网格自动重定向，并在工作空间导入完成后生成骨架。"
+        ),
         default=True,
     ) # type: ignore
 
@@ -322,50 +325,6 @@ class GlobalProterties(bpy.types.PropertyGroup):
             "切换后需要重新导入，让每个 LOD 的 VGMap 按自己的物体计算。"
         ),
         default=False,
-    ) # type: ignore
-
-    cross_group_merged_vgmap_test: bpy.props.BoolProperty(
-        name="跨组融合统一顶点组测试",
-        description=(
-            "【实验开关，仅 ZZMI】跨 SkeletonGroup（对象变换 / 渲染 vs-cb1 对象空间"
-            "不同）的骨骼合并总开关，默认开启（2026-10-27 用户拍板；关掉即回退历史路线）。开启后：① 被吸收进宿主网格的**别组**"
-            "部件，其骨骼写进**吸收它的宿主组**骨架缓冲（跨组 attach，旧行为会让被"
-            "吸收的顶点读未初始化矩阵 ⇒ 部件消失）；② 合并网格**按来源拆分绘制**——"
-            "对象变换 cb1 是**每次绘制一份**的常量（464 B，顶点没有索引它的机制），而"
-            "合并后的网格里有两群顶点属于不同对象空间 ⇒ 只能一个来源一次 drawindexed、"
-            "每次换一份 `vs-cb1`。骨骼矩阵仍然全部合并在**同一份**骨架缓冲里（「一个"
-            "物体用所有 IB 的骨骼矩阵」这一点不变），拆的只是绘制调用；③ 每个来源的段"
-            "**放回该来源自己的渲染段**里画（`ib` / `vb1` / `vb0` 由该段自己绑成合并"
-            "网格那一份）——那里的 `vs-cb1` 天然就是它自己的当帧对象变换，因此**不依赖"
-            "帧内绘制顺序**、也不需要任何跨对象空间的校准矩阵（旧做法把全部段塞进宿主"
-            "段，跨组 cb1 可能还是上一帧的值 ⇒ 影子/镜像物体）；④ 拆分绘制继承合并"
-            "物体那行 `; [mesh:<名>] [vertex_count:<N>]` 标注，且各来源段统一写**合并"
-            "物体（宿主）的名字**，拖拽交互 / 形态键 / 显隐钩子才认得出这个物体。"
-            "历史方案均已实测否决并移除：F4/F7 在宿主渲染段重算跨组校准再写回顶点流"
-            "（重算 CS 实际未执行；把自建缓冲当 `vb0` 的四次尝试全部静默失败）、F5 把"
-            "palette 捕获后移让 palette 与 cb1 同源（合并骨架缓冲宿主与跨组共用 ⇒ 整块"
-            "骨架一起慢一帧，用户实测「两边都在抖、连原始物体都错」）。"
-            "残余：某来源部件本帧未被游戏提交渲染时，它那一段不会被画（与游戏自身的"
-            "剔除口径一致，方向比「用陈旧 cb1 画错」更安全）；palette / cb1 首帧未捕获"
-            "时该帧骨架为未初始化值（一帧闪动后自愈）；跨组供骨件当帧被剔除时该帧合并"
-            "几何不写（与组内部件既有口径一致）。**已知未解问题**：角色展示页（大世界"
-            "之外的那条渲染路径）里我方段的 `draw` / `drawindexed` 命令不执行、画面不推进"
-            "且什么都看不见（大世界一切正常；进程未死、资源级覆盖仍生效）；原因未定，"
-            "排查存档见 `ZZMI骨骼合并计划书.md` ⑭ 与 §9。与已验证可用"
-            "的合并骨骼（使用融合统一顶点组）完全分离，关闭时逐字节保持历史行为"
-        ),
-        default=True,
-    ) # type: ignore
-
-    zzmi_merged_redirect_enabled: bpy.props.BoolProperty(
-        name="启用合并网格自动重定向（实验）",
-        description=(
-            "ZZMI 合并骨架开关，默认开启：合并网格改用跨 DrawIB 的 RedirectSO "
-            "自动重定向，可以挂在任意 DrawIB 上。关闭后保留每个合并物体的原始 "
-            "IB/Blend 输入布局，在组内宿主完成当帧重放。注意：自动重定向在部分"
-            "游戏帧序下会丢失整块几何，遇到合并后缺块/错位时先关掉本项对照。"
-        ),
-        default=True,
     ) # type: ignore
 
     efmi_lod_group_projection: bpy.props.BoolProperty(
@@ -683,31 +642,11 @@ class GlobalProterties(bpy.types.PropertyGroup):
 
     @classmethod
     def cross_group_merged_vgmap_test(cls):
-        """跨组融合统一顶点组测试开关（仅 ZZMI，默认开启）。
-
-        与 `import_merged_vgmap`（已验证可用的合并骨骼）**完全分离**：互不影响，
-        关闭本开关时任何既有行为都不变。
-
-        **2026-10-10 起本开关已真实接入导出侧**（不再是死开关）：开启后 F1 把跨组
-        部件的骨骼写进**宿主组**骨架缓冲、F2 从各组部件的渲染段捕获对象→世界 cb1、
-        F3 把合并几何的落笔改成顺序无关、v19 按来源拆分绘制（每个来源各绑自己的
-        `vs-cb1`）。**已知未解问题（2026-10-10 报告，至今未定位）**：角色展示页
-        （大世界之外那条渲染路径）下本方案的段命令 `draw` / `drawindexed` 不执行 ——
-        画面不推进、什么都看不见（大世界一切正常；进程未死、资源级覆盖仍生效）。
-        排查存档见 `ZZMI骨骼合并计划书.md` ⑭ 与 §9；默认值已按用户要求改为开启，
-        遇到该现象关掉本开关即逐字节回到历史行为。
-        """
-        return cls._bool_attr("cross_group_merged_vgmap_test", True)
-
-    @classmethod
-    def set_cross_group_merged_vgmap_test(cls, value: bool):
-        """显式切换跨组测试开关（实验/测试用）。"""
-        setattr(cls._instance(), "cross_group_merged_vgmap_test", bool(value))
+        return cls.import_merged_vgmap()
 
     @classmethod
     def zzmi_merged_redirect_enabled(cls) -> bool:
-        """Whether to use the experimental cross-DrawIB RedirectSO path."""
-        return cls._bool_attr("zzmi_merged_redirect_enabled", False)
+        return cls.import_merged_vgmap()
 
     @classmethod
     def efmi_lod_group_projection(cls):

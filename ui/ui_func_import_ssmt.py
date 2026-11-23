@@ -3,6 +3,7 @@
 导入模型配置面板
 '''
 import os
+from pathlib import Path
 
 import bpy
 from bpy_extras.io_utils import ImportHelper
@@ -657,8 +658,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
 
     # ZZMI 骨骼合并数据预生成：**生成侧与消费侧分离**。
     #
-    # 生成侧（本段）：无论「使用融合统一顶点组」以及两个实验开关（启用合并网格
-    # 自动重定向 / 跨组融合统一顶点组测试）是否开启，首次导入、或「清除骨骼合并
+    # 生成侧（本段）：无论「使用融合统一顶点组」是否开启，首次导入、或「清除骨骼合并
     # VGMap 缓存」后的重新导入，都必须把提取文件里的骨骼合并数据完整反查并落盘到
     # 工作空间——VGMap/VGOffset/VGCount + SkeletonGroup/DeformDrawIndex/
     # OriginalVertexCount + ModImpRuntime 的 palette（BoneMatrix）与对象变换
@@ -955,6 +955,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
                         **target,
                         "imported_obj": imported_obj,
                         "gametype_name": gametype_name,
+                        "json_file_path": json_file_path,
                     }
                 )
                 self.report({'INFO'}, "成功导入 " + target["import_key"] + " 的数据类型: " + gametype_name)
@@ -976,6 +977,20 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
         for index in NonMirrorWorkflowHelper.iter_imported_objects(imported_objects):
             if index % 4 == 0:
                 yield 89 + 4 * index / total, f"整理网格 {index + 1}/{total}"
+
+    if zzmi_merged_consumption and merged_vgmap_ready is True:
+        yield 93, "重建导入骨架"
+        try:
+            from ..blueprint.node_postprocess_bone_matrix import bind_imported_workspace_rigs
+
+            rigs = bind_imported_workspace_rigs(
+                context, Path(GlobalConfig.path_workspace_folder()), import_records,
+            )
+            if rigs:
+                bone_count = sum(len(rig.data.bones) for rig in rigs)
+                self.report({'INFO'}, f"已重建 {len(rigs)} 套骨架，共 {bone_count} 根骨骼")
+        except Exception as error:
+            self.report({'WARNING'}, f"网格已导入，自动重建骨架失败：{error}")
 
     CollectionUtils.select_collection_objects(workspace_collection)
     PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)

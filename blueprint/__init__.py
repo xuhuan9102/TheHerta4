@@ -76,6 +76,7 @@ _MODULE_REGISTRY = [
     {"name": "node_transparency", "required": False},
     {"name": "node_multifile_export", "required": False},
     {"name": "node_postprocess_base", "required": False},
+    {"name": "node_postprocess_bone_matrix", "required": False},
     {"name": "node_postprocess_shapekey", "required": False},
     {"name": "node_postprocess_uv_offset", "required": False},
     {"name": "node_postprocess_flow_light", "required": False},
