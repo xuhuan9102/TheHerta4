@@ -126,6 +126,43 @@ class DragTearTests(unittest.TestCase):
             self.assertFalse((root / "res/drag_tear").exists())
 
     @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_stocking_run_keeps_intact_stitches_past_the_slit(self):
+        from tools.check_drag_cloth import GeneratedCloth
+
+        size = 256
+        coordinates = np.linspace(-0.1, 0.1, size, dtype=np.float32)
+        atlas = np.zeros((size, size, 4), dtype="<f2")
+        atlas[:, :, 0] = coordinates[None, :]
+        atlas[:, :, 2] = coordinates[:, None]
+        atlas[:, :, 3] = 1
+        gesture = np.array([[0, 0, 0, 1], [0, 1, 0, 0.009], [0, 0, -1, 0.051], [0, 0, 0.16, 0]], np.float32)
+        sections = {
+            "[ResourceMask]": ["type = Texture2D", "format = R32_FLOAT", f"width = {size}",
+                               f"height = {size}", "array = 1", "msaa = 1", "mips = 1"],
+            "[CustomShaderPaint]": [
+                f"cs = {self.tear.SHADER_DIR / 'rzm_tear_mask.hlsl'}", "y494 = 1",
+                "clear = ResourceMask",
+                "cs-t106 = ResourceGesture", "cs-t108 = ResourceAtlas", "cs-u0 = ResourceMask",
+                f"dispatch = {size // 8}, {size // 8}, 1", "cs-u0 = null",
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            render = GeneratedCloth(temp, sections, {})
+            try:
+                render.external("ResourceAtlas", atlas, 8, 17)
+                render.external("ResourceGesture", gesture, 16, 2)
+                render.execute("CustomShaderPaint")
+                result = render.resource("ResourceMask")
+                mask = render.gpu.read_texture(result.pointer, *result.texture, result.fmt, result.stride).view("<f4") > 0.5
+                waist = mask[np.abs(coordinates) < 0.005].any(axis=0)
+                self.assertLess(float(np.ptp(coordinates[waist])), 0.020)
+                run = mask[(coordinates < -0.055) & (coordinates > -0.082)].any(axis=1)
+                self.assertGreater(np.count_nonzero(run[1:] & ~run[:-1]), 2)
+                self.assertFalse(mask[:, np.abs(coordinates) > 0.013].any())
+            finally:
+                render.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
     def test_gpu_hole_grows_at_grab_and_leaves_source_and_other_objects_intact(self):
         import ctypes
 

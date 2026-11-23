@@ -68,7 +68,7 @@ void main()
             axis.xyz = normalize(pull);
     }
     float growth = saturate((travel - 0.028) / 0.132);
-    Gesture[1] = float4(shape.xyz, lerp(0.010, 0.026, growth));
-    Gesture[2] = float4(axis.xyz, lerp(0.016, 0.060, growth));
+    Gesture[1] = float4(shape.xyz, lerp(0.0035, 0.0090, growth));
+    Gesture[2] = float4(axis.xyz, lerp(0.016, 0.051, growth));
     Gesture[3] = float4(drag.xy, travel, drag.w);
 }
