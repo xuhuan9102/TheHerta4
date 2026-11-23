@@ -26,7 +26,6 @@
 
 import json
 import os
-import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -919,7 +918,9 @@ class TextureExportPlan(object):
 
         if not target_exists or entry.overwrite_policy == "overwrite":
             started = time.perf_counter()
-            shutil.copy2(entry.source_path, target_path)
+            from ..toolkit.png_rgba import copy_png_rgba
+
+            copy_png_rgba(entry.source_path, target_path)
             cls._profile["copy_s"] += time.perf_counter() - started
             cls._stats["written"] += 1
             _debug(f"复制落盘 {entry.final_filename}")
@@ -995,7 +996,9 @@ class TextureExportPlan(object):
         fallback_name = f"{stem}{source_extension}"
         fallback_path = os.path.join(entry.target_folder, fallback_name)
         if os.path.exists(entry.source_path):
-            shutil.copy2(entry.source_path, fallback_path)
+            from ..toolkit.png_rgba import copy_png_rgba
+
+            copy_png_rgba(entry.source_path, fallback_path)
         if fallback_name != entry.final_filename:
             cls._pending_renames[entry.ini_filename] = (
                 f"{entry.ini_folder}/{fallback_name}"

@@ -33,12 +33,12 @@ causes an automatic texconv fallback. It has no AVX2 requirement. Set
 
 Basis Universal/BC7f is pinned to commit
 `ee771a7f913a3233a252eb6d281b4446f6a3c9f5` (Apache-2.0); its LICENSE and NOTICE
-are retained here. stb_image v2.30 retains its dual license at the end of
-`stb_image.h`, original Git blob `9eedabedc45b3e6fd88fae6f14a160b4d53272ec`.
-Custom wrapper code follows TheHerta4's GPL-3.0 licensing.
+and required transcoder sources are retained under `vendor/basis_universal`.
+stb_image v2.30 retains its dual license at the end of `stb_image.h`, original
+Git blob `9eedabedc45b3e6fd88fae6f14a160b4d53272ec`. Custom wrapper code follows
+TheHerta4's GPL-3.0 licensing.
 
-With a normal MSVC + Windows SDK toolchain, configure this directory with
-`-DBASIS_UNIVERSAL_ROOT=<pinned-checkout>` and build Release/x64. The shipped
-binary was directly compiled and linked from these sources with MSVC on the
-development machine; the CMake packaging entry has not been separately
-validated in a clean full-SDK environment. `BUILD.json` records inputs.
+With a normal MSVC + Windows SDK toolchain, configure
+`common/native/CMakeLists.txt` and build Release/x64. `BASIS_UNIVERSAL_ROOT`
+defaults to the vendored snapshot and remains overridable for dependency audits.
+`BUILD.json` records the wrapper inputs and production DLL digest.

@@ -6,6 +6,7 @@ import tempfile
 import time
 import types
 import unittest
+import zlib
 from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
@@ -24,6 +25,9 @@ PKG = "_dds_to_png_test_pkg"
 for package_name in (PKG, f"{PKG}.toolkit"):
     package = _install_module(package_name)
     package.__path__ = []
+
+TOOLKIT_ROOT = Path(__file__).resolve().parents[1] / "toolkit"
+sys.modules[f"{PKG}.toolkit"].__path__ = [str(TOOLKIT_ROOT)]
 
 
 _registered_timers = []
@@ -66,6 +70,7 @@ def _load(submodule):
 _load("tt_dds_conversion")
 native_png = _load("_dds_png_native")
 dds_to_png = _load("tt_dds_to_png")
+png_rgba = sys.modules[f"{PKG}.toolkit.png_rgba"]
 
 
 class FakeImage:
@@ -97,18 +102,25 @@ class _FakeArea:
         self.redraws += 1
 
 
-def _write_png(path, bit_depth=8, gama=None, srgb=False):
-    """写一个最小 PNG（IHDR + 可选 gAMA/sRGB + IEND），供位深与色彩元数据判读。"""
+def _write_png(path, bit_depth=8, gama=None, srgb=False, color_type=6):
+    """写一个可解码的 PNG，供位深、通道和色彩元数据判读。"""
 
     def chunk(kind, payload):
-        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", 0)
+        crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
 
+    channels = {0: 1, 2: 3, 6: 4}[color_type]
+    bytes_per_sample = bit_depth // 8
+    sample_value = b"\xff" * bytes_per_sample
+    row = b"\x00" + sample_value * (16 * channels)
+    compressed = zlib.compress(row * 16)
     body = bytearray(b"\x89PNG\r\n\x1a\n")
-    body += chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, bit_depth, 6, 0, 0, 0))
+    body += chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, bit_depth, color_type, 0, 0, 0))
     if gama is not None:
         body += chunk(b"gAMA", struct.pack(">I", gama))
     if srgb:
         body += chunk(b"sRGB", b"\x00")
+    body += chunk(b"IDAT", compressed)
     body += chunk(b"IEND", b"")
     with open(path, "wb") as handle:
         handle.write(bytes(body))
@@ -231,24 +243,67 @@ class DDSToPNGTests(unittest.TestCase):
         Image.new("RGB", (7, 5), (70, 130, 190)).save(path, format="JPEG")
         original = Path(path).read_bytes()
         with Image.open(path) as decoded:
-            expected = decoded.convert("RGB").tobytes()
+            expected = decoded.convert("RGBA").tobytes()
         image = FakeImage(path)
         with mock.patch.object(dds_to_png, "find_texconv", return_value=None), mock.patch.object(dds_to_png.subprocess, "run") as run:
             status, png = dds_to_png.process_one(image, path)
         self.assertEqual(status, "converted")
         run.assert_not_called()
         with Image.open(png) as decoded:
-            self.assertEqual(decoded.convert("RGB").tobytes(), expected)
+            self.assertEqual(decoded.mode, "RGBA")
+            self.assertEqual(decoded.convert("RGBA").tobytes(), expected)
+        with open(png, "rb") as handle:
+            self.assertEqual(handle.read(26)[25], 6)
         self.assertEqual(Path(path).read_bytes(), original)
 
-    def test_png_with_dds_filename_is_copied_byte_for_byte(self):
+    def test_png_with_dds_filename_is_normalized_to_rgba(self):
+        from PIL import Image
         path = os.path.join(self.temp_dir, "masked.dds")
-        _write_png(path, bit_depth=16)
-        original = Path(path).read_bytes()
+        Image.new("RGB", (7, 5), (70, 130, 190)).save(path, format="PNG")
+        with Image.open(path) as decoded:
+            expected = decoded.convert("RGBA").tobytes()
         with mock.patch.object(dds_to_png.subprocess, "run") as run:
             png = dds_to_png.convert_dds_to_png(None, path)
         run.assert_not_called()
-        self.assertEqual(Path(png).read_bytes(), original)
+        with Image.open(png) as decoded:
+            self.assertEqual(decoded.mode, "RGBA")
+            self.assertEqual(decoded.convert("RGBA").tobytes(), expected)
+
+    def test_texconv_rgb_output_is_normalized_to_rgba(self):
+        dds_path = self._make_dds("RGBFallback.dds", dxgi_format=72)
+
+        def write_rgb(command, **_kwargs):
+            out_dir = command[command.index("-o") + 1]
+            png_path = os.path.join(out_dir, "RGBFallback.png")
+            _write_png(png_path, color_type=2, srgb=True)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(native_png, "convert", return_value=None), \
+             mock.patch.object(dds_to_png.subprocess, "run", side_effect=write_rgb):
+            png = dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
+
+        with open(png, "rb") as handle:
+            self.assertEqual(handle.read(26)[25], 6)
+        _depth, chunks = dds_to_png.png_color_metadata(png)
+        self.assertIn("sRGB", chunks)
+
+    def test_texconv_grayscale16_output_is_expanded_without_losing_depth(self):
+        dds_path = self._make_dds("MaskFallback.dds", legacy_d3dfmt=111)
+
+        def write_gray16(command, **_kwargs):
+            out_dir = command[command.index("-o") + 1]
+            png_path = os.path.join(out_dir, "MaskFallback.png")
+            _write_png(png_path, bit_depth=16, color_type=0)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(native_png, "convert", return_value=None), \
+             mock.patch.object(dds_to_png.subprocess, "run", side_effect=write_gray16):
+            png = dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
+
+        with open(png, "rb") as handle:
+            header = handle.read(26)
+        self.assertEqual(header[24], 16)
+        self.assertEqual(header[25], 6)
 
     """DDS 引用转 PNG：色彩空间、保留原文件、重连显示配置、自动调度。"""
 
@@ -324,10 +379,10 @@ class DDSToPNGTests(unittest.TestCase):
 
         self.assertEqual(1, len(captured))
         self.assertNotIn("-f", captured[0])
-        self.assertEqual(
-            ["texconv.exe", "-ft", "png", "-o", self.temp_dir, "-y", dds_path],
-            captured[0],
-        )
+        self.assertEqual(["texconv.exe", "-ft", "png"], captured[0][:3])
+        self.assertEqual("-o", captured[0][3])
+        self.assertEqual(self.temp_dir, os.path.dirname(captured[0][4]))
+        self.assertEqual(["-y", dds_path], captured[0][5:])
 
     def test_original_dds_is_never_deleted(self):
         """用户明确要求保留原文件：转换只新增 .png，不动 .dds"""
@@ -395,6 +450,28 @@ class DDSToPNGTests(unittest.TestCase):
         self.assertEqual(dds_path, image.filepath)
         self.assertEqual(0, image.reload_count)
 
+    def test_texconv_failure_keeps_existing_png_bytes(self):
+        dds_path = self._make_dds()
+        png_path = dds_to_png.png_path_for(dds_path)
+        _write_png(png_path, 8)
+        previous = Path(png_path).read_bytes()
+        image = FakeImage(dds_path)
+
+        def fail_after_partial(command, **_kwargs):
+            out_dir = command[command.index("-o") + 1]
+            partial = os.path.join(
+                out_dir, os.path.splitext(os.path.basename(command[-1]))[0] + ".png"
+            )
+            with open(partial, "wb") as handle:
+                handle.write(b"partial-output")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+        with mock.patch.object(dds_to_png.subprocess, "run", side_effect=fail_after_partial):
+            status, _detail = dds_to_png.process_one(image, dds_path, force=True)
+
+        self.assertEqual("failed", status)
+        self.assertEqual(previous, Path(png_path).read_bytes())
+
     def test_missing_texconv_reports_failure(self):
         """找不到 texconv 时给出明确失败原因，而不是抛异常中断整个导入"""
         dds_path = self._make_dds()
@@ -420,6 +497,52 @@ class DDSToPNGTests(unittest.TestCase):
         self.assertEqual(image.colorspace_settings.name, "Non-Color")
         self.assertEqual(image.alpha_mode, "CHANNEL_PACKED")
         self.assertTrue(os.path.isfile(dds_path))
+
+    def test_native_wrong_hdr_depth_keeps_existing_png(self):
+        dds_path = self._make_dds("NativeHDR.dds", dxgi_format=95)
+        png_path = dds_to_png.png_path_for(dds_path)
+        _write_png(png_path, 16)
+        previous = Path(png_path).read_bytes()
+
+        def wrong_depth(_source, destination):
+            _write_png(destination, 8)
+            return dict(depth=8, read_ms=1, decode_ms=2, filter_ms=3,
+                        compress_ms=4, write_ms=5)
+
+        with mock.patch.object(native_png, "convert", side_effect=wrong_depth):
+            status, detail = dds_to_png.process_one(
+                FakeImage(dds_path), dds_path, force=True
+            )
+
+        self.assertEqual("failed", status)
+        self.assertTrue(detail)
+        self.assertEqual(previous, Path(png_path).read_bytes())
+
+    def test_native_truncated_rgba_png_keeps_existing_png(self):
+        dds_path = self._make_dds("NativeTruncated.dds", dxgi_format=95)
+        png_path = dds_to_png.png_path_for(dds_path)
+        _write_png(png_path, 16)
+        previous = Path(png_path).read_bytes()
+
+        def truncated(_source, destination):
+            with open(destination, "wb") as handle:
+                handle.write(
+                    b"\x89PNG\r\n\x1a\n"
+                    + struct.pack(">I", 13)
+                    + b"IHDR"
+                    + struct.pack(">IIBBBBB", 16, 16, 16, 6, 0, 0, 0)
+                    + b"\x00\x00\x00\x00"
+                )
+            return dict(depth=16, read_ms=1, decode_ms=2, filter_ms=3,
+                        compress_ms=4, write_ms=5)
+
+        with mock.patch.object(native_png, "convert", side_effect=truncated):
+            status, _detail = dds_to_png.process_one(
+                FakeImage(dds_path), dds_path, force=True
+            )
+
+        self.assertEqual("failed", status)
+        self.assertEqual(previous, Path(png_path).read_bytes())
 
     def test_native_error_falls_back_to_existing_texconv_rules(self):
         dds_path = self._make_dds(dxgi_format=95)
@@ -676,10 +799,12 @@ class DDSToPNGTests(unittest.TestCase):
             dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
 
         self.assertEqual(
-            ["texconv.exe", "-f", "R16G16B16A16_UNORM", "-ft", "png",
-             "-o", self.temp_dir, "-y", dds_path],
-            captured[0],
+            ["texconv.exe", "-f", "R16G16B16A16_UNORM", "-ft", "png"],
+            captured[0][:5],
         )
+        self.assertEqual("-o", captured[0][5])
+        self.assertEqual(self.temp_dir, os.path.dirname(captured[0][6]))
+        self.assertEqual(["-y", dds_path], captured[0][7:])
 
     def test_legacy_float_source_png_is_reused(self):
         """legacy 浮点源同样：已有同名 png 就沿用，不再每次导入都重转"""
@@ -702,6 +827,21 @@ class DDSToPNGTests(unittest.TestCase):
         _write_png(path, 8)
         self.assertEqual(8, dds_to_png.png_bit_depth(path))
         self.assertIsNone(dds_to_png.png_bit_depth(os.path.join(self.temp_dir, "missing.png")))
+
+    def test_png_info_reads_complete_ihdr(self):
+        path = os.path.join(self.temp_dir, "probe-rgba.png")
+        _write_png(path, 16, color_type=6)
+        info = png_rgba.png_info(path)
+        self.assertEqual(
+            (16, 16, 16, 6, 0),
+            (
+                info["width"],
+                info["height"],
+                info["bit_depth"],
+                info["color_type"],
+                info["interlace"],
+            ),
+        )
 
     def test_png_color_metadata_and_strip(self):
         """色彩元数据能读出来，也能被清掉（清第二次不应再算改动）"""
@@ -766,9 +906,12 @@ class DDSToPNGTests(unittest.TestCase):
             dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
 
         self.assertEqual(
-            ["texconv.exe", "-f", "R16G16B16A16_UNORM", "-ft", "png", "-o", self.temp_dir, "-y", dds_path],
-            captured[0],
+            ["texconv.exe", "-f", "R16G16B16A16_UNORM", "-ft", "png"],
+            captured[0][:5],
         )
+        self.assertEqual("-o", captured[0][5])
+        self.assertEqual(self.temp_dir, os.path.dirname(captured[0][6]))
+        self.assertEqual(["-y", dds_path], captured[0][7:])
 
     def test_any_existing_png_is_reused_even_if_suspect(self):
         """只看存在性：哪怕是 8bit 的历史产物也照样沿用，由用户自己删
@@ -812,6 +955,9 @@ class DDSToPNGTests(unittest.TestCase):
     def test_hdr_source_without_16bit_output_reports_failure(self):
         """结果校验：HDR 源没产出 16bit PNG 时报失败，绝不把错图重连上去"""
         dds_path = self._make_dds("HDR-LightMap.dds", dxgi_format=95)
+        png_path = dds_to_png.png_path_for(dds_path)
+        _write_png(png_path, 16)
+        previous = Path(png_path).read_bytes()
         image = FakeImage(dds_path)
 
         def wrong_depth(command, **_kwargs):
@@ -823,11 +969,12 @@ class DDSToPNGTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         with mock.patch.object(dds_to_png.subprocess, "run", side_effect=wrong_depth):
-            status, detail = dds_to_png.process_one(image, dds_path)
+            status, detail = dds_to_png.process_one(image, dds_path, force=True)
 
         self.assertEqual("failed", status)
         self.assertIn("16bit", detail)
         self.assertEqual(dds_path, image.filepath)
+        self.assertEqual(previous, Path(png_path).read_bytes())
 
     def test_non_hdr_source_still_uses_8bit_without_pinned_format(self):
         """整型源不受影响：仍走 8bit 且不钉死格式，保住 texconv 的色彩空间判断"""
@@ -851,15 +998,15 @@ class DDSToPNGTests(unittest.TestCase):
         这条分支不过原生引擎、也没有产物头校验，以前直接写目标路径，写一半失败就把
         下游引用的那张 PNG 截断了。
         """
+        from PIL import Image
         dds_path = os.path.join(self.temp_dir, "disguised.dds")
-        with open(dds_path, "wb") as handle:
-            handle.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        Image.new("RGB", (7, 5), (70, 130, 190)).save(dds_path, format="PNG")
         png_path = dds_to_png.png_path_for(dds_path)
         previous = b"previous-png-body"
         with open(png_path, "wb") as handle:
             handle.write(previous)
 
-        with mock.patch.object(dds_to_png.shutil, "copyfile", side_effect=OSError("disk full")):
+        with mock.patch.object(dds_to_png.os, "replace", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
 
@@ -867,17 +1014,16 @@ class DDSToPNGTests(unittest.TestCase):
             self.assertEqual(previous, handle.read())
         self.assertEqual([], [name for name in os.listdir(self.temp_dir) if name.endswith(".tmp")])
 
-    def test_disguised_png_is_copied_through_a_temporary_file(self):
-        """成功路径也走临时文件 + os.replace，目标一旦出现就是完整内容。"""
+    def test_disguised_png_is_rewritten_rgba_through_a_temporary_file(self):
+        """伪装 PNG 也走临时文件 + os.replace，并按 RGBA 发布。"""
+        from PIL import Image
         dds_path = os.path.join(self.temp_dir, "disguised.dds")
-        payload = b"\x89PNG\r\n\x1a\n" + b"payload" * 8
-        with open(dds_path, "wb") as handle:
-            handle.write(payload)
+        Image.new("RGB", (7, 5), (70, 130, 190)).save(dds_path, format="PNG")
 
         png_path = dds_to_png.convert_dds_to_png("texconv.exe", dds_path)
 
-        with open(png_path, "rb") as handle:
-            self.assertEqual(payload, handle.read())
+        with Image.open(png_path) as decoded:
+            self.assertEqual(decoded.mode, "RGBA")
         self.assertEqual([], [name for name in os.listdir(self.temp_dir) if name.endswith(".tmp")])
 
     def test_disguised_jpeg_decoding_failure_keeps_previous_png(self):

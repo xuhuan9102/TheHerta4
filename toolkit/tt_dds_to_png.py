@@ -24,7 +24,6 @@ PNG 后 Blender 能正常读，控制台也不再刷这些警告。
 """
 
 import os
-import shutil
 import struct
 import subprocess
 import tempfile
@@ -36,6 +35,7 @@ import bpy
 
 from .tt_dds_conversion import find_texconv
 from . import _dds_png_native
+from .png_rgba import ensure_png_rgba, icc_profile_color_space, validate_png_rgba
 
 
 _AUTO_INTERVAL = 0.005
@@ -352,6 +352,7 @@ def _publish_atomically(destination, write):
     os.close(handle)
     try:
         write(temporary)
+        validate_png_rgba(temporary)
         os.replace(temporary, destination)
     finally:
         if os.path.exists(temporary):
@@ -370,23 +371,44 @@ def convert_dds_to_png(texconv, dds_path):
         signature = source.read(8)
     if signature.startswith(b"\x89PNG\r\n\x1a\n"):
         png_path = png_path_for(dds_path)
-        _publish_atomically(png_path, lambda temporary: shutil.copyfile(dds_path, temporary))
-        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 PNG，直接复制容器。")
+        _publish_atomically(
+            png_path,
+            lambda temporary: ensure_png_rgba(dds_path, temporary),
+        )
+        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 PNG，已规范为 RGBA。")
         return png_path
     if signature.startswith(b"\xff\xd8"):
         from PIL import Image
 
         def _save_as_png(temporary):
             with Image.open(dds_path) as image:
-                image.convert("RGB").save(temporary, format="PNG")
+                profile = image.info.get("icc_profile")
+                save_options = {"format": "PNG"}
+                if profile and icc_profile_color_space(profile) == b"RGB ":
+                    save_options["icc_profile"] = profile
+                image.convert("RGBA").save(temporary, **save_options)
 
         png_path = png_path_for(dds_path)
         _publish_atomically(png_path, _save_as_png)
-        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 JPEG，按真实格式转为 PNG。")
+        print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} 实际为 JPEG，已转为 RGBA PNG。")
         return png_path
     png_path = png_path_for(dds_path)
+    attrs = probe_dds(dds_path)
+    native_stats = None
     try:
-        native_stats = _dds_png_native.convert(dds_path, png_path)
+        with tempfile.TemporaryDirectory(
+            prefix=".herta_dds_native_", dir=os.path.dirname(png_path) or "."
+        ) as staging:
+            staged_png = os.path.join(
+                staging, os.path.splitext(os.path.basename(png_path))[0] + ".png"
+            )
+            native_stats = _dds_png_native.convert(dds_path, staged_png)
+            if native_stats is not None:
+                ensure_png_rgba(staged_png)
+                info = validate_png_rgba(staged_png)
+                if attrs["is_float"] and info["bit_depth"] != 16:
+                    raise RuntimeError("HDR 源未产出 16bit PNG")
+                os.replace(staged_png, png_path)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"{_LOG_PREFIX} {os.path.basename(dds_path)} C 引擎失败，回退 texconv: {exc}")
         native_stats = None
@@ -399,33 +421,44 @@ def convert_dds_to_png(texconv, dds_path):
     if not texconv:
         raise RuntimeError("未找到 texconv.exe")
     out_dir = os.path.dirname(dds_path)
-    attrs = probe_dds(dds_path)
     rule = select_png_command(attrs)
-    command = [texconv] + list(rule["args"]) + ["-ft", "png", "-o", out_dir, "-y", dds_path]
-    print("%s %s: %s/%s%s -> 规则 %s（%s），参数 %s" % (
-        _LOG_PREFIX, os.path.basename(dds_path), attrs["container"], attrs["format"],
-        " sRGB" if attrs["is_srgb"] else (" float" if attrs["is_float"] else " linear"),
-        rule["rule"], rule["why"], " ".join(rule["args"]) or "无 -f 参数"))
-    process = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-    )
-    if process.returncode != 0:
-        detail = (process.stderr or process.stdout or "").strip()
-        raise RuntimeError(detail or f"texconv 退出码 {process.returncode}")
+    with tempfile.TemporaryDirectory(prefix=".herta_texconv_", dir=out_dir or ".") as staging:
+        command = (
+            [texconv]
+            + list(rule["args"])
+            + ["-ft", "png", "-o", staging, "-y", dds_path]
+        )
+        print("%s %s: %s/%s%s -> 规则 %s（%s），参数 %s" % (
+            _LOG_PREFIX, os.path.basename(dds_path), attrs["container"], attrs["format"],
+            " sRGB" if attrs["is_srgb"] else (" float" if attrs["is_float"] else " linear"),
+            rule["rule"], rule["why"], " ".join(rule["args"]) or "无 -f 参数"))
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        if process.returncode != 0:
+            detail = (process.stderr or process.stdout or "").strip()
+            raise RuntimeError(detail or f"texconv 退出码 {process.returncode}")
 
-    png_path = png_path_for(dds_path)
-    if not os.path.exists(png_path):
-        raise RuntimeError(f"texconv 未生成 {png_path}")
-    # 线性源的产物会被 texconv 打上 gAMA=1.0，Photoshop / Paint.NET 会据此重编码显示、
-    # 整片变亮；去掉它，数值才能和 dds 显示成一样。sRGB 源的 sRGB chunk 是正确的，保留。
-    stripped = False
-    if not attrs["is_srgb"]:
-        stripped = strip_color_metadata(png_path)
-    depth, chunks = png_color_metadata(png_path)
+        staged_png = os.path.join(
+            staging, os.path.splitext(os.path.basename(dds_path))[0] + ".png"
+        )
+        if not os.path.exists(staged_png):
+            raise RuntimeError(f"texconv 未生成 {staged_png}")
+        ensure_png_rgba(staged_png)
+        info = validate_png_rgba(staged_png)
+        # 线性源的产物会被 texconv 打上 gAMA=1.0，Photoshop / Paint.NET 会据此重编码显示、
+        # 整片变亮；去掉它，数值才能和 dds 显示成一样。sRGB 源的 sRGB chunk 是正确的，保留。
+        stripped = False
+        if not attrs["is_srgb"]:
+            stripped = strip_color_metadata(staged_png)
+        depth, chunks = png_color_metadata(staged_png)
+        if attrs["is_float"] and info["bit_depth"] != 16:
+            raise RuntimeError("HDR 源未产出 16bit PNG")
+        os.replace(staged_png, png_path)
     print("%s   产物 %s: 位深 %s，色彩元数据 %s%s" % (
         _LOG_PREFIX, os.path.basename(png_path), depth, "、".join(chunks) or "无",
         "（已清除线性源的 gAMA）" if stripped else ""))

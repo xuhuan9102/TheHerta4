@@ -1,0 +1,12 @@
+{
+  "bcdec": {
+    "repository": "iOrange/bcdec",
+    "commit": "80859ed3b7afb1c527a2a99d70c61457bea72d0c",
+    "files": 2
+  },
+  "libdeflate": {
+    "repository": "ebiggers/libdeflate",
+    "commit": "92e6a0db9fa848d742f9eb286c92afc60f2c3dda",
+    "files": 43
+  }
+}
