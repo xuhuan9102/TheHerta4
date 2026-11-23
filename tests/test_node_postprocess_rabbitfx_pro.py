@@ -2336,6 +2336,12 @@ class GlowFXTests(unittest.TestCase):
         self.assertIn("run = CommandListZZMISurfaceReplayIndexedabcd1234", content)
         self.assertIn("[CustomShaderZZMISurfaceReplayIndexed]", content)
         self.assertIn("[ShaderRegexZZMISurfaceReplayPackedLayout]", content)
+        replay = content.split("[CommandListZZMISurfaceReplayIndexedabcd1234]", 1)[1]
+        guard = next(line for line in replay.splitlines() if line.startswith("if "))
+        self.assertNotIn("is_color_shader", guard)
+        self.assertNotIn("vs ==", guard)
+        self.assertIn("    if vs == 73412", replay)
+        self.assertIn("    else if vs == 73413", replay)
         self.assertNotIn("ShaderRegexTheHertaZZMISurfaceFlow", content)
         self.assertTrue((Path(self.export_dir) / "res" / "surface_flow_replay_ps.hlsl").is_file())
         self.assertTrue(
