@@ -14,6 +14,14 @@ _RESULT = "HERTA_IMPORT_RESULT "
 
 def bundled_python():
     name = "python.exe" if sys.platform == "win32" else f"python{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = [
+        Path(sys.prefix) / "bin" / name,
+        Path(sys.prefix) / name,
+        Path(sys.executable),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
     return Path(sys.prefix) / "bin" / name
 
 
