@@ -1009,6 +1009,53 @@ class ZZMIPartitionResolverTests(unittest.TestCase):
             self.assertTrue(os.path.samefile(resolved, json_path))
 
 
+class ZZMIWorkspaceLODSourceTests(unittest.TestCase):
+    def test_workspace_sources_keep_the_same_draw_ib_on_separate_lod_palettes(self):
+        with tempfile.TemporaryDirectory(prefix="zzmi_workspace_lod_") as folder:
+            dump, workspace, identities = _make_zzmi_dump_and_workspace(Path(folder))
+            shutil.copytree(workspace / "LOD0", workspace / "LOD1")
+            imports = {identity.replace("LOD0.", lod + "."): "GPU_P12_"
+                       for lod in ("LOD0", "LOD1") for identity in identities}
+            (workspace / "Import.json").write_text(json.dumps(imports), encoding="utf-8")
+
+            expected = {}
+            for lod, value in (("LOD0", 10.0), ("LOD1", 20.0)):
+                source = workspace / lod / "ZZMISkeletonSource"
+                shutil.copytree(dump, source)
+                log = source / "log.txt"
+                log.write_text(
+                    log.read_text(encoding="utf-8").replace(str(dump.resolve()), str(source.resolve())),
+                    encoding="utf-8",
+                )
+                matrices = list((source / "deduped").glob("pal*.buf"))
+                for matrix in matrices:
+                    palette = numpy.frombuffer(matrix.read_bytes(), dtype=numpy.float32).copy()
+                    palette[3] = value
+                    matrix.write_bytes(palette.tobytes())
+                expected[lod] = (source / "deduped" / "pal1.buf").read_bytes()
+
+            properties = types.SimpleNamespace(GlobalProterties=types.SimpleNamespace(
+                zzmi_fusion_from_workspace=lambda: True,
+                zzmi_fusion_per_lod=lambda: True,
+            ))
+            with mock.patch.dict(sys.modules, {f"{PKG}.common.global_properties": properties}):
+                for lod in expected:
+                    batch = [identity for identity in imports if identity.startswith(lod + ".")]
+                    ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
+                        str(workspace), batch, _lod=lod,
+                    )
+                    self.assertTrue(ok, message)
+                    palette = workspace / lod / "aaaa1111-100-0" / "ModImpRuntime" / "aaaa1111-100-0-BoneMatrix.buf"
+                    self.assertEqual(palette.read_bytes(), expected[lod])
+
+                (workspace / "LOD1" / "ZZMISkeletonSource" / "log.txt").unlink()
+                ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
+                    str(workspace), ["LOD1.aaaa1111-100-0"], _lod="LOD1", force=True,
+                )
+                self.assertFalse(ok, message)
+                self.assertIn("LOD1 缺少可用的 SSMT4 骨骼数据", message)
+
+
 class ZZMIWorkspaceCacheOnlyTests(unittest.TestCase):
     """P2 回归：FrameAnalysis 被搬走/删除后，仍能靠工作空间缓存正常重建。"""
 

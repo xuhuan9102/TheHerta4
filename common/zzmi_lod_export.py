@@ -20,9 +20,10 @@ def _ini_sections(path):
             for i, m in enumerate(headers)]
 
 
-def _asset_targets(staged, destination):
+def _asset_targets(staged):
     claims = {}
     mappings = {}
+    writes = {}
     for lod, _, _, folder in staged:
         mapping = {}
         for path in sorted(folder.rglob("*")):
@@ -31,8 +32,8 @@ def _asset_targets(staged, destination):
                 continue
             if relative.parts[0] not in {"Textures", "res"} and not re.fullmatch(r"Meshes\d*", relative.parts[0]):
                 continue
-            data = path.read_bytes()
-            digest = hashlib.sha256(data).digest()
+            with path.open("rb") as asset:
+                digest = hashlib.file_digest(asset, "sha256").digest()
             target = relative
             key = target.as_posix().casefold()
             if key in claims and claims[key] != digest:
@@ -40,18 +41,22 @@ def _asset_targets(staged, destination):
                 key = target.as_posix().casefold()
             if key in claims and claims[key] != digest:
                 raise ValueError(f"不同 LOD 使用了同一个文件名：{target}")
-            if key not in claims:
-                safe_write.write_bytes_if_changed_atomic(str(destination / target), data)
+            if key in claims:
+                target = writes[key][0]
+            else:
                 claims[key] = digest
+                writes[key] = (target, path)
             mapping[relative.as_posix().casefold()] = target.as_posix()
         mappings[lod] = mapping
-    return mappings
+    return mappings, writes.values()
 
 
 def publish_lod_exports(exports, main_ini, buffers_only=False):
     main_ini = Path(main_ini)
     staged = [(lod, model, exporter, Path(path)) for lod, model, exporter, path in exports]
-    files = _asset_targets(staged, main_ini.parent)
+    files, writes = _asset_targets(staged)
+    for target, source in writes:
+        safe_write.write_bytes_if_changed_atomic(str(main_ini.parent / target), source.read_bytes())
     if buffers_only:
         return
 
@@ -93,8 +98,9 @@ def publish_lod_exports(exports, main_ini, buffers_only=False):
                 continue
             rewritten = []
             for line in lines.splitlines(keepends=True):
-                if not line.lstrip().startswith(";"):
+                if FILENAME.match(line):
                     line = FILENAME.sub(rewrite_file, line)
+                elif not line.lstrip().startswith(";"):
                     if references is not None:
                         line = references.sub(lambda m: names[m[0].casefold()], line)
                     line = VARIABLE.sub(lambda m: "$" + names.get(m[1].casefold(), lod.lower() + "_" + m[1]), line)
