@@ -2142,14 +2142,28 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         written_inis = set()
         from . import drag_tear
         tear_names = set()
+        authored_ttl_names = set()
+        promote_native_ttl = False
         if getattr(self, "tear_enabled", False):
             excluded = set()
             for _, empty in self._collect_enabled_zone_entries():
                 settings = empty.ssmt_drag_zone
                 if getattr(settings, "grabbable", True):
                     tear_names.update(_zone_allowed_names(settings))
+                    for item in getattr(settings, "include_objects", ()):
+                        obj = getattr(item, "object", None)
+                        if obj is not None and any(
+                            str(getattr(getattr(slot, "material", None), "name", "")).startswith("TTLMap")
+                            for slot in getattr(obj, "material_slots", ())
+                        ):
+                            authored_ttl_names.add(_blender_object_key(obj.name))
                 excluded.update(_collider_allowed_names(settings))
             tear_names = {_blender_object_key(name) for name in tear_names} - excluded
+            promote_native_ttl = drag_tear.ttlib_available(mod_export_path)
+            if not promote_native_ttl and current_logic:
+                mods_folder = getattr(GlobalConfig, "path_mods_folder", None)
+                if callable(mods_folder):
+                    promote_native_ttl = drag_tear.ttlib_available(mods_folder())
 
         for ini_file in ini_files:
             ini_path = os.path.join(mod_export_path, ini_file)
@@ -2190,7 +2204,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             components = active_components
             cloth_tokens.update(comp['cloth']['token'] for comp in components if comp.get('cloth'))
             tear = drag_tear.bake(self, mod_export_path, sections, components, ns, ini_file,
-                                  tear_names, _blender_object_key)
+                                  tear_names, _blender_object_key, authored_ttl_names)
 
             # 2) 生成 CustomShader/CommandList/Resource 段
             self._emit_sections(sections, components, ns)
@@ -2208,7 +2222,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             # 4) Present 块 + Constants globals
             self._emit_present_and_constants(sections, components, ns)
             if tear:
-                preserved_tail = drag_tear.emit(self, sections, preserved_tail, components, ns, tear)
+                preserved_tail = drag_tear.emit(self, sections, preserved_tail, components, ns, tear,
+                                                promote_native_ttl=promote_native_ttl)
                 tear_tokens.add(tear.directory.name)
             if self._cloth_enabled():
                 from .drag_cloth import stabilize_globals

@@ -29,6 +29,12 @@ class DragTearTests(unittest.TestCase):
         sections["[Resourceabc123Texcoord]"] = ["type = Buffer", "stride = 8", "filename = Meshes/abc123-Texcoord.buf"]
         sections["[TextureOverride_abc123_Draw]"].append("; SSMT tear TEXCOORD0 = 0, R32G32_FLOAT")
 
+    @staticmethod
+    def install_ttl_fixture(root):
+        ini = root / "Core/ZZMI/Libraries/TTLib/TTLib.ini"
+        ini.parent.mkdir(parents=True)
+        ini.write_text("namespace = TTL\n[CommandListDraw]\n", "utf8")
+
     def generate(self, root, cloth=False, ttl=False):
         fixture = cloth_tests.GarmentExportTests()
         node, sections, comp = fixture.prepare(root, bake=cloth, prefix=3 if cloth else 0)
@@ -70,6 +76,7 @@ class DragTearTests(unittest.TestCase):
     def test_wraps_only_draws_and_keeps_cloth_and_ttl_routing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            self.install_ttl_fixture(root)
             sections, comp, tail, original, original_tail = self.generate(root, cloth=True, ttl=True)
             binding = f"{self.tear.PIXEL_SLOT} = ref ResourceDragTearMask_abc123P0M1_unit"
             tail_binding = f"{self.tear.PIXEL_SLOT} = ref ResourceDragTearMask_abc123P0M2_unit"
@@ -85,6 +92,7 @@ class DragTearTests(unittest.TestCase):
             self.assertIn(r"if $\TTL\enabled && @ResourceDragTearTTL_abc123P0M2_unit",
                           sections["[CommandListDragTearTTLBind_abc123P0M2_unit]"])
             self.assertEqual(sum(line.strip() == binding for line in draw), 1)
+            self.assertFalse(any(name.startswith("[CommandListDragTearNativeTTL") for name in sections))
             self.assertEqual(self.tear.clean_existing(sections, tail, "unit"), original_tail)
             self.assertEqual(sections, original)
             self.tear.prune(root, "unit", set())
@@ -94,6 +102,7 @@ class DragTearTests(unittest.TestCase):
     def test_export_switch_adds_and_removes_the_scoped_tear_resources(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            self.install_ttl_fixture(root)
             node, sections, comp = cloth_tests.GarmentExportTests().prepare(root, bake=False)
             self.add_uv(root, sections)
             ini = root / "Mod.ini"
@@ -117,6 +126,7 @@ class DragTearTests(unittest.TestCase):
             self.assertNotIn("[KeyDragTear_unit]", enabled)
             self.assertNotIn("$ssmtdragtear_enabled_unit", enabled)
             self.assertIn(f"{self.tear.PIXEL_SLOT} = ref ResourceDragTearMask_abc123P0M1_unit", enabled)
+            self.assertIn("run = CommandListDragTearNativeTTL0_unit", enabled)
             self.assertNotIn("ib = ref ResourceDragTear", enabled)
             self.assertTrue((root / "res/drag_tear").is_dir())
             owners_path = next((root / "res/drag_tear").glob("*/*-owners.buf"))
@@ -127,6 +137,10 @@ class DragTearTests(unittest.TestCase):
             self.assertFalse(owners[body_offset // 3:(body_offset + body_count) // 3].any())
             node.execute_postprocess(temp)
             self.assertEqual(ini.read_text("utf8").count("[KeyDragTearReset_unit]"), 1)
+            self.assertEqual(ini.read_text("utf8").count("[CommandListDragTearNativeTTL0_unit]"), 1)
+            (root / "Core/ZZMI/Libraries/TTLib/TTLib.ini").unlink()
+            node.execute_postprocess(temp)
+            self.assertNotIn("CommandListDragTearNativeTTL", ini.read_text("utf8"))
             node.tear_enabled = False
             node.hash_values = "deadbeef"
             node.execute_postprocess(temp)
@@ -138,6 +152,26 @@ class DragTearTests(unittest.TestCase):
             self.assertNotIn(self.tear.BEGIN, disabled)
             self.assertIn("CustomShaderDragJiggleabc123_unit", disabled)
             self.assertFalse((root / "res/drag_tear").exists())
+
+    def test_direct_stocking_draw_uses_installed_ttl_without_changing_body_or_cloth(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.install_ttl_fixture(root)
+            sections, comp, _, original, original_tail = self.generate(root, cloth=True)
+            draw = sections["[TextureOverride_abc123_Draw]"]
+            calls = [line.strip() for line in draw if line.strip().startswith("run = CommandListDragTearNativeTTL")]
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(sum(line.strip() == comp["cloth_publish"] for line in draw),
+                             sum(line.strip() == comp["cloth_publish"] for line in original["[TextureOverride_abc123_Draw]"]))
+            self.assertIn(r"if $\TTL\enabled", [line.strip() for line in draw])
+            for call in calls:
+                lines = sections["[" + call.split(" = ")[1] + "]"]
+                self.assertIn(r"Resource\TTL\TransparencyTex = null", lines)
+                self.assertIn(r"run = CommandList\TTL\Draw", lines)
+                self.assertTrue(any("CommandListDragTearTTLBind_abc123P0M" in line for line in lines))
+                self.assertTrue(any(line.strip() == "run = CommandListDragTearTTLRestore_unit" for line in lines))
+            self.assertEqual(self.tear.clean_existing(sections, original_tail, "unit"), original_tail)
+            self.assertEqual(sections, original)
 
     @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
     def test_stocking_render_keeps_separate_opening_thinning_yarn_and_rim(self):

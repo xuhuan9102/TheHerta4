@@ -23,11 +23,19 @@ TTL_DRAW = r"commandlist\ttl\draw"
 TTL_TAKEN = "; [SSMT TTL 已接管]"
 TTL_MASK = r"Resource\TTL\TransparencyTex"
 TTL_INVERT = r"$\TTL\mask_invert"
+TTL_ENABLED = r"$\TTL\enabled"
 # The old R32_FLOAT mask can still be installed in another mod.
 MASK_MAGIC = 7312404
 TTL_MASK_MAGIC = 7312405
 PIXEL_REGISTER = "t116"
 PIXEL_SLOT = f"ps-{PIXEL_REGISTER}"
+
+
+def ttlib_available(root):
+    if not root:
+        return False
+    path = Path(root).resolve()
+    return any((parent / "Core/ZZMI/Libraries/TTLib/TTLib.ini").is_file() for parent in (path, *path.parents))
 
 
 def _clean(lines):
@@ -83,14 +91,14 @@ def _part_owners(root, sections, part, vertex_count, names, name_key):
         claimed[tri] = np.where(overlap, 0xFFFFFFFF, object_id)
         owners[tri] = np.where(overlap | (key not in names), 0, object_id)
     owners[np.any(indices >= vertex_count, axis=1)] = 0
-    return (filename, indices, owners) if owners.any() else None
+    return (filename, indices, owners, ids) if owners.any() else None
 
 
 def asset_token(ns, ini_name):
     return hashlib.sha256(f"{ns}\0{ini_name}".encode("utf8")).hexdigest()[:20]
 
 
-def bake(node, root, sections, components, ns, ini_name, names, name_key):
+def bake(node, root, sections, components, ns, ini_name, names, name_key, authored_ttl_names=()):
     if not names:
         return None
     token = asset_token(ns, ini_name)
@@ -111,7 +119,7 @@ def bake(node, root, sections, components, ns, ini_name, names, name_key):
             uv = read_uv(root, sections, comp, part, len(positions))
             if uv is None:
                 continue
-            filename, indices, owners = data
+            filename, indices, owners, ids = data
             masks = {}
             for owner in np.unique(owners[owners != 0]):
                 atlas = rasterize_reference(positions, uv, indices[owners == owner])
@@ -126,6 +134,7 @@ def bake(node, root, sections, components, ns, ini_name, names, name_key):
             header = np.array([component_id, part_id], dtype="<u4")
             owners_file = assets.put(f"{cn}-p{part_id}-owners.buf", np.concatenate((header, owners)))
             part["tear"] = (filename, owners, owners_file, masks)
+            part["tear_authored_ttl"] = {ids[name] for name in authored_ttl_names if name in ids}
             comp["tear_token"] = component_id
         if "tear_token" in comp:
             comp["tear_rest"] = assets.put(f"{cn}-rest.buf", positions.astype("<f4", copy=False))
@@ -276,10 +285,32 @@ def _emit_ttl(sections, tags, ns, epoch, shader):
         ]
 
 
+def _emit_native_ttl_draw(sections, ns, tag, index, count, first, base):
+    """Send an ordinarily opaque draw to TTL with the tear as its opacity map."""
+    command = f"CommandListDragTearNativeTTL{index}_{ns}"
+    original = f"ResourceDragTearNativeTTLInput_{ns}"
+    sections.setdefault(f"[{original}]", [])
+    args = {"_1": count, "_2": first, "_3": base, "alpha": 1,
+            "mask_channel": 0, "mask_invert": 0, "mask_discard_threshold": 0.999}
+    ttl_var = "$\\TTL\\"
+    ready = f"$ssmtdragtear_ready_{ns}"
+    sections[f"[{command}]"] = [
+        *(f"local $ssmtdragtear_old_{key} = {ttl_var}{key}" for key in args),
+        f"{original} = ref {TTL_MASK}", f"{TTL_MASK} = null",
+        *(f"{ttl_var}{key} = {value}" for key, value in args.items()),
+        f"if {ready} == 1", f"\trun = CommandListDragTearTTLBind_{tag}", "endif",
+        r"run = CommandList\TTL\Draw",
+        f"if {ready} == 1", f"\trun = CommandListDragTearTTLRestore_{ns}", "endif",
+        f"{TTL_MASK} = ref {original}", f"{original} = null",
+        *(f"{ttl_var}{key} = $ssmtdragtear_old_{key}" for key in args),
+    ]
+    return command
+
+
 def _wrap(lines, sites, guard, ns):
     saved = f"ResourceDragTearSavedPS_{ns}"
     magic = f"$ssmtdragtear_saved_magic_{ns}"
-    for index, (mask, ttl) in sorted(sites.items(), reverse=True):
+    for index, (mask, ttl, promoted) in sorted(sites.items(), reverse=True):
         indent = re.match(r"[ \t]*", lines[index]).group()
         before = [BEGIN, guard, f"\t{saved} = ref {PIXEL_SLOT}",
                   f"\t{magic} = x494",
@@ -289,7 +320,11 @@ def _wrap(lines, sites, guard, ns):
         if ttl:
             before.append(f"\trun = CommandListDragTearTTLBind_{ttl}")
             after.append(f"\trun = CommandListDragTearTTLRestore_{ns}")
-        before.extend(("endif", END))
+        before.append("endif")
+        if promoted:
+            before.extend((f"if {TTL_ENABLED}", f"\trun = {promoted}", "else"))
+            after.insert(1, "endif")
+        before.append(END)
         after.extend(("endif", END))
         lines[index + 1:index + 1] = [indent + line for line in after]
         lines[index:index] = [indent + line for line in before]
@@ -321,7 +356,7 @@ def _live_draw_index(lines, index):
     return index
 
 
-def emit(node, sections, tail, components, ns, assets):
+def emit(node, sections, tail, components, ns, assets, *, promote_native_ttl=None):
     active = f"$ssmtdragtear_active_{ns}"
     ready = f"$ssmtdragtear_ready_{ns}"
     epoch = f"$ssmtdragtear_epoch_{ns}"
@@ -336,6 +371,9 @@ def emit(node, sections, tail, components, ns, assets):
     wrappers = defaultdict(dict)
     clears, clear_masks, dispatch = [], [], []
     ttl_masks = {}
+    promoted = {}
+    if promote_native_ttl is None:
+        promote_native_ttl = ttlib_available(assets.mod)
     section_names = {name[1:-1].casefold() for name in sections}
     for comp in components:
         if "tear_token" not in comp:
@@ -376,9 +414,16 @@ def emit(node, sections, tail, components, ns, assets):
                 if ttl:
                     ttl_masks[tag] = mask
                 if ttl and ttl[1].casefold() != TTL_DRAW:
-                    wrappers[ttl[1].casefold()][(part["ib_resource"], tag)] = (mask, tag)
+                    wrappers[ttl[1].casefold()][(part["ib_resource"], tag)] = (mask, tag, None)
+                elif promote_native_ttl and DRAW.match(line) and ownership[0] not in part.get("tear_authored_ttl", ()):
+                    ttl_masks[tag] = mask
+                    vertex_base = record["vertex_base"]
+                    key = (tag, count, start, vertex_base)
+                    if key not in promoted:
+                        promoted[key] = _emit_native_ttl_draw(sections, ns, tag, len(promoted), count, start, vertex_base)
+                    sites[section][index] = (mask, None, promoted[key])
                 elif ttl or DRAW.match(line) or (run and run[1].casefold() in section_names):
-                    sites[section][index] = (mask, tag if ttl else None)
+                    sites[section][index] = (mask, tag if ttl else None, None)
     for section, locations in sites.items():
         _wrap(sections[section], locations, guard, ns)
     for section, lines in sections.items():
