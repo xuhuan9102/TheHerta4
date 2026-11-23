@@ -47,6 +47,17 @@ class PreviewTests(unittest.TestCase):
                     self.assertGreaterEqual(y, 0, name)
                     self.assertLessEqual(y + h, .12 * zoom, name)
 
+    def test_glow_slider_defaults_follow_exported_row_indices(self):
+        text = (
+            '; GlowFX brightness slider $first {"mode": "REMARK"}\n'
+            '; GlowFX brightness slider $second\n'
+            '    $param3 = $first\n'
+            '    $param2 = $second\n'
+        )
+        params = [.4]
+        preview._apply_glow_slider_defaults(text, {"first": .8, "second": .3}, params)
+        self.assertEqual(params, [.4, .3, .8])
+
     def test_attached_buttons_extend_canvas_not_slider_background(self):
         values = self.values()
         for i in range(1, 4):

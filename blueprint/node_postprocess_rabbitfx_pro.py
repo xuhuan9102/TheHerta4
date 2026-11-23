@@ -590,7 +590,7 @@ def build_breath_parameter_lines(
         "endif",
     ]
     bmin = _format_number(brightness_min)
-    bmax = _format_number(brightness_max)
+    bmax = f"({brightness_max})" if isinstance(brightness_max, str) else _format_number(brightness_max)
     if mode == 'SINGLE':
         lines.extend(
             [

@@ -143,6 +143,9 @@ def _iter_node_variable_names(node):
     effect_name = normalize_variable_name(getattr(node, "effect_switch_variable", ""))
     if effect_name:
         yield effect_name
+    brightness_name = normalize_variable_name(getattr(node, "surface_brightness_variable", ""))
+    if brightness_name:
+        yield brightness_name
     continuous_custom_name = normalize_variable_name(getattr(node, "custom_continuous_index_variable_name", "") or "")
     continuous_assigned_name = normalize_variable_name(getattr(node, "assigned_continuous_index_variable_name", "") or "")
     if continuous_custom_name:
@@ -198,6 +201,7 @@ def _iter_shapekey_item_variable_names(item):
 # 节点上「自己声明」的标量变量字段（owner）。
 _OWNER_SCALAR_VARIABLE_FIELDS = (
     "effect_switch_variable",
+    "surface_brightness_variable",
     "material_switch_var",
     "custom_var_name",
     "assigned_variable_name",
@@ -457,7 +461,7 @@ def normalize_variable_name(var_name: str) -> str:
     return _sanitize_name(cleaned, fallback="")
 
 
-def glow_fx_switch_variable_name(node, base_name):
+def glow_fx_switch_variable_name(node, base_name, field="effect_switch_variable"):
     """Keep a saved name if free, otherwise allocate an unused Glow FX name."""
     used = set()
     tree = getattr(node, "id_data", None)
@@ -483,7 +487,9 @@ def glow_fx_switch_variable_name(node, base_name):
                 for group in other.groups if str(getattr(group, "uid", "") or "").strip()
             )
 
-    current = str(getattr(node, "effect_switch_variable", "") or "").strip().lstrip("$").lower()
+    sibling = "surface_brightness_variable" if field == "effect_switch_variable" else "effect_switch_variable"
+    used.add(normalize_variable_name(getattr(node, sibling, "")).casefold())
+    current = str(getattr(node, field, "") or "").strip().lstrip("$").lower()
     if current and current not in used:
         return f"${current}"
     candidate = base_name

@@ -8,6 +8,7 @@
 import bpy
 import glob
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -338,6 +339,37 @@ class SSMTNode_PostProcess_GlowFX(
         description="动态反光强度，1 为参考强度",
         default=1.0, min=0.0, max=4.0,
     )
+    surface_brightness_slider: bpy.props.BoolProperty(name="游戏内亮度滑块", default=False)
+    surface_brightness_variable: bpy.props.StringProperty(options={'HIDDEN'})
+    surface_brightness_icon_mode: bpy.props.EnumProperty(
+        name="滑块按钮图标",
+        items=[
+            ('REMARK', "用备注生成图标", ""),
+            ('IMAGE', "使用自定义图片", ""),
+            ('DEFAULT', "使用面板默认图片", ""),
+        ],
+        default='REMARK',
+    )
+    surface_brightness_icon_remark: bpy.props.StringProperty(name="滑块按钮备注")
+    surface_brightness_icon_image: bpy.props.StringProperty(name="滑块按钮图片", subtype='FILE_PATH')
+    surface_brightness_icon_font: bpy.props.EnumProperty(
+        name="字体",
+        items=[
+            ('msyh.ttc', "微软雅黑", ""),
+            ('simsun.ttc', "宋体", ""),
+            ('simhei.ttf', "黑体", ""),
+            ('arial.ttf', "Arial", ""),
+        ],
+        default='msyh.ttc',
+    )
+    surface_brightness_icon_font_size: bpy.props.IntProperty(name="字号大小", default=36, min=10, max=300)
+    surface_brightness_icon_text_color: bpy.props.FloatVectorProperty(
+        name="文字颜色", subtype='COLOR', size=3, default=(1.0, 1.0, 1.0), min=0.0, max=1.0,
+    )
+    surface_brightness_icon_stroke_color: bpy.props.FloatVectorProperty(
+        name="描边颜色", subtype='COLOR', size=3, default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+    )
+    surface_brightness_icon_stroke_width: bpy.props.IntProperty(name="描边宽度", default=4, min=0, max=20)
     effect_switch_enabled: bpy.props.BoolProperty(
         name="游戏内切换", default=False, update=_update_effect_switch_variable,
     )
@@ -384,6 +416,7 @@ class SSMTNode_PostProcess_GlowFX(
 
     def copy(self, source):
         self.buffer_tag = uuid.uuid4().hex[:8]
+        self.surface_brightness_variable = ""
         if getattr(self, "effect_switch_enabled", False):
             self.effect_switch_variable = ""
 
@@ -415,6 +448,7 @@ class SSMTNode_PostProcess_GlowFX(
 
     def draw_buttons(self, context, layout):
         self._draw_targets(layout)
+        layout.prop(self, self._button_remark_property(), text="备注")
         layout.prop(self, "effect_switch_enabled")
         if getattr(self, "effect_switch_enabled", False):
             box = layout.box()
@@ -425,7 +459,7 @@ class SSMTNode_PostProcess_GlowFX(
             op.node_tree_name = self.id_data.name
             op.target_prop = "effect_switch_key"
             box.prop(self, "effect_switch_variable")
-            box.prop(self, "effect_switch_comment")
+        self._draw_brightness_slider(layout)
         layout.prop(self, "enable_native_surface_flow")
         if getattr(self, "enable_native_surface_flow", False):
             layout.prop(self, "native_surface_replay")
@@ -457,6 +491,27 @@ class SSMTNode_PostProcess_GlowFX(
         )
         op.node_name = self.name
 
+    def _draw_brightness_slider(self, layout):
+        layout.prop(self, "surface_brightness_slider")
+        if not self.surface_brightness_slider:
+            return
+        box = layout.box()
+        box.label(text="游戏内亮度比例 0%–100%", icon='INFO')
+        if not self.enable_native_surface_flow and self._breathing():
+            box.label(text="调节呼吸灯最大强度", icon='INFO')
+        box.prop(self, "surface_brightness_icon_mode")
+        if self.surface_brightness_icon_mode == 'REMARK':
+            style = box.box()
+            style.label(text="文字图标样式", icon='FILE_FONT')
+            style.prop(self, "surface_brightness_icon_font")
+            style.prop(self, "surface_brightness_icon_font_size")
+            colors = style.row(align=True)
+            colors.prop(self, "surface_brightness_icon_text_color")
+            colors.prop(self, "surface_brightness_icon_stroke_color")
+            style.prop(self, "surface_brightness_icon_stroke_width")
+        elif self.surface_brightness_icon_mode == 'IMAGE':
+            box.prop(self, "surface_brightness_icon_image")
+
     def _draw_breath_block(self, layout):
         layout.prop(self, "halo_radius")
         layout.prop(self, "emission_only")
@@ -465,16 +520,84 @@ class SSMTNode_PostProcess_GlowFX(
     def _halo_suffix(self):
         return "" if self.halo_radius == _DEFAULT_HALO_RADIUS else f"_r{self.halo_radius}"
 
+    def brightness_slider_enabled(self):
+        return getattr(self, "surface_brightness_slider", False) and (
+            getattr(self, "enable_native_surface_flow", False) or self.enable_glow
+        )
+
+    def brightness_slider_label(self):
+        if getattr(self, "enable_native_surface_flow", False):
+            return "流光亮度"
+        return "呼吸灯最大亮度" if self._breathing() else "发光亮度"
+
+    def _button_remark_property(self):
+        if self.effect_switch_comment.strip() and not self.is_property_set("surface_brightness_icon_remark"):
+            return "effect_switch_comment"
+        return "surface_brightness_icon_remark"
+
+    def brightness_slider_remark(self):
+        return getattr(self, self._button_remark_property()).strip()
+
+    def _brightness_slider_value(self, sections=None, ini_file=None, *, remember_variable=True):
+        if getattr(self, "enable_native_surface_flow", False):
+            initial = self.native_surface_brightness
+        else:
+            initial = self.breath_brightness_max if self._breathing() else self.glow_brightness
+        if not self.brightness_slider_enabled():
+            return initial
+        from .variable_registry import glow_fx_switch_variable_name
+
+        variable = glow_fx_switch_variable_name(
+            self, f"glowfx_brightness_{self._var_tag()}", "surface_brightness_variable",
+        )
+        if sections is not None:
+            mode = self.surface_brightness_icon_mode
+            remark = self.brightness_slider_remark()
+            icon = {"mode": mode, "group": remark}
+            switch = self._effect_switch_variable()
+            if switch:
+                icon["switch"] = switch
+            if mode == 'REMARK':
+                icon["remark"] = remark or self.brightness_slider_label()
+                icon["style"] = {
+                    "font_family": self.surface_brightness_icon_font,
+                    "font_size": self.surface_brightness_icon_font_size,
+                    "text_color": tuple(self.surface_brightness_icon_text_color),
+                    "stroke_color": tuple(self.surface_brightness_icon_stroke_color),
+                    "stroke_width": self.surface_brightness_icon_stroke_width,
+                }
+            elif mode == 'IMAGE':
+                selected = self.surface_brightness_icon_image
+                source = Path(bpy.path.abspath(selected, library=getattr(self.id_data, "library", None)))
+                if not selected or not source.is_file():
+                    raise ValueError("Glow FX 滑块按钮图片不存在，请重新选择")
+                data = source.read_bytes()
+                resource = Path("res") / f"glow-slider-{hashlib.sha256(data).hexdigest()[:16]}{source.suffix.lower()}"
+                dest = Path(ini_file).parent / resource
+                dest.parent.mkdir(exist_ok=True)
+                dest.write_bytes(data)
+                icon["image"] = resource.as_posix()
+            if remember_variable:
+                self.surface_brightness_variable = variable
+            sections.setdefault("[Constants]", []).extend([
+                f"; GlowFX brightness slider {variable} {json.dumps(icon)}",
+                f"global persist {variable} = 1.000000",
+            ])
+        return f"{_format_float(initial)} * {variable}"
+
     def effect_switch_group(self):
         if not getattr(self, "effect_switch_enabled", False):
             return None
         from .variable_registry import glow_fx_switch_variable_name
 
         variable = glow_fx_switch_variable_name(self, f"glowfx_enabled_{self._var_tag()}")
+        comment = self.brightness_slider_remark()
+        if not comment:
+            comment = self.brightness_slider_label() if self.brightness_slider_enabled() else self.label or self.name
         return SimpleNamespace(
             switch_variable=variable,
             key=self.effect_switch_key.strip(),
-            comment=" ".join(self.effect_switch_comment.split()) or self.label or self.name,
+            comment=comment,
             state_count=2,
         )
 
@@ -624,6 +747,8 @@ class SSMTNode_PostProcess_GlowFX(
 
         if not changed:
             return False
+        if not native_surface and generated and self.brightness_slider_enabled():
+            self._brightness_slider_value(sections, ini_file)
         self._emit_effect_switch(sections)
         if generated:
             run = (RUN_LINE + self._halo_suffix()).casefold()
@@ -783,6 +908,7 @@ class SSMTNode_PostProcess_GlowFX(
             native_draws[(hash_val, int(index_count), int(first_index))] = obj.name
         if not jobs and not native_draws:
             return False
+        brightness = self._brightness_slider_value(sections, ini_file)
         mode = getattr(self, "native_surface_mode", "MIRROR")
         replay = getattr(self, "native_surface_replay", False)
         height_scale = 0.0
@@ -830,7 +956,7 @@ class SSMTNode_PostProcess_GlowFX(
                 indent = _leading_whitespace(block[index])
                 setup, restore = surface_draw_scope(
                     tag, f"{start}_{index}",
-                    self.native_surface_speed, self.native_surface_brightness,
+                    self.native_surface_speed, brightness,
                     self.native_surface_color,
                     height_scale, texture, switch,
                 )
@@ -852,7 +978,7 @@ class SSMTNode_PostProcess_GlowFX(
             draw_id = f"{hash_val}_{index_count}_{first_index}"
             setup, restore = surface_draw_scope(
                 tag, draw_id,
-                self.native_surface_speed, self.native_surface_brightness,
+                self.native_surface_speed, brightness,
                 self.native_surface_color, height_scale, texture, switch,
             )
             commands = (
@@ -869,13 +995,13 @@ class SSMTNode_PostProcess_GlowFX(
             ]
             changed = True
         if changed and replay:
-            self._emit_surface_replay(sections, tag, ini_file, bool(jobs), bool(native_draws), height_scale)
+            self._emit_surface_replay(sections, tag, ini_file, bool(jobs), bool(native_draws), height_scale, brightness)
         elif changed:
             textured = any(name.startswith("[ResourceZZMISurfaceFlowTexture") for name in sections)
             sections.update(surface_shader_sections(textured))
         return changed
 
-    def _emit_surface_replay(self, sections, tag, ini_file, indexed, native, height_scale):
+    def _emit_surface_replay(self, sections, tag, ini_file, indexed, native, height_scale, brightness):
         from ..common.zzmi_surface_flow import surface_draw_scope
 
         relative = "res/surface_flow_replay_ps.hlsl"
@@ -905,7 +1031,7 @@ class SSMTNode_PostProcess_GlowFX(
                 if line not in constants:
                     constants.append(line)
         setup, restore = surface_draw_scope(
-            tag, "replay", self.native_surface_speed, self.native_surface_brightness,
+            tag, "replay", self.native_surface_speed, brightness,
             self.native_surface_color, height_scale,
         )
         switch = self._effect_switch_variable()
@@ -1147,12 +1273,15 @@ class SSMTNode_PostProcess_GlowFX(
             return [_BREATH_BEGIN, *values, _BREATH_END]
         tag = self._var_tag()
         return [
-            f"{_glowfx_param(name)} = {_glowfx_param(name, tag)}"
+            f"{_glowfx_param(name)} = "
+            + (self._brightness_slider_value() if name == "brightness" and self.brightness_slider_enabled()
+               else _glowfx_param(name, tag))
             for name in ("h", "s", "v", "brightness", "interpolate")
         ]
 
     def _build_breath_lines(self, breath_tick_count=1):
-        return build_breath_parameter_lines(
+        brightness_max = self._brightness_slider_value() if self.brightness_slider_enabled() else self.breath_brightness_max
+        lines = build_breath_parameter_lines(
             _glowfx_param,
             var_prefix=_VAR_PREFIX,
             breath_begin=_BREATH_BEGIN,
@@ -1165,11 +1294,18 @@ class SSMTNode_PostProcess_GlowFX(
             s=self.breath_s,
             v=self.breath_v,
             brightness_min=self.breath_brightness_min,
-            brightness_max=self.breath_brightness_max,
+            brightness_max=brightness_max,
             interpolate=self.breath_interpolate,
             tick_count=breath_tick_count,
             smooth_combo=True,
         )
+        if isinstance(brightness_max, str) and self.breath_mode != 'RAINBOW':
+            lines[-1:-1] = [
+                f"if ({brightness_max}) < {_format_float(self.breath_brightness_min)}",
+                f"    {_glowfx_param('brightness')} = {brightness_max}",
+                "endif",
+            ]
+        return lines
 
     def _split_breath_lines(self):
         lines = self._build_breath_lines()

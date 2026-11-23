@@ -2,6 +2,7 @@
 
 import math
 import os
+import re
 import tempfile
 import types
 
@@ -103,8 +104,26 @@ def export_preview(source, root):
         slider._find_combined_slider_panel = lambda: node
     os.makedirs(os.path.join(root, "res"), exist_ok=True)
     ini_path = os.path.join(root, "preview.ini")
+    sections = {"[Constants]": [], "[Present]": []}
+    collect_groups = getattr(source, "_collect_custom_material_switch_groups", None)
+    if collect_groups is not None:
+        glow_groups = [
+            (glow, group) for glow, _, group in collect_groups(include_glow_sliders=True)
+            if getattr(glow, "bl_idname", "") == "SSMTNode_PostProcess_GlowFX"
+        ]
+        if len(glow_groups) > 1:
+            from .node_postprocess_condition import _iter_upstream_postprocess_nodes
+
+            order = {node.name: -index for index, node in enumerate(_iter_upstream_postprocess_nodes(source))}
+            glow_groups.sort(key=lambda item: order.get(item[0].name, -len(order)))
+        for glow, group in glow_groups:
+            if group is not None:
+                sections["[Constants]"].append(f"global persist {group.switch_variable} = 1")
+            if node.slider_use_slider_panel and glow.brightness_slider_enabled():
+                glow._brightness_slider_value(sections, ini_path, remember_variable=False)
     with open(ini_path, "w", encoding="utf-8") as handle:
-        handle.write("[Constants]\n\n[Present]\n")
+        for section, lines in sections.items():
+            handle.write("\n".join((section, *lines, "")) + "\n")
     if slider is not None and node.slider_use_slider_panel:
         emitted_slider[0] = bool(slider.execute_postprocess(
             root, _in_place=True, _ini_path=ini_path, _skip_backup=True))
@@ -119,6 +138,17 @@ def _numeric(values, key, default=0.0):
         return float(values[key])
     except (KeyError, TypeError, ValueError):
         return default
+
+
+def _apply_glow_slider_defaults(text, values, params):
+    variables = set(re.findall(r"(?m)^\s*; GlowFX brightness slider \$([a-z_][a-z_0-9]*)\b", text))
+    for index, name in re.findall(r"(?m)^\s*\$param([1-9]\d*)\s*=\s*\$([a-z_][a-z_0-9]*)[ \t]*$", text):
+        if name not in variables:
+            continue
+        index = int(index) - 1
+        if index >= len(params):
+            params.extend([0.0] * (index + 1 - len(params)))
+        params[index] = _numeric(values, name)
 
 
 def collect_draws(node, values, slider_params):
@@ -231,6 +261,7 @@ def render_panel_runtime_image(node, ini_path, res_dir):
     values = panel._panel_runtime_parse_globals(text)
     resources = panel._panel_runtime_parse_resources(text)
     params = panel._panel_runtime_slider_params(node._find_shape_ext_node(), values)
+    _apply_glow_slider_defaults(text, values, params)
     draws = collect_draws(node, values, params)
     if not draws:
         raise RuntimeError("当前节点未生成可渲染的面板，请检查按钮列表和滑块分组")

@@ -309,8 +309,13 @@ def _load_glowfx_module():
 
 def _make_glowfx_node(**overrides):
     module = _load_glowfx_module()
+    explicit_remark = "surface_brightness_icon_remark" in overrides
+    overrides.setdefault("is_property_set", lambda name: name == "surface_brightness_icon_remark" and explicit_remark)
+    overrides.setdefault("effect_switch_comment", "")
+    overrides.setdefault("surface_brightness_icon_remark", "")
     overrides.setdefault("halo_radius", 40)
     overrides.setdefault("emission_only", False)
+    overrides.setdefault("surface_brightness_slider", False)
     return _make_node(
         node_cls=module.SSMTNode_PostProcess_GlowFX,
         **overrides,
@@ -2960,6 +2965,41 @@ class GlowFXTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["tick_count"], 2)
         self.assertEqual(calls[1]["tick_count"], 2)
+
+    def test_glowfx_brightness_slider_exports_static_and_breathing_values(self):
+        _load_variable_registry_module()
+        _install_module(
+            f"{PKG}.blueprint.node_postprocess_custom_material_assign",
+            find_activation_flag_in_sections=lambda _sections: "$active0",
+        )
+        marker = "; MaterialRabbitFX brightness"
+        for breathing, assignment in (
+            (False, "$glowfx_brightness = 6.0 * $glowfx_brightness_abcd1234"),
+            (True, "$glowfx_brightness = 2 + ((6.0 * $glowfx_brightness_abcd1234) - 2)"),
+        ):
+            with self.subTest(breathing=breathing):
+                _write_ini(self.ini_path, (
+                    f"[{GLOW_SECTION}]\n"
+                    f"[mesh:{MESH_NAME}]\n"
+                    "hash = fd054d1d\n"
+                    r"Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal" "\n"
+                    f"{marker}\n"
+                    r"run = CommandList\RabbitFX\Run" "\n"
+                    "drawindexed = 10, 20, 0\n"
+                ))
+                self._register_glow_record(marker)
+                node = _make_glowfx_node(
+                    target_items=[_item(_fake_object())],
+                    enable_breath=breathing, breath_mode="COMBO",
+                    glow_brightness=6, breath_brightness_min=2, breath_brightness_max=6,
+                    surface_brightness_slider=True,
+                    surface_brightness_icon_mode="DEFAULT", surface_brightness_icon_remark="",
+                    effect_switch_key="", effect_switch_comment="Glow",
+                )
+                node.execute_postprocess(self.export_dir)
+                content = _read_ini(self.ini_path)
+                self.assertIn("global persist $glowfx_brightness_abcd1234 = 1.000000", content)
+                self.assertIn(assignment, content)
 
     def test_glowfx_combo_eases_brightness_and_respects_both_limits(self):
         glow = _make_glowfx_node(

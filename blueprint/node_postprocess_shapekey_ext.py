@@ -1,6 +1,7 @@
 import bpy
 import os
 import glob
+import json
 import re
 import math
 import shutil
@@ -2091,6 +2092,29 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         masked_vars = {name_to_var[name] for name in unassigned_names if name in name_to_var}
         return unassigned_names, masked_vars
 
+    @staticmethod
+    def _glow_brightness_sliders(sections):
+        pattern = re.compile(r"^\s*; GlowFX brightness slider (\$[a-z_][a-z_0-9]*)(?: (\{.*\}))?\s*$")
+        constants = sections.get("[Constants]", [])
+        declared = {
+            match[1] for line in constants
+            if (match := re.match(r"^\s*global persist (\$[a-z_][a-z_0-9]*)\s*=", line))
+        }
+        return {
+            match[1]: json.loads(match[2]) if match[2] else {"mode": "REMARK", "remark": "流光亮度"}
+            for line in constants
+            if (match := pattern.match(line)) and match[1] in declared
+        }
+
+    @staticmethod
+    def _group_glow_brightness_sliders(sliders):
+        groups = {}
+        for variable, icon in sliders.items():
+            remark = icon.get("group")
+            key = ("remark", remark) if remark else ("variable", variable)
+            groups.setdefault(key, []).append(variable)
+        return {members[-1]: members for members in groups.values()}
+
     def _collect_slider_freq_params(self, sections=None, exclude_vars=None):
         """收集**会变成滑块**的形态键参数（`_apply_slider_panel` 的唯一产出前提）。
 
@@ -2455,7 +2479,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                 # 紧凑内边距：文字到背景边缘 6px + 边框宽，边框紧挨文字，图片不过大
                 border_w = max(0, int(self.button_border_width))
                 gap = 6
-                padding = gap + border_w
+                padding = max(gap, stroke_width) + border_w
             else:
                 # 无背景/边框：透明背景仅文字，紧凑内边距（旧版机制，最锐利）
                 border_w = 0
@@ -2797,6 +2821,17 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             group_ids, multi_group_mode = self._scan_slider_group_info(sections)
             slider_to_group = self._build_slider_to_group(sorted_freq_params, multi_group_mode, group_ids)
 
+        brightness_sliders = self._glow_brightness_sliders(sections)
+        brightness_groups = self._group_glow_brightness_sliders(brightness_sliders)
+        brightness_switches = {
+            leader: tuple(dict.fromkeys(
+                brightness_sliders[member]["switch"] for member in members
+                if brightness_sliders[member].get("switch")
+            ))
+            for leader, members in brightness_groups.items()
+        }
+        sorted_freq_params.extend(brightness_groups)
+        num_sliders = len(sorted_freq_params)
         if num_sliders == 0:
             return False
 
@@ -2824,10 +2859,14 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
 
         def param_from_freq(freq_var):
             """`$paramN = ...` 的右侧：权重 -> 窗口内位置。"""
+            if freq_var in brightness_sliders:
+                return freq_var
             return param_from_weight_expr(freq_var, window_min, window_max)
 
         def freq_from_param(index):
             """`$Freq_x = ...` 的右侧：窗口内位置 -> 权重。"""
+            if sorted_freq_params[index - 1] in brightness_sliders:
+                return f"$param{index}"
             return weight_from_param_expr(f"$param{index}", window_min, window_max)
 
         slot_icon_map = self._scan_slot_icons(sections)
@@ -2864,20 +2903,34 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
 
             for i in range(1, num_sliders + 1):
                 idx = i - 1
-                group_id = slider_to_group.get(idx) if multi_group_mode else None
-                custom_icon = None
-                if group_id is not None and group_id in slot_icon_map:
-                    custom_icon = slot_icon_map[group_id]
-                if not custom_icon and self.button_image and os.path.isfile(self.button_image):
-                    custom_icon = self.button_image
-                if custom_icon and os.path.isfile(custom_icon):
-                    src_btn = custom_icon
+                icon = brightness_sliders.get(sorted_freq_params[idx], {})
+                dest_name = f"4_{i}.png"
+                dest_path = os.path.join(dest_res_dir, dest_name)
+                if icon.get("mode") == "IMAGE":
+                    source = os.path.join(mod_export_path, icon["image"])
+                    if PIL_AVAILABLE:
+                        with Image.open(source) as image:
+                            image.convert("RGBA").save(dest_path, format="PNG")
+                    elif source.lower().endswith(".png"):
+                        shutil.copy2(source, dest_path)
+                    else:
+                        raise ValueError("Glow FX 滑块按钮图片需要 PNG，其他格式需要 Pillow")
+                    src_btn = dest_path
+                elif icon.get("mode") == "REMARK" and self._generate_remark_icon(
+                    icon["remark"], dest_path,
+                    with_style=bool(brightness_switches[sorted_freq_params[idx]]),
+                    **icon.get("style", {"font_size": 24}),
+                ):
+                    src_btn = dest_path
                 else:
+                    src_btn = self.button_image
+                group_id = slider_to_group.get(idx) if multi_group_mode else None
+                if group_id is not None and group_id in slot_icon_map:
+                    src_btn = slot_icon_map[group_id]
+                if not src_btn or not os.path.isfile(src_btn):
                     src_btn = os.path.join(source_asset_dir, "4.png")
 
                 if os.path.exists(src_btn):
-                    dest_name = f"4_{i}.png"
-                    dest_path = os.path.join(dest_res_dir, dest_name)
                     if os.path.normpath(src_btn) != os.path.normpath(dest_path):
                         shutil.copy2(src_btn, dest_path)
                     mark_png_as_srgb(dest_path)
@@ -3073,6 +3126,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         if not detect_index_count_val and self.match_index_count > 0:
             detect_index_count_val = str(self.match_index_count)
 
+        always_show_brightness_panel = bool(brightness_sliders and not (detect_hash or detect_index_count_val))
         constants_additions = []
         present_additions = []
         other_sections = OrderedDict()
@@ -3101,7 +3155,8 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             ])
 
         constants_additions.extend([
-            "global $ui_active", "global $help",
+            "global $ui_active = 1" if always_show_brightness_panel else "global $ui_active",
+            "global $help",
             "global $max_zoom = 5.0", "global $min_zoom = 0.1",
             "global $dragged_slider = 0", "global $mouse_clicked = 0",
             "global $click_outside = 0", "global $is_dragging = 0",
@@ -3181,7 +3236,8 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         if not self.auto_play_key_global:
             auto_play_key_lines.append("condition = $help == 1 && $ui_active == 1")
         auto_play_key_lines.extend([f"key = {auto_play_key}", "type = press", f"run = CommandListToggleAutoPlay_{ns}"])
-        other_sections[f"[KeyToggleAutoPlay_{ns}]"] = auto_play_key_lines
+        if freq_params_temp:
+            other_sections[f"[KeyToggleAutoPlay_{ns}]"] = auto_play_key_lines
 
         other_sections["[CommandListZoomIn]"] = zoom_in_lines
         other_sections["[CommandListZoomOut]"] = zoom_out_lines
@@ -3194,7 +3250,10 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         else:
             other_sections[f"[CommandListToggleAutoPlay_{ns}]"] = ["$auto_play_enabled = 1 - $auto_play_enabled"]
 
-        present_additions.append("post $ui_active = 0")
+        for variable, members in brightness_groups.items():
+            present_additions.extend(f"{member} = {variable}" for member in members[:-1])
+        if not always_show_brightness_panel:
+            present_additions.append("post $ui_active = 0")
         present_additions.append("if $help == 1 && $ui_active == 1")
         present_additions.append("    ; --- 1. 尺寸计算 ---")
         present_additions.append("    $norm_width0 = $base_width0 * $zoom0")
@@ -3218,7 +3277,9 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         present_additions.append("    endif")
         for i in range(1, num_sliders + 1):
             present_additions.append(f"    if $rel_x{i} == 0")
-            if multi_group_mode:
+            if sorted_freq_params[i-1] in brightness_sliders:
+                present_additions.append(f"        $param{i} = {sorted_freq_params[i-1]}")
+            elif multi_group_mode:
                 gid = slider_to_group.get(i - 1)
                 if gid is not None and gid in group_ids:
                     present_additions.append(f"        if ($auto_play_enabled_group{gid} == 1)")
@@ -3246,10 +3307,14 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             present_additions.append(f"    $btn_x{i} = $img0_x + $min_rel_x{i} - $btn_width{i} - $slider_label_gap * $zoom0")
             present_additions.append(f"    $btn_y{i} = $img{i}_y + ($norm_height{i} - $btn_height{i}) * 0.5")
 
-        present_additions.append("\n    ; --- 5. 按钮按下/弹起检测（仅自动播放分组可点击）---")
-        present_additions.append("    $btn_click_processed = 0")
-        present_additions.append("    if $mouse_clicked && $is_dragging == 0")
+        button_commands = {}
         for i in range(1, num_sliders + 1):
+            variable = sorted_freq_params[i-1]
+            if variable in brightness_groups:
+                switches = brightness_switches[variable]
+                if switches:
+                    button_commands[i] = [f"{switch} = 1 - {switches[-1]}" for switch in switches]
+                continue
             gid = slider_to_group.get(i - 1) if multi_group_mode else None
             # 仅启用自动播放的分组按钮可点击（切换播放/暂停）
             setting = self._find_group_setting(gid) if (multi_group_mode and gid is not None) else None
@@ -3259,6 +3324,16 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                 auto_playable = any(s.enable_auto_playback for s in self.play_group_settings)
             if not auto_playable:
                 continue
+            if multi_group_mode and gid is not None and gid in group_ids:
+                command = f"CommandListToggleAutoPlayGroup{gid}_{ns}"
+            else:
+                command = f"CommandListToggleAutoPlay_{ns}"
+            button_commands[i] = [f"run = {command}"]
+
+        present_additions.append("\n    ; --- 5. 按钮按下/弹起检测 ---")
+        present_additions.append("    $btn_click_processed = 0")
+        present_additions.append("    if $mouse_clicked && $is_dragging == 0")
+        for i in button_commands:
             present_additions.append(f"        if cursor_x > $btn_x{i} && cursor_x < $btn_x{i} + $btn_width{i} && cursor_y > $btn_y{i} && cursor_y < $btn_y{i} + $btn_height{i}")
             present_additions.append(f"            $btn_pressed{i} = 1")
             present_additions.append(f"            $btn_click_processed = 1")
@@ -3272,21 +3347,10 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             present_additions.append("        endif")
         present_additions.append("    else")
         present_additions.append("        if $is_dragging == 0")
-        for i in range(1, num_sliders + 1):
-            gid = slider_to_group.get(i - 1) if multi_group_mode else None
-            setting = self._find_group_setting(gid) if (multi_group_mode and gid is not None) else None
-            if setting is not None:
-                auto_playable = bool(setting.enable_auto_playback)
-            else:
-                auto_playable = any(s.enable_auto_playback for s in self.play_group_settings)
-            if not auto_playable:
-                continue
+        for i, commands in button_commands.items():
             present_additions.append(f"            if $btn_pressed{i} == 1")
             present_additions.append(f"                if cursor_x > $btn_x{i} && cursor_x < $btn_x{i} + $btn_width{i} && cursor_y > $btn_y{i} && cursor_y < $btn_y{i} + $btn_height{i}")
-            if multi_group_mode and gid is not None and gid in group_ids:
-                present_additions.append(f"                    run = CommandListToggleAutoPlayGroup{gid}_{ns}")
-            else:
-                present_additions.append(f"                    run = CommandListToggleAutoPlay_{ns}")
+            present_additions.extend(f"                    {command}" for command in commands)
             present_additions.append(f"                endif")
             present_additions.append(f"                $btn_pressed{i} = 0")
             present_additions.append(f"            endif")
@@ -3356,8 +3420,23 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                 f"（shader 硬边界 {SHAPEKEY_WEIGHT_MIN:g} ~ {SHAPEKEY_WEIGHT_MAX:g}）"
             )
 
+        def append_brightness_slider(index, variable):
+            present_additions.extend([
+                f"    if ($dragged_slider == {index})",
+                f"        $param{index} = ($rel_x{index} - $min_rel_x{index}) / $range_x{index}",
+                *(f"        {member} = $param{index}" for member in brightness_groups[variable]),
+                "    else",
+                f"        $param{index} = {variable}",
+                f"        $rel_x{index} = $min_rel_x{index} + $param{index} * $range_x{index}",
+                "    endif",
+            ])
+
         if multi_group_mode:
             for i in range(1, num_sliders + 1):
+                variable = sorted_freq_params[i-1]
+                if variable in brightness_groups:
+                    append_brightness_slider(i, variable)
+                    continue
                 gid = slider_to_group.get(i - 1)
                 present_additions.append(f"    if ($dragged_slider == {i})")
                 present_additions.append(f"        $param{i} = ($rel_x{i} - $min_rel_x{i}) / $range_x{i}")
@@ -3383,6 +3462,10 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                 present_additions.append(f"    endif")
         else:
             for i in range(1, num_sliders + 1):
+                variable = sorted_freq_params[i-1]
+                if variable in brightness_groups:
+                    append_brightness_slider(i, variable)
+                    continue
                 present_additions.append(f"    if ($dragged_slider == {i})")
                 present_additions.append(f"        $param{i} = ($rel_x{i} - $min_rel_x{i}) / $range_x{i}")
                 present_additions.append(f"        if ($auto_play_enabled == 1)")
