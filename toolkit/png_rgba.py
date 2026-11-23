@@ -114,7 +114,10 @@ def validate_png_rgba(path):
     compressed = b"".join(payload for kind, payload in chunks if kind == b"IDAT")
     if not compressed:
         raise ValueError("PNG has no IDAT")
-    raw = zlib.decompress(compressed)
+    try:
+        raw = zlib.decompress(compressed)
+    except zlib.error as exc:  # 截断/损坏的 IDAT 流
+        raise ValueError(f"PNG IDAT 解压失败: {exc}") from exc
     if not interlace:
         bytes_per_sample = bit_depth // 8
         expected = (width * 4 * bytes_per_sample + 1) * height
@@ -282,7 +285,10 @@ def _expand_rgba_payload(chunks):
 
     channels = {0: 1, 2: 3, 3: 1, 4: 2}[color_type]
     compressed = b"".join(payload for kind, payload in chunks if kind == b"IDAT")
-    raw = zlib.decompress(compressed)
+    try:
+        raw = zlib.decompress(compressed)
+    except zlib.error as exc:  # 截断/损坏的 IDAT 流
+        raise ValueError(f"PNG IDAT 解压失败: {exc}") from exc
     rows = (
         _interlaced_rows(raw, width, height, bit_depth, channels)
         if interlace

@@ -986,7 +986,12 @@ class TextureExportPlan(object):
             return converter(entry.source_path, target_path, **kwargs)
         except TypeError:
             # 兼容轻量测试桩的更窄签名
-            return converter(entry.source_path, target_path)
+            try:
+                return converter(entry.source_path, target_path)
+            except Exception as exc:  # noqa: BLE001 - 转换器崩了要回退，不能把图丢掉
+                return False, f"{type(exc).__name__}: {exc}"
+        except Exception as exc:  # noqa: BLE001 - 同上：任何转换异常都必须走回退复制
+            return False, f"{type(exc).__name__}: {exc}"
 
     @classmethod
     def _fallback_copy(cls, entry):
