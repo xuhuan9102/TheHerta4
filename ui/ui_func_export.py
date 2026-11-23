@@ -15,6 +15,7 @@ from ..common.config_table_backup import (
 
 from ..blueprint.direct_export import (
     has_direct_export_mode,
+    needs_merged_native_expression_node,
 )
 from ..blueprint.export_helper import BlueprintExportHelper
 try:  # 共享步骤计划：拿不到时（精简加载 / 测试桩）退回旧预算
@@ -1003,7 +1004,9 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
             max_multi_file_count=max_multi_file_count,
         )
 
-        direct_export = has_direct_export_mode(tree)
+        auto_expression = not has_shapekey_export and needs_merged_native_expression_node(tree)
+        has_shapekey_export = has_shapekey_export or auto_expression
+        direct_export = auto_expression or has_direct_export_mode(tree)
         total_steps = self._estimate_background_total_steps(
             tree,
             export_plan,

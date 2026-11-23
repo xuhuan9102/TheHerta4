@@ -45,6 +45,52 @@ class DirectShapeKeyRuntimeMixin:
                     return drawib_model
         return None
 
+    def _merged_native_morph_carriers(self, logical_hash):
+        exporter = self.exporter
+        get_plan = getattr(exporter, "_merged_owned_redirect_plan", None)
+        if not callable(get_plan) or not getattr(exporter, "has_merged_skeleton", False):
+            return
+        carrier = self.node._extract_hash_prefix(logical_hash)
+        for group in exporter._merged_skeleton_groups():
+            plan = get_plan(group)
+            if not plan:
+                continue
+            for index, draw_ib in enumerate(plan["deform_draw_ibs"]):
+                if draw_ib == carrier:
+                    yield plan, f"ResourceZZRedirectSkinPosition_G{group}_c{index}"
+
+    def _native_morph_keys_for_export(self, logical_hash, drawib_model, shape_key_names):
+        from . import native_morph_driver as native_morph
+
+        def keys_for(model):
+            metadata = getattr(model, "import_json_dict", {}) or {}
+            return native_morph.parse_native_morph_keys(metadata.get("ShapeKeysInfo", {}))
+
+        own_keys = keys_for(drawib_model)
+        if own_keys:
+            return own_keys
+
+        slot_map = native_morph.shape_key_runtime_slot_by_index(shape_key_names)
+        if not slot_map:
+            return ()
+        source_ibs = {
+            component["draw_ib"]
+            for plan, _resource in self._merged_native_morph_carriers(logical_hash)
+            for component in self.exporter._merged_redirect_space_components(plan)
+        }
+        candidates = set()
+        for model in _iter_drawib_models(self.exporter):
+            if model.draw_ib not in source_ibs:
+                continue
+            keys = tuple(key for key in keys_for(model) if key.shape_key_index in slot_map)
+            if set(slot_map).issubset(key.shape_key_index for key in keys):
+                candidates.add(keys)
+        if len(candidates) == 1:
+            return candidates.pop()
+        if candidates:
+            LOG.warning(f"ZZMI 合并形态键：{logical_hash} 有多个匹配的原生表情通道来源")
+        return ()
+
     def _native_shapekey_attributes_for_hash(self, actual_hash: str, logical_hash: str):
         drawib_model = self._match_drawib_model(actual_hash, logical_hash)
         if drawib_model is None:

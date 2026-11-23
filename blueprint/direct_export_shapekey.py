@@ -291,15 +291,10 @@ class DirectShapeKeyGenerator(
         native_morph_metadata_hashes = {
             logical_hash
             for logical_hash in unique_hashes
-            if native_morph.parse_native_morph_keys(
-                (
-                    getattr(
-                        self._match_drawib_model(logical_hash, logical_hash),
-                        "import_json_dict",
-                        {},
-                    )
-                    or {}
-                ).get("ShapeKeysInfo", {})
+            if self._native_morph_keys_for_export(
+                logical_hash,
+                self._match_drawib_model(logical_hash, logical_hash),
+                (name for names in slot_to_name_to_objects.values() for name in names),
             )
         }
         source_object_map = self._build_source_object_map()

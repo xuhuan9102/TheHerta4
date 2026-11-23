@@ -417,6 +417,62 @@ def _has_native_expression_keys(obj):
     return False
 
 
+def has_merged_native_expression_keys(objects):
+    """Find exported shape keys that require the merged-skin expression path."""
+    from ..common.logic_name import LogicName
+    from ..common.object_prefix_helper import ObjectPrefixHelper, coerce_index
+    from ..common.workspace_helper import WorkSpaceHelper
+    from . import native_morph_driver
+
+    properties = getattr(bpy.context.scene, "global_properties", None)
+    if not (
+        LogicName.is_zzmi_family(GlobalConfig.logic_name)
+        and getattr(properties, "import_merged_vgmap", False)
+    ):
+        return False
+
+    targets_by_lod = {}
+    for obj in objects:
+        mesh = getattr(obj, "data", None)
+        keys = getattr(getattr(mesh, "shape_keys", None), "key_blocks", None)
+        if not keys:
+            continue
+        prefix = ObjectPrefixHelper.extract_prefix_info(obj.name)
+        if not prefix:
+            continue
+        parts = ObjectPrefixHelper.parse_prefix_parts(prefix[0])
+        index_count = parts.get("index_count")
+        if (
+            index_count
+            and len(mesh.polygons) * 3 == coerce_index(index_count, field="index_count")
+            and _has_native_expression_keys(obj)
+        ):
+            continue
+        indices = set(native_morph_driver.shape_key_runtime_slot_by_index(keys.keys()))
+        if indices:
+            lod_name, _bare = WorkSpaceHelper.parse_lod_unique_str(prefix[0])
+            targets_by_lod.setdefault(lod_name.upper(), []).append(indices)
+
+    if not targets_by_lod:
+        return False
+    for record in WorkSpaceHelper.get_submesh_folder_records():
+        targets = targets_by_lod.get(record["lod_name"], ())
+        if not targets:
+            continue
+        folder = Path(record["folder_path"])
+        for metadata in folder.glob(f"TYPE_*/{record['bare_name']}.json"):
+            try:
+                with metadata.open(encoding="utf-8-sig") as file:
+                    payload = json.load(file)
+            except (OSError, ValueError):
+                continue
+            keys = native_morph_driver.parse_native_morph_keys(payload.get("ShapeKeysInfo", {}))
+            native_indices = {key.shape_key_index for key in keys}
+            if any(indices <= native_indices for indices in targets):
+                return True
+    return False
+
+
 def build_quick_export_temp_tree(objects):
     """按物体列表建一棵临时蓝图树（Object Info → Object Group → Output）。
 
@@ -465,7 +521,10 @@ def build_quick_export_temp_tree(objects):
 
     group_node.location = (300, max(0, (object_count - 1) * -90))
     output_node.location = (650, group_node.location.y)
-    if any(_has_native_expression_keys(obj) for obj in objects):
+    if (
+        any(_has_native_expression_keys(obj) for obj in objects)
+        or has_merged_native_expression_keys(objects)
+    ):
         shape_node = tree.nodes.new("SSMTNode_PostProcess_ShapeKey")
         shape_node.direct_export_mode = True
         tree.links.new(output_node.outputs[0], shape_node.inputs[0])

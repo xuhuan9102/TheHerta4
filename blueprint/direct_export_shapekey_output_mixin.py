@@ -1402,13 +1402,6 @@ class DirectShapeKeyOutputMixin:
             if drawib_model is None:
                 continue
 
-            import_json_dict = getattr(drawib_model, "import_json_dict", {}) or {}
-            shape_keys_info = import_json_dict.get("ShapeKeysInfo", {}) or {}
-            native_keys = native_morph.parse_native_morph_keys(shape_keys_info)
-            if not native_keys:
-                continue
-            metadata_key_count += len(native_keys)
-
             slot_data = hash_slot_data_map.get(logical_hash, {}) or {}
             shape_key_names = list(
                 OrderedDict.fromkeys(
@@ -1417,6 +1410,12 @@ class DirectShapeKeyOutputMixin:
                     for name in per_slot_names.keys()
                 )
             )
+            native_keys = self._native_morph_keys_for_export(
+                logical_hash, drawib_model, shape_key_names
+            )
+            if not native_keys:
+                continue
+            metadata_key_count += len(native_keys)
             slot_map = native_morph.shape_key_runtime_slot_by_index(shape_key_names)
             if not slot_map:
                 continue
@@ -1967,6 +1966,10 @@ class DirectShapeKeyOutputMixin:
                     ])
             else:
                 block_lines.append(f"    {res_to_bind[0]} = copy cs-u5")
+            if logical_hash in native_hashes:
+                for _plan, skin_input in self._merged_native_morph_carriers(logical_hash):
+                    if f"[{skin_input}]" in sections:
+                        block_lines.append(f"    {skin_input} = copy cs-u5")
             block_lines.extend([
                 "    cs-u5 = null",
                 *[f"    {reg} = null" for reg in sorted(list(set(t_registers_to_null)))],
