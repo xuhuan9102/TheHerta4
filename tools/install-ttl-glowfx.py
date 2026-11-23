@@ -130,6 +130,36 @@ def halo_sections():
     return "\n\n".join(sections) + "\n"
 
 
+def patch_opaque_depth(text):
+    name = "CustomShaderGlowFXOpaqueDepth"
+    if f"[{name}]" in text:
+        return text
+
+    anchor = (
+        "    run = BuiltInCommandListUnbindAllRenderTargets\n"
+        "    o0 = ref ResourceSavedO0\n"
+        "    ResourceSavedO0 = null\n"
+        "    x180 = $bak_x180\n"
+        "    $layers = 0\n"
+    )
+    text = replace_once(text, anchor, (
+        "    if ResourceSceneDepth !== null\n"
+        f"        run = {name}\n"
+        "    endif\n"
+        + anchor
+    ))
+    shader = ini_section(name, [
+        r"vs = shaders\composite.hlsl", r"ps = shaders\glow_fx_opaque_depth.hlsl",
+        "hs = null", "ds = null", "gs = null", "cull = none", "topology = triangle_list",
+        "depth_enable = true", "depth_write_mask = all", "depth_func = greater_equal",
+        "stencil_enable = false", "run = BuiltInCommandListUnbindAllRenderTargets",
+        "run = CommandListGlowFXBindDepthLayers", "ps-t116 = null",
+        "oD = set_viewport ResourceSceneDepth", "draw = 3, 0",
+        "run = CommandListGlowFXUnbindDepthLayers",
+    ])
+    return text.rstrip() + "\n\n" + shader + "\n"
+
+
 def patch_config(text):
     if "global locked $version = 0.52\n" not in text:
         raise ValueError("This extension requires EFMITTL 0.5.2")
@@ -149,7 +179,7 @@ def patch_config(text):
             raise ValueError("Unexpected EFMITTL forward VS declaration pattern")
         text = replace_once(text, header + legacy_pattern + "\n", header + forward_pattern + "\n")
     if HALO_MARKER in text:
-        return text
+        return patch_opaque_depth(text)
 
     capture = (ASSETS / "EFMITTL/glow_fx_sections.ini").read_text(encoding="utf-8")
     if "[CommandListCaptureGlowFX]" in text:
@@ -200,7 +230,8 @@ def patch_config(text):
         "    endif\n"
     ))
     halo = (ASSETS / "EFMITTL/glow_fx_halo.ini").read_text(encoding="utf-8")
-    return "\n\n".join((text.rstrip(), capture.rstrip(), halo.rstrip(), halo_sections().rstrip())) + "\n"
+    combined = "\n\n".join((text.rstrip(), capture.rstrip(), halo.rstrip(), halo_sections().rstrip())) + "\n"
+    return patch_opaque_depth(combined)
 
 
 def edit_ini(path, edit):
