@@ -2886,13 +2886,21 @@ RWBuffer<float4> Result : register(u0);
                         "time": 1,
                     }
                 )
-                runner.variables[runner.prefix + "enabled"] = 0
+                cloth = runner.prefix + cn + "_"
+                runner.variables[cloth + "activated"] = 0
                 runner.execute("TestDrawGate")
                 self.assertEqual(runner.variables["$ordinary_called"], 1)
                 self.assertEqual(runner.dispatches, 0)
-                runner.variables["$ordinary_called"] = 0
-                runner.variables[runner.prefix + "enabled"] = 1
-                runner.variables["time"] = 2
+                runner.resources[f"ResourceSSMTCloth_{cn}_unit_GestureHit"] = runner.resource(
+                    f"ResourceDragPinnedComponentInfo_{cn}_unit"
+                )
+                runner.variables.update({
+                    "$ordinary_called": 0,
+                    "$isMouseButtonDown": 1,
+                    cloth + "pointer_held": 1,
+                    cloth + "intent": 2,
+                    "time": 2,
+                })
                 runner.execute("TestDrawGate")
                 self.assertEqual(runner.variables["$ordinary_called"], 0)
                 self.assertGreater(runner.dispatches, 0)
@@ -3248,6 +3256,37 @@ RWBuffer<float4> Result : register(u0);
                 runner.close()
 
     @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_empty_native_cannot_match_an_unused_zero_palette(self):
+        spec = importlib.util.spec_from_file_location(
+            "empty_palette_gpu", Path(__file__).resolve().parents[1] / "tools/check_drag_cloth.py"
+        )
+        gpu = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gpu)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root)
+            node._emit_sections(sections, [comp], "unit")
+            r = gpu.GeneratedCloth(root, sections, comp)
+            prefix = "ResourceSSMTCloth_abc123_unit_"
+            try:
+                bind = np.fromfile(root / comp["cloth"]["directory"] / "bind.buf", "<f4").reshape(-1, 10)
+                r.external(prefix + "BindInput", bind, 40, structured=True)
+                r.external(prefix + "NativeInput", np.zeros_like(bind), 40, structured=True)
+                r.external(prefix + "SkinPalette_s1", np.eye(4, dtype=np.float32)[:3], 16, 2)
+                r.external(prefix + "SkinPalette_s2", np.zeros((3, 4), np.float32), 16, 2)
+                r.execute("CustomShaderSSMTClothG0Select_abc123_unit")
+                resource = r.resource(prefix + "G0_Decision")
+                decision = r.gpu.read_bytes(resource.pointer, resource.size).view("<f4").reshape(-1, 4)
+                self.assertEqual(decision[0, 3], 0, "an empty output must not match an unused zero skeleton")
+                r.external(prefix + "NativeInput", bind, 40, structured=True)
+                r.execute("CustomShaderSSMTClothG0Select_abc123_unit")
+                decision = r.gpu.read_bytes(resource.pointer, resource.size).view("<f4").reshape(-1, 4)
+                self.assertEqual(decision[0, 0], 1)
+                self.assertEqual(decision[0, 3], 1)
+            finally:
+                r.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
     def test_unready_native_frame_does_not_poison_first_generated_drag(self):
         path = Path(__file__).resolve().parents[1] / "tools/check_drag_cloth.py"
         spec = importlib.util.spec_from_file_location("startup_cloth_gpu", path)
@@ -3385,7 +3424,7 @@ RWBuffer<float4> Result : register(u0);
                 self.assertEqual(runner.resources["vb0"].pointer, source.pointer)
                 self.assertEqual(runner.resources["vb2"].stride, 16)
                 count = runner.dispatches
-                runner.variables[runner.prefix + "enabled"] = 0
+                runner.variables["$ssmtdrag_drag_enabled_unit"] = 1
                 np.testing.assert_array_equal(runner.frame(), native)
                 self.assertEqual(runner.dispatches, count)
             finally:

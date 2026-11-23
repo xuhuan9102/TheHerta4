@@ -23,7 +23,9 @@ void main(uint3 dispatch:SV_DispatchThreadID)
     {
         uint row=BodyVertices[(sampleIndex*7919u)%bodyIndices];if(row>=count)continue;
         float3 p=Bind[row].position,target=Native[row].position;
-        if(!all(isfinite(p)) || !all(isfinite(target)) || dot(Bind[row].normal,Bind[row].normal)<.01)continue;
+        float3 targetNormal=Native[row].normal;
+        if(!all(isfinite(p)) || !all(isfinite(target)) || !all(isfinite(targetNormal)) ||
+           dot(Bind[row].normal,Bind[row].normal)<.01 || dot(targetNormal,targetNormal)<.01)continue;
         float4 weights=OriginalBlend[row*2];uint4 indices=asuint(OriginalBlend[row*2+1]);
         float3 p1=0,p2=0;float total=0;
         [unroll]for(uint k=0;k<4;++k)
