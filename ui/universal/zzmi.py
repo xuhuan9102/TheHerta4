@@ -119,20 +119,28 @@ def _merged_palette_profile() -> dict | None:
     """
     try:
         from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
+        from ...common.zzmi_cross_group_palette import load_profile, get_profile_path
     except Exception:
         return None
+    per_lod = _zzmi_prop_flag("zzmi_fusion_per_lod", False)
+    workspace_folder = str(GlobalConfig.path_workspace_folder() or "") if per_lod else ""
+    if per_lod and workspace_folder:
+        # 按 LOD 分批时，**先**看本 LOD 自己的方案文件：类属性里只留着最后一批
+        # 导入算出的方案（单例），先命中单例会让 LOD0 用上 LOD1 的池表。
+        lod_folder = os.path.join(workspace_folder, _zzmi_scope_lod())
+        try:
+            lod_profile_path = get_profile_path(lod_folder)
+        except Exception:
+            lod_profile_path = ""
+        if lod_profile_path and os.path.isfile(lod_profile_path):
+            loaded = load_profile(lod_folder, required=False)
+            if isinstance(loaded, dict) and loaded.get("components"):
+                return loaded
     profile = getattr(ZZMISkeletonMergeHelper, "cross_group_profile", None)
     if isinstance(profile, dict):
         return profile
     try:
-        from ...common.zzmi_cross_group_palette import load_profile
         workspace_folder = str(GlobalConfig.path_workspace_folder() or "")
-        # 按 LOD 分批导出时，每个 LOD 有自己的方案文件（<工作区>/<LOD>/ZZMI_CrossGroupPalette.json）；
-        # 目录不存在或没文件时退回工作区级（单 LOD 行为不变）。
-        if workspace_folder and _zzmi_prop_flag("zzmi_fusion_per_lod", False):
-            lod_folder = os.path.join(workspace_folder, _zzmi_scope_lod())
-            if os.path.isdir(lod_folder):
-                workspace_folder = lod_folder
     except Exception:
         return None
     if not workspace_folder:
@@ -7619,11 +7627,9 @@ class ExportZZMI(ExportUnity):
         # 只是不需要 cb1 / 拆分绘制那套运行时。这里按**原始开关**判，好让「开关开着
         # 但本次会话没有方案数据」也能落一条可见的提示，而不是静默退回历史产物。
         if _zzmi_prop_flag("cross_group_merged_vgmap_test", True):
-            from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
-
-            profile = getattr(
-                ZZMISkeletonMergeHelper, "cross_group_profile", None
-            )
+            # 走统一的方案解析：按 LOD 分批时它会优先读本 LOD 的方案文件，
+            # 直接读类属性会拿到最后一批导入算出的那份（别的 LOD 的池表）。
+            profile = _merged_palette_profile()
             if profile is None:
                 print(
                     "[ZZMI骨骼合并] 跨组开关开着，但本次会话没有骨骼池方案数据，"
@@ -8721,6 +8727,16 @@ class ExportZZMI(ExportUnity):
             # 注意：pre-87 基底里没有「后处理节点接管 _zzmi_lod_exports」的读者，
             # 所以这里必须**当场发布**；把 staging 塞给 blueprint 再 return 会让
             # 主 ini / 资源永远不落盘（带后处理节点的蓝图必现）。
+            # 发布前先按真实 Mod 目录做一次 skip 预判：staging 是空的，贴图计划的
+            # "目标已存在就不覆盖用户文件"在这层永远判不出来，不预判会覆盖手改贴图。
+            try:
+                skipped = TextureExportPlan.skip_entries_existing_in(
+                    staging.name, os.path.dirname(main_ini)
+                )
+                if skipped:
+                    print(f"[ZZMI 按 LOD 导出] 跳过 {skipped} 个真实 Mod 已存在的贴图（不覆盖用户文件）")
+            except Exception as exc:  # pragma: no cover - 保守：预判失败不阻塞发布
+                print(f"[ZZMI 按 LOD 导出] 贴图 skip 预判失败（继续发布）：{exc}")
             TextureExportPlan.finalize(staging.name)
             publish_lod_exports(exports, main_ini, buffers_only=method_name == "export_buffers_only")
         except Exception:

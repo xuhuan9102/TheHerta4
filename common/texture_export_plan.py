@@ -238,6 +238,34 @@ class TextureExportPlan(object):
         cls._textures_dir = ""
 
     @classmethod
+    def skip_entries_existing_in(cls, staging_root: str, real_root: str) -> int:
+        """把「真实 Mod 里已有同名文件」的计划项标记为已落盘（跳过 staging → 不覆盖用户文件）。
+
+        按 LOD 分批导出时贴图先写进 staging，`overwrite_policy="skip"` 在空 staging 上
+        永远判不出"目标已存在"，发布阶段就会覆盖真实目录里用户手改过的贴图。这里在
+        finalize 之前按真实根做一次预判：命中的条目既不搬进 staging，也不参与发布。
+        返回被跳过的条目数。
+        """
+        import os as _os
+
+        skipped = 0
+        real_root = _os.path.abspath(real_root)
+        staging_root = _os.path.abspath(staging_root)
+        for entry in cls._entries:
+            if getattr(entry, "materialized", False):
+                continue
+            if getattr(entry, "overwrite_policy", "skip") == "overwrite":
+                continue
+            rel = _os.path.relpath(_os.path.abspath(entry.target_folder), staging_root)
+            if rel.startswith(".."):
+                continue
+            real_path = _os.path.join(real_root, rel, entry.final_filename)
+            if _os.path.exists(real_path):
+                entry.materialized = True
+                skipped += 1
+        return skipped
+
+    @classmethod
     def _reset_state(cls):
         cls._entries = []
         cls._warmed_sources = {}

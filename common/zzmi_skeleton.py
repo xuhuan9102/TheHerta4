@@ -1648,6 +1648,9 @@ class ZZMISkeletonMergeHelper:
         # 快路径必须按**本次要的口径**校验：开跨组合并时，缓存里的 VGMap 必须是
         # 池槽位，并且池方案文件得在盘上（两者缺一就无法确认编号域，而「看起来
         # 有 VGMap」正是把历史分组编号当成合并成果的入口）。
+        # 按 LOD 分批时，池方案文件在 <工作区>/<LOD>/ 下：门控必须看本批自己的那份，
+        # 否则根文件不存在会把 cross 缓存判成"没有方案"而永久跳过重建。
+        profile_root = os.path.join(workspace_root, _lod) if _lod else workspace_root
         expect_cross = bool(cls.cross_group_merged_enabled())
         pool_profile_ready = False
         if expect_cross:
@@ -1655,7 +1658,7 @@ class ZZMISkeletonMergeHelper:
                 from .zzmi_cross_group_palette import get_profile_path
 
                 pool_profile_ready = os.path.isfile(
-                    get_profile_path(workspace_root)
+                    get_profile_path(profile_root)
                 )
             except Exception:  # pragma: no cover - 磁盘异常
                 pool_profile_ready = False
@@ -2264,7 +2267,6 @@ class ZZMISkeletonMergeHelper:
 
         # 每个 LOD 各写自己的骨骼池方案：profile 是**工作区单文件**，
         # 逐 LOD 共用会让后一个 LOD 覆盖前一个（前一个 LOD 的 VGMap 与最终方案不符）。
-        profile_root = os.path.join(workspace_root, _lod) if _lod else workspace_root
         cross_plan = (
             cls._cross_group_plan_or_none(ready_groups)
             if cls.cross_group_merged_enabled()
@@ -2547,5 +2549,6 @@ class ZZMISkeletonMergeHelper:
         if failure_parts:
             return False, success_message + "；" + "；".join(failure_parts)
         return written > 0, success_message
+
 
 
