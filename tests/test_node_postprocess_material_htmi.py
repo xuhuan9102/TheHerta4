@@ -2882,7 +2882,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertIn(f"${BS}EFMITTL{BS}first = 34", body)
             self.assertIn(f"Resource{BS}EFMITTL{BS}Mask = ref Resource_TTLMap_Body", body)
             self.assertIn(f"${BS}EFMITTL{BS}mask_channel = 3", body)
-            self.assertIn(f"${BS}EFMITTL{BS}mask_invert = 1", body)
+            self.assertIn(f"${BS}EFMITTL{BS}mask_invert = 0", body)
             self.assertIn("[Resource_TTLMap_Body]", sections)
             # 材质名不带数值就不写 alpha：库按「有遮罩 ⇒ 1，交给遮罩决定」处理。
             self.assertNotIn(f"${BS}EFMITTL{BS}alpha", body)

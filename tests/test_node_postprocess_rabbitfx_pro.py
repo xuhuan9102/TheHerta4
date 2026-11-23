@@ -2652,6 +2652,21 @@ class GlowFXTests(unittest.TestCase):
         node.execute_postprocess(self.export_dir)
         self.assertEqual(_read_ini(self.ini_path).count("run = CommandListEFMIGlowFXRun"), 1)
 
+    def test_efmi_glow_matches_both_forward_vertex_layouts(self):
+        runtime = (ROOT / "Toolset/glow_fx/EFMI/GlowFX.ini").read_text(encoding="utf-8")
+        pattern = runtime.split("[ShaderRegexEFMIGlowFXLitVS.Pattern]\n", 1)[1].splitlines()[0]
+        declaration = "\n".join((
+            "vs_5_0", "dcl_constantbuffer CB0[82], immediateIndexed",
+            "dcl_resource_structured t0, 16", "dcl_input v1.xy",
+            "dcl_input_sgv v10.x, instance_id", "dcl_output_siv o0.xyzw, position",
+            "dcl_output o1.xy", "dcl_output o2.xyz", "dcl_output o3.xyz",
+            "dcl_output o4.xyzw", "dcl_output o5.xyz", "dcl_output o6.xyz", "dcl_output o7.xyz", "",
+        ))
+        self.assertRegex(declaration + "dcl_output o8.xyz\ndcl_output o9.x\n", pattern)
+        extended = declaration + "dcl_output o8.xyzw\ndcl_output o9.xyz\ndcl_output o10.x\n"
+        self.assertRegex(extended, pattern)
+        self.assertNotRegex(extended.replace("dcl_output o1.xy\n", "dcl_output o1.xyz\n"), pattern)
+
     def test_glowfx_preserves_ttl_draw_and_primes_its_emission(self):
         marker = "; MaterialRabbitFX glow-ttl"
         section = (

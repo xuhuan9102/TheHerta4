@@ -133,6 +133,21 @@ def halo_sections():
 def patch_config(text):
     if "global locked $version = 0.52\n" not in text:
         raise ValueError("This extension requires EFMITTL 0.5.2")
+    # Both forward variants pass position and the primary UV in o0 and o1.
+    # Use the same declaration pattern as the standalone replay shader.
+    standalone = (ASSETS / "EFMI/GlowFX.ini").read_text(encoding="utf-8")
+    _, _, replay_pattern = standalone.partition("[ShaderRegexEFMIGlowFXLitVS.Pattern]\n")
+    forward_pattern = replay_pattern.split("\n", 1)[0]
+    header = "[ShaderRegexEFMITTLLitVS.Pattern]\n"
+    _, _, capture_pattern = text.partition(header)
+    current_pattern = capture_pattern.split("\n", 1)[0]
+    if not current_pattern or not forward_pattern:
+        raise ValueError("Could not locate the EFMI forward VS declaration pattern")
+    if current_pattern != forward_pattern:
+        legacy_pattern = forward_pattern.split(r"(?:dcl_output o8", 1)[0] + r"dcl_output o8\.xyz\ndcl_output o9\.x\n"
+        if current_pattern != legacy_pattern:
+            raise ValueError("Unexpected EFMITTL forward VS declaration pattern")
+        text = replace_once(text, header + legacy_pattern + "\n", header + forward_pattern + "\n")
     if HALO_MARKER in text:
         return text
 

@@ -70,11 +70,9 @@ _EFMITTL_KEY = "EFMITTL"
 _EFMITTL_LIBRARY_FILE = os.path.join(_EFMITTL_KEY, "translucency.ini")
 _EFMITTL_MASK_PARAM = "Resource\\EFMITTL\\Mask"
 _EFMITTL_DRAW_LINE = "run = CommandList\\EFMITTL\\Draw"
-# 遮罩默认读透明通道（3 = A）：库自己的默认是 0（R），我们不跟它，每次显式写 3。
-# 提取工具的透明通道贴图四个通道同值，所以 3 读到的就是那张遮罩本身；方向与 ZZMI
-# 的 TTL 一致：mask_invert = 1。
+# TTLMap 的 A 通道存不透明度。EFMITTL 的 invert=0 直接使用 A。
 _EFMITTL_MASK_CHANNEL_LINE = "$\\EFMITTL\\mask_channel = 3"
-_EFMITTL_MASK_INVERT_LINE = "$\\EFMITTL\\mask_invert = 1"
+_EFMITTL_MASK_INVERT_LINE = "$\\EFMITTL\\mask_invert = 0"
 _EFMITTL_DRAW_RE = re.compile(
     r'^(?P<indent>\s*)drawindexed(?:instanced)?\s*=\s*(?P<args>[^;]+?)\s*$',
     re.IGNORECASE,
@@ -2662,7 +2660,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
             Resource\\EFMITTL\\Mask = ref ResourceTTLMap_Body
             $\\EFMITTL\\mask_channel = 3
-            $\\EFMITTL\\mask_invert = 1
+            $\\EFMITTL\\mask_invert = 0
             $\\EFMITTL\\count = 59679
             $\\EFMITTL\\first = 0
             run = CommandList\\EFMITTL\\Draw
