@@ -2012,6 +2012,28 @@ class ZZMIMergedMetadataGateTests(unittest.TestCase):
             )
         )
 
+    def test_corrupt_lod_profile_rebuilds_cross_group_cache(self):
+        helper = ZZMISkeletonMergeHelper
+        ok, message = helper.ensure_skeleton_data(str(self.ws), self.unique_strs, _lod="LOD0")
+        self.assertTrue(ok, message)
+        for _, json_path, payload in _list_submesh_jsons(str(self.ws)):
+            payload["SkeletonMergeMode"] = "cross_group"
+            Path(json_path).write_text(json.dumps(payload), encoding="utf-8")
+
+        palette_name = f"{PKG}.common.zzmi_cross_group_palette"
+        with mock.patch.dict(sys.modules):
+            palette = _load_module(palette_name, REPO_ROOT / "common" / "zzmi_cross_group_palette.py")
+            profile = Path(palette.get_profile_path(str(self.ws / "LOD0")))
+            profile.parent.mkdir(parents=True, exist_ok=True)
+            profile.write_text("{broken", encoding="utf-8")
+            with mock.patch.object(helper, "_cross_group_plan_or_none", return_value=None) as rebuild:
+                ok, message = helper.ensure_skeleton_data(str(self.ws), self.unique_strs, _lod="LOD0")
+            self.assertTrue(ok, message)
+            rebuild.assert_called_once()
+            self.assertFalse(profile.exists())
+            self.assertTrue(all(payload["SkeletonMergeMode"] == "group"
+                                for _, _, payload in _list_submesh_jsons(str(self.ws))))
+
 
 if __name__ == "__main__":
     unittest.main()

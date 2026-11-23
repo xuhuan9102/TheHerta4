@@ -2144,10 +2144,10 @@ class GarmentExportTests(unittest.TestCase):
                 traces = []
                 dispatch = r.gpu.dispatch
 
-                def trace(shader, groups):
+                def trace(shader, groups, groups_y=1, groups_z=1):
                     path = next(path for path, value in r.shaders.items() if value == shader)
                     traces.append((path.name, int(r.params[127, 0])))
-                    return dispatch(shader, groups)
+                    return dispatch(shader, groups, groups_y, groups_z)
 
                 r.gpu.dispatch = trace
                 for _ in range(12):
