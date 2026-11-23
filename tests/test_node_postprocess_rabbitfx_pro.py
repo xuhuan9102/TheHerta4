@@ -129,7 +129,7 @@ _install_module(
 
 _install_module(
     f"{PKG}.common.logic_name",
-    LogicName=types.SimpleNamespace(HIMI="HIMI", NTEMI="NTEMI"),
+    LogicName=types.SimpleNamespace(EFMI="EFMI", HIMI="HIMI", NTEMI="NTEMI"),
 )
 _install_module(
     f"{PKG}.common.global_config",
@@ -2576,11 +2576,16 @@ class GlowFXTests(unittest.TestCase):
         self.assertIn(r"Resource\ZZMI\GlowMap = ref ResourceTexture_Glowmap_Personal", content)
         self.assertNotIn(r"Resource\RabbitFX\Glowmap", content)
         self.assertNotIn(r"CommandList\RabbitFX\Run", content)
-        self.assertIn(r"$glowfx_h = 12.0", content)
-        self.assertIn(r"$glowfx_s = -4.0", content)
-        self.assertIn(r"$glowfx_v = 6.0", content)
-        self.assertIn(r"$glowfx_brightness = 2.5", content)
-        self.assertIn(r"$glowfx_interpolate = 0.75", content)
+        self.assertIn(r"$glowfx_h = $glowfx_abcd1234_h", content)
+        self.assertIn(r"$glowfx_s = $glowfx_abcd1234_s", content)
+        self.assertIn(r"$glowfx_v = $glowfx_abcd1234_v", content)
+        self.assertIn(r"$glowfx_brightness = $glowfx_abcd1234_brightness", content)
+        self.assertIn(r"$glowfx_interpolate = $glowfx_abcd1234_interpolate", content)
+        self.assertIn("global $glowfx_abcd1234_h = 12.0", content)
+        self.assertIn("global $glowfx_abcd1234_s = -4.0", content)
+        self.assertIn("global $glowfx_abcd1234_v = 6.0", content)
+        self.assertIn("global $glowfx_abcd1234_brightness = 2.5", content)
+        self.assertIn("global $glowfx_abcd1234_interpolate = 0.75", content)
 
         draw_index = content.index("drawindexed = 52688, 0, 3")
         bind_index = content.index(
@@ -2613,6 +2618,39 @@ class GlowFXTests(unittest.TestCase):
             "geom_glow_composite_ps.hlsl",
         ):
             self.assertTrue(os.path.isfile(os.path.join(self.export_dir, "res", filename)))
+
+    def test_efmi_glow_replays_all_five_instanced_draw_arguments(self):
+        config = sys.modules[f"{PKG}.common.global_config"].GlobalConfig
+        self.addCleanup(setattr, config, "logic_name", config.logic_name)
+        config.logic_name = "EFMI"
+        draw = "drawindexedinstanced = 864,INSTANCE_COUNT,48,-3,FIRST_INSTANCE"
+        _write_ini(self.ini_path, "\n".join([
+            f"[{GLOW_SECTION}]", "hash = fd054d1d", "if $visible",
+            f"  ; [mesh:{MESH_NAME}]",
+            r"  Resource\RabbitFX\Glowmap = ref Resource_Glowmap_Personal",
+            f"  {draw}", "endif", "",
+        ]))
+        node = _make_glowfx_node(target_items=[_item(_fake_object())])
+
+        node.execute_postprocess(self.export_dir)
+        output = _read_ini(self.ini_path)
+
+        self.assertEqual(output.count(draw), 1)
+        self.assertLess(output.index(draw), output.index("run = CommandListEFMIGlowFXRun"))
+        self.assertIn("  run = CommandListEFMIGlowFXRun", output)
+        for name, value in zip(("count", "instances", "start", "base", "first_instance"),
+                               (864, "INSTANCE_COUNT", 48, -3, "FIRST_INSTANCE")):
+            self.assertIn(f"$efmiglowfx_{name} = {value}", output)
+        self.assertIn("ps = res/efmi_glow_fx_ps.hlsl", output)
+        self.assertIn("blend[0] = add one one", output)
+        self.assertIn("depth_write_mask = zero", output)
+        self.assertNotIn(".Pattern.Replace]", output)
+        self.assertNotIn("SlotFix", output)
+        self.assertNotIn(r"run = CommandList\EFMITTL\Draw", output)
+        self.assertTrue((Path(self.export_dir) / "res" / "efmi_glow_fx_ps.hlsl").is_file())
+
+        node.execute_postprocess(self.export_dir)
+        self.assertEqual(_read_ini(self.ini_path).count("run = CommandListEFMIGlowFXRun"), 1)
 
     def test_glowfx_preserves_ttl_draw_and_primes_its_emission(self):
         marker = "; MaterialRabbitFX glow-ttl"
@@ -2660,12 +2698,21 @@ class GlowFXTests(unittest.TestCase):
         setup = r"Resource\EFMITTL\GlowFXMap = ref Resource_Glowmap_Personal"
         native_call = "\n".join(source.splitlines()[-3:])
         self.assertLess(result.index(setup), result.index(native_call))
-        self.assertIn(r"$\EFMITTL\glowfx_only = 1", result)
-        self.assertIn(r"$\EFMITTL\glowfx_radius = 18", result)
-        self.assertRegex(result, r"\$\\EFMITTL\\glowfx_normalization = [1-9]\d*\.\d+")
+        self.assertIn(r"$\EFMITTL\glowfx_only = $glowfx_abcd1234_only", result)
+        self.assertIn(r"$\EFMITTL\glowfx_radius = $glowfx_abcd1234_radius", result)
+        self.assertIn(
+            r"$\EFMITTL\glowfx_normalization = $glowfx_abcd1234_normalization",
+            result,
+        )
+        self.assertIn("global $glowfx_abcd1234_only = 1", result)
+        self.assertIn("global $glowfx_abcd1234_radius = 18", result)
+        self.assertRegex(
+            result, r"global \$glowfx_abcd1234_normalization = [1-9]\d*\.\d{8}"
+        )
         self.assertIn(r"Resource\EFMITTL\Mask = ref Resource_TTLMap_Silk", result)
         self.assertIn(r"$\EFMITTL\alpha = 0.6", result)
         self.assertEqual(result.count(r"run = CommandList\EFMITTL\Draw"), 1)
+        self.assertIn("global $glowfx_brightness = 1", result)
         self.assertNotIn("CommandListGlowFXRun", result)
         self.assertNotIn("SlotFix", result)
 

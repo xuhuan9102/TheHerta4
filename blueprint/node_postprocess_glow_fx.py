@@ -34,6 +34,8 @@ from .node_postprocess_rabbitfx_pro import (
     _unit_edit_scope,
 )
 from .node_postprocess_base import SSMTNode_PostProcess_Base
+from ..common.global_config import GlobalConfig
+from ..common.logic_name import LogicName
 from ..common.ttl_protocol import parse_efmi_ttl_draw_call, parse_ttl_draw_call
 from .node_postprocess_rabbitfx import (
     _extract_hash_from_object,
@@ -42,6 +44,9 @@ from .node_postprocess_rabbitfx import (
 
 NODE_IDNAME = "SSMTNode_PostProcess_GlowFX"
 RUN_LINE = "run = CommandListGlowFXRun"
+_EFMI_GLOW_RUN = "run = CommandListEFMIGlowFXRun"
+_EFMI_GLOW_PASS = "vs == 73414 && o0 !== null && o2 === null && oD !== null"
+_EFMI_DRAW_PARAMS = ("count", "instances", "start", "base", "first_instance")
 _TTL_DRAW_LINE = r"run = CommandList\TTL\Draw".casefold()
 _EFMI_TTL_DRAW_LINE = r"run = CommandList\EFMITTL\Draw".casefold()
 _DRAW_GUARD = 'if !$\\SlotFix\\is_outline_shader'
@@ -54,8 +59,23 @@ _LEGACY_GLOW_REF_RE = re.compile(r"^Resource\\GlowFX\\Glowmap\s*=\s*ref\s+(\S+)"
 _EFMI_GLOW_REF_RE = re.compile(r"^Resource\\EFMITTL\\GlowFXMap\s*=\s*ref\s+(\S+)", re.IGNORECASE)
 
 
-def _glowfx_param(name):
-    return f"$glowfx_{name.lower()}"
+_GLOW_VAR_RE = re.compile(r"^\$glowfx_[a-z0-9_]+$")
+
+
+def _glowfx_param(name, tag=None):
+    """GlowFX 工作变量；给了 tag 就是该节点实例的 [Constants] 参数。
+
+    ``$glowfx_h`` 是共享 CommandList 读的工作变量；``$glowfx_<tag>_h`` 是
+    面板值，只在 [Constants] 声明一次，draw 段做「变量 = 变量」。
+    """
+    param = re.sub(r"[^a-z0-9_]", "_", str(name).lower())
+    if tag is None:
+        return f"$glowfx_{param}"
+    safe_tag = re.sub(r"[^a-z0-9_]", "_", str(tag).lower()).strip("_") or "0"
+    variable = f"$glowfx_{safe_tag}_{param}"
+    if not _GLOW_VAR_RE.fullmatch(variable):
+        raise ValueError(f"Glow FX 参数变量名非法：{variable}")
+    return variable
 
 
 def _halo_normalization(radius):
@@ -78,12 +98,19 @@ _RESET_BEGIN = "; === GlowFX Reset ==="
 _RESET_END = "; === End GlowFX Reset ==="
 
 _VAR_PREFIX = "$glowfx_"
+_GLOW_GLOBAL_RE = re.compile(
+    r"^\s*global\s+(?:persist\s+)?\$glowfx_", re.IGNORECASE
+)
+_GLOW_PARAM_NAMES = (
+    "h", "s", "v", "brightness", "interpolate", "only", "radius", "normalization",
+)
 _VAR_IF_RE = re.compile(r"^if\s+\$glowfx_", re.IGNORECASE)
 _IF_LINE_RE = re.compile(r"^if\s+", re.IGNORECASE)
 _DRAWINDEXED_RE = re.compile(
     r"^(?P<indent>\s*)drawindexed\s*=\s*(?P<args>[^;]+)",
     re.IGNORECASE,
 )
+_DRAWINDEXEDINSTANCED_RE = re.compile(r"^drawindexedinstanced\s*=\s*([^;]+)", re.IGNORECASE)
 _RABBITFX_PARAM_RE = re.compile(
     r"^\$\\RabbitFX\\(?:h|s|v|brightness|interpolate)\s*=",
     re.IGNORECASE,
@@ -211,9 +238,10 @@ def _draw_arguments(line):
     return args
 
 
-def _glow_draws(lines):
+def _glow_draws(lines, efmi=False):
     for index, line in enumerate(lines):
-        command = str(line).partition(";")[0].strip().casefold()
+        text = str(line).partition(";")[0].strip()
+        command = text.casefold()
         if command == _TTL_DRAW_LINE:
             parsed = parse_ttl_draw_call(lines, index)
             if parsed is not None:
@@ -225,9 +253,18 @@ def _glow_draws(lines):
                 start, args = parsed
                 yield start, index, (*args, 0), "EFMITTL"
         else:
+            if efmi and (match := _DRAWINDEXEDINSTANCED_RE.match(text)):
+                args = [part.strip() for part in match.group(1).split(",")]
+                if len(args) == len(_EFMI_DRAW_PARAMS) and all(args):
+                    yield index, index, args, "EFMI"
+                continue
             args = _draw_arguments(line)
             if args is not None:
-                yield index, index, args, None
+                if efmi:
+                    count, start, base = args
+                    yield index, index, (count, "1", start, base, "0"), "EFMI"
+                else:
+                    yield index, index, args, None
 
 
 def _surface_mode_get(node):
@@ -474,9 +511,6 @@ class SSMTNode_PostProcess_GlowFX(
         if variable and variable != self.effect_switch_variable:
             self.effect_switch_variable = variable
         if getattr(self, "enable_native_surface_flow", False):
-            from ..common.global_config import GlobalConfig
-            from ..common.logic_name import LogicName
-
             if GlobalConfig.logic_name != LogicName.ZZMI:
                 raise ValueError("独立表面流光需要 ZZMI（DX11）导出预设")
         conflicts = []
@@ -570,6 +604,7 @@ class SSMTNode_PostProcess_GlowFX(
         }
 
     def _process_ini_file(self, ini_file, targets, records=None):
+        self._glowfx_efmi_used = False
         with open(ini_file, "r", encoding="utf-8") as handle:
             content = handle.read()
 
@@ -592,17 +627,23 @@ class SSMTNode_PostProcess_GlowFX(
         self._emit_effect_switch(sections)
         if generated:
             run = (RUN_LINE + self._halo_suffix()).casefold()
-            if any(line.strip().casefold() == run for lines in sections.values() for line in lines):
+            commands = {line.strip().casefold() for lines in sections.values() for line in lines}
+            efmi_replay = _EFMI_GLOW_RUN.casefold() in commands
+            if run in commands:
                 self._embed_glow_runtime(sections)
-            else:
+            elif not efmi_replay:
                 constants = sections.setdefault("[Constants]", [])
                 for name, default in (("h", 0), ("s", 0), ("v", 0), ("brightness", 1), ("interpolate", 0)):
                     declaration = f"global $glowfx_{name} = {default}"
                     if declaration not in constants:
                         constants.append(declaration)
-            if self.enable_glow and self._breathing():
-                self._ensure_glow_constants(sections)
-                self._ensure_breath_clock(sections)
+            if efmi_replay:
+                self._embed_efmi_glow_runtime(sections, os.path.dirname(ini_file))
+            if self.enable_glow:
+                self._ensure_glow_parameter_constants(sections)
+                if self._breathing():
+                    self._ensure_glow_constants(sections)
+                    self._ensure_breath_clock(sections)
             if self._has_sibling_rabbitfx_targets():
                 # 同蓝图还有 RabbitFXPro 在用：只清本节点自己的单元，别动别人的运行元素。
                 print(
@@ -958,16 +999,18 @@ class SSMTNode_PostProcess_GlowFX(
         block = _strip_rabbitfx_glow_lines(block, self.fx_profile)
         block = _strip_material_rabbitfx_lines(block)
 
-        draws = list(_glow_draws(block))
+        draws = list(_glow_draws(block, efmi=GlobalConfig.logic_name == LogicName.EFMI))
         if not draws:
             print(f"[GlowFX] 跳过 {unit.get('mesh', '')}: 找不到绘制参数")
             return False
 
-        for start_index, draw_index, draw_args, ttl in reversed(draws):
-            if ttl == "EFMITTL":
+        for start_index, draw_index, draw_args, draw_kind in reversed(draws):
+            if draw_kind == "EFMITTL":
                 self._insert_efmi_glow_draw(block, start_index, draw_index, ref)
+            elif draw_kind == "EFMI":
+                self._insert_efmi_glow_replay(block, draw_index, draw_args, ref)
             else:
-                self._insert_glow_draw(block, start_index, draw_index, draw_args, ref, ttl == "TTL")
+                self._insert_glow_draw(block, start_index, draw_index, draw_args, ref, draw_kind == "TTL")
         lines[start:end] = block
         return True
 
@@ -1037,9 +1080,43 @@ class SSMTNode_PostProcess_GlowFX(
         param_lines.append(_PARAM_END)
         _insert_block(block, start_index, param_lines, indent)
 
+    def _insert_efmi_glow_replay(self, block, draw_index, draw_args, ref):
+        indent = _leading_whitespace(block[draw_index])
+        switch = self._effect_switch_variable()
+        call = [_CALL_BEGIN]
+        if self.emission_only:
+            call.append("endif")
+        if switch:
+            call.append(f"if {switch} != 0")
+        if self.enable_glow:
+            call.extend(self._build_glow_parameter_lines())
+        call.append(f"{GLOW_RESOURCE} = ref {ref}")
+        call.extend(f"$efmiglowfx_{name} = {value}" for name, value in zip(_EFMI_DRAW_PARAMS, draw_args))
+        call.append(_EFMI_GLOW_RUN)
+        if switch:
+            call.append("endif")
+        call.append(_CALL_END)
+        _insert_block(block, draw_index + 1, call, indent)
+        if self.emission_only:
+            keep_original = f"if !({_EFMI_GLOW_PASS})"
+            if switch:
+                keep_original += f" || {switch} == 0"
+            _insert_block(block, draw_index, [_PARAM_BEGIN, keep_original, _PARAM_END], indent)
+
     def _insert_efmi_glow_draw(self, block, start_index, draw_index, ref):
         indent = _leading_whitespace(block[draw_index])
         switch = self._effect_switch_variable()
+        tag = self._var_tag()
+        self._glowfx_efmi_used = True
+        if self.enable_glow:
+            only_value = _glowfx_param("only", tag)
+            radius_value = _glowfx_param("radius", tag)
+            normalization_value = _glowfx_param("normalization", tag)
+        else:
+            # 关闭发光时保持旧导出逐字节不变。
+            only_value = int(self.emission_only)
+            radius_value = self.halo_radius
+            normalization_value = f"{_halo_normalization(self.halo_radius):.8f}"
         setup = [_PARAM_BEGIN]
         if self.enable_glow:
             setup.extend(self._build_glow_parameter_lines())
@@ -1051,9 +1128,9 @@ class SSMTNode_PostProcess_GlowFX(
             r"$\EFMITTL\glowfx_saturation = ($glowfx_s / 100.0) * $glowfx_interpolate",
             r"$\EFMITTL\glowfx_value = ($glowfx_v / 100.0) * $glowfx_interpolate",
             r"$\EFMITTL\glowfx_brightness = $glowfx_brightness",
-            rf"$\EFMITTL\glowfx_only = {int(self.emission_only)}",
-            rf"$\EFMITTL\glowfx_radius = {self.halo_radius}",
-            rf"$\EFMITTL\glowfx_normalization = {_halo_normalization(self.halo_radius):.8f}",
+            rf"$\EFMITTL\glowfx_only = {only_value}",
+            rf"$\EFMITTL\glowfx_radius = {radius_value}",
+            rf"$\EFMITTL\glowfx_normalization = {normalization_value}",
         ])
         if switch:
             setup.append("endif")
@@ -1068,12 +1145,10 @@ class SSMTNode_PostProcess_GlowFX(
         if self._breathing():
             _, values = self._split_breath_lines()
             return [_BREATH_BEGIN, *values, _BREATH_END]
+        tag = self._var_tag()
         return [
-            f"$glowfx_h = {_format_float(self.glow_h)}",
-            f"$glowfx_s = {_format_float(self.glow_s)}",
-            f"$glowfx_v = {_format_float(self.glow_v)}",
-            f"$glowfx_brightness = {_format_float(self.glow_brightness)}",
-            f"$glowfx_interpolate = {_format_float(self.glow_interpolate)}",
+            f"{_glowfx_param(name)} = {_glowfx_param(name, tag)}"
+            for name in ("h", "s", "v", "brightness", "interpolate")
         ]
 
     def _build_breath_lines(self, breath_tick_count=1):
@@ -1111,6 +1186,82 @@ class SSMTNode_PostProcess_GlowFX(
         if begin in present and end in present:
             del present[present.index(begin):present.index(end) + 1]
         present.extend([begin, *clock, end])
+
+    def _ensure_glow_parameter_constants(self, sections):
+        """每个节点实例的每组面板参数在 [Constants] 恰好声明一次。
+
+        同 tag 的旧声明原地更新（改面板值重导只动声明行），不追加第二份。
+        呼吸灯模式下的 h/s/v/brightness/interpolate 是逐帧算出来的，不声明。
+        """
+        if not self.enable_glow:
+            return False
+        tag = self._var_tag()
+        wanted = []
+        if not self._breathing():
+            values = (
+                ("h", _format_float(self.glow_h)),
+                ("s", _format_float(self.glow_s)),
+                ("v", _format_float(self.glow_v)),
+                ("brightness", _format_float(self.glow_brightness)),
+                ("interpolate", _format_float(self.glow_interpolate)),
+            )
+            wanted.extend(
+                f"global {_glowfx_param(name, tag)} = {value}"
+                for name, value in values
+            )
+        if getattr(self, "_glowfx_efmi_used", False):
+            wanted.extend([
+                f"global {_glowfx_param('only', tag)} = {int(self.emission_only)}",
+                f"global {_glowfx_param('radius', tag)} = {self.halo_radius}",
+                f"global {_glowfx_param('normalization', tag)} = "
+                f"{_halo_normalization(self.halo_radius):.8f}",
+            ])
+        if not wanted:
+            return False
+        constants = sections.setdefault("[Constants]", [])
+        safe_tag = re.sub(r"[^a-z0-9_]", "_", tag.lower()).strip("_") or "0"
+        own_re = re.compile(
+            rf"^\s*global\s+(?:persist\s+)?\$glowfx_{re.escape(safe_tag)}_"
+            rf"(?:{'|'.join(_GLOW_PARAM_NAMES)})\s*=",
+            re.IGNORECASE,
+        )
+        changed = False
+        for line in wanted:
+            variable = line.split("=", 1)[0].split()[-1]
+            pattern = re.compile(
+                rf"^\s*global\s+(?:persist\s+)?{re.escape(variable)}\s*=",
+                re.IGNORECASE,
+            )
+            indexes = [
+                index for index, existing in enumerate(constants)
+                if pattern.match(str(existing))
+            ]
+            if indexes:
+                first = indexes[0]
+                if str(constants[first]).strip() != line:
+                    constants[first] = line
+                    changed = True
+                for index in reversed(indexes[1:]):
+                    del constants[index]
+                    changed = True
+                continue
+            own = [
+                index for index, existing in enumerate(constants)
+                if own_re.match(str(existing))
+            ]
+            if own:
+                position = own[-1] + 1
+            else:
+                position = next(
+                    (
+                        index for index, existing in enumerate(constants)
+                        if _GLOW_GLOBAL_RE.match(str(existing))
+                    ),
+                    len(constants),
+                )
+            constants.insert(position, line)
+            changed = True
+        return changed
 
     def _ensure_glow_constants(self, sections):
         tag = self._var_tag()
@@ -1163,6 +1314,22 @@ class SSMTNode_PostProcess_GlowFX(
             if line.strip().casefold() not in existing_present
         )
         sections.update(runtime)
+
+    def _embed_efmi_glow_runtime(self, sections, mod_export_path):
+        source_root = Path(self._resource_source_root())
+        template = source_root / "EFMI" / "GlowFX.ini"
+        source = template.read_text(encoding="utf-8").replace("__GLOW_PASS__", _EFMI_GLOW_PASS)
+        runtime, _ = self._parse_ini(source)
+        constants = sections.setdefault("[Constants]", [])
+        existing = {line.split("=", 1)[0].strip().casefold() for line in constants}
+        constants.extend(
+            line for line in runtime.pop("[Constants]")
+            if line.split("=", 1)[0].strip().casefold() not in existing
+        )
+        sections.update(runtime)
+        output = Path(mod_export_path) / "res"
+        output.mkdir(exist_ok=True)
+        shutil.copy2(source_root / "res" / "efmi_glow_fx_ps.hlsl", output)
 
     def _copy_glow_fx_resources(self, mod_export_path):
         source_dir = os.path.join(self._resource_source_root(), "res")
