@@ -195,6 +195,7 @@ class GeneratedCloth:
             "$cursorX": 800,
             "$screenH": 1080,
             "$isMouseButtonDown": 0,
+            "$inputMode": 0,
         }
         self.current_shader = None
         for line in sections.get("[Constants]", []):
@@ -208,7 +209,6 @@ class GeneratedCloth:
         # Present normally replaces the INI's 1x1 startup dimensions.
         self.variables["$screenW"] = 1920
         self.variables["$screenH"] = 1080
-        self.variables[self.prefix + "enabled"] = 1
         self.variables["$ssmtdrag_drag_enabled_" + namespace] = 2
         # Solver replays explicitly opt into an already grabbed garment.
         # Cold-idle tests clear this flag to exercise the native passthrough.
@@ -490,8 +490,13 @@ class GeneratedCloth:
                 groups = tuple(int(part) for part in value.split(","))
                 self.gpu.dispatch(self.current_shader, *groups)
                 self.dispatches += 1
+            elif key == "store":
+                variable, resource, offset = (part.strip() for part in value.split(","))
+                bound = self.resource(resource)
+                values = self.gpu.read_bytes(bound.pointer, bound.size).view("<f4").ravel()
+                self.variables[variable] = float(values[int(offset)])
             elif key == "clear":
-                resource = self.resource(value)
+                resource = self.resource(value.split()[0])
                 view = self.view(resource, True)
                 zeros = (ct.c_uint * 4)(0, 0, 0, 0)
                 self.gpu.method(
@@ -512,6 +517,10 @@ class GeneratedCloth:
                     source = self.resource(
                         source_name
                     )
+                    if source is None:
+                        self.resources.pop(key, None)
+                        self.gpu.bind(slot, None, writable)
+                        continue
                     if mode not in ("copy", "ref"):
                         same_register_type = bool(re.fullmatch(r"cs-[tu][0-9]+", source_name)) and source_name[3] == key[3]
                         mode = "ref" if source_name.startswith("Resource") or same_register_type else "copy"
@@ -542,6 +551,8 @@ class GeneratedCloth:
                         )
                     self.resources[key] = bound
                     view = self.view(bound, writable)
+                else:
+                    self.resources.pop(key, None)
                 self.gpu.bind(slot, view, writable)
             elif key.startswith("Resource") or key in ("vb0", "vb2"):
                 if value == "null":
@@ -555,6 +566,9 @@ class GeneratedCloth:
                 region = re.fullmatch(r"(.+)->Region\((\d+),(\d+)\)", source)
                 if region:
                     source = region[1]
+                if mode == "ref" and re.fullmatch(r"cs-[tu][0-9]+", source) and source not in self.resources:
+                    self.resources[key] = None
+                    continue
                 if source not in self.resources:
                     try:
                         self.resource(source)
@@ -674,6 +688,8 @@ class GeneratedCloth:
             ]
             self.resources["cs-u0"] = self.resources["so0"]
             self.execute(command.strip("[]"))
+        # The simulated capture aliases the SO only for its capture block.
+        self.resources.pop("cs-u0", None)
         del self.sections[command]
 
     def frame(
@@ -686,6 +702,7 @@ class GeneratedCloth:
         cursor_x=None,
         camera_basis=None,
         advance_time=True,
+        route_gesture=False,
     ):
         # Deferred command-list execution or another diagnostic dispatch can
         # reset context bindings. Each replay frame owns its INI view.
@@ -703,13 +720,8 @@ class GeneratedCloth:
         self.resources["vb0"] = self.resources[
             f'{meta["native_family"]}_G{meta["group"]}_s{slot}'
         ]
+        name = f"ResourceDragPinnedComponentInfo_{self.comp['comp_name']}_{self.ns}"
         if hit_row is not None:
-            name = (
-                "ResourceDragPinnedComponentInfo_"
-                + self.comp["comp_name"]
-                + "_"
-                + self.ns
-            )
             value = self.resource(name)
             data = np.zeros((value.size // 16, 4), np.float32)
             data[0, 0] = 0
@@ -745,6 +757,11 @@ class GeneratedCloth:
                 0,
                 result=None,
             )
+        if not route_gesture:
+            var = f"$ssmtcloth_{self.ns}_{self.comp['comp_name']}_"
+            self.variables[var + "pointer_held"] = int(held)
+            self.variables[var + "intent"] = 2 if held else 0
+            self.resources[f"ResourceSSMTCloth_{self.comp['comp_name']}_{self.ns}_GestureHit"] = self.resource(name)
         self.execute(self.comp["cloth_bind"])
         output = self.resources["vb0"]
         return self.gpu.read_bytes(output.pointer, output.size).reshape(

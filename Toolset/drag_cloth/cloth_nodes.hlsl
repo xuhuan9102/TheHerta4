@@ -1,5 +1,6 @@
 #include "constants.hlsli"
 #include "common.hlsli"
+#include "screen_direction.hlsli"
 Buffer<float4> Rest : register(t75);
 Buffer<uint> Representatives : register(t85);
 Buffer<uint> WearMap : register(t94);
@@ -339,9 +340,7 @@ void Control()
                             b.x=code==3?(Rest[particle*2+1].z>=.5?0:1):(code==1?0:1);
                             float signValue=b.x<.5?-1:1;
                             float3 direction=State[5].xyz*signValue;
-                            // Use the same cursor/basis convention as ordinary
-                            // dragging: local motion = right*dx + basis[9]*dy.
-                            float2 projected=float2(dot(direction,Detect[8].xyz),dot(direction,Detect[9].xyz));
+                            float2 projected=n>9?ClothScreenDirection(direction,Detect[8],Detect[9]):0;
                             float lengthValue=length(projected);
                             bool basisValid=n>9 && Detect[8].w>.5 && Detect[9].w>1e-5;
                             projected=basisValid && isfinite(lengthValue) && lengthValue>1e-8?projected/lengthValue:float2(0,signValue);
@@ -349,7 +348,14 @@ void Control()
                             State[14]=float4(projected,maximum,1);
                         }
                     }
-                    else State[14]=0;
+                    else
+                    {
+                        // Automatically fitted stockings use their posed axis
+                        // even when it projects sideways in the current view.
+                        float2 projected=n>9?ClothScreenDirection(-State[5].xyz,Detect[8],Detect[9]):0;
+                        float lengthValue=length(projected);
+                        State[14]=lengthValue>1e-8?float4(projected/lengthValue,1,2):0;
+                    }
                 }
             }
         }
@@ -360,7 +366,12 @@ void Control()
         {
             float2 motion=float2((cursorX-b.y)/max(IniParams[117].w,1),(cursor-a.w)/screen);
             float delta=clamp(dot(motion,State[14].xy)*1.6,-Config[4].z,Config[4].z);
-            if(!TwoEnded()){a.x=clamp(a.x+delta,0,State[14].z);a.y=a.x;}
+            if(!TwoEnded() && State[14].w>1.5)
+            {
+                if(Config[0].w>.5){a.x=saturate(a.x+delta);a.y=a.x;}
+                else if(b.x<.5)a.x=saturate(a.x+delta);else a.y=saturate(a.y+delta);
+            }
+            else if(!TwoEnded()){a.x=clamp(a.x+delta,0,State[14].z);a.y=a.x;}
             else if(b.x<.5){a.x=clamp(a.x+delta,0,State[14].z);a.y=min(a.y,1-a.x);}
             else{a.y=clamp(a.y+delta,0,State[14].z);a.x=min(a.x,1-a.y);}
             if(Branched()){a.x=0;a.y=min(a.y,Config[14].x/max(1-Config[13].w,.001));}

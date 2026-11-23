@@ -1160,8 +1160,6 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         description="独立生成实时贴身穿脱、褶皱与动态贴合权重；不依赖普通碰撞开关。需要ZZMI合并骨架、衣物与同载体身体碰撞体",
         default=False,
     )
-    cloth_runtime_enabled: bpy.props.BoolProperty(name="运行时默认开启", default=False)
-    cloth_toggle_key: bpy.props.StringProperty(name="穿脱切换键", default="ctrl alt U")
     cloth_reset_key: bpy.props.StringProperty(name="穿脱复位键", default="ctrl alt VK_BACK")
     cloth_drag_sensitivity: bpy.props.FloatProperty(name="穿脱灵敏度", default=2.0, min=.1, max=5.0)
     cloth_surface_gap_mm: bpy.props.FloatProperty(name="贴合间隙（毫米）", description="活动衣片与身体表面的间隙，1毫米对应当前导出模型的0.001单位", default=1.0, min=0, max=30, soft_max=10, precision=2)
@@ -1369,9 +1367,10 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         if self._cloth_enabled() and cloth_supported:
             cloth_box = feature_box.box()
             cloth_box.label(text="实时贴身穿脱（ZZMI 合并骨架）", icon='MOD_CLOTH')
+            cloth_box.label(text="沿行程拖动触发穿脱，其他方向为普通拖拽", icon='INFO')
             cloth_box.label(text="各区域：包含物体=衣物，碰撞体=身体", icon='INFO')
             cloth_box.label(text="区域独立；连通衣物同步，分开的袜子独立", icon='INFO')
-            for prop in ('cloth_runtime_enabled','cloth_toggle_key','cloth_reset_key','cloth_drag_sensitivity','cloth_surface_gap_mm','cloth_sleep_enabled','cloth_adaptive_quality','cloth_self_collision',
+            for prop in ('cloth_reset_key','cloth_drag_sensitivity','cloth_surface_gap_mm','cloth_sleep_enabled','cloth_adaptive_quality','cloth_self_collision',
                          'cloth_fold_height','cloth_fold_spacing','cloth_gather_strength','cloth_stretch_compliance',
                          'cloth_bend_compliance','cloth_velocity_retention','cloth_bend_min_ratio',
                          'cloth_min_height_ratio','cloth_min_span_ratio','cloth_proxy_budget','cloth_up_axis'):
@@ -5605,6 +5604,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             # （0.5 = 节点侧 maxOffset 上限）。非 0 = 覆盖两者（调试用）。
             "w119 = 0",
         ])
+        cloth_var = f"$ssmtcloth_{ns}_{cn}_" if comp.get("cloth") else None
+        if cloth_var:
+            lines += [f"if {cloth_var}jiggle_slot > 0", "\tx119 = 0", "endif"]
         # 碰撞检测参数（防穿模）：仅在模式三/拉扯模式生效。115 选择整面求解，0 兼容旧资源。
         # 显式写全（含关闭时的 x101 = 0），遵守「读了必设」残留纪律。
         collision_grid = comp.get("collision_grid")
@@ -5722,14 +5724,22 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                     skeleton_group, skeleton_occ, skeleton_reason = self._merged_skeleton_binding(
                         sections, comp
                     )
-                    for i, (output, palette) in enumerate(calibrated_inputs.items()):
+                    choices = []
+                    if cloth_var:
+                        choices.extend(
+                            (f"{cloth_var}jiggle_slot == {slot}", f"ResourceSSMTCloth_{cn}_{ns}_SkinPalette_s{slot}")
+                            for slot in (1, 2)
+                        )
+                    choices.extend((f"@vb0 != 0 && @vb0 == @{output}", palette)
+                                   for output, palette in calibrated_inputs.items())
+                    for i, (condition, palette) in enumerate(choices):
                         branch = "if" if i == 0 else "elif"
                         lines.extend([
-                            f"\t{branch} @vb0 != 0 && @vb0 == @{output}",
+                            f"\t{branch} {condition}",
                             f"\t\tcs-t88 = ref {palette}",
                         ])
                     if skeleton_group is not None and skeleton_occ is not None:
-                        branch = "elif" if calibrated_inputs else "if"
+                        branch = "elif" if choices else "if"
                         lines.extend([
                             f"\t{branch} $zz_ms_occ_{skeleton_occ} == 2",
                             f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s2",
@@ -5737,7 +5747,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                             f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s1",
                             "\tendif",
                         ])
-                    elif calibrated_inputs:
+                    elif choices:
                         lines.extend(["\telse", "\t\tcs-t88 = null", "\tendif"])
                     else:
                         _warn_missing_merged_skeleton_binding(
@@ -5860,10 +5870,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                         else f"ResourceDragJiggleScreenState_{cn}_{ns}")
         path_state = (f"ResourceDragPathProgressState_{ns}" if cn is None
                       else f"ResourceDragPathProgressState_{cn}_{ns}")
+        normal_grab = "if $isMouseButtonDown == 1"
+        if comp and comp.get('cloth'):
+            normal_grab += f" && $ssmtcloth_{ns}_{cn}_intent != 2"
         lines = [
             "local $LLScreenCursorXPast", "local $LLScreenCursorYPast", "local $LLScreenWasMouseDown",
             "",
-            "if $isMouseButtonDown == 1",
+            normal_grab,
             "\tif $LLScreenWasMouseDown == 0",
             "\t\t$LLScreenCursorXPast = $cursorX", "\t\t$LLScreenCursorYPast = $cursorY",
             "\tendif",
@@ -6653,24 +6666,45 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"\t\trun = CustomShaderDragDetect{part_tag}_{ns}",
                 "\tendif",
             ])
+        cloth_var = f"$ssmtcloth_{ns}_{cn}_" if comp.get('cloth') else None
+        can_jiggle = f"\tif {drag_mode_var} >= 2 && $ssmtdrag_mode_{ns} == 1"
+        dispatch = f"\t\tif time != {last_dispatch}"
+        if cloth_var:
+            can_jiggle += f" && ({cloth_var}intent == 1 || $isMouseButtonDown == 0)"
+            dispatch += f" || {cloth_var}jiggle_dispatch_slot != {cloth_var}jiggle_slot"
+        lines.append(can_jiggle)
+        if cloth_var:
+            lines += [
+                f"\t\t{cloth_var}jiggle_slot = 0",
+                f"\t\tif vb0 === ResourceSSMTCloth_{cn}_{ns}_Output_s1",
+                f"\t\t\t{cloth_var}jiggle_slot = 1",
+                f"\t\telif vb0 === ResourceSSMTCloth_{cn}_{ns}_Output_s2",
+                f"\t\t\t{cloth_var}jiggle_slot = 2", "\t\tendif",
+            ]
         lines.extend([
-            f"\tif {drag_mode_var} >= 2 && $ssmtdrag_mode_{ns} == 1" + (f" && $ssmtcloth_{ns}_enabled == 0" if comp.get('cloth') else ''),
-            f"\t\tif time != {last_dispatch}",
+            dispatch,
             f"\t\t\trun = CustomShaderDragJiggle{cn}_{ns}",
             f"\t\t\t{last_dispatch} = time",
+            *([f"\t\t\t{cloth_var}jiggle_dispatch_slot = {cloth_var}jiggle_slot"] if cloth_var else []),
             "\t\tendif",
             f"\t\tvb0 = {temp_vb0}",
         ])
         # BlendOut persists the initialized compute weights. BlendVB is its
         # plain vertex-compatible snapshot, including rows untouched by slide.
         if comp.get("collision_trigrid"):
-            lines.extend([
+            blend = [
                 f"\t\tif $ssmtdrag_slide_enabled_{ns} == 1",
                 f"\t\t\tvb2 = ResourceDragJiggleBlendVB_{cn}_{ns}",
                 "\t\telse",
                 f"\t\t\tvb2 = Resource{cn}Blend",
                 "\t\tendif",
-            ])
+            ]
+            if cloth_var:
+                lines += [f"\t\tif {cloth_var}jiggle_slot == 0", *("\t" + line for line in blend), "\t\tendif"]
+            else:
+                lines += blend
+        if cloth_var:
+            lines += [f"\t\t{cloth_var}overlay_time = time"]
         lines.extend([
             "\tendif",
             *(['\trun = ' + comp['cloth_publish'], '\tpost run = ' + comp['cloth_restore']] if comp.get('cloth_publish') else []),

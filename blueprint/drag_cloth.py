@@ -234,6 +234,7 @@ def component_sections(comp):
 def clean_sections(sections, ns):
     """Remove only our inline routing and globals; normal draw code is retained."""
     prefix = "$ssmtcloth_" + ns + "_"
+    sections.pop(f"[KeySSMTClothMode_{ns}]", None)
     for name, lines in list(sections.items()):
         cleaned = []
         inside = False
@@ -396,6 +397,8 @@ def _shader(node, name, constants):
     text = text.replace('#include "constants.hlsli"', constants).replace(
         '#include "common.hlsli"', common
     )
+    if '#include "screen_direction.hlsli"' in text:
+        text = text.replace('#include "screen_direction.hlsli"', (TOOLSET / "screen_direction.hlsli").read_text("utf8"))
     if name == "select.hlsl":
         text = (
             constants
@@ -790,6 +793,7 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
         f"#define COPY_WORDS {count * stride // 4}\n"
         + (TOOLSET / "copy_native.hlsl").read_text("utf8"),
     )
+    paths["gesture_shader"] = assets.put("gesture.hlsl", _shader(node, "gesture.hlsl", ""))
     if base or count != len(positions):
         constants = "\n".join(
             f"#define {key} {value}"
@@ -965,7 +969,6 @@ class _Emitter:
         self.suffix = comp["comp_name"] + "_" + ns
         self.prefix = "ResourceSSMTCloth_" + self.suffix + "_"
         self.var = "$ssmtcloth_" + ns + "_" + comp["comp_name"] + "_"
-        self.enabled = "$ssmtcloth_" + ns + "_enabled"
         self.reset = "$ssmtcloth_" + ns + "_reset"
         self.mode = node._runtime_variable_names(ns)[0]
         self.self_collision = bool(getattr(node, "cloth_self_collision", False))
@@ -1041,11 +1044,11 @@ class _Emitter:
             "x115 = 1",
             f"y115 = {self.bodies[self.body_index(g)]['leaves']}",
             f"x116 = {phase}",
-            f"y116 = {self.enabled}",
+            "y116 = 1",
             f"z116 = {self.reset}",
             "w116 = $cursorY",
             "x118 = $cursorX",
-            "x117 = $isMouseButtonDown",
+            f"x117 = {self.var}wear_held",
             f"y117 = $screenH / {v}drag_sensitivity",
             f"w117 = $screenW / {v}drag_sensitivity",
             f"z117 = {self.var}dt",
@@ -1609,6 +1612,64 @@ class _Emitter:
             simulate.insert(len(simulate)-2, run("Capture"))
             simulate.append(run("CaptureDisplay"))
 
+    def gesture_routing(self):
+        """Latch the first meaningful motion of each grab before either solver runs."""
+        var = self.var
+        self.resource("GestureHit", stride=16)
+        self.resource("Intent", 1, "R32_FLOAT", writable=True)
+        select = self.cmd("SelectGesture")
+        selection = [f"clear = {self.r('Intent')}"]
+        registers = ("cs-t2", "cs-t67", "cs-t82", "cs-t86", "cs-t94", "cs-t110", "cs-u0")
+        saved = []
+        for register in registers:
+            name = "GestureSave_" + register.replace("-", "")
+            self.resource(name, alias=True)
+            selection.append(f"{self.r(name)} = ref {register}")
+            saved.extend((f"{register} = ref {self.r(name)}", f"{self.r(name)} = null"))
+        for slot in (1, 2):
+            selection.append(f"if {var}slot == {slot} && {var}source_valid_s{slot} == 1")
+            for g in range(len(self.meta["garments"])):
+                name = self.shader(f"G{g}Gesture_s{slot}")
+                self.s(name, [
+                    "cs = " + self.meta["paths"]["gesture_shader"],
+                    *(f"local $cloth_gesture_{c}67 = {c}67" for c in "xyzw"),
+                    f"x67 = $cursorX - {var}start_x", f"y67 = $cursorY - {var}start_y",
+                    "z67 = $screenW", "w67 = $screenH",
+                    f"cs-t67 = ref {self.r('GestureHit')}",
+                    f"cs-t82 = ref {self.r(f'G{g}_Config')}",
+                    f"cs-t86 = ref {self.r('Blend')}",
+                    f"cs-t94 = ref {self.r(f'G{g}_Map')}",
+                    f"cs-t110 = ref {self.r(f'G{g}_ControlZones')}",
+                    f"cs-t2 = ref {self.r(f'SkinPalette_s{slot}')}",
+                    f"cs-u0 = ref {self.r('Intent')}", "dispatch = 1, 1, 1", "cs-u0 = null",
+                    *(f"cs-t{binding} = null" for binding in (2, 67, 82, 86, 94, 110)),
+                    *(f"{c}67 = $cloth_gesture_{c}67" for c in "xyzw"),
+                ])
+                selection.append(f"\trun = {name}")
+            selection.append("endif")
+        selection += [
+            *saved,
+            f"store = {var}intent, {self.r('Intent')}, 0",
+            f"if {var}intent == 2",
+            f"\tclear = ResourceDragJiggleScreenState_{self.suffix} 0.0",
+            f"\tclear = ResourceDragJiggleState_{self.suffix} 0.0",
+            "else", f"\t{var}intent = 1", "endif",
+        ]
+        self.s(select, selection)
+        return [
+            "if $isMouseButtonDown == 1 && $inputMode == 0",
+            f"\tif {var}pointer_held == 0",
+            f"\t\t{var}intent = 0", f"\t\t{var}start_x = $cursorX", f"\t\t{var}start_y = $cursorY",
+            f"\t\t{self.r('GestureHit')} = copy ResourceDragPinnedComponentInfo_{self.suffix}",
+            f"\t\t{var}pointer_held = 1",
+            "\tendif",
+            f"\tlocal $cloth_dx = $cursorX - {var}start_x",
+            f"\tlocal $cloth_dy = $cursorY - {var}start_y",
+            f"\tif {var}intent == 0 && ($cloth_dx * $cloth_dx + $cloth_dy * $cloth_dy) >= 64",
+            f"\t\trun = {select}", "\tendif",
+            "else", f"\t{var}pointer_held = 0", f"\t{var}intent = 0", "endif",
+        ]
+
     def emit(self):
         m = self.meta
         v = m["vertices"]
@@ -1659,6 +1720,14 @@ class _Emitter:
             ("need_render", 0),
             ("activated", 0),
             ("activation_reset", -1),
+            ("intent", 0),
+            ("pointer_held", 0),
+            ("start_x", 0),
+            ("start_y", 0),
+            ("wear_held", 0),
+            ("jiggle_slot", 0),
+            ("jiggle_dispatch_slot", 0),
+            ("overlay_time", -1),
             ("solve_until", -1),
             ("passive", 0),
             ("cursor_x", -1),
@@ -1749,23 +1818,42 @@ class _Emitter:
         for g, data in enumerate(m["garments"]):
             self.garment(g, data)
         source = lambda slot: self.r(f"SkinSource_s{slot}")
-        enabled = f"{self.enabled} == 1 && {self.mode} >= 2"
+        enabled = f"{self.mode} >= 2"
         effective = enabled + f" && {self.var}activated == 1"
         lines = [
             "if " + enabled,
             f"\tif {self.var}activation_reset != {self.reset}",
             f"\t\t{self.var}activated = 0",
             f"\t\t{self.var}activation_reset = {self.reset}",
+            f"\t\tif {self.var}pointer_held == 1",
+            f"\t\t\t{self.var}intent = 1", "\t\tendif",
             "\tendif",
-            "\tif $isMouseButtonDown == 1",
+            f"\t{self.var}slot = 1",
+            f"\tif vb0 === {source(2)}",
+            f"\t\t{self.var}slot = 2",
+            f"\telif vb0 === {source(1)}",
+            f"\telif $zz_ms_occ_{m['occ']} == 2",
+            f"\t\t{self.var}slot = 2",
+            "\tendif",
+        ]
+        lines.extend("\t" + line for line in self.gesture_routing())
+        lines += [
+            f"\tif {self.var}intent == 2 && $isMouseButtonDown == 1",
             f"\t\t{self.var}activated = 1",
             f"\t\tif {self.var}mouse_held == 0 || $cursorX != {self.var}cursor_x || $cursorY != {self.var}cursor_y",
             f"\t\t\t{self.var}solve_until = time",
             "\t\tendif",
+            f"\t\t{self.var}wear_held = 1",
+            "\telse",
+            f"\t\t{self.var}wear_held = 0",
             "\tendif",
             f"\t{self.var}cursor_x = $cursorX",
             f"\t{self.var}cursor_y = $cursorY",
-            f"\t{self.var}mouse_held = $isMouseButtonDown",
+            f"\t{self.var}mouse_held = {self.var}wear_held",
+            "else",
+            f"\t{self.var}intent = 0",
+            f"\t{self.var}pointer_held = 0",
+            f"\t{self.var}wear_held = 0",
             "endif",
             "if " + effective,
             f"\tif {self.var}frame_time != time",
@@ -1775,15 +1863,6 @@ class _Emitter:
             f"\t\t\t{self.var}dt = 0.0166667",
             "\t\tendif",
             f"\t\t{self.var}previous_time = time",
-            f"\t\t{self.var}slot = 1",
-            f"\t\tif $zz_ms_occ_{m['occ']} == 2",
-            f"\t\t\t{self.var}slot = 2",
-            "\t\tendif",
-            "\tendif",
-            f"\tif vb0 === {source(1)}",
-            f"\t\t{self.var}slot = 1",
-            f"\telif vb0 === {source(2)}",
-            f"\t\t{self.var}slot = 2",
             "\tendif",
         ]
         for slot in (1, 2):
@@ -1828,7 +1907,7 @@ class _Emitter:
                 ),
                 "\t\t\t"
                 + self.r("DetectInput")
-                + f" = copy ResourceDragPinnedComponentInfo_{self.suffix}",
+                + " = copy " + self.r("GestureHit"),
                 "\t\t\t"
                 + self.r(f"Write_s{slot}")
                 + " = ref "
@@ -1882,8 +1961,14 @@ class _Emitter:
                     f"\tif {self.var}slot == {slot} && {self.var}ready_s{slot} == time",
                     "\t\tvb0 = ref " + target + " unless_null",
                     "\t\tvb2 = ref " + self.r(f"NativeBlend_s{slot}") + " unless_null",
-                    "\tendif",
                 ]
+                if action == "Publish":
+                    lines += [
+                        f"\t\tif {self.var}overlay_time == time && {self.var}jiggle_slot == {slot} && {self.var}intent != 2",
+                        f"\t\t\tvb0 = ref ResourceDragJiggleTempVB0_{self.suffix} unless_null",
+                        "\t\tendif",
+                    ]
+                lines.append("\tendif")
             self.s(self.cmd(action), lines + ["endif"])
         return self
 
@@ -1895,7 +1980,6 @@ def emit_components(node, sections, components, ns):
     constants = sections.setdefault("[Constants]", [])
     prefix = "$ssmtcloth_" + ns + "_"
     settings = {
-        "enabled": int(bool(getattr(node, "cloth_runtime_enabled", False))),
         "reset": 0,
         "drag_sensitivity": 2.0,
         "stretch_compliance": 0.00003,
@@ -1915,7 +1999,7 @@ def emit_components(node, sections, components, ns):
     for key, default in settings.items():
         value = (
             getattr(node, "cloth_" + key, default)
-            if key not in ("enabled", "reset")
+            if key != "reset"
             else default
         )
         if isinstance(value, bool):
@@ -1923,16 +2007,8 @@ def emit_components(node, sections, components, ns):
         line = "global " + prefix + key + " = " + str(value)
         if line not in constants:
             constants.append(line)
-    mode = node._runtime_variable_names(ns)[0]
-    sections[f"[KeySSMTClothMode_{ns}]"] = [
-        f"condition = $ssmtdrag_drawn_{ns} == 1",
-        "key = " + str(getattr(node, "cloth_toggle_key", "ctrl alt U")),
-        "type = cycle",
-        prefix + "enabled = 0, 1",
-        mode + " = 2, 2",
-    ]
     sections[f"[KeySSMTClothReset_{ns}]"] = [
-        "condition = " + prefix + "enabled == 1",
+        f"condition = $ssmtdrag_drawn_{ns} == 1",
         "key = " + str(getattr(node, "cloth_reset_key", "ctrl alt VK_BACK")),
         "type = cycle",
         prefix + "reset = 0, 1",
