@@ -88,6 +88,25 @@ def test_buffers_only_keeps_the_existing_main_ini(tmp_path):
     assert (output.parent / "Meshes/LOD1_body.buf").read_bytes() == b"LOD1"
 
 
+@pytest.mark.parametrize("allow_overwrite", [False, True])
+def test_reexport_resolves_the_lod_texture_name_before_preserving_existing_files(tmp_path, allow_overwrite):
+    output = tmp_path / "mod" / "character.ini"
+    lod0_name = "Textures/trim$mask.dds"
+    lod1_name = "Textures/LOD1_trim$mask.dds"
+    write_asset(output.parent, lod0_name, b"edited LOD0")
+    write_asset(output.parent, lod1_name, b"edited LOD1")
+    exports = lod_inputs(tmp_path)
+
+    overwrite = [exports[1][3] / lod0_name] if allow_overwrite else []
+    publish_lod_exports(exports, output, overwrite_textures=overwrite)
+
+    ini = output.read_text(encoding="utf-8")
+    assert f"[ResourceMask_LOD0]\nfilename = {lod0_name}" in ini
+    assert f"[ResourceMask_LOD1]\nfilename = {lod1_name}" in ini
+    assert (output.parent / lod0_name).read_bytes() == b"edited LOD0"
+    assert (output.parent / lod1_name).read_bytes() == (b"LOD1" if allow_overwrite else b"edited LOD1")
+
+
 def test_asset_name_collision_is_reported_before_writing_output(tmp_path):
     output = tmp_path / "mod" / "character.ini"
     write_asset(output.parent, output.name, b"older ini")

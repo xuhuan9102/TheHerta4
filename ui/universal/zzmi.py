@@ -8742,21 +8742,12 @@ class ExportZZMI(ExportUnity):
             # 注意：pre-87 基底里没有「后处理节点接管 _zzmi_lod_exports」的读者，
             # 所以这里必须**当场发布**；把 staging 塞给 blueprint 再 return 会让
             # 主 ini / 资源永远不落盘（带后处理节点的蓝图必现）。
-            # 发布前按**每个 LOD 的 staging 根**做 skip 预判：真实 Mod 里贴图落到
-            # <Mod>/Textures/…，而 staging 里是 <staging>/<LOD>/Textures/…，必须按
-            # LOD 目录分别算相对路径，否则永远判不到已存在的文件、手改贴图被覆盖。
-            try:
-                skipped = 0
-                for _lod_name, _child, _exporter, _folder in exports:
-                    skipped += TextureExportPlan.skip_entries_existing_in(
-                        _folder, os.path.dirname(main_ini)
-                    )
-                if skipped:
-                    print(f"[ZZMI 按 LOD 导出] 跳过 {skipped} 个真实 Mod 已存在的贴图（不覆盖用户文件）")
-            except Exception as exc:  # pragma: no cover - 保守：预判失败不阻塞发布
-                print(f"[ZZMI 按 LOD 导出] 贴图 skip 预判失败（继续发布）：{exc}")
+            # 先保留 staging 贴图供发布器区分同名资源，然后按最终路径判断是否覆盖。
             TextureExportPlan.finalize(staging.name)
-            publish_lod_exports(exports, main_ini, buffers_only=method_name == "export_buffers_only")
+            publish_lod_exports(
+                exports, main_ini, buffers_only=method_name == "export_buffers_only",
+                overwrite_textures=TextureExportPlan.overwrite_targets(),
+            )
         except Exception:
             staging.cleanup()
             raise

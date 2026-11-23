@@ -25,7 +25,10 @@ import unittest
 from collections import OrderedDict
 from pathlib import Path
 
+from PIL import Image
+
 BS = chr(92)
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _install_module(name, **attrs):
@@ -39,7 +42,7 @@ def _install_module(name, **attrs):
 PKG = "_ttl_layer_test_pkg"
 for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.utils", f"{PKG}.common", f"{PKG}.toolkit"):
     package = _install_module(package_name)
-    package.__path__ = []
+    package.__path__ = [str(ROOT / "toolkit")] if package_name.endswith(".toolkit") else []
 
 
 class _FakeBpyDataObjects(dict):
@@ -95,9 +98,6 @@ _install_module(
     convert_texture_to_dds_cached=lambda *_args, **_kwargs: (True, ""),
     is_dds_file=lambda path: str(path or "").lower().endswith(".dds"),
 )
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_blueprint_module(module_name):
@@ -181,8 +181,7 @@ def _bound_box_with_radius(radius):
 
 def _write_png(temp_dir, filename):
     path = os.path.join(temp_dir, filename)
-    with open(path, "wb") as file_obj:
-        file_obj.write(filename.encode("ascii"))
+    Image.new("LA", (1, 1), (96, 64)).save(path)
     return path
 
 
@@ -391,6 +390,9 @@ class TTLLayerExportTests(unittest.TestCase):
             obj = _FakeObject("Body", [("TTLMap_Generic", ttl_path)])
             _fake_bpy.data.objects[obj.name] = obj
             exported = _export_bytes(work_dir, _section_text("TextureOverride_Body", "Body"))
+            with Image.open(Path(work_dir) / "Textures" / "TTLMap_Generic.png") as mask:
+                self.assertEqual(mask.mode, "RGBA")
+                self.assertEqual(mask.getpixel((0, 0)), (96, 96, 96, 64))
 
         frozen_golden = "\n".join([
             "[TextureOverride_Body]",

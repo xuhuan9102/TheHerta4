@@ -20,10 +20,11 @@ def _ini_sections(path):
             for i, m in enumerate(headers)]
 
 
-def _asset_targets(staged):
+def _asset_targets(staged, overwrite_textures):
     claims = {}
     mappings = {}
     writes = {}
+    overwrites = set()
     for lod, _, _, folder in staged:
         mapping = {}
         for path in sorted(folder.rglob("*")):
@@ -46,17 +47,22 @@ def _asset_targets(staged):
             else:
                 claims[key] = digest
                 writes[key] = (target, path)
+            if path in overwrite_textures:
+                overwrites.add(target)
             mapping[relative.as_posix().casefold()] = target.as_posix()
         mappings[lod] = mapping
-    return mappings, writes.values()
+    return mappings, writes.values(), overwrites
 
 
-def publish_lod_exports(exports, main_ini, buffers_only=False):
+def publish_lod_exports(exports, main_ini, buffers_only=False, *, overwrite_textures=()):
     main_ini = Path(main_ini)
     staged = [(lod, model, exporter, Path(path)) for lod, model, exporter, path in exports]
-    files, writes = _asset_targets(staged)
+    files, writes, overwrites = _asset_targets(staged, {Path(path) for path in overwrite_textures})
     for target, source in writes:
-        safe_write.write_bytes_if_changed_atomic(str(main_ini.parent / target), source.read_bytes())
+        destination = main_ini.parent / target
+        if target.parts[0] == "Textures" and target not in overwrites and destination.is_file():
+            continue
+        safe_write.write_bytes_if_changed_atomic(str(destination), source.read_bytes())
     if buffers_only:
         return
 
