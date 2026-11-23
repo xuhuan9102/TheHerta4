@@ -675,6 +675,8 @@ class PanelBasicInformation(bpy.types.Panel):
             # 按 LOD 融合：每个 LOD 只读自己的提取目录、各自算一套合并骨骼，
             # 产物仍合并进同一个 Mod（同名资源按 LOD 前缀改名）。
             layout.prop(global_properties, "zzmi_fusion_per_lod")
+            # 输入源：默认读 FrameAnalysis；勾选后只读 SSMT4 提取到各 LOD 工作页的数据。
+            layout.prop(global_properties, "zzmi_fusion_from_workspace")
         # EFMI 专用：多 LOD 使用 LOD0 分组投影，关闭则两侧独立去重。
         if GlobalConfig.logic_name == LogicName.EFMI:
             layout.prop(global_properties, "efmi_lod_group_projection")

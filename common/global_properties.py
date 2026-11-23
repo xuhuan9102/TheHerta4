@@ -297,6 +297,16 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    zzmi_fusion_from_workspace: bpy.props.BoolProperty(
+        name="使用 SSMT4 提取的骨骼数据",
+        description=(
+            "融合时只使用新版 SSMT4 提取到各 LOD 工作页的骨骼数据"
+            "（<工作区>/<LOD>/ZZMISkeletonSource/ 下的 log 与 dump），不读 FrameAnalysis。"
+            "缺哪个 LOD 的数据就整批失败并点名。默认关闭，仍走 FrameAnalysis。"
+        ),
+        default=False,
+    ) # type: ignore
+
     zzmi_fusion_per_lod: bpy.props.BoolProperty(
         name="按 LOD 融合骨骼",
         description=(
@@ -653,6 +663,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def zzmi_fusion_per_lod(cls):
         return cls._instance().zzmi_fusion_per_lod
+
+    @classmethod
+    def zzmi_fusion_from_workspace(cls):
+        return cls._instance().zzmi_fusion_from_workspace
 
     @classmethod
     def set_import_merged_vgmap(cls, value: bool):

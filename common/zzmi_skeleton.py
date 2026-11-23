@@ -1559,6 +1559,10 @@ class ZZMISkeletonMergeHelper:
         workspace_root: str,
         unique_str_list: list[str],
         force: bool = False,
+        *,
+        _lod: str | None = None,
+        settings: dict | None = None,
+        progress=None,
     ) -> tuple[bool, str]:
         """为 ZZMI 工作空间的子网格生成并写回骨骼合并数据（幂等）。
 
@@ -1567,39 +1571,51 @@ class ZZMISkeletonMergeHelper:
         if not unique_str_list:
             return False, "没有子网格需要处理。"
 
-        frame_analysis_dir = cls.resolve_frame_analysis_dir(workspace_root)
-        log_path = os.path.join(frame_analysis_dir, "log.txt") if frame_analysis_dir else ""
-        parser = None
-        resolver = None
-        frame_analysis_signature = ""
-        if frame_analysis_dir:
-            if not os.path.isfile(log_path):
-                print(
-                    f"[ZZMI骨骼合并] 提示: FrameAnalysis 缺少 log.txt（{log_path}），"
-                    "将仅用工作空间缓存重建"
+        try:
+            from .global_properties import GlobalProterties
+
+            workspace_source = bool(GlobalProterties.zzmi_fusion_from_workspace())
+        except (ImportError, AttributeError):
+            workspace_source = False
+
+        def read_source(folder):
+            """一个输入源目录 → (parser, resolver, 签名)；不可用时返回 (None, None, \"\")。"""
+            log_path = os.path.join(folder, "log.txt") if folder else ""
+            if not log_path or not os.path.isfile(log_path):
+                return None, None, ""
+            source_parser = ZZMILogParser(log_path)
+            source_resolver = ZZMIDeformResolver(source_parser)
+            if not source_resolver.passes:
+                return None, None, ""
+            return source_parser, source_resolver, cls._frame_analysis_log_signature(log_path)
+
+        if workspace_source:
+            # 每个 LOD 只读自己的提取页（<工作区>/<LOD>/ZZMISkeletonSource），
+            # 互不串帧；缺哪个 LOD 就整批失败并点名。
+            sources = {
+                lod: read_source(os.path.join(workspace_root, lod, "ZZMISkeletonSource"))
+                for lod in sorted({fusion_lod(identity) for identity in unique_str_list})
+            }
+            missing = [lod for lod, (parser, _, _) in sources.items() if parser is None]
+            if missing:
+                return False, (
+                    "、".join(missing)
+                    + " 缺少可用的 SSMT4 骨骼数据（ZZMISkeletonSource），"
+                    "请在新版 SSMT4 中重新提取对应工作页。"
                 )
-            else:
-                parser = ZZMILogParser(log_path)
-                resolver = ZZMIDeformResolver(parser)
-                frame_analysis_signature = cls._frame_analysis_log_signature(log_path)
-                if not resolver.passes:
-                    print(
-                        "[ZZMI骨骼合并] 提示: FrameAnalysis log 中未识别到 deform pass，"
-                        "将仅用工作空间缓存重建"
-                    )
-                    parser = None
-                    resolver = None
+            print("[ZZMI骨骼合并] 使用 SSMT4 提取到工作空间的骨骼数据重新计算")
         else:
-            # dump 目录已被删除：上次导入已把 palette / 对象变换 CB 复制进工作空间
-            # ModImpRuntime，缓存完整的子网格可以脱离 dump 重建。工作区已记录过提取源
-            # 时**不会**自动改用游戏目录里的其它帧（防跨帧/跨模型混用，见
-            # resolve_frame_analysis_dir）：要换用新的提取文件，请在面板重新选择
-            # 提取源后重新导入。
-            print(
-                "[ZZMI骨骼合并] 提示: 未找到 FrameAnalysis 目录（记录过的提取源已被"
-                "删除/搬走），本次仅用工作空间缓存重建；如需改用新的提取文件，"
-                "请重新选择提取源后重新导入"
+            folder = (
+                cls._resolve_lod_frame_analysis_dir(workspace_root, _lod)
+                if _lod
+                else cls.resolve_frame_analysis_dir(workspace_root)
             )
+            sources = {"": read_source(folder)}
+            if sources[""][0] is None:
+                print("[ZZMI骨骼合并] 提示: 未找到可用的 FrameAnalysis 蒙皮记录，将使用工作空间缓存")
+
+        def source_for(identity):
+            return sources[fusion_lod(identity) if workspace_source else ""]
 
         # 第一遍：收集每个子网格信息并按 DrawIB 分组（同 DrawIB 的拆分子网格共享
         # 同一 deform pass / palette / VGMap，只参与一次去重）。
@@ -1670,6 +1686,9 @@ class ZZMISkeletonMergeHelper:
                 print(f"[ZZMI骨骼合并] 跳过 {unique_str}: 无法解析 DrawIB")
                 unresolved_targets.append(unique_str)
                 continue
+
+            # 该部件所属输入源（按 LOD 取；非工作空间模式恒为同一个 FrameAnalysis）。
+            parser, resolver, frame_analysis_signature = source_for(unique_str)
 
             group = groups.get(draw_ib)
             if group is None:
