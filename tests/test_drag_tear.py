@@ -162,8 +162,9 @@ class DragTearTests(unittest.TestCase):
                 result = render.resource("ResourceMask")
                 opening, thinning, yarn, rim = np.moveaxis(_tear_fields(render, result), -1, 0)
                 waist = (opening[np.abs(coordinates) < 0.005] >= 128).any(axis=0)
-                self.assertLess(float(np.ptp(coordinates[waist])), 0.024)
-                outside = (coordinates < -0.068) & (coordinates > -0.092)
+                self.assertLess(float(np.ptp(coordinates[waist])), 0.012)
+                self.assertGreater(np.unique(opening[(opening > 0) & (opening < 255)]).size, 12)
+                outside = (coordinates < -0.044) & (coordinates > -0.065)
                 self.assertFalse(opening[outside].any())
                 self.assertGreater(np.unique(thinning[outside]).size, 8)
                 self.assertTrue(((opening >= 128) & (yarn > 0)).any())
@@ -274,5 +275,16 @@ class DragTearTests(unittest.TestCase):
                     self.assertTrue((coverage[run] > 0).all() and (coverage[run] < intact).all())
                     if rim.any():
                         self.assertTrue((coverage[rim] >= intact).all())
+
+                # A previously opaque draw has no original TTL texture.
+                compose = "CustomShaderDragTearTTLCompose_abc123P0M1_unit"
+                lines = render.sections[f"[{compose}]"]
+                lines[lines.index("cs-t107 = ref ResourceDragTearSavedTTL_unit")] = "cs-t107 = null"
+                render.params[494, 2] = 0
+                render.execute(compose)
+                composed = read_mask(output).reshape(*output.texture, 4)
+                self.assertFalse(composed[unchanged].any())
+                self.assertTrue((composed[empty] == 1).all())
+                self.assertTrue((composed[run] > 0).all() and (composed[run] < 1).all())
             finally:
                 render.close()

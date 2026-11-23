@@ -4,6 +4,8 @@ Buffer<uint2> Reference : register(t108);
 Texture1D<float4> IniParams : register(t120);
 RWTexture2D<uint> Mask : register(u0);
 
+static const float OpeningScale = 0.5;
+
 float YarnVariation(float value)
 {
     return frac(sin(value * 31.712) * 1234.124);
@@ -77,7 +79,8 @@ float RunStrength(float2 local, float2 across, float2 along, float2 radii, float
         return 0.0;
     float side = local.y > (ends.x + ends.y) * 0.5 ? 1.0 : -1.0;
     float beyond = max(0.0, side * (local.y - (side > 0.0 ? ends.y : ends.x)));
-    float size = smoothstep(0.006, 0.035, sqrt(radii.x * radii.y));
+    // Keep the run reach tied to the pull even when the opening is smaller.
+    float size = smoothstep(0.003, 0.0175, sqrt(radii.x * radii.y));
     float load = along.x * radii.x;
     float loadedSide = lerp(0.72, (side * load >= 0.0 ? 1.0 : 0.44), smoothstep(0.1, 0.65, abs(load)));
     float column = YarnVariation(floor(local.x / 0.006) + seed + side * 21.0);
@@ -111,7 +114,7 @@ void main(uint3 id : SV_DispatchThreadID)
 
     float4 axis = Gesture[2];
     float3 acrossPull = cross(shape.xyz, axis.xyz);
-    float2 radii = float2(axis.w, shape.w);
+    float2 radii = OpeningScale * float2(axis.w, shape.w);
     float2 pull = float2(dot(offset, axis.xyz), dot(offset, acrossPull));
     float seed = YarnVariation(dot(anchor.xyz, float3(17.31, 32.67, 11.91))) * 6.2831853;
     float sd = OpeningDistance(pull / radii, radii, seed);
@@ -130,8 +133,12 @@ void main(uint3 id : SV_DispatchThreadID)
     float aa = max(0.00013, 0.42 * (length(dx) + length(dy)));
     float footprint = max(0.00008, abs(dot(dx, wale)) + abs(dot(dy, wale)));
 
-    float front = 1.0 - smoothstep(max(0.0055, shape.w * 0.85), 0.010, depth);
-    float opening = (1.0 - smoothstep(-aa, aa, sd)) * front;
+    // On a curved stocking the departure from the tangent plane scales
+    // quadratically with the opening's width near the grab point.
+    float depthScale = OpeningScale * OpeningScale;
+    float front = 1.0 - smoothstep(max(0.0055, shape.w * 0.85) * depthScale, 0.010 * depthScale, depth);
+    float feather = max(aa, 0.0011);
+    float opening = (1.0 - smoothstep(-feather, feather, sd)) * front;
     float bandWidth = lerp(0.00028, 0.00050, YarnVariation(floor(dot(texel.xyz, acrossWale) / 0.0016) + seed));
     float rim = (smoothstep(-aa, aa, sd) - smoothstep(bandWidth - aa, bandWidth + aa, sd)) * front;
 
