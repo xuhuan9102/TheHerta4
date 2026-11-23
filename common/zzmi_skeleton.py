@@ -1665,12 +1665,15 @@ class ZZMISkeletonMergeHelper:
         pool_profile_ready = False
         if expect_cross:
             try:
-                from .zzmi_cross_group_palette import get_profile_path
+                from .zzmi_cross_group_palette import get_profile_path, load_profile
 
-                pool_profile_ready = os.path.isfile(
-                    get_profile_path(profile_root)
+                # 用 load_profile 验证而不只看 isfile：损坏/半截的方案文件
+                # 之前会被当成"有方案"，然后导出静默退回历史路线。
+                pool_profile_ready = (
+                    load_profile(profile_root, required=False) is not None
+                    and os.path.isfile(get_profile_path(profile_root))
                 )
-            except Exception:  # pragma: no cover - 磁盘异常
+            except Exception:  # pragma: no cover - 磁盘异常/损坏
                 pool_profile_ready = False
         # 编号域校验只在池方案在盘上时才有意义：没有方案文件时历史分组编号就是
         # 本工作空间的正常态，判据由下面的「池方案不在 ⇒ 强制重建」承担。
@@ -2559,6 +2562,7 @@ class ZZMISkeletonMergeHelper:
         if failure_parts:
             return False, success_message + "；" + "；".join(failure_parts)
         return written > 0, success_message
+
 
 
 
