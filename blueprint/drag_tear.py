@@ -23,8 +23,11 @@ TTL_DRAW = r"commandlist\ttl\draw"
 TTL_TAKEN = "; [SSMT TTL 已接管]"
 TTL_MASK = r"Resource\TTL\TransparencyTex"
 TTL_INVERT = r"$\TTL\mask_invert"
-MASK_MAGIC = 7312402
-PIXEL_SLOT = "ps-t114"
+# The old R32_FLOAT mask can still be installed in another mod.
+MASK_MAGIC = 7312404
+TTL_MASK_MAGIC = 7312405
+PIXEL_REGISTER = "t116"
+PIXEL_SLOT = f"ps-{PIXEL_REGISTER}"
 
 
 def _clean(lines):
@@ -165,7 +168,7 @@ def _emit_mask(sections, tag, owner, atlas, gesture, shader):
     mask = f"ResourceDragTearMask_{tag}"
     reference = f"ResourceDragTearUV_{tag}"
     paint = f"CustomShaderDragTearPaint_{tag}"
-    sections[f"[{mask}]"] = _mask_texture("R32_FLOAT")
+    sections[f"[{mask}]"] = _mask_texture("R32_UINT")
     sections[f"[{reference}]"] = ["type = Buffer", "format = R32G32_UINT", f"filename = {atlas}"]
     sections[f"[{paint}]"] = [
         f"cs = {shader}", f"cs-t106 = {gesture}", f"cs-t108 = {reference}",
@@ -177,30 +180,59 @@ def _emit_mask(sections, tag, owner, atlas, gesture, shader):
 
 def _emit_pixel_regex(sections, ns):
     name = f"ShaderRegexDragTear_{ns}"
-    sections[f"[{name}]"] = ["shader_model = ps_5_0", "temps = tearuv tearsize"]
+    sections[f"[{name}]"] = ["shader_model = ps_5_0", "temps = tearuv tearsize tearctl tearfield tearshade"]
     sections[f"[{name}.Pattern]"] = [
-        r"(?m)\A(?![\s\S]*?^dcl_resource_\w+[^\r\n]*\bt114\b)"
+        rf"(?m)\A(?![\s\S]*?^dcl_resource_\w+[^\r\n]*\b{PIXEL_REGISTER}\b)"
         r"(?=[\s\S]*?^dcl_input_ps linear(?: \w+)? v0\.xyz?w?\r?$)"
         r"(?<head>[\s\S]*?^dcl_temps \d+\r?\n(?:^dcl_[^\r\n]*\r?\n)*)",
     ]
     sections[f"[{name}.Pattern.Replace]"] = ["${head}", *(line + r"\n" for line in (
-        "ld_indexable(texture1d)(float,float,float,float) ${tearuv}.x, l(494, 0, 0, 0), t120.xxxx",
-        f"eq ${{tearuv}}.x, ${{tearuv}}.x, l({MASK_MAGIC}.0)",
-        "if_nz ${tearuv}.x",
-        "resinfo_indexable(texture2d)(float,float,float,float)_uint ${tearsize}.xy, l(0), t114.xyzw",
+        "ld_indexable(texture1d)(float,float,float,float) ${tearctl}.x, l(494, 0, 0, 0), t120.xxxx",
+        f"eq ${{tearctl}}.y, ${{tearctl}}.x, l({TTL_MASK_MAGIC}.0)",
+        f"eq ${{tearctl}}.x, ${{tearctl}}.x, l({MASK_MAGIC}.0)",
+        "or ${tearctl}.x, ${tearctl}.x, ${tearctl}.y",
+        "if_nz ${tearctl}.x",
+        f"resinfo_indexable(texture2d)(uint,uint,uint,uint)_uint ${{tearsize}}.xy, l(0), {PIXEL_REGISTER}.xyzw",
         "utof ${tearsize}.xy, ${tearsize}.xyxx",
         "frc ${tearuv}.xy, v0.xyxx",
         "mul ${tearuv}.xy, ${tearuv}.xyxx, ${tearsize}.xyxx",
         "ftou ${tearuv}.xy, ${tearuv}.xyxx",
         "mov ${tearuv}.zw, l(0, 0, 0, 0)",
-        "ld_indexable(texture2d)(float,float,float,float) ${tearuv}.x, ${tearuv}.xyzw, t114.xxxx",
-        "ge ${tearuv}.x, ${tearuv}.x, l(0.5)",
-        "discard_nz ${tearuv}.x",
+        f"ld_indexable(texture2d)(uint,uint,uint,uint) ${{tearfield}}.x, ${{tearuv}}.xyzw, {PIXEL_REGISTER}.xxxx",
+        "ushr ${tearfield}.xyzw, ${tearfield}.xxxx, l(0, 8, 16, 24)",
+        "and ${tearfield}.xyzw, ${tearfield}.xyzw, l(255, 255, 255, 255)",
+        # TTL applies continuous opacity in its mask/depth pass. Its native
+        # colour replay only skips pixels with no fabric or surviving yarn.
+        "if_nz ${tearctl}.y",
+        "ieq ${tearshade}.x, ${tearfield}.x, l(255)",
+        "ieq ${tearshade}.y, ${tearfield}.z, l(0)",
+        "and ${tearshade}.x, ${tearshade}.x, ${tearshade}.y",
+        "else",
+        "utof ${tearfield}.xyzw, ${tearfield}.xyzw",
+        "mul ${tearfield}.xyzw, ${tearfield}.xyzw, l(0.00392156863)",
+        "add ${tearshade}.x, -${tearfield}.x, l(1.0)",
+        "add ${tearshade}.y, -${tearfield}.y, l(1.0)",
+        "mul ${tearshade}.y, ${tearshade}.y, ${tearshade}.x",
+        "max ${tearshade}.y, ${tearshade}.y, ${tearfield}.z",
+        "add ${tearshade}.x, ${tearshade}.x, -${tearshade}.y",
+        "max ${tearshade}.x, ${tearshade}.x, l(0)",
+        "mad ${tearshade}.y, ${tearfield}.w, ${tearshade}.x, ${tearshade}.y",
+        # A stable texel threshold converts the opacity into opaque coverage.
+        "imad ${tearshade}.z, ${tearuv}.y, l(374761393), ${tearuv}.x",
+        "ushr ${tearshade}.w, ${tearshade}.z, l(13)",
+        "xor ${tearshade}.z, ${tearshade}.z, ${tearshade}.w",
+        "imad ${tearshade}.z, ${tearshade}.z, l(1274126177), l(0)",
+        "ushr ${tearshade}.z, ${tearshade}.z, l(24)",
+        "utof ${tearshade}.z, ${tearshade}.z",
+        "mad ${tearshade}.z, ${tearshade}.z, l(0.00390625), l(0.001953125)",
+        "lt ${tearshade}.x, ${tearshade}.y, ${tearshade}.z",
+        "endif",
+        "discard_nz ${tearshade}.x",
         "endif",
     ))]
     sections[f"[{name}.InsertDeclarations]"] = [
         "dcl_resource_texture1d (float,float,float,float) t120",
-        "dcl_resource_texture2d (float,float,float,float) t114",
+        f"dcl_resource_texture2d (uint,uint,uint,uint) {PIXEL_REGISTER}",
     ]
 
 
@@ -238,6 +270,9 @@ def _emit_ttl(sections, tags, ns, epoch, shader):
             f"\t{version} = {epoch}", f"\t{invert} = {TTL_INVERT}",
             f"\t{previous} = ref {saved_ttl}", "endif",
             f"{TTL_MASK} = ref {combined} unless_null",
+            f"if $\\TTL\\enabled && @{combined}",
+            f"\tx494 = {TTL_MASK_MAGIC}",
+            "endif",
         ]
 
 

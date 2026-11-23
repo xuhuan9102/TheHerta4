@@ -10,6 +10,11 @@ import numpy as np
 from tests import test_drag_cloth as cloth_tests
 
 
+def _tear_fields(render, texture):
+    rows = render.gpu.read_texture(texture.pointer, *texture.texture, texture.fmt, texture.stride)
+    return (rows.view("<u4")[..., None] >> np.arange(0, 32, 8, dtype=np.uint32)) & 255
+
+
 class DragTearTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -66,8 +71,8 @@ class DragTearTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             sections, comp, tail, original, original_tail = self.generate(root, cloth=True, ttl=True)
-            binding = "ps-t114 = ref ResourceDragTearMask_abc123P0M1_unit"
-            tail_binding = "ps-t114 = ref ResourceDragTearMask_abc123P0M2_unit"
+            binding = f"{self.tear.PIXEL_SLOT} = ref ResourceDragTearMask_abc123P0M1_unit"
+            tail_binding = f"{self.tear.PIXEL_SLOT} = ref ResourceDragTearMask_abc123P0M2_unit"
             draw = sections["[TextureOverride_abc123_Draw]"]
             inline = next(i for i, line in enumerate(draw) if line.strip() == r"run = CommandList\TTL\Draw")
             self.assertIn(binding, [line.strip() for line in draw[inline - 10:inline]])
@@ -76,6 +81,8 @@ class DragTearTests(unittest.TestCase):
             self.assertLess(tail.index(comp["cloth_publish"]), tail.index(tail_binding))
             self.assertIn("run = CommandListDragTearTTLRestore_unit", tail)
             self.assertIn(r"Resource\TTL\TransparencyTex = ref ResourceDragTearTTL_abc123P0M2_unit unless_null",
+                          sections["[CommandListDragTearTTLBind_abc123P0M2_unit]"])
+            self.assertIn(r"if $\TTL\enabled && @ResourceDragTearTTL_abc123P0M2_unit",
                           sections["[CommandListDragTearTTLBind_abc123P0M2_unit]"])
             self.assertEqual(sum(line.strip() == binding for line in draw), 1)
             self.assertEqual(self.tear.clean_existing(sections, tail, "unit"), original_tail)
@@ -102,7 +109,7 @@ class DragTearTests(unittest.TestCase):
             node.execute_postprocess(temp)
             enabled = ini.read_text("utf8")
             self.assertIn("[KeyDragTear_unit]", enabled)
-            self.assertIn("ps-t114 = ref ResourceDragTearMask_abc123P0M1_unit", enabled)
+            self.assertIn(f"{self.tear.PIXEL_SLOT} = ref ResourceDragTearMask_abc123P0M1_unit", enabled)
             self.assertNotIn("ib = ref ResourceDragTear", enabled)
             self.assertTrue((root / "res/drag_tear").is_dir())
             owners_path = next((root / "res/drag_tear").glob("*/*-owners.buf"))
@@ -126,7 +133,7 @@ class DragTearTests(unittest.TestCase):
             self.assertFalse((root / "res/drag_tear").exists())
 
     @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
-    def test_stocking_run_keeps_intact_stitches_past_the_slit(self):
+    def test_stocking_render_keeps_separate_opening_thinning_yarn_and_rim(self):
         from tools.check_drag_cloth import GeneratedCloth
 
         size = 256
@@ -137,7 +144,7 @@ class DragTearTests(unittest.TestCase):
         atlas[:, :, 3] = 1
         gesture = np.array([[0, 0, 0, 1], [0, 1, 0, 0.009], [0, 0, -1, 0.051], [0, 0, 0.16, 0]], np.float32)
         sections = {
-            "[ResourceMask]": ["type = Texture2D", "format = R32_FLOAT", f"width = {size}",
+            "[ResourceMask]": ["type = Texture2D", "format = R32_UINT", f"width = {size}",
                                f"height = {size}", "array = 1", "msaa = 1", "mips = 1"],
             "[CustomShaderPaint]": [
                 f"cs = {self.tear.SHADER_DIR / 'rzm_tear_mask.hlsl'}", "y494 = 1",
@@ -153,12 +160,14 @@ class DragTearTests(unittest.TestCase):
                 render.external("ResourceGesture", gesture, 16, 2)
                 render.execute("CustomShaderPaint")
                 result = render.resource("ResourceMask")
-                mask = render.gpu.read_texture(result.pointer, *result.texture, result.fmt, result.stride).view("<f4") > 0.5
-                waist = mask[np.abs(coordinates) < 0.005].any(axis=0)
-                self.assertLess(float(np.ptp(coordinates[waist])), 0.020)
-                run = mask[(coordinates < -0.055) & (coordinates > -0.082)].any(axis=1)
-                self.assertGreater(np.count_nonzero(run[1:] & ~run[:-1]), 2)
-                self.assertFalse(mask[:, np.abs(coordinates) > 0.013].any())
+                opening, thinning, yarn, rim = np.moveaxis(_tear_fields(render, result), -1, 0)
+                waist = (opening[np.abs(coordinates) < 0.005] >= 128).any(axis=0)
+                self.assertLess(float(np.ptp(coordinates[waist])), 0.024)
+                outside = (coordinates < -0.068) & (coordinates > -0.092)
+                self.assertFalse(opening[outside].any())
+                self.assertGreater(np.unique(thinning[outside]).size, 8)
+                self.assertTrue(((opening >= 128) & (yarn > 0)).any())
+                self.assertTrue(((opening < 128) & (rim > 0)).any())
             finally:
                 render.close()
 
@@ -216,16 +225,17 @@ class DragTearTests(unittest.TestCase):
                 render.variables["$ssmtdragtear_enabled_unit"] = 1
                 render.execute(update)
                 move(20)
-                self.assertFalse(read_mask(display).any())
+                self.assertFalse(_tear_fields(render, display).any())
 
                 move(15)
-                near = read_mask(display) > 0.5
+                near = _tear_fields(render, display)
                 self.assertTrue(near.any())
                 move(140)
-                far = read_mask(display) > 0.5
+                far = _tear_fields(render, display)
                 self.assertGreater(far.sum(), near.sum())
-                self.assertTrue((~near | far).all())
-                self.assertFalse(read_mask(other).any())
+                self.assertTrue((far[:, :, :2] >= near[:, :, :2]).all())
+                self.assertFalse(far[:, :, 3][far[:, :, 0] == 255].any())
+                self.assertFalse(_tear_fields(render, other).any())
                 kept = render.gpu.read_bytes(source.pointer, source.size).view("<u4").reshape(-1, 3)
                 np.testing.assert_array_equal(kept, initial)
                 for slot in range(106, 111):
@@ -236,7 +246,7 @@ class DragTearTests(unittest.TestCase):
                 dispatches = render.dispatches
                 render.execute(update)
                 self.assertEqual(render.dispatches, dispatches)
-                np.testing.assert_array_equal(read_mask(display) > 0.5, far)
+                np.testing.assert_array_equal(_tear_fields(render, display), far)
 
                 # TTL writes depth from the combined opacity texture before its color pass.
                 output = render.resource("ResourceDragTearTTL_abc123P0M1_unit")
@@ -248,11 +258,21 @@ class DragTearTests(unittest.TestCase):
                 channels = (ctypes.c_float * 4)(0.2, 0.4, 0.6, 0.8)
                 render.gpu.method(render.gpu.context, 52, [ctypes.c_void_p, ctypes.c_void_p],
                                   render.view(original_mask, True), channels, result=None)
+                unchanged = ~far.any(axis=-1)
+                empty = (far[:, :, 0] == 255) & (far[:, :, 2] == 0)
+                run = (far[:, :, 0] == 0) & (far[:, :, 1] > 30) & (far[:, :, 3] == 0)
+                rim = (far[:, :, 0] == 0) & (far[:, :, 1] == 0) & (far[:, :, 3] > 0)
+                self.assertTrue(empty.any() and run.any())
                 for invert in (0, 1):
                     render.params[494, 2] = invert
                     render.execute("CustomShaderDragTearTTLCompose_abc123P0M1_unit")
                     composed = read_mask(output).reshape(*output.texture, 4)
-                    np.testing.assert_allclose(composed[~far], np.tile(channels, ((~far).sum(), 1)), atol=1e-6)
-                    self.assertTrue((composed[far] == 1 - invert).all())
+                    np.testing.assert_allclose(composed[unchanged], np.broadcast_to(channels, (unchanged.sum(), 4)), atol=1e-6)
+                    self.assertTrue((composed[empty] == 1 - invert).all())
+                    intact = np.array(channels) if invert else 1 - np.array(channels)
+                    coverage = composed if invert else 1 - composed
+                    self.assertTrue((coverage[run] > 0).all() and (coverage[run] < intact).all())
+                    if rim.any():
+                        self.assertTrue((coverage[rim] >= intact).all())
             finally:
                 render.close()
