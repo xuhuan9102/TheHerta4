@@ -680,10 +680,36 @@ def ImprotFromWorkSpaceFull(self, context):
         try:
             from ..common.zzmi_skeleton import ZZMISkeletonMergeHelper
             import_keys = [target["import_key"] for target in import_targets]
-            ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
-                workspace_root=GlobalConfig.path_workspace_folder(),
-                unique_str_list=import_keys,
-            )
+            # 按 LOD 分批调用：同一次调用里只放同一个 LOD 的部件，组内共用一份输入源；
+            # 否则同一 DrawIB 在 LOD0/LOD1 会并成一组、共用第一份 source（串帧）。
+            try:
+                from ..common.global_properties import GlobalProterties as _ZZMIProps
+
+                per_lod = bool(_ZZMIProps.zzmi_fusion_per_lod())
+            except Exception:
+                per_lod = False
+            if per_lod:
+                from ..common.zzmi_skeleton import fusion_lod
+
+                batches = {}
+                for key in import_keys:
+                    batches.setdefault(fusion_lod(key), []).append(key)
+                messages = []
+                ok = True
+                for lod in sorted(batches):
+                    lod_ok, lod_message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
+                        workspace_root=GlobalConfig.path_workspace_folder(),
+                        unique_str_list=batches[lod],
+                        _lod=lod,
+                    )
+                    ok = ok and bool(lod_ok)
+                    messages.append(f"{lod}: {lod_message}")
+                message = "；".join(messages)
+            else:
+                ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
+                    workspace_root=GlobalConfig.path_workspace_folder(),
+                    unique_str_list=import_keys,
+                )
             print(f"[ZZMI骨骼合并] {message}")
             merged_vgmap_ready = bool(ok)
             if merged_vgmap_ready and zzmi_merged_consumption:
@@ -1651,3 +1677,4 @@ def register():
 def unregister():
     bpy.utils.unregister_class(SSMT4ImportRaw)
     bpy.utils.unregister_class(SSMT4ImportAllFromCurrentWorkSpaceBlueprint)
+
