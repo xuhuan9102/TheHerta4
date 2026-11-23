@@ -18,6 +18,10 @@ from .direct_export_shapekey_runtime_mixin import DirectShapeKeyRuntimeMixin
 from .direct_export_shapekey_sampling_mixin import DirectShapeKeySamplingMixin
 from .direct_export_shapekey_shared import ShapeKeyDirectExportError, resolve_use_delta
 from .export_helper import BlueprintExportHelper
+try:
+    from . import native_morph_driver as native_morph
+except ImportError:
+    from blueprint import native_morph_driver as native_morph
 
 
 class DirectShapeKeyGenerator(
@@ -34,6 +38,66 @@ class DirectShapeKeyGenerator(
         self.meshes_dir = os.path.join(mod_export_path, "Meshes0000")
         self.merged_name_members = {}
         self._processing_chain_alias_lookup = None
+
+    def _install_native_expression_transfers(
+        self, sections, runtime_infos, processed_hashes, hash_slot_data_map,
+        slot_position_overrides, shader_source_path, dest_res_dir,
+    ):
+        from ..common.global_config import GlobalConfig
+        from ..common.logic_name import LogicName
+        from ..common.workspace_helper import WorkSpaceHelper
+        from . import native_expression_transfer as transfer
+
+        if not LogicName.is_zzmi_family(GlobalConfig.logic_name):
+            return set()
+
+        grouped_hashes = {}
+        for logical_hash in processed_hashes:
+            draw_hash = self.node._extract_hash_prefix(logical_hash)
+            grouped_hashes.setdefault(draw_hash, []).append(logical_hash)
+
+        transferred = set()
+        for draw_hash, logical_hashes in grouped_hashes.items():
+            info = runtime_infos[logical_hashes[0]]
+            model = info.get("drawib_model")
+            attributes = info.get("native_shapekey_attributes")
+            metadata = getattr(model, "import_json_dict", {}) or {}
+            if not (
+                attributes and attributes.by_name
+                and native_morph.parse_native_morph_keys(metadata.get("ShapeKeysInfo", {}))
+            ):
+                continue
+            try:
+                mesh = transfer.read_transfer_mesh(
+                    sections, self.mod_export_path, draw_hash,
+                    WorkSpaceHelper.get_submesh_folder_path,
+                    Path(model.import_json_path).parent.name,
+                )
+            except (OSError, ValueError):
+                continue
+            if mesh is None:
+                continue
+
+            # Submeshes can share one Position buffer. Check the whole batch before
+            # replacing its animation path, keeping authored keys on the existing path.
+            hash_slots = {}
+            for logical_hash in logical_hashes:
+                for slot, names in hash_slot_data_map[logical_hash].items():
+                    for name, objects in names.items():
+                        hash_slots.setdefault(slot, {}).setdefault(name, set()).update(objects)
+            if not transfer.matches_imported_shape_keys(
+                mesh.exported_basis, mesh.source_vertices, attributes.by_name, hash_slots, slot_position_overrides,
+            ):
+                continue
+
+            filename = f"{draw_hash}-NativeExpressionSourceVertex.buf"
+            transfer.write_transfer_buffers(self.mod_export_path, draw_hash, mesh, f"Meshes0000/{filename}")
+            shader = Path(shader_source_path).with_name(transfer.SHADER_NAME)
+            write_text_if_changed(Path(dest_res_dir) / transfer.SHADER_NAME, shader.read_text(encoding="utf-8"))
+            transfer.install_transfer_sections(sections, draw_hash, mesh, f"Meshes0000/{filename}")
+            transferred.update(logical_hashes)
+            LOG.info(f"ZZMI: 原生表情顶点重映射已启用 {draw_hash}，顶点数={len(mesh.source_vertices)}")
+        return transferred
 
     def _iter_name_variants(self, name: str):
         if not name:
@@ -213,6 +277,26 @@ class DirectShapeKeyGenerator(
         if not shader_source_path or not os.path.exists(shader_source_path):
             raise ShapeKeyDirectExportError(f"着色器模板文件未找到: {shader_source_path}")
 
+        native_full_attribute_hashes = {
+            logical_hash
+            for logical_hash in unique_hashes
+            if (
+                (native_attributes := self._native_shapekey_attributes_for_hash(
+                    logical_hash, logical_hash
+                ))
+                is not None
+                and native_attributes.has_non_position_deltas
+            )
+        }
+        native_morph_metadata_hashes = {
+            logical_hash
+            for logical_hash in unique_hashes
+            if self._native_morph_keys_for_export(
+                logical_hash,
+                self._match_drawib_model(logical_hash, logical_hash),
+                (name for names in slot_to_name_to_objects.values() for name in names),
+            )
+        }
         source_object_map = self._build_source_object_map()
         static_copy_map = {}
         frame_table_all_channels = bool(
@@ -221,7 +305,9 @@ class DirectShapeKeyGenerator(
         )
 
         try:
-            use_preprocess_records = bool(BlueprintExportHelper.get_direct_shapekey_position_records())
+            use_preprocess_records = bool(
+                BlueprintExportHelper.get_direct_shapekey_position_records()
+            ) and not native_full_attribute_hashes
             if use_preprocess_records and frame_table_all_channels:
                 raise ShapeKeyDirectExportError("全通道帧表需要包含法线和切线的导出器顶点缓冲区")
             if use_preprocess_records and bool(getattr(self.node, "store_all_vertex_channels", False)):
@@ -363,6 +449,11 @@ class DirectShapeKeyGenerator(
         downstream_build_cache = {}
         reusable_actual_hashes = set()
         hash_to_base_resources = self._parse_hash_to_base_resources(sections)
+        force_all_vertex_channel_hashes = {
+            logical_hash
+            for logical_hash, runtime_info in runtime_infos.items()
+            if bool(runtime_info.get("force_all_vertex_channels", False))
+        }
         all_unique_names = list(
             OrderedDict.fromkeys(name for slot_data in slot_to_name_to_objects.values() for name in slot_data.keys())
         )
@@ -408,6 +499,10 @@ class DirectShapeKeyGenerator(
             # 前置条件校验：帧表依赖「紧凑 + 合并槽位文件 + 优化查找」三件套产出的
             # 中间数据。任一不满足都明确点名，
             # 而不是让用户只看到一句笼统的「帧表构建失败」。
+            if native_morph_metadata_hashes:
+                frame_table_blocked.append(
+                    "「原生 morph 权重桥接」：帧表使用工程内序列权重，无法接收游戏的实时 morph 权重"
+                )
             if not use_packed:
                 frame_table_blocked.append("「紧凑模式」：帧表需要合并后的逐槽位数据")
             if not merge_slot_files:
@@ -466,6 +561,17 @@ class DirectShapeKeyGenerator(
                     "请确认「形态键扩展」节点已启用、至少有一个「序列」模式的分组且该分组已分配到形态键；\n"
                     "或取消勾选「帧表插值（序列组加速）」后重试。"
                 )
+
+        if not (frame_table_mode or drag_drive_enabled):
+            transferable_hashes = [
+                logical_hash for logical_hash in unique_hashes
+                if runtime_infos.get(logical_hash) and hash_slot_data_map.get(logical_hash)
+            ]
+            transferred = self._install_native_expression_transfers(
+                sections, runtime_infos, transferable_hashes, hash_slot_data_map,
+                slot_position_overrides, shader_source_path, dest_res_dir,
+            )
+            unique_hashes = [logical_hash for logical_hash in unique_hashes if logical_hash not in transferred]
 
         logical_resource_meta = {}
         actual_resource_members = {}
@@ -585,6 +691,16 @@ class DirectShapeKeyGenerator(
             for logical_hash in unique_hashes
             if runtime_infos.get(logical_hash) and hash_slot_data_map.get(logical_hash)
         ]
+        native_morph_plans, native_morph_lookup_files = (
+            self._prepare_native_morph_bridge(
+                runtime_infos=runtime_infos,
+                logical_hashes=processed_hashes,
+                hash_slot_data_map=hash_slot_data_map,
+                sections=sections,
+                dest_res_dir=dest_res_dir,
+                shader_source_path=shader_source_path,
+            )
+        )
         hash_to_shader_paths = {}
         for logical_hash in processed_hashes:
             if logical_hash not in hash_slot_data_map or not hash_slot_data_map[logical_hash]:
@@ -754,6 +870,11 @@ class DirectShapeKeyGenerator(
                     hash_val=logical_hash,
                     source_path=shader_source_path,
                     use_sparse_vertex_index=use_sparse_vertex_index,
+                    force_all_vertex_channels=(
+                        True
+                        if logical_hash in force_all_vertex_channel_hashes
+                        else None
+                    ),
                 )
         LOG.info(f"直出形态键: shader/freq 写出完成 {perf_counter() - stage_start:.3f}s")
 
@@ -775,6 +896,9 @@ class DirectShapeKeyGenerator(
             drag_drive_resource=drag_drive_resource,
             frame_table_meta_map=frame_table_meta_map,
             use_sparse_index=use_sparse_vertex_index,
+            force_all_vertex_channels_hashes=force_all_vertex_channel_hashes,
+            native_morph_plans=native_morph_plans,
+            native_morph_lookup_files=native_morph_lookup_files,
         )
         retained_hashes = self._update_ini_sections(
             sections=sections,
@@ -790,6 +914,18 @@ class DirectShapeKeyGenerator(
         if frame_cache is not None and frame_table_meta_map:
             output = Path(self.mod_export_path)
             files = [Path("res") / WEIGHT_SYNC_SHADER_NAME]
+            if native_morph_plans:
+                files.extend(
+                    Path("res") / shader_name
+                    for shader_name in (
+                        native_morph.CAPTURE_SHADER_NAME,
+                        native_morph.CLEAR_SHADER_NAME,
+                        native_morph.WEIGHT_SYNC_SHADER_NAME,
+                    )
+                )
+                files.extend(
+                    Path(path) for path in native_morph_lookup_files.values()
+                )
             compact_frame_meta = {}
             tangent_layouts = {}
             ini_data["unique_hashes"] = retained_hashes

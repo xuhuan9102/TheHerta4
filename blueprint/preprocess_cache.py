@@ -12,6 +12,11 @@ from ..common.global_properties import GlobalProterties
 from ..utils.log_utils import LOG
 from ..utils.color_attribute_utils import read_color_attribute_data
 from ..common.object_prefix_helper import ObjectPrefixHelper
+from ..common.mesh_attribute_names import (
+    IMPORTED_NORMAL_XYZ,
+    IMPORTED_TANGENT_W,
+    IMPORTED_TANGENT_XYZ,
+)
 
 
 class PreProcessCache:
@@ -366,6 +371,23 @@ class PreProcessCache:
 
         if obj.type == 'MESH' and obj.data:
             mesh = obj.data
+            attributes = getattr(mesh, "attributes", None)
+            for attribute_name in (
+                IMPORTED_NORMAL_XYZ,
+                IMPORTED_TANGENT_XYZ,
+                IMPORTED_TANGENT_W,
+            ):
+                attribute = attributes.get(attribute_name) if attributes is not None else None
+                if attribute is None:
+                    continue
+                hasher.update(attribute_name.encode("utf-8"))
+                if attribute.data_type == "FLOAT_VECTOR":
+                    values = numpy.empty(len(attribute.data) * 3, dtype=numpy.float32)
+                    attribute.data.foreach_get("vector", values)
+                else:
+                    values = numpy.empty(len(attribute.data), dtype=numpy.float32)
+                    attribute.data.foreach_get("value", values)
+                hasher.update(values.tobytes())
             if preserve_shapes:
                 from .frame_table_cache import hash_mesh_topology
 

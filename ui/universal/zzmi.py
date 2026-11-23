@@ -6101,6 +6101,21 @@ class ExportZZMI(ExportUnity):
                     with open(buffer_path, "wb") as file_obj:
                         category_buffer.tofile(file_obj)
 
+    @staticmethod
+    def _skin_input_aliases(draw_ib, category_hash):
+        """Read verified alternate skinning inputs for this DrawIB and input hash."""
+        path = os.path.join(GlobalConfig.path_workspace_folder(), "Config", "ZZMISkinInputAliases.json")
+        if not os.path.isfile(path):
+            return ()
+        with open(path, encoding="utf-8-sig") as file:
+            aliases = json.load(file).get(draw_ib, {}).get(category_hash, [])
+        if not isinstance(aliases, list) or any(
+            not isinstance(alias, str) or not re.fullmatch(r"[0-9a-f]{8}", alias)
+            for alias in aliases
+        ):
+            raise ValueError(f"Invalid ZZMI skin input aliases for DrawIB {draw_ib}: {path}")
+        return tuple(dict.fromkeys(alias for alias in aliases if alias != category_hash))
+
     def add_unity_vs_texture_override_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
         d3d11_game_type = drawib_model.d3d11GameType
         draw_ib = drawib_model.draw_ib
@@ -6165,6 +6180,7 @@ class ExportZZMI(ExportUnity):
             texture_override_vb_name_suffix = "VB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + category_name
             texture_override_vb_section.append("[TextureOverride_" + texture_override_vb_name_suffix + "]")
             texture_override_vb_section.append("hash = " + category_hash)
+            body_start = len(texture_override_vb_section.SectionLineList)
 
             for original_category_name, draw_category_name in d3d11_game_type.CategoryDrawCategoryDict.items():
                 if category_name != draw_category_name:
@@ -6201,6 +6217,14 @@ class ExportZZMI(ExportUnity):
                         texture_override_vb_section.append("$ActiveCharacter = 1")
 
             texture_override_vb_section.new_line()
+            if draw_category_name is not None and category_name == draw_category_name:
+                body = texture_override_vb_section.SectionLineList[body_start:]
+                for alias in self._skin_input_aliases(draw_ib, category_hash):
+                    texture_override_vb_section.append(
+                        f"[TextureOverride_{texture_override_vb_name_suffix}_SkinInput_{alias}]"
+                    )
+                    texture_override_vb_section.append(f"hash = {alias}")
+                    texture_override_vb_section.extend(body)
 
         ini_builder.append_section(texture_override_vb_section)
 
@@ -8860,6 +8884,66 @@ class ExportZZMI(ExportUnity):
         finally:
             self._cleanup_stub_objects()
 
+    def _add_native_expression_transfers(self, ini_builder):
+        from ...blueprint.export_helper import BlueprintExportHelper
+        from ...blueprint import native_expression_transfer as transfer, native_morph_driver
+        from ...common.workspace_helper import WorkSpaceHelper
+
+        # Explicit shape-key post-processing owns its animation buffers.
+        if BlueprintExportHelper.is_direct_export_active() or any(
+            node.bl_idname == "SSMTNode_PostProcess_ShapeKey"
+            for node in getattr(self.blueprint_model, "postprocess_nodes", ())
+        ):
+            return
+
+        models = [
+            model for model in self.drawib_model_list
+            if native_morph_driver.parse_native_morph_keys(
+                getattr(model, "import_json_dict", {}).get("ShapeKeysInfo", {})
+            )
+        ]
+        if not models:
+            return
+
+        sections, owners = transfer.collect_builder_sections(ini_builder.ini_section_list)
+        output = os.path.abspath(GlobalConfig.path_generate_mod_folder())
+        for model in models:
+            try:
+                mesh = transfer.read_transfer_mesh(
+                    sections, output, model.draw_ib, WorkSpaceHelper.get_submesh_folder_path,
+                    os.path.basename(os.path.dirname(model.import_json_path)),
+                )
+            except (OSError, ValueError):
+                continue
+            if mesh is None:
+                continue
+
+            mapping_file = os.path.join(
+                os.path.dirname(mesh.position_file), f"{model.draw_ib}-NativeExpressionSourceVertex.buf",
+            ).replace(os.sep, "/")
+            transfer.write_transfer_buffers(output, model.draw_ib, mesh, mapping_file)
+            toolset = os.path.join(os.path.dirname(__file__), "..", "..", "Toolset")
+            shader = os.path.join(output, "res", transfer.SHADER_NAME)
+            os.makedirs(os.path.dirname(shader), exist_ok=True)
+            with open(os.path.join(toolset, transfer.SHADER_NAME), encoding="utf-8") as file:
+                safe_write.write_text_if_changed(shader, file.read())
+
+            run_command, generated = transfer.render_transfer_sections(model.draw_ib, mesh, mapping_file)
+            owner, has_header = owners[mesh.override]
+            lines = owner.SectionLineList
+            start = lines.index(mesh.override) + 1 if has_header else 0
+            binding = f"vb0 = {mesh.position_resource}"
+            binding_index = next(index for index in range(start, len(lines)) if lines[index].strip() == binding)
+            lines.insert(binding_index, run_command)
+
+            with _section_registry_context(model.draw_ib):
+                for header, body in generated.items():
+                    section = M_IniSection(M_SectionType.ResourceBuffer)
+                    section.SectionName = header[1:-1]
+                    section.extend(body)
+                    ini_builder.append_section(section)
+            print(f"ZZMI: 原生表情顶点重映射已启用 {model.draw_ib}，顶点数={len(mesh.source_vertices)}")
+
     def _export_impl(self):
         if hasattr(self, '_transparency_split_shader_drawcalls'):
             self._transparency_split_shader_drawcalls = []
@@ -9002,6 +9086,7 @@ class ExportZZMI(ExportUnity):
             section = M_IniSection(M_SectionType.ShaderReplace)
             section.extend(flow_shader_sections(tag))
             ini_builder.append_section(section)
+        self._add_native_expression_transfers(ini_builder)
         ini_builder.save_to_file(ini_path)
         TimerUtils.end_stage("INI配置生成")
 

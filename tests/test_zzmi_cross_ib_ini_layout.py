@@ -72,6 +72,7 @@ class _FakeExportUnity:
 _install_module(
     f"{PKG}.common.global_config",
     GlobalConfig=types.SimpleNamespace(
+        path_workspace_folder=lambda: "",
         path_generatemod_buffer_folder=lambda: "",
         path_generate_mod_folder=lambda: "",
         get_workspace_name=lambda: "",

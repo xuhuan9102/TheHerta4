@@ -1140,6 +1140,7 @@ class ExportUtils:
                         mesh_loops=mesh.loops,
                         mesh_loops_length=len(mesh.loops),
                         d3d11_element=d3d11_element,
+                    mesh=mesh,
                     )
                 data = all_normals[loop_indices]
 
@@ -1148,6 +1149,7 @@ class ExportUtils:
                     mesh_loops=mesh.loops,
                     mesh_loops_length=len(mesh.loops),
                     d3d11_element=d3d11_element,
+                    mesh=mesh,
                 )
                 data = all_tangents[loop_indices]
 

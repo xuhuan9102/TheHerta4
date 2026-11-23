@@ -18,8 +18,14 @@ from ..utils.vertexgroup_utils import VertexGroupUtils
 from .global_config import GlobalConfig
 from .global_properties import GlobalProterties
 from .logic_name import LogicName
+from .mesh_attribute_names import (
+    IMPORTED_NORMAL_XYZ,
+    IMPORTED_TANGENT_W,
+    IMPORTED_TANGENT_XYZ,
+)
 from .object_prefix_helper import ObjectPrefixHelper
 from .d3d11_element import D3D11Element
+from .shapekey_import_layout import infer_shapekey_vertex_offset_stride
 from ..ui.wwmi.extracted_object import ExtractedObjectHelper
 
 
@@ -101,6 +107,7 @@ class MeshCreateHelper:
         shapekeys = {}
         use_normals = False
         normals = []
+        tangents = None
 
         for element in elements:
             data = vb_data[element.ElementName]
@@ -186,7 +193,16 @@ class MeshCreateHelper:
                 else:
                     print(f"警告: ENCODEDDATA 元素仅在 EFMI 格式中支持，当前游戏类型: {logic_name}")
             elif element.SemanticName == "TANGENT":
-                pass
+                tangent_values = numpy.asarray(data, dtype=numpy.float32)
+                if tangent_values.ndim == 1:
+                    tangent_values = tangent_values.reshape(-1, 1)
+                if tangent_values.shape[1] < 4:
+                    padding = numpy.zeros(
+                        (len(tangent_values), 4 - tangent_values.shape[1]),
+                        dtype=numpy.float32,
+                    )
+                    tangent_values = numpy.concatenate((tangent_values, padding), axis=1)
+                tangents = numpy.ascontiguousarray(tangent_values[:, :4])
             elif element.SemanticName == "BINORMAL":
                 pass
             else:
@@ -253,8 +269,11 @@ class MeshCreateHelper:
 
         mesh.validate(verbose=False, clean_customdata=False)
         mesh.update()
+        if tangents is not None:
+            MeshCreateHelper.set_import_tangents(mesh=mesh, tangents=tangents)
         if use_normals:
             MeshUtils.set_import_normals_v2(mesh=mesh, normals=normals)
+            MeshCreateHelper.set_import_normals(mesh=mesh, normals=normals)
 
         MeshCreateHelper.create_bsdf_with_diffuse_linked(
             obj=obj,
@@ -320,6 +339,65 @@ class MeshCreateHelper:
         obj["3DMigoto:RecalculateTANGENT"] = False
         obj["3DMigoto:RecalculateCOLOR"] = False
         obj['3DMigoto:GameTypeName'] = gametypename
+
+    @staticmethod
+    def set_import_tangents(mesh, tangents):
+        values = numpy.asarray(tangents, dtype=numpy.float32)
+        if values.ndim != 2 or values.shape[1] < 4:
+            return
+        if len(values) != len(mesh.vertices):
+            print(
+                "警告: TANGENT 数量与顶点数不匹配，跳过原始切线导入 "
+                f"({len(values)} != {len(mesh.vertices)})"
+            )
+            return
+
+        for name in (IMPORTED_TANGENT_XYZ, IMPORTED_TANGENT_W):
+            existing = mesh.attributes.get(name)
+            if existing is not None:
+                mesh.attributes.remove(existing)
+        xyz_attr = mesh.attributes.new(
+            name=IMPORTED_TANGENT_XYZ,
+            type="FLOAT_VECTOR",
+            domain="POINT",
+        )
+        xyz_attr.data.foreach_set(
+            "vector",
+            numpy.ascontiguousarray(values[:, :3]).ravel(),
+        )
+        w_attr = mesh.attributes.new(
+            name=IMPORTED_TANGENT_W,
+            type="FLOAT",
+            domain="POINT",
+        )
+        w_attr.data.foreach_set(
+            "value",
+            numpy.ascontiguousarray(values[:, 3]).ravel(),
+        )
+
+    @staticmethod
+    def set_import_normals(mesh, normals):
+        values = numpy.asarray(normals, dtype=numpy.float32)
+        if values.ndim != 2 or values.shape[1] < 3:
+            return
+        if len(values) != len(mesh.vertices):
+            print(
+                "警告: NORMAL 数量与顶点数不匹配，跳过原始法线导入 "
+                f"({len(values)} != {len(mesh.vertices)})"
+            )
+            return
+        existing = mesh.attributes.get(IMPORTED_NORMAL_XYZ)
+        if existing is not None:
+            mesh.attributes.remove(existing)
+        attr = mesh.attributes.new(
+            name=IMPORTED_NORMAL_XYZ,
+            type="FLOAT_VECTOR",
+            domain="POINT",
+        )
+        attr.data.foreach_set(
+            "vector",
+            numpy.ascontiguousarray(values[:, :3]).ravel(),
+        )
 
     @staticmethod
     def set_import_coordinate(obj):
@@ -598,6 +676,15 @@ class MeshCreateHelper:
 
         vertex_id_buffer = numpy.asarray(sk_vertex_id_raw).view(numpy.uint32)
         vertex_offset_buffer = numpy.asarray(sk_vertex_offset_raw).view(numpy.float16)
+        vertex_offset_stride = infer_shapekey_vertex_offset_stride(
+            len(vertex_id_buffer),
+            len(vertex_offset_buffer),
+        )
+        if vertex_offset_stride <= 0:
+            print(
+                "警告: ShapeKeyVertexOffset 通道数与顶点记录数不匹配，跳过原生形态键导入"
+            )
+            return
         effective_vertex_count = vertex_count if vertex_count > 0 else len(obj.data.vertices)
         if effective_vertex_count <= 0:
             return
@@ -637,7 +724,7 @@ class MeshCreateHelper:
             if len(entries) == 0:
                 continue
 
-            dx_idx = entries * 6
+            dx_idx = entries * vertex_offset_stride
             dy_idx = dx_idx + 1
             dz_idx = dx_idx + 2
             valid_offset_mask = dz_idx < len(vertex_offset_buffer)
@@ -646,7 +733,7 @@ class MeshCreateHelper:
             if len(entries) == 0:
                 continue
 
-            dx_idx = entries * 6
+            dx_idx = entries * vertex_offset_stride
             dy_idx = dx_idx + 1
             dz_idx = dx_idx + 2
 
