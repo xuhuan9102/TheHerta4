@@ -1,0 +1,33 @@
+name: Full tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: >-
+          python -m pip install pytest==9.1.1 numpy==2.4.2
+          Pillow==12.3.0 scipy==1.17.1
+      - name: Build Windows native libraries
+        run: |
+          $build = Join-Path $env:RUNNER_TEMP "theherta-native"
+          cmake -S common/native -B $build -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build $build --config Release --parallel
+      - name: Run the full test suite
+        run: python -m pytest tests -q --tb=short
