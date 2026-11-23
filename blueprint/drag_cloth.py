@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
@@ -108,9 +108,18 @@ def _resource_reference(value):
     return re.sub(r"^ref\s+", "", value, flags=re.IGNORECASE).split()[0]
 
 
+def _position_buffer_key(lines):
+    filename = _field(lines, "filename")
+    stride = _field(lines, "stride")
+    if filename and stride:
+        return PurePosixPath(filename.replace("\\", "/")).as_posix().casefold(), stride
+    return None
+
+
 def _skin_writes(sections, comp, group, family, vertex_count):
     """Identify writes of this component's skinned rows and their actual palette."""
     base = comp["base_resource"].casefold()
+    base_layout = _position_buffer_key(sections.get(f"[{comp['base_resource']}]", ()))
     outputs = {f"{family}_G{group}_s{slot}".casefold(): slot for slot in (1, 2)}
     palettes = re.compile(
         rf"ResourceZZ(?:MergedSkeleton_G{group}|PaletteConv_C\d+)_s([12])",
@@ -119,15 +128,27 @@ def _skin_writes(sections, comp, group, family, vertex_count):
     writes = []
     for section, lines in sections.items():
         if section.casefold().startswith("[customshader"):
-            shader = (_field(lines, "cs") or "").replace("\\", "/").rsplit("/", 1)[-1]
-            if shader.casefold() != "zzmi_merged_skin.hlsl":
+            shader = (_field(lines, "cs") or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            owned = shader == "zzmi_merged_skin_owned_output.hlsl"
+            if not owned and shader != "zzmi_merged_skin.hlsl":
                 continue
             vertices = _resource_reference(_field(lines, "cs-u0") or "null")
+            if owned:
+                # The calibrated shader writes via a typed view of the drawing VB.
+                alias = _field(lines, vertices)
+                if alias:
+                    if not re.match(r"^ref\s+", alias, re.IGNORECASE):
+                        continue
+                    vertices = _resource_reference(alias)
             slot = outputs.get(vertices.casefold())
             position = _resource_reference(_field(lines, "cs-t0") or "null")
+            position_matches = position.casefold() == base or (
+                owned and base_layout is not None
+                and _position_buffer_key(sections.get(f"[{position}]", ())) == base_layout
+            )
             if (
                 slot is None
-                or position.casefold() != base
+                or not position_matches
                 or _field(lines, "x1") != str(vertex_count)
             ):
                 continue
