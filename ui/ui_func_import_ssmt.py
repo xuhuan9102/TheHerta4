@@ -429,7 +429,20 @@ def _configure_and_execute_efmi_lod_match(
 
 
 def ImprotFromWorkSpaceFull(self, context):
-    """从工作空间完整导入所有子模型并构建蓝图节点树"""
+    """同步导入入口，供脚本和无窗口模式使用。"""
+    return _consume_import_steps(_iter_workspace_import(self, context))
+
+
+def _consume_import_steps(steps):
+    while True:
+        try:
+            next(steps)
+        except StopIteration as completed:
+            return completed.value
+
+
+def _iter_workspace_import(self, context, *, background_zzmi=False):
+    yield 1, "扫描工作空间"
     # 每次导入都重新读 SSMT 贴图标记：工作空间里的标记可能被 SSMT 侧改过。
     # 缓存只用于同一次导入内的去重（同一身份不会重复解析 SubmeshJson），清不掉
     # 也不影响正确性，因此对缺失该模块的轻量宿主（测试桩）保持容错。
@@ -444,7 +457,7 @@ def ImprotFromWorkSpaceFull(self, context):
     is_ntemi = _detect_ntemi_workspace()
 
     if is_ntemi:
-        return _import_workspace_full_ntemi(self, context, workspace_collection)
+        return (yield from _iter_workspace_import_ntemi(self, context, workspace_collection))
 
     import_targets = list(_build_workspace_import_targets(workspace_collection))
     if not import_targets:
@@ -454,6 +467,7 @@ def ImprotFromWorkSpaceFull(self, context):
     # None = 非 EFMI/ZZMI 或未请求合并，沿用全局选项；True = 本次整批
     # 预生成完整成功；False = 任一目标失败/异常，整批必须普通导入，不能让
     # JSON 残留 VGMap 造成“部分全局组 + 部分局部组”的混合命名空间。
+    yield 6, "准备导入数据"
     merged_vgmap_ready: bool | None = None
 
     # t15 活性修复（佩丽卡 13:12 实况）：用户「清骨骼合并VGMap缓存 + 重新导入」
@@ -663,6 +677,9 @@ def ImprotFromWorkSpaceFull(self, context):
         GlobalConfig.logic_name == LogicName.ZZMI
         and GlobalProterties.import_merged_vgmap()
     )
+    zzmi_workspace_fusion = (
+        zzmi_merged_consumption and GlobalProterties.zzmi_fusion_from_workspace()
+    )
     zzmi_merged_metadata_missing = False
     if GlobalConfig.logic_name == LogicName.ZZMI:
         try:
@@ -677,40 +694,39 @@ def ImprotFromWorkSpaceFull(self, context):
             zzmi_merged_metadata_missing = False
     if zzmi_merged_consumption or zzmi_merged_metadata_missing:
         merged_vgmap_ready = False
+        yield 8, "准备 ZZMI 骨骼融合"
         try:
             from ..common.zzmi_skeleton import ZZMISkeletonMergeHelper
             import_keys = [target["import_key"] for target in import_targets]
-            # 按 LOD 分批调用：同一次调用里只放同一个 LOD 的部件，组内共用一份输入源；
-            # 否则同一 DrawIB 在 LOD0/LOD1 会并成一组、共用第一份 source（串帧）。
-            try:
-                from ..common.global_properties import GlobalProterties as _ZZMIProps
+            workspace_root = GlobalConfig.path_workspace_folder()
+            result = None
+            if background_zzmi:
+                from ..common.zzmi_import_worker import ZZMIImportWorker, bundled_python
 
-                per_lod = bool(_ZZMIProps.zzmi_fusion_per_lod())
-            except Exception:
-                per_lod = False
-            if per_lod:
-                from ..common.zzmi_skeleton import fusion_lod
-
-                batches = {}
-                for key in import_keys:
-                    batches.setdefault(fusion_lod(key), []).append(key)
-                messages = []
-                ok = True
-                for lod in sorted(batches):
-                    lod_ok, lod_message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
-                        workspace_root=GlobalConfig.path_workspace_folder(),
-                        unique_str_list=batches[lod],
-                        _lod=lod,
-                    )
-                    ok = ok and bool(lod_ok)
-                    messages.append(f"{lod}: {lod_message}")
-                message = "；".join(messages)
-            else:
-                ok, message = ZZMISkeletonMergeHelper.ensure_skeleton_data(
-                    workspace_root=GlobalConfig.path_workspace_folder(),
-                    unique_str_list=import_keys,
+                if bundled_python().is_file():
+                    settings = {
+                        "workspace_source": GlobalProterties.zzmi_fusion_from_workspace(),
+                        "per_lod": GlobalProterties.zzmi_fusion_per_lod(),
+                        "cross_group": ZZMISkeletonMergeHelper.cross_group_merged_enabled(),
+                    }
+                    if not settings["workspace_source"]:
+                        settings["frame_analysis_dir"] = ZZMISkeletonMergeHelper.resolve_frame_analysis_dir(
+                            workspace_root
+                        )
+                    with ZZMIImportWorker(workspace_root, import_keys, settings) as worker:
+                        while result is None:
+                            (fraction, stage), result = worker.poll()
+                            if result is None:
+                                yield 8 + 40 * fraction, stage
+            if result is None:
+                result = ZZMISkeletonMergeHelper.ensure_import_skeleton_data(
+                    workspace_root, import_keys, per_lod=GlobalProterties.zzmi_fusion_per_lod(),
                 )
+            ok, message = result
             print(f"[ZZMI骨骼合并] {message}")
+            if not ok and zzmi_workspace_fusion:
+                self.report({'ERROR'}, f"无法使用 SSMT4 提取的骨骼数据：{message}")
+                return False
             merged_vgmap_ready = bool(ok)
             if merged_vgmap_ready and zzmi_merged_consumption:
                 # ok 只说「骨骼数据在/写下去了」；开着跨组合并时还要确认这份数据
@@ -774,6 +790,9 @@ def ImprotFromWorkSpaceFull(self, context):
             import traceback
             print(f"[ZZMI骨骼合并] 预生成失败（不阻断导入）: {e}")
             traceback.print_exc()
+            if zzmi_workspace_fusion:
+                self.report({'ERROR'}, f"读取 SSMT4 骨骼数据失败：{e}")
+                return False
             if zzmi_merged_consumption:
                 self.report({'WARNING'}, f"ZZMI 骨骼合并预生成异常，已回退普通导入：{e}")
 
@@ -872,7 +891,9 @@ def ImprotFromWorkSpaceFull(self, context):
     # 复用旧批次留下的同名合集，而应由 Blender 风格命名生成 .001/.002。
     zzmi_skeleton_group_collections = {}
 
-    for target in import_targets:
+    total = len(import_targets)
+    for index, target in enumerate(import_targets):
+        yield 50 + 38 * index / total, f"导入网格 {index + 1}/{total} · {target['display_name']}"
         submesh_folder_name = target["submesh_folder_name"]
         print("Import FolderName: " + target["import_key"])
 
@@ -946,15 +967,20 @@ def ImprotFromWorkSpaceFull(self, context):
         self.report({'ERROR'}, "当前工作空间没有成功导入任何模型，已跳过蓝图生成。")
         return False
 
+    yield 89, "整理网格和顶点组"
     save_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict, filepath=save_import_json_path)
 
     if GlobalProterties.enable_non_mirror_workflow():
-        NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
+        total = len(imported_objects)
+        for index in NonMirrorWorkflowHelper.iter_imported_objects(imported_objects):
+            if index % 4 == 0:
+                yield 89 + 4 * index / total, f"整理网格 {index + 1}/{total}"
 
     CollectionUtils.select_collection_objects(workspace_collection)
     PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
 
+    yield 94, "生成导入蓝图"
     try:
         tree_name = GlobalConfig.get_workspace_name()
 
@@ -983,7 +1009,9 @@ def ImprotFromWorkSpaceFull(self, context):
         y_gap = 200
         tab_gap = 400
 
-        for record in import_records:
+        for index, record in enumerate(import_records):
+            if index and index % 8 == 0:
+                yield 94 + 4 * index / len(import_records), f"生成蓝图 · 节点 {index}/{len(import_records)}"
             obj = record["imported_obj"]
             if obj.type != 'MESH':
                 continue
@@ -1287,6 +1315,7 @@ def ImprotFromWorkSpaceFull(self, context):
             original_model_frame.update()
 
         print(f"蓝图 {tree_name} 已按工作空间标签完成导入对象分组更新。")
+        yield 100, "导入完成"
         return True
 
     except Exception as e:
@@ -1298,6 +1327,10 @@ def ImprotFromWorkSpaceFull(self, context):
 
 
 def _import_workspace_full_ntemi(self, context, workspace_collection):
+    return _consume_import_steps(_iter_workspace_import_ntemi(self, context, workspace_collection))
+
+
+def _iter_workspace_import_ntemi(self, context, workspace_collection):
     """NTEMI 工作空间的完整导入流程，含骨骼合并后处理"""
     workspace_root = GlobalConfig.path_workspace_folder()
     drawib_aliasname_dict = WorkSpaceHelper.get_drawib_aliasname_dict()
@@ -1316,7 +1349,9 @@ def _import_workspace_full_ntemi(self, context, workspace_collection):
     imported_objects = []
     import_records = []
 
-    for draw_call in draw_calls:
+    total = len(draw_calls)
+    for index, draw_call in enumerate(draw_calls):
+        yield 8 + 71 * index / total, f"导入网格 {index + 1}/{total} · {draw_call.lod_name}"
         lod_name = str(draw_call.lod_name or "LOD0").strip() or "LOD0"
         lod_collection = lod_collection_map.get(lod_name)
         if lod_collection is None:
@@ -1405,11 +1440,15 @@ def _import_workspace_full_ntemi(self, context, workspace_collection):
         self.report({'ERROR'}, "NTEMI工作空间没有成功导入任何模型，已跳过蓝图生成。")
         return False
 
+    yield 80, "整理网格和顶点组"
     save_import_json_path = os.path.join(workspace_root, "Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict, filepath=save_import_json_path)
 
     if GlobalProterties.enable_non_mirror_workflow():
-        NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
+        total = len(imported_objects)
+        for index in NonMirrorWorkflowHelper.iter_imported_objects(imported_objects):
+            if index % 4 == 0:
+                yield 80 + 4 * index / total, f"整理网格 {index + 1}/{total}"
 
     CollectionUtils.select_collection_objects(workspace_collection)
     PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
@@ -1423,7 +1462,8 @@ def _import_workspace_full_ntemi(self, context, workspace_collection):
             continue
         imported_by_source.setdefault((frame_analysis_dir, draw_ib), []).append(imported_obj)
 
-    for (frame_analysis_dir, draw_ib), draw_ib_objects in imported_by_source.items():
+    for index, ((frame_analysis_dir, draw_ib), draw_ib_objects) in enumerate(imported_by_source.items()):
+        yield 84 + 9 * index / len(imported_by_source), f"整理骨骼 · {draw_ib}"
         try:
             _perform_bone_merge_postprocess(
                 objects=draw_ib_objects,
@@ -1440,6 +1480,7 @@ def _import_workspace_full_ntemi(self, context, workspace_collection):
                 f"已跳过 DrawIB {draw_ib} 的骨骼合并后处理：{os.path.basename(frame_analysis_dir)}"
             )
 
+    yield 94, "生成导入蓝图"
     try:
         tree_name = GlobalConfig.get_workspace_name()
 
@@ -1468,7 +1509,9 @@ def _import_workspace_full_ntemi(self, context, workspace_collection):
         y_gap = 200
         tab_gap = 400
 
-        for record in import_records:
+        for index, record in enumerate(import_records):
+            if index and index % 8 == 0:
+                yield 94 + 4 * index / len(import_records), f"生成蓝图 · 节点 {index}/{len(import_records)}"
             obj = record["imported_obj"]
             if obj.type != 'MESH':
                 continue
@@ -1566,6 +1609,7 @@ def _import_workspace_full_ntemi(self, context, workspace_collection):
             original_model_frame.update()
 
         print(f"已创建 NTEMI 蓝图 {tree_name}，并挂载 NTMI ModImp 输出节点。")
+        yield 100, "导入完成"
         return True
 
     except Exception as e:
@@ -1583,28 +1627,109 @@ class SSMT4ImportAllFromCurrentWorkSpaceBlueprint(bpy.types.Operator):
     bl_description = "一键导入当前工作空间文件夹下所有的内容"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
-        success = False
+    _import_running = False
+    _timer = None
+
+    def _can_start(self):
+        if type(self)._import_running:
+            self.report({"WARNING"}, "工作空间正在导入。")
+            return False
         if GlobalConfig.get_workspace_name() == "":
             self.report({"ERROR"}, "请先在 SSMT 中选择工作空间后再导入。")
-        elif not os.path.exists(GlobalConfig.path_workspace_folder()):
-            self.report(
-                {"ERROR"},
-                "工作空间目录不存在，请先在 SSMT 中创建工作空间后再导入："
-                + GlobalConfig.path_workspace_folder(),
-            )
-        else:
-            TimerUtils.Start("ImportFromWorkSpaceBlueprint")
-            success = bool(ImprotFromWorkSpaceFull(self, context))
+            return False
+        workspace_path = GlobalConfig.path_workspace_folder()
+        if not os.path.exists(workspace_path):
+            self.report({"ERROR"}, "工作空间目录不存在：" + workspace_path)
+            return False
+        return True
+
+    def _result(self, context, success):
+        if not success:
+            return {'CANCELLED'}
+        from ..toolkit.tt_dds_to_png import schedule_auto_convert
+
+        schedule_auto_convert(context)
+        return {'FINISHED'}
+
+    def execute(self, context):
+        if not self._can_start():
+            return {'CANCELLED'}
+        TimerUtils.Start("ImportFromWorkSpaceBlueprint")
+        try:
+            success = ImprotFromWorkSpaceFull(self, context)
+        finally:
             TimerUtils.End("ImportFromWorkSpaceBlueprint")
+        return self._result(context, success)
 
-        if success:
-            # 勾选了「导入后自动转为PNG」时，导入结束再调度转换：这里当场跑会拖长导入本身
-            from ..toolkit.tt_dds_to_png import schedule_auto_convert
+    def invoke(self, context, event):
+        if bpy.app.background or context.window is None:
+            return self.execute(context)
+        if not self._can_start():
+            return {'CANCELLED'}
+        self._origin = {
+            "window": context.window,
+            "area": context.area,
+            "region": context.region,
+        }
+        self._steps = _iter_workspace_import(self, context, background_zzmi=True)
+        self._last_progress = None
+        self._timer = context.window_manager.event_timer_add(0.04, window=context.window)
+        type(self)._import_running = True
+        TimerUtils.Start("ImportFromWorkSpaceBlueprint")
+        context.window_manager.progress_begin(0, 100)
+        self._show_progress(context, 0, "准备导入工作空间")
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
 
-            schedule_auto_convert(context)
-            return {'FINISHED'}
-        return {'CANCELLED'}
+    def _show_progress(self, context, fraction, message):
+        from ..blueprint.export_background import format_percent_bar, push_progress_header
+
+        percent = int(fraction)
+        if self._last_progress == (percent, message):
+            return
+        if self._last_progress is None or self._last_progress[0] != percent:
+            context.window_manager.progress_update(percent)
+        self._last_progress = (percent, message)
+        push_progress_header(f"工作空间导入  {format_percent_bar(percent, width=10)}  {message}", context)
+
+    def modal(self, context, event):
+        if event.type != 'TIMER':
+            # Let viewport navigation run between steps while scene edits wait for the import.
+            if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'MIDDLEMOUSE',
+                              'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'TRACKPADPAN',
+                              'TRACKPADZOOM', 'MOUSEROTATE', 'WINDOW_DEACTIVATE'}:
+                return {'PASS_THROUGH'}
+            return {'RUNNING_MODAL'}
+        try:
+            with context.temp_override(**self._origin):
+                percent, message = next(self._steps)
+            self._show_progress(context, percent, message)
+        except StopIteration as completed:
+            self.cancel(context)
+            return self._result(context, completed.value)
+        except Exception as error:
+            import traceback
+            traceback.print_exc()
+            self.cancel(context)
+            self.report({'ERROR'}, f"导入工作空间失败：{error}")
+            return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+    def cancel(self, context):
+        if self._timer is None:
+            return
+        from ..blueprint.export_background import clear_progress_header
+
+        context.window_manager.event_timer_remove(self._timer)
+        self._timer = None
+        try:
+            self._steps.close()
+        finally:
+            self._steps = None
+            type(self)._import_running = False
+            context.window_manager.progress_end()
+            clear_progress_header(context)
+            TimerUtils.End("ImportFromWorkSpaceBlueprint")
 
 
 class SSMT4ImportRaw(bpy.types.Operator, ImportHelper):
@@ -1677,4 +1802,3 @@ def register():
 def unregister():
     bpy.utils.unregister_class(SSMT4ImportRaw)
     bpy.utils.unregister_class(SSMT4ImportAllFromCurrentWorkSpaceBlueprint)
-
