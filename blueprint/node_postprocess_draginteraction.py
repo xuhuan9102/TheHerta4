@@ -1145,6 +1145,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         default=8, min=0, max=32,
     )
 
+    tear_enabled: bpy.props.BoolProperty(
+        name="启用丝袜破洞",
+        description="拖动区域包含的衣物时在绘制中生成破洞；游戏内 Ctrl+Alt+Y 切换显示",
+        default=False,
+    )
     cloth_slide_enabled: bpy.props.BoolProperty(
         name="启用上下拖拽",
         description="独立生成实时贴身穿脱、褶皱与动态贴合权重；不依赖普通碰撞开关。需要ZZMI合并骨架、衣物与同载体身体碰撞体",
@@ -1346,6 +1351,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         collision_row = feature_box.row()
         collision_row.enabled = not is_efmi
         collision_row.prop(self, "collision_enabled", text="启用碰撞检测")
+        tear_row = feature_box.row()
+        tear_row.enabled = cloth_supported
+        tear_row.prop(self, "tear_enabled")
+        if getattr(self, "tear_enabled", False) and cloth_supported:
+            feature_box.label(text="为区域显式包含的衣物生成破洞，Ctrl+Alt+Y 切换显示", icon='INFO')
         cloth_row = feature_box.row()
         cloth_row.enabled = cloth_supported or self._cloth_enabled()
         cloth_row.prop(self, "cloth_slide_enabled", text="启用上下拖拽")
@@ -1749,8 +1759,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                     "请先 git checkout / 重新拉取后再导出，不要在半截仓库上生成模组。"
                 ) from _cloth_missing
             else:
-                clean_sections(sections, self._resolve_namespace(ini_file_path))
+                from .drag_tear import clean_existing
+                ns = self._resolve_namespace(ini_file_path)
+                clean_sections(sections, ns)
                 preserved_tail_content = clean_tail(preserved_tail_content)
+                preserved_tail_content = clean_existing(sections, preserved_tail_content, ns)
         except FileNotFoundError:
             return None, "", ""
         return sections, preserved_tail_content, preserved_driver_content
@@ -2102,6 +2115,18 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         os.makedirs(res_dir, exist_ok=True)
         self._copy_shaders(res_dir)
         cloth_tokens = set()
+        tear_tokens = set()
+        written_inis = set()
+        from . import drag_tear
+        tear_names = set()
+        if getattr(self, "tear_enabled", False):
+            excluded = set()
+            for _, empty in self._collect_enabled_zone_entries():
+                settings = empty.ssmt_drag_zone
+                if getattr(settings, "grabbable", True):
+                    tear_names.update(_zone_allowed_names(settings))
+                excluded.update(_collider_allowed_names(settings))
+            tear_names = {_blender_object_key(name) for name in tear_names} - excluded
 
         for ini_file in ini_files:
             ini_path = os.path.join(mod_export_path, ini_file)
@@ -2141,6 +2166,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 continue
             components = active_components
             cloth_tokens.update(comp['cloth']['token'] for comp in components if comp.get('cloth'))
+            tear = drag_tear.bake(self, mod_export_path, sections, components, ns, ini_file,
+                                  tear_names, _blender_object_key)
 
             # 2) 生成 CustomShader/CommandList/Resource 段
             self._emit_sections(sections, components, ns)
@@ -2157,6 +2184,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
 
             # 4) Present 块 + Constants globals
             self._emit_present_and_constants(sections, components, ns)
+            if tear:
+                preserved_tail = drag_tear.emit(self, sections, preserved_tail, components, ns, tear)
+                tear_tokens.add(tear.directory.name)
             if self._cloth_enabled():
                 from .drag_cloth import stabilize_globals
                 stabilize_globals(sections, ns)
@@ -2171,10 +2201,16 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 preserved_driver,
                 ns,
             )
+            written_inis.add(ini_file)
             print(f"[DragInteraction] 已注入 {len(components)} 个组件到 {ini_file}")
 
         from .drag_cloth import prune_assets
         prune_assets(mod_export_path, self._resolve_namespace(None), cloth_tokens)
+        ns = self._resolve_namespace(None)
+        untouched_tokens = {drag_tear.asset_token(ns, name) for name in ini_files if name not in written_inis}
+        drag_tear.prune(mod_export_path, ns, tear_tokens | untouched_tokens)
+        if getattr(self, "tear_enabled", False) and not tear_tokens:
+            print("[DragInteraction][WARNING] 丝袜破洞未找到可绘制的衣物，请检查区域的包含物体和 R32_UINT 索引")
         if self._cloth_enabled() and not cloth_tokens:
             raise ValueError("上下拖拽：衣物没有匹配到有效拖拽组件，请检查目标哈希、区域包含物体和身体碰撞体")
         print("[DragInteraction] 完成")

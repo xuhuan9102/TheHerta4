@@ -240,12 +240,11 @@ class GeneratedCloth:
             and decl.get("misc_flags") != "none"
         ):
             structured = True
-        writable = "rw" in decl.get(
-            "type", ""
-        ).lower() or "unordered_access" in decl.get("bind_flags", "")
-        flags = (128 if writable else 0) | (
-            1 if "vertex_buffer" in decl.get("bind_flags", "") else 8
-        )
+        binds = decl.get("bind_flags", "").split()
+        writable = "rw" in decl.get("type", "").lower() or "unordered_access" in binds
+        flags = sum(bit for name, bit in (("vertex_buffer", 1), ("index_buffer", 2)) if name in binds) or 8
+        if writable:
+            flags |= 128
         filename = decl.get("filename")
         if filename:
             raw = np.fromfile(self.root / filename.replace("\\", "/"), np.uint8)
@@ -572,7 +571,7 @@ class GeneratedCloth:
                 else:
                     decl = self._declaration(key)
                     fmt, _unit = FORMATS.get(
-                        decl.get("format", "UNKNOWN"), (src.fmt, 0)
+                        decl.get("format"), (src.fmt, 0)
                     )
                     stride = int(decl.get("stride", src.stride))
                     self.resources[key] = Resource(

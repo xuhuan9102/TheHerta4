@@ -1,0 +1,181 @@
+import importlib
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+from tests import test_drag_cloth as cloth_tests
+
+
+class DragTearTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cloth_tests.GarmentExportTests.setUpClass()
+        cls.tear = importlib.import_module("_ssmt_root.blueprint.drag_tear")
+
+    def generate(self, root, cloth=False, ttl=False):
+        fixture = cloth_tests.GarmentExportTests()
+        node, sections, comp = fixture.prepare(root, bake=cloth, prefix=3 if cloth else 0)
+        node.cloth_slide_enabled = cloth
+        draw = "[TextureOverride_abc123_Draw]"
+        tail = ""
+        if ttl:
+            lines = sections[draw]
+            original = lines[4]
+            count, start, base = original.split(" = ")[1].split(", ")
+            lines[4:5] = [
+                "; [SSMT TTL 已接管] " + original,
+                f"$\\TTL\\_1 = {count}", f"$\\TTL\\_2 = {start}", f"$\\TTL\\_3 = {base}",
+                r"run = CommandList\TTL\Draw",
+            ]
+            count, start, base = lines[10].split(" = ")[1].split(", ")
+            lines[10:11] = [
+                f"$\\TTL\\_1 = {count}", f"$\\TTL\\_2 = {start}", f"$\\TTL\\_3 = {base}",
+                "run = CommandListSSMTTTLDraw_legacy",
+            ]
+            tail = "[CommandListSSMTTTLDraw_legacy]\nib = ResourceIB\nrun = CommandList\\TTL\\Draw\n"
+            comp["parts"] = node._collect_draw_parts(sections, comp["hash"])
+        assets = self.tear.bake(
+            node, root, sections, [comp], "unit", "Mod.ini", {"Stocking0", "Stocking1"},
+            fixture.mod._blender_object_key,
+        )
+        self.assertIsNotNone(assets)
+        node._emit_sections(sections, [comp], "unit")
+        node._inject_draw_hooks(sections, comp, "unit")
+        if cloth:
+            fixture.exporter.publish_before_draws(sections, comp)
+            tail = fixture.exporter.publish_in_tail(tail, sections, [comp])
+        node._emit_present_and_constants(sections, [comp], "unit")
+        existing = {name: lines.copy() for name, lines in sections.items()}
+        wrapped = self.tear.emit(node, sections, tail, [comp], "unit", assets)
+        return sections, comp, wrapped, existing, tail
+
+    def test_wraps_only_draws_and_keeps_cloth_and_ttl_routing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sections, comp, tail, original, original_tail = self.generate(root, cloth=True, ttl=True)
+            binding = "ib = ref ResourceDragTearDisplay_abc123P0_unit unless_null"
+            draw = sections["[TextureOverride_abc123_Draw]"]
+            inline = next(i for i, line in enumerate(draw) if line.strip() == r"run = CommandList\TTL\Draw")
+            self.assertEqual(draw[inline - 3].strip(), binding)
+            self.assertTrue(any(comp["cloth_publish"] in line for line in draw[:inline - 3]))
+            self.assertLess(tail.index("ib = ResourceIB"), tail.index(binding))
+            self.assertLess(tail.index(comp["cloth_publish"]), tail.index(binding))
+            self.assertEqual(sum(line.strip() == binding for line in draw), 1)
+            self.assertEqual(self.tear.clean_existing(sections, tail, "unit"), original_tail)
+            self.assertEqual(sections, original)
+            self.tear.prune(root, "unit", set())
+            self.assertFalse((root / "res/drag_tear").exists())
+            self.assertTrue((root / "res/drag_cloth").exists())
+
+    def test_export_switch_adds_and_removes_the_scoped_tear_resources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = cloth_tests.GarmentExportTests().prepare(root, bake=False)
+            ini = root / "Mod.ini"
+            node._write_ordered_dict_to_ini(sections, ini)
+            node.mod_namespace = "unit"
+            node.hash_values = "abc123"
+            node.cloth_slide_enabled = False
+            node._write_jiggle_masks = lambda *args: True  # No Blender volume or preview in this fixture.
+            node._write_zone_resources = lambda *args: None
+            settings = node._collect_enabled_zones()[0].ssmt_drag_zone
+            settings.include_objects.append(SimpleNamespace(object=SimpleNamespace(name="Body_copy")))
+            node.tear_enabled = True
+            node.execute_postprocess(temp)
+            enabled = ini.read_text("utf8")
+            self.assertIn("[KeyDragTear_unit]", enabled)
+            self.assertIn("ib = ref ResourceDragTearDisplay_abc123P0_unit unless_null", enabled)
+            self.assertTrue((root / "res/drag_tear").is_dir())
+            owners_path = next((root / "res/drag_tear").glob("*/*-owners.buf"))
+            owners = np.fromfile(owners_path, dtype="<u4")[2:]
+            body_offset, body_count, _ = next(
+                entry for entry in comp["parts"][0]["name_ranges"] if entry[2] == "Body"
+            )
+            self.assertFalse(owners[body_offset // 3:(body_offset + body_count) // 3].any())
+            node.execute_postprocess(temp)
+            self.assertEqual(ini.read_text("utf8").count("[KeyDragTear_unit]"), 1)
+            node.tear_enabled = False
+            node.hash_values = "deadbeef"
+            node.execute_postprocess(temp)
+            self.assertTrue((root / "res/drag_tear").is_dir())
+            node.hash_values = "abc123"
+            node.execute_postprocess(temp)
+            disabled = ini.read_text("utf8")
+            self.assertNotIn("DragTear", disabled)
+            self.assertNotIn(self.tear.BEGIN, disabled)
+            self.assertIn("CustomShaderDragJiggleabc123_unit", disabled)
+            self.assertFalse((root / "res/drag_tear").exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_gpu_hole_grows_at_grab_and_leaves_source_and_other_objects_intact(self):
+        from tools.check_drag_cloth import GeneratedCloth
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sections, comp, _, _, _ = self.generate(root)
+            render = GeneratedCloth(root, sections, comp)
+            update = "CommandListDragTearUpdate_unit"
+            display = render.resource("ResourceDragTearDisplay_abc123P0_unit")
+            source = render.resource("ResourceDragTearOriginal_abc123P0_unit")
+            for slot in range(106, 111):
+                render.resources[f"cs-t{slot}"] = source
+                render.gpu.bind(slot, render.view(source, False))
+            initial = np.fromfile(root / "Meshes/Index.buf", dtype="<u4").reshape(-1, 3)
+            owners = comp["parts"][0]["tear"][1]
+            eligible = np.flatnonzero(owners)
+            face = eligible[len(eligible) // 4]
+            hit = np.zeros((15, 4), np.float32)
+            hit[1, 3] = 7
+            hit[2, 3] = face
+            hit[4] = (0.4, 0.3, 0.3, 1)
+            hit[13, 0] = 1
+            grab = np.zeros((15, 4), np.float32)
+            grab[3, 3] = 1
+            grab[6, 0] = 1
+            grab[7, 1] = 1
+
+            def read(resource):
+                return render.gpu.read_bytes(resource.pointer, resource.size).view("<u4").reshape(-1, 3)
+
+            try:
+                render.external("ResourceDragJiggleScreenState_unit", grab, 16, 2)
+                render.external("ResourceDragPinnedDetectInfo_unit", hit, 16, structured=True)
+                render.params[69] = (500, 400, 1920, 1080)
+                render.execute(update)
+                self.assertEqual(render.dispatches, 0)
+                render.variables["$isMouseButtonDown"] = 1
+                render.variables["$ssmtdragtear_enabled_unit"] = 0
+                render.execute(update)
+                self.assertEqual(render.dispatches, 0)
+                render.variables["$ssmtdragtear_enabled_unit"] = 1
+                render.execute(update)
+                render.params[69, 0] += 20
+                render.execute(update)
+                np.testing.assert_array_equal(read(display), initial)
+
+                render.params[69, 0] += 15
+                render.execute(update)
+                near = np.any(read(display) != initial, axis=1)
+                self.assertTrue(near[face])
+                render.params[69, 0] += 140
+                render.execute(update)
+                far = np.any(read(display) != initial, axis=1)
+                self.assertGreater(far.sum(), near.sum())
+                self.assertTrue((~near | far).all())
+                self.assertTrue((owners[far] == owners[face]).all())
+                np.testing.assert_array_equal(read(source), initial)
+                for slot in range(106, 111):
+                    restored = render.resources[f"cs-t{slot}"]
+                    self.assertEqual(restored.pointer, source.pointer)
+                    self.assertEqual(restored.fmt, source.fmt)
+                render.variables["$isMouseButtonDown"] = 0
+                dispatches = render.dispatches
+                render.execute(update)
+                self.assertEqual(render.dispatches, dispatches)
+                self.assertTrue(np.array_equal(np.any(read(display) != initial, axis=1), far))
+            finally:
+                render.close()

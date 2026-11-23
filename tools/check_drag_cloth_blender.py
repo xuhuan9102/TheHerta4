@@ -22,6 +22,7 @@ try:
         "Cloth generator RNA check", "SSMTBlueprintTreeType"
     )
     node = tree.nodes.new("SSMTNode_PostProcess_DragInteraction")
+    assert node.tear_enabled is False
     assert node.cloth_slide_enabled is False
     assert node.cloth_drag_sensitivity == 2.0
     assert node.cloth_surface_gap_mm == 1.0
@@ -29,6 +30,7 @@ try:
     assert node.cloth_self_collision is False
     assert abs(node.cloth_bend_compliance - 0.0008) < 1e-7
     node.cloth_slide_enabled = True
+    node.tear_enabled = True
     zone = bpy.data.objects.new("Directional cloth RNA zone", None)
     item = node.zone_objects.add()
     item.zone_id = 0
@@ -81,6 +83,7 @@ try:
 
     node.draw_buttons(bpy.context, Layout())
     for name in (
+        "tear_enabled",
         "collision_enabled",
         "cloth_slide_enabled",
         "cloth_drag_sensitivity",
@@ -136,6 +139,7 @@ try:
                 "rna_registration": True,
                 "node_ui_properties": len(properties),
                 "cloth_default_off": True,
+                "tear_default_off": True,
                 "independent_collision_and_cloth_switches": True,
                 "unfinished_label_removed": True,
                 "per_zone_direction": True,

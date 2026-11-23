@@ -251,9 +251,9 @@ def stabilize_globals(sections, ns):
 
 
 class _Assets:
-    def __init__(self, root, token, ns):
+    def __init__(self, root, token, ns, family="drag_cloth"):
         self.mod = Path(root).resolve()
-        self.directory = self.mod / "res" / "drag_cloth" / token
+        self.directory = self.mod / "res" / family / token
         self.directory.mkdir(parents=True, exist_ok=True)
         self.files = {}
         self.ns = ns
@@ -312,8 +312,8 @@ def _remove_owned(directory, files, keep=()):
             folder.rmdir()
 
 
-def prune_assets(root, namespace, active_tokens):
-    directory = Path(root) / "res" / "drag_cloth"
+def prune_assets(root, namespace, active_tokens, family="drag_cloth"):
+    directory = Path(root) / "res" / family
     if not directory.is_dir():
         return
     for manifest in directory.glob("*/manifest.json"):
