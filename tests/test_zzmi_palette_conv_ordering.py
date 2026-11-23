@@ -13,9 +13,11 @@ run = CustomShaderZZMSPaletteConv_X_s<k>；且换算 run 必须与 attach run �
 """
 
 import re
+import struct
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 def _import_ini_test_module():
@@ -44,7 +46,7 @@ PKG = base.PKG
 ZZMI_MODULE = base._zzmi_module
 
 # zzmi.py 在函数内按相对导入取 ...common.zzmi_cross_group_palette（真实实现、
-# 只依赖 numpy）。不登记它 ⇒ _merged_palette_conv_component_ids() 永远空集，
+# 只依赖 numpy）。不登记它 ⇒ 换算部件表为空，
 # 骨骼池路线在测试里彻底失活。
 _PALETTE = base._load_real_module(
     f"{PKG}.common.zzmi_cross_group_palette", "common/zzmi_cross_group_palette.py"
@@ -142,9 +144,11 @@ def _palette_profile():
     }
 
 
-def _enable_palette_route(case):
+def _enable_palette_route(case, profile=None):
     """在 `case` 上激活骨骼池路线（方案数据 + 开关 + 清换算缓存）。"""
-    profile = _PALETTE.validate_profile(_palette_profile())
+    profile = _PALETTE.validate_profile(
+        _palette_profile() if profile is None else profile
+    )
     module_name = f"{PKG}.common.zzmi_skeleton"
     stub = types.ModuleType(module_name)
     stub.ZZMISkeletonMergeHelper = type(
@@ -168,9 +172,8 @@ def _enable_palette_route(case):
     )
     patcher.start()
     case.addCleanup(patcher.stop)
-    # 缓存以方案对象身份为键（globals 里的 _MERGED_CONV_IDS_CACHE）。
-    case.addCleanup(ZZMI_MODULE.__dict__.pop, "_MERGED_CONV_IDS_CACHE", None)
-    ZZMI_MODULE.__dict__.pop("_MERGED_CONV_IDS_CACHE", None)
+    case.addCleanup(ZZMI_MODULE.__dict__.pop, "_MERGED_CONV_INDICES_CACHE", None)
+    ZZMI_MODULE.__dict__.pop("_MERGED_CONV_INDICES_CACHE", None)
     return profile
 
 
@@ -204,7 +207,10 @@ class ZZMIPaletteConvOrderTests(unittest.TestCase):
         """前置断言：骨骼池路线已激活，且本段换算集合 = 自身 ∪ 重放宿主。"""
         exporter, _models = self._make_exporter()
         self.assertTrue(exporter._merged_palette_enabled())
-        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(), {0, 1, 2})
+        self.assertEqual(
+            ZZMI_MODULE._merged_palette_conv_indices_by_ib(),
+            {"a23aa8a3": 0, "b20f90ea": 1, "b30db54e": 2},
+        )
         absorbed_hosts = exporter._merged_group_absorbed_hosts(0)
         # 宿主段：只有自己（几何被吸收，重放的就是自己那份）
         self.assertEqual(
@@ -272,6 +278,83 @@ class ZZMIPaletteConvOrderTests(unittest.TestCase):
                         f"{draw_ib} 段第 {index + 1} 行的换算 run 落在 if 内：{raw!r}",
                     )
                     self.assertFalse(raw[:1].isspace(), f"换算 run 有缩进：{raw!r}")
+
+class ZZMIPalettePartialProfileTests(unittest.TestCase):
+    def _generate(self, profile, draw_ibs):
+        _enable_palette_route(self, profile)
+        models = []
+        for component in _palette_profile()["components"]:
+            draw_ib = component["ib_hash"]
+            if draw_ib in draw_ibs:
+                submesh = base._FakeSubmesh(
+                    f"LOD0.{draw_ib}-3-0",
+                    component["vg_offset"],
+                    component["vg_count"],
+                    exported_vertex_count=3,
+                )
+                models.append(base._FakeDrawIBModel(draw_ib, [submesh]))
+        exporter = base._make_exporter(models)
+        (
+            exporter.merged_skeleton_components,
+            exporter.merged_skeleton_component_id_dict,
+        ) = exporter._collect_merged_skeleton_components()
+        skeleton = base._FakeIniBuilder()
+        with mock.patch.object(exporter, "_atomic_write_binary") as binary_writer:
+            exporter.add_merged_skeleton_sections(skeleton)
+        buffers = {
+            Path(path).name: payload
+            for (path, payload), _kwargs in binary_writer.call_args_list
+        }
+
+        texts = {}
+        for model in models:
+            vb = base._FakeIniBuilder()
+            exporter.add_unity_vs_texture_override_vb_sections(vb, model)
+            texts[model.draw_ib] = "\n".join(base._all_builder_lines(vb))
+        return texts, "\n".join(base._all_builder_lines(skeleton)), buffers
+
+    def test_part_outside_conversion_profile_reads_its_global_slots(self):
+        profile = _palette_profile()
+        profile["components"] = profile["components"][:1]
+        profile["pool_bones"] = 170
+        texts, skeleton, buffers = self._generate(profile, ("a23aa8a3", "b30db54e"))
+        self.assertEqual(
+            struct.unpack("<4I", buffers["zz_cgparams_C0.buf"]), (0, 1, 170, 0)
+        )
+        for slot in (1, 2):
+            draw_block = (
+                f"if $zz_ms_occ_1 == {slot}\n"
+                f"    vs-t0 = ResourceZZMergedSkeleton_G0_s{slot}\n"
+                "    draw = 3, 0"
+            )
+            self.assertIn(draw_block, texts["b30db54e"])
+            self.assertIn(
+                f"cs-t0 = ref ResourceZZPalette_b30db54e_s{slot}", skeleton
+            )
+            self.assertNotIn(f"ResourceZZPaletteConv_C1_s{slot}", skeleton)
+            conv = skeleton.split(f"[ResourceZZPaletteConv_C0_s{slot}]", 1)[1]
+            self.assertIn("array = 510", conv.split("\n[", 1)[0])
+
+    def test_subset_matches_conversion_by_draw_ib(self):
+        profile = _palette_profile()
+        profile["components"] = profile["components"][:2]
+        texts, skeleton, buffers = self._generate(profile, ("b20f90ea", "b30db54e"))
+        self.assertEqual(
+            struct.unpack("<4I", buffers["zz_cgparams_C1.buf"]), (1, 2, 170, 0)
+        )
+        for slot in (1, 2):
+            self.assertIn(
+                f"    vs-t0 = ResourceZZPaletteConv_C0_s{slot}", texts["b20f90ea"]
+            )
+            self.assertIn(
+                f"    vs-t0 = ResourceZZMergedSkeleton_G0_s{slot}", texts["b30db54e"]
+            )
+            self.assertNotIn(f"CustomShaderZZMSPaletteConv_C1_s{slot}", texts["b30db54e"])
+            conv = skeleton.split(f"[CustomShaderZZMSPaletteConv_C0_s{slot}]", 1)[1]
+            self.assertIn("cs-t2 = ref ResourceZZCgParams_C1", conv.split("\n[", 1)[0])
+            pool = skeleton.split(f"[ResourceZZMergedSkeleton_G0_s{slot}]", 1)[1]
+            self.assertIn("array = 510", pool.split("\n[", 1)[0])
+
 
 # 整条 VB 的重放块：绑换算 palette → 引 SO → 拿宿主（carrier）的原生 vb0/vb2 → 画全部行。
 _REPLAY_BLOCK = re.compile(
@@ -478,7 +561,10 @@ class ZZMIPaletteConvSoOwnerSpaceTests(base._ZZMIGroup3RedirectFixture, unittest
             ),
             [0, 1],
         )
-        self.assertEqual(ZZMI_MODULE._merged_palette_conv_component_ids(), {0, 1, 2})
+        self.assertEqual(
+            ZZMI_MODULE._merged_palette_conv_indices_by_ib(),
+            {"a23aa8a3": 0, "b20f90ea": 1, "b30db54e": 2},
+        )
 
     def test_all_conv_bindings_are_audited_clean(self):
         """整份 VB 产物过审计：换算 run 先于绑定、且不在 if 内。"""

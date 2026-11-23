@@ -188,24 +188,24 @@ def _merged_pool_segment_of(unique_str: str) -> tuple[int, int] | None:
     return None
 
 
-def _merged_palette_conv_component_ids() -> set:
-    """有「换算 palette」缓冲的部件下标 —— 只有方案里真正参与合并的那些。
-
-    没参与合并的部件（形态键 / 和角色不共用骨骼）在池尾占自己的私有段，骨骼矩阵
-    就在自己空间里，直接绑骨架缓冲就对了；给它们也发换算缓冲没有意义（换算 CS 的
-    部件表里没有它们，`x1` 会指到界外），所以这里按方案成员过滤。
-    """
-    profile = _merged_palette_profile() or {}
-    cache = globals().get("_MERGED_CONV_IDS_CACHE")
+def _merged_palette_conv_indices_by_ib() -> dict[str, int]:
+    """按 DrawIB 查换算部件表下标，导出子集时该下标仍由骨骼池方案决定。"""
+    profile = _merged_palette_profile()
+    if profile is None:
+        return {}
+    cache = globals().get("_MERGED_CONV_INDICES_CACHE")
     if isinstance(cache, tuple) and cache[0] is profile:
         return cache[1]
     try:
         from ...common.zzmi_cross_group_palette import merged_components
-        ids = {int(component["component_id"]) for component in merged_components(profile)}
-    except Exception:
-        ids = set()
-    globals()["_MERGED_CONV_IDS_CACHE"] = (profile, ids)
-    return ids
+    except ImportError:
+        return {}
+    indices = {
+        component["ib_hash"].lower(): index
+        for index, component in enumerate(merged_components(profile))
+    }
+    globals()["_MERGED_CONV_INDICES_CACHE"] = (profile, indices)
+    return indices
 
 
 def _merged_palette_route_active() -> bool:
@@ -2734,21 +2734,15 @@ class ExportZZMI(ExportUnity):
     def _merged_deform_palette_name(
         self, ib_key, skeleton_group: int, slot: int
     ) -> str:
-        """deform / 重放绘制该绑哪一份 palette。
-
-        骨骼池路线绑**换算后**的那份（本部件空间、按 canonical 索引）；历史路线绑本
-        组骨架缓冲（直拷、按池槽位索引）。两者布局完全不同，混绑会让顶点按别人的
-        对象空间蒙皮 —— 这正是跨组要修的东西，所以每次绑 vs-t0 都必须过这里。
-        """
-        if _merged_palette_route_active():
-            component_id = self.merged_skeleton_component_id_dict.get(str(ib_key))
-            if component_id is not None and int(component_id) in _merged_palette_conv_component_ids():
-                return self._merged_palette_conv_name(int(component_id), int(slot))
-            # 本部件没参与合并（形态键 / 与角色不共用骨骼）：它的顶点组仍是自己的
-            # 局部骨号，池槽位索引与它对不上。绑它自己的 palette 原始副本（本帧
-            # `copy vs-t0` 捕获的那份），游戏自己的绘制照旧成立；绑骨架池会让这一段
-            # 按别人的池槽位取骨 ⇒ 整段炸开（实测：展示页红色炸开）。
-            return self._merged_palette_name(str(ib_key), int(slot))
+        """蒙皮读取全局骨号。需要空间换算的部件读取换算后的全局骨骼表。"""
+        draw_ib = str(ib_key)
+        if (
+            self._merged_palette_enabled()
+            and draw_ib.lower() in _merged_palette_conv_indices_by_ib()
+        ):
+            component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
+            if component_id is not None:
+                return self._merged_palette_conv_name(component_id, slot)
         return self._merged_skeleton_name(int(skeleton_group), int(slot))
 
     def _merged_so_space_palette_ib(
@@ -4913,11 +4907,10 @@ class ExportZZMI(ExportUnity):
         # 4.5) 【已回退】F5 曾在此处（attach 之后）追加一次捕获以实现跨组同帧化，
         #      用户实测导致「两侧都抖、骨骼矩阵不对」——原因见 3) 上方注释。
 
-        # 5) 换绑骨架：骨骼池路线绑换算后的那份（本部件空间），历史路线绑本组缓冲。
-        if self._merged_palette_enabled() and int(component_id) in _merged_palette_conv_component_ids():
-            palette_source = self._merged_palette_conv_name(component_id, slot_first)
-        else:
-            palette_source = self._merged_skeleton_name(skeleton_group, slot_first)
+        # 5) 默认绑定与各实例绘制共用骨骼表选择规则。
+        palette_source = self._merged_deform_palette_name(
+            draw_ib, skeleton_group, slot_first
+        )
         texture_override_vb_section.append("vs-t0 = " + palette_source)
         texture_override_vb_section.append("handling = skip")
 
@@ -5410,14 +5403,13 @@ class ExportZZMI(ExportUnity):
                  的 `host['draw_ib']`）
               ∪ ④跨组重放宿主（`_append_merged_cross_group_replays`）。
         ①②③④ 由分支互斥地生效，这里取并集 ⇒ 是**按需集合的上界**：最多多发一
-        份本段用不到的换算（代价一次 Dispatch），少发则退回陈旧快照。结果再与
-        `_merged_palette_conv_component_ids()` 求交——不在骨池里的部件没有换算
-        段可 `run`，`_merged_deform_palette_name` 对它返回的是原始捕获。
+        份本段用不到的换算（代价一次 Dispatch），少发则退回陈旧快照。按 DrawIB
+        筛选需要换算的部件，其余部件直接读取全局骨骼池。
         """
         if not self._merged_palette_enabled():
             return []
-        conv_ids = _merged_palette_conv_component_ids()
-        if not conv_ids:
+        conv_indices = _merged_palette_conv_indices_by_ib()
+        if not conv_indices:
             return []
         candidates: list[int] = [int(component_id)]
         # ②：重放绑的是 SO 所属空间（so_owner），target 只有占位几何时它们不同 ——
@@ -5440,7 +5432,8 @@ class ExportZZMI(ExportUnity):
                 candidates.append(int(host["component_id"]))
         ordered: list[int] = []
         for candidate in candidates:
-            if candidate in conv_ids and candidate not in ordered:
+            candidate_ib = self.merged_skeleton_components[candidate]["draw_ib"].lower()
+            if candidate_ib in conv_indices and candidate not in ordered:
                 ordered.append(candidate)
         return ordered
 
@@ -7472,8 +7465,10 @@ class ExportZZMI(ExportUnity):
                 # 池宽口径：没参与合并的部件也把骨骼落在池尾，骨架/换算缓冲必须按
                 # **整池**开（`pool_bones`），否则它们的槽位在缓冲之外，attach 写出
                 # 边界被丢弃、蒙皮读到没写过的空间 —— 实测整块炸开。
-                bones_count = int(
-                    profile.get("pool_bones") or profile.get("bones_count") or 0
+                bones_count = max(
+                    bones_count,
+                    int(profile.get("pool_bones") or 0),
+                    int(profile.get("bones_count") or 0),
                 )
                 # 每部件一份 Params（参考实现的 `Buffer<uint4> Params : register(t2)`）：
                 # `Params[0] = (本部件在部件表里的下标, 合并部件数, 池骨骼数, 0)`。
@@ -7678,6 +7673,9 @@ class ExportZZMI(ExportUnity):
         # 逐 (部件, 槽) attach 段（y1 = vg_count；仅由 deform VB 段顶层调用）。
         # Dispatch 按 HLSL numthreads(64,1,1) 动态取整，避免 palette > 512 时
         # 固定 8 组漏掉尾部骨骼。
+        conv_indices = (
+            _merged_palette_conv_indices_by_ib() if self._merged_palette_enabled() else {}
+        )
         for slot in slots:
             for component_id, component in enumerate(self.merged_skeleton_components):
                 vg_count = int(component["vg_count"])
@@ -7718,38 +7716,17 @@ class ExportZZMI(ExportUnity):
                 )
                 section.append(f"Dispatch = {dispatch_count}, 1, 1")
                 section.append("cs-u0 = null")
-                if self._merged_palette_enabled() and int(component_id) in _merged_palette_conv_component_ids():
+                conv_index = conv_indices.get(component["draw_ib"].lower())
+                if conv_index is not None:
                     # 池（骨架缓冲）是混合空间，deform 直接读会把别人的骨骼按错误
                     # 的空间蒙皮；这一段用锚点链把每根异物骨骼搬到本部件空间，
                     # 输出缓冲按 canonical 槽位索引 —— 与 vg_map 天生对齐，网格
                     # 与权重不用改任何数字。
-                    profile = _merged_palette_profile() or {}
-                    bones_total = int(profile.get("bones_count", 0))
-                    if bones_total <= 0:
-                        bones_total = int(component["vg_offset"]) + vg_count
                     conv_name = self._merged_palette_conv_name(component_id, slot)
-                    # 换算段里的「我是第几个部件」必须是**池部件表**里的下标，
-                    # 不是 merged_skeleton_components 的下标：两张表的排序来源
-                    # 不同（前者按 vg_offset 升序 / pool 顺序），混用会让 CS 把
-                    # 自己算成别的部件，to_self 直接错。
-                    from ...common.zzmi_cross_group_palette import (
-                        merged_components as _conv_merged_components,
-                    )
-
-                    _conv_key = str(component["draw_ib"]).strip().lower()
-                    conv_index = -1
-                    for _conv_i, _conv_c in enumerate(
-                        _conv_merged_components(profile)
-                    ):
-                        if str(_conv_c.get("ib_hash", "")).strip().lower() == _conv_key:
-                            conv_index = _conv_i
-                            break
-                    if conv_index < 0:
-                        continue
                     section.append(f"[{conv_name}]")
                     section.append("type = RWBuffer")
                     section.append("format = R32G32B32A32_FLOAT")
-                    section.append(f"array = {bones_total * 3}")
+                    section.append(f"array = {bones_count * 3}")
                     section.append("bind_flags = shader_resource unordered_access")
                     section.new_line()
                     section.append(
@@ -7778,7 +7755,7 @@ class ExportZZMI(ExportUnity):
                             max(
                                 1,
                                 (
-                                    bones_total
+                                    bones_count
                                     + self.MERGED_SKELETON_ATTACH_THREADS
                                     - 1
                                 )
