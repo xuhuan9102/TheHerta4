@@ -663,6 +663,9 @@ class EFMIBoneMapBuilder:
         position_buf_path: str,
         blend_buf_path: str,
         submesh_json_dict: dict,
+        *,
+        blend_data: tuple | None = None,
+        use_native_normals: bool = False,
     ) -> dict[int, dict]:
         """计算每个局部骨骼的"驱动签名"（质心回退 + 权重扩散确认）。
 
@@ -710,26 +713,29 @@ class EFMIBoneMapBuilder:
         # 统一走 parse_blend_layout / parse_blendindices_from_buf /
         # parse_blendweights_from_buf：中央格式表覆盖 R16G16_UINT、R32G32_UINT
         # 等全部解析器支持格式，哨兵按数据格式判定（不再硬编码 0xFFFF）。
-        blend_layout = EFMIBoneMapBuilder.parse_blend_layout(submesh_json_dict)
-        if not blend_layout:
-            return empty
-        element_info = EFMIBoneMapBuilder.layout_element_info(blend_layout)
-        try:
-            blend_indices = EFMIBoneMapBuilder.parse_blendindices_from_buf(
-                blend_buf_path, element_info
+        if blend_data is None:
+            blend_layout = EFMIBoneMapBuilder.parse_blend_layout(submesh_json_dict)
+            if not blend_layout:
+                return empty
+            element_info = EFMIBoneMapBuilder.layout_element_info(blend_layout)
+            try:
+                blend_indices = EFMIBoneMapBuilder.parse_blendindices_from_buf(
+                    blend_buf_path, element_info
+                )
+                blend_weights = EFMIBoneMapBuilder.parse_blendweights_from_buf(
+                    blend_buf_path, blend_layout
+                )
+            except Exception:
+                return empty
+            bi_channels = blend_layout["bi_channels"]
+            valid_mask = EFMIBoneMapBuilder.valid_blend_channels(
+                blend_indices, element_info, blend_weights
             )
-            blend_weights = EFMIBoneMapBuilder.parse_blendweights_from_buf(
-                blend_buf_path, blend_layout
-            )
-        except Exception:
-            return empty
+        else:
+            blend_indices, blend_weights, valid_mask, bi_channels = blend_data
         if len(blend_indices) != vertex_count:
             return empty
 
-        bi_channels = blend_layout["bi_channels"]
-        valid_mask = EFMIBoneMapBuilder.valid_blend_channels(
-            blend_indices, element_info, blend_weights
-        )
         indices = blend_indices.astype(numpy.int64)
         if blend_weights is not None:
             weights = numpy.asarray(blend_weights, dtype=numpy.float32)
@@ -813,7 +819,7 @@ class EFMIBoneMapBuilder:
                 "diffusion_weights": diffusion_weights,
                 "diffusion_radius": EFMIBoneMapBuilder._diffusion_radius(diffusion_points),
                 "diffusion_normals": EFMIBoneMapBuilder._estimate_diffusion_normals(
-                    diffusion_points
+                    diffusion_points, use_native=use_native_normals,
                 ),
             }
         return result
@@ -1931,6 +1937,8 @@ class EFMIBoneMapBuilder:
     def _estimate_diffusion_normals(
         points: numpy.ndarray,
         neighbor_count: int = 8,
+        *,
+        use_native: bool = False,
     ) -> numpy.ndarray:
         """从点云局部 PCA 估计表面法向；无法判定为表面时返回 NaN。
 
@@ -1944,30 +1952,49 @@ class EFMIBoneMapBuilder:
             return normals
 
         neighbor_count = max(3, min(int(neighbor_count), len(points) - 1))
-        for point_idx, point in enumerate(points):
-            delta = points - point
-            squared = numpy.sum(delta * delta, axis=1)
-            order = numpy.argsort(squared)
-            neighbors = points[order[1:neighbor_count + 1]]
-            centered = neighbors - numpy.mean(neighbors, axis=0)
-            covariance = centered.T @ centered / max(len(neighbors), 1)
+        distances = None
+        if use_native:
+            from .skeleton_fusion_native import squared_point_distances
+
+            distances = squared_point_distances(points)
+
+        # Keep temporary distance arrays bounded and reuse LAPACK's batched entry point.
+        for start in range(0, len(points), 64):
+            batch = points[start:start + 64]
+            if distances is None:
+                delta = points[None, :, :] - batch[:, None, :]
+                squared = numpy.sum(delta * delta, axis=2)
+            else:
+                squared = distances[start:start + len(batch)]
+            order = numpy.argsort(squared, axis=1)
+            neighbors = points[order[:, 1:neighbor_count + 1]]
+            centered = neighbors - numpy.mean(neighbors, axis=1, keepdims=True)
+            covariance = centered.swapaxes(1, 2) @ centered / neighbor_count
+            finite = numpy.isfinite(covariance).all(axis=(1, 2))
             try:
-                eigenvalues, eigenvectors = numpy.linalg.eigh(covariance)
+                eigenvalues, eigenvectors = numpy.linalg.eigh(covariance[finite])
             except numpy.linalg.LinAlgError:
-                continue
-            largest = float(eigenvalues[-1])
-            if largest <= 1e-10:
-                continue
-            # 平面：最小特征值远小于最大值；线：中间特征值也接近 0；
-            # 体积云：三个特征值相近。只接受真正“面状”的局部邻域。
-            if float(eigenvalues[0]) / largest > 0.20:
-                continue
-            if float(eigenvalues[1]) / largest < 0.10:
-                continue
-            normal = eigenvectors[:, 0]
-            length = float(numpy.linalg.norm(normal))
-            if length > 1e-8:
-                normals[point_idx] = (normal / length).astype(numpy.float32)
+                # Preserve valid rows if one covariance matrix fails to converge.
+                eigenvalues = numpy.full((int(finite.sum()), 3), numpy.nan)
+                eigenvectors = numpy.full((len(eigenvalues), 3, 3), numpy.nan)
+                for row, matrix in enumerate(covariance[finite]):
+                    try:
+                        eigenvalues[row], eigenvectors[row] = numpy.linalg.eigh(matrix)
+                    except numpy.linalg.LinAlgError:
+                        continue
+            eigenvalues = eigenvalues.astype(numpy.float64)
+            largest = eigenvalues[:, -1]
+            # Plane-like neighborhoods have two large eigenvalues.
+            planar = (
+                (largest > 1e-10)
+                & (eigenvalues[:, 0] <= 0.20 * largest)
+                & (eigenvalues[:, 1] >= 0.10 * largest)
+            )
+            vectors = eigenvectors[planar, :, 0]
+            lengths = numpy.linalg.norm(vectors, axis=1)
+            usable = lengths > 1e-8
+            rows = start + numpy.flatnonzero(finite)[planar][usable]
+            normals[rows] = vectors[usable] / lengths[usable, None]
         return normals
 
     @staticmethod
@@ -2180,14 +2207,14 @@ class EFMIBoneMapBuilder:
         layer_distance = min(max(float(layer_distance), contact_distance), 0.15)
         tangent_tolerance = max(float(tangent_tolerance), float(distance_tolerance))
 
-        normals_a = numpy.asarray(
-            signature_a.get("diffusion_normals", cls._estimate_diffusion_normals(points_a)),
-            dtype=numpy.float32,
-        )
-        normals_b = numpy.asarray(
-            signature_b.get("diffusion_normals", cls._estimate_diffusion_normals(points_b)),
-            dtype=numpy.float32,
-        )
+        normals_a = signature_a.get("diffusion_normals")
+        if "diffusion_normals" not in signature_a:
+            normals_a = cls._estimate_diffusion_normals(points_a)
+        normals_a = numpy.asarray(normals_a, dtype=numpy.float32)
+        normals_b = signature_b.get("diffusion_normals")
+        if "diffusion_normals" not in signature_b:
+            normals_b = cls._estimate_diffusion_normals(points_b)
+        normals_b = numpy.asarray(normals_b, dtype=numpy.float32)
         normals_a_valid = (
             normals_a.ndim == 2 and normals_a.shape == (len(points_a), 3)
             and numpy.isfinite(normals_a).all(axis=1)

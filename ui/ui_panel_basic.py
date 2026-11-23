@@ -573,6 +573,7 @@ class PanelBasicInformation(bpy.types.Panel):
         layout.operator(SSMTQuickExportSelected.bl_idname, text="快速局部导出", icon='EXPORT')
 
         import_row = layout.row(align=True)
+        import_row.operator_context = 'INVOKE_DEFAULT'
         import_row.operator(SSMT4ImportAllFromCurrentWorkSpaceBlueprint.bl_idname, text="一键导入SSMT工作空间内容", icon='IMPORT')
         import_row.prop(
             global_properties,
