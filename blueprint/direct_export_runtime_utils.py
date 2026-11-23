@@ -84,6 +84,31 @@ def apply_position_override_in_place(
     state_rows[normalized_indices] = source_rows
 
 
+def apply_full_vertex_override_in_place(
+    state_bytes: bytearray,
+    vertex_bytes: bytes,
+    export_indices: np.ndarray,
+    vertex_stride: int,
+):
+    expected_bytes = int(export_indices.size) * vertex_stride
+    if len(vertex_bytes) != expected_bytes:
+        raise ValueError(
+            f"完整顶点覆盖大小不匹配: 期望={expected_bytes}, 实际={len(vertex_bytes)}"
+        )
+    if export_indices.size == 0 or vertex_stride <= 0:
+        return
+    state_array = np.frombuffer(state_bytes, dtype=np.uint8)
+    source_array = np.frombuffer(vertex_bytes, dtype=np.uint8)
+    if state_array.size % vertex_stride != 0 or source_array.size % vertex_stride != 0:
+        raise ValueError(
+            f"完整顶点缓冲区步长不匹配: state={state_array.size}, source={source_array.size}, stride={vertex_stride}"
+        )
+    state_rows = state_array.reshape(-1, vertex_stride)
+    source_rows = source_array.reshape(-1, vertex_stride)
+    normalized_indices = np.asarray(export_indices, dtype=np.int64)
+    state_rows[normalized_indices] = source_rows
+
+
 def _submesh_position_stride(submesh_model) -> int:
     game_type = getattr(submesh_model, "d3d11_game_type", None)
     stride_dict = getattr(game_type, "CategoryStrideDict", {}) or {}

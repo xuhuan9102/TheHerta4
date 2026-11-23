@@ -8860,6 +8860,66 @@ class ExportZZMI(ExportUnity):
         finally:
             self._cleanup_stub_objects()
 
+    def _add_native_expression_transfers(self, ini_builder):
+        from ...blueprint.export_helper import BlueprintExportHelper
+        from ...blueprint import native_expression_transfer as transfer, native_morph_driver
+        from ...common.workspace_helper import WorkSpaceHelper
+
+        # Explicit shape-key post-processing owns its animation buffers.
+        if BlueprintExportHelper.is_direct_export_active() or any(
+            node.bl_idname == "SSMTNode_PostProcess_ShapeKey"
+            for node in getattr(self.blueprint_model, "postprocess_nodes", ())
+        ):
+            return
+
+        models = [
+            model for model in self.drawib_model_list
+            if native_morph_driver.parse_native_morph_keys(
+                getattr(model, "import_json_dict", {}).get("ShapeKeysInfo", {})
+            )
+        ]
+        if not models:
+            return
+
+        sections, owners = transfer.collect_builder_sections(ini_builder.ini_section_list)
+        output = os.path.abspath(GlobalConfig.path_generate_mod_folder())
+        for model in models:
+            try:
+                mesh = transfer.read_transfer_mesh(
+                    sections, output, model.draw_ib, WorkSpaceHelper.get_submesh_folder_path,
+                    os.path.basename(os.path.dirname(model.import_json_path)),
+                )
+            except (OSError, ValueError):
+                continue
+            if mesh is None:
+                continue
+
+            mapping_file = os.path.join(
+                os.path.dirname(mesh.position_file), f"{model.draw_ib}-NativeExpressionSourceVertex.buf",
+            ).replace(os.sep, "/")
+            transfer.write_transfer_buffers(output, model.draw_ib, mesh, mapping_file)
+            toolset = os.path.join(os.path.dirname(__file__), "..", "..", "Toolset")
+            shader = os.path.join(output, "res", transfer.SHADER_NAME)
+            os.makedirs(os.path.dirname(shader), exist_ok=True)
+            with open(os.path.join(toolset, transfer.SHADER_NAME), encoding="utf-8") as file:
+                safe_write.write_text_if_changed(shader, file.read())
+
+            run_command, generated = transfer.render_transfer_sections(model.draw_ib, mesh, mapping_file)
+            owner, has_header = owners[mesh.override]
+            lines = owner.SectionLineList
+            start = lines.index(mesh.override) + 1 if has_header else 0
+            binding = f"vb0 = {mesh.position_resource}"
+            binding_index = next(index for index in range(start, len(lines)) if lines[index].strip() == binding)
+            lines.insert(binding_index, run_command)
+
+            with _section_registry_context(model.draw_ib):
+                for header, body in generated.items():
+                    section = M_IniSection(M_SectionType.ResourceBuffer)
+                    section.SectionName = header[1:-1]
+                    section.extend(body)
+                    ini_builder.append_section(section)
+            print(f"ZZMI: 原生表情顶点重映射已启用 {model.draw_ib}，顶点数={len(mesh.source_vertices)}")
+
     def _export_impl(self):
         if hasattr(self, '_transparency_split_shader_drawcalls'):
             self._transparency_split_shader_drawcalls = []
@@ -9002,6 +9062,7 @@ class ExportZZMI(ExportUnity):
             section = M_IniSection(M_SectionType.ShaderReplace)
             section.extend(flow_shader_sections(tag))
             ini_builder.append_section(section)
+        self._add_native_expression_transfers(ini_builder)
         ini_builder.save_to_file(ini_path)
         TimerUtils.end_stage("INI配置生成")
 

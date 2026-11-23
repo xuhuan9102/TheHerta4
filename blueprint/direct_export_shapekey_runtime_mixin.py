@@ -3,6 +3,7 @@ from collections import Counter, OrderedDict, defaultdict
 import numpy as np
 
 from ..utils.log_utils import LOG
+from ..common.native_shapekey_attributes import load_native_shapekey_attributes
 from .direct_export_runtime_utils import get_model_vertex_count as _get_model_vertex_count
 from .direct_export_runtime_utils import iter_drawib_models as _iter_drawib_models
 from .direct_export_shapekey_shared import ShapeKeyDirectExportError
@@ -43,6 +44,21 @@ class DirectShapeKeyRuntimeMixin:
                 ):
                     return drawib_model
         return None
+
+    def _native_shapekey_attributes_for_hash(self, actual_hash: str, logical_hash: str):
+        drawib_model = self._match_drawib_model(actual_hash, logical_hash)
+        if drawib_model is None:
+            return None
+        cache_key = id(drawib_model)
+        cache = getattr(self, "_native_shapekey_attribute_cache", None)
+        if cache is None:
+            cache = {}
+            self._native_shapekey_attribute_cache = cache
+        if cache_key not in cache:
+            cache[cache_key] = load_native_shapekey_attributes(
+                getattr(drawib_model, "import_json_path", "")
+            )
+        return cache[cache_key]
 
     def _get_drawib_candidate_keys(self, drawib_model):
         candidate_keys = {

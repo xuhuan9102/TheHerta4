@@ -385,6 +385,38 @@ def safe_object_name(obj) -> str:
         return ""
 
 
+def _has_native_expression_keys(obj):
+    keys = getattr(getattr(getattr(obj, "data", None), "shape_keys", None), "key_blocks", None)
+    if not keys:
+        return False
+
+    from ..common.logic_name import LogicName
+    from ..common.object_prefix_helper import ObjectPrefixHelper
+    from ..common.workspace_helper import WorkSpaceHelper
+    from . import native_morph_driver
+
+    if not LogicName.is_zzmi_family(GlobalConfig.logic_name):
+        return False
+    prefix_info = ObjectPrefixHelper.extract_prefix_info(obj.name)
+    if not prefix_info:
+        return False
+    prefix = ObjectPrefixHelper.parse_prefix_parts(prefix_info[0])
+    folder = Path(WorkSpaceHelper.get_submesh_folder_path(prefix["unique_str"]))
+    slots = native_morph_driver.shape_key_runtime_slot_by_index(keys.keys())
+    if not slots:
+        return False
+    for metadata in folder.glob(f"TYPE_*/{prefix['bare_unique_str']}.json"):
+        try:
+            with metadata.open(encoding="utf-8-sig") as file:
+                payload = json.load(file)
+        except (OSError, ValueError):
+            continue
+        native = native_morph_driver.parse_native_morph_keys(payload.get("ShapeKeysInfo", {}))
+        if any(key.shape_key_index in slots for key in native):
+            return True
+    return False
+
+
 def build_quick_export_temp_tree(objects):
     """按物体列表建一棵临时蓝图树（Object Info → Object Group → Output）。
 
@@ -433,6 +465,10 @@ def build_quick_export_temp_tree(objects):
 
     group_node.location = (300, max(0, (object_count - 1) * -90))
     output_node.location = (650, group_node.location.y)
+    if any(_has_native_expression_keys(obj) for obj in objects):
+        shape_node = tree.nodes.new("SSMTNode_PostProcess_ShapeKey")
+        shape_node.direct_export_mode = True
+        tree.links.new(output_node.outputs[0], shape_node.inputs[0])
     return tree
 
 
@@ -925,7 +961,10 @@ def _run_worker(manifest_path: str) -> None:
                 LOG.warning(f"后台实例导出前同步失败（继续导出）: {sync_error}")
 
         blueprint_model = None
-        if quick_export:
+        quick_native_keys = quick_export and any(
+            node.bl_idname == "SSMTNode_PostProcess_ShapeKey" for node in getattr(tree, "nodes", ())
+        )
+        if quick_export and not quick_native_keys:
             # 快速局部导出后台分支：临时树单轮导出 + 后处理（与同步快速导出一致）
             round_plan = dict(round_plans[0]) if round_plans else dict(QUICK_EXPORT_ROUND_PLAN)
             export_progress.report_stage("快速局部导出")
@@ -1000,13 +1039,23 @@ def _run_worker(manifest_path: str) -> None:
             done_steps = export_progress.finish_steps()
             _write_stage(stage_path, "完成", done_steps,
                          export_progress.step_total(), "NTMI ModImp 后台导出完成")
-        elif bool(manifest.get("direct_export")):
+        elif quick_native_keys or bool(manifest.get("direct_export")):
             # 直出模式：与同步导出走同一个 execute_direct_export 入口（headless 可用，
             # 经验库 `theherta4-plugin-headless-direct-export` 已实证），它内部含后处理。
             export_progress.report_stage("直出导出")
             from .direct_export import execute_direct_export
 
-            execute_direct_export(context=bpy.context, tree=tree)
+            if quick_native_keys:
+                # The quick blueprint only exists in this worker, outside the input snapshot.
+                properties = bpy.context.scene.global_properties
+                parallel_preprocess = properties.enable_parallel_preprocess
+                properties.enable_parallel_preprocess = False
+                try:
+                    execute_direct_export(context=bpy.context, tree=tree)
+                finally:
+                    properties.enable_parallel_preprocess = parallel_preprocess
+            else:
+                execute_direct_export(context=bpy.context, tree=tree)
             done_steps = export_progress.finish_steps()  # 收尾算最后一步（并补满）
             result["rounds"] = 1
             result["status"] = "success"

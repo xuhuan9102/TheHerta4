@@ -244,7 +244,28 @@ class DirectShapeKeySamplingMixin:
             "export_indices": np.asarray(object_context.get("export_indices", []), dtype=np.int32),
             "export_indices_key": None,
             "loop_state": None,
+            "live_loop_vertex_indices": None,
+            "source_vertex_ids": None,
         }
+
+    def _live_loop_vertex_indices_for_object(self, obj_name):
+        candidate_names = [obj_name]
+        if obj_name.endswith("_copy"):
+            candidate_names.append(obj_name[:-5])
+        for original_name, copy_name in (
+            getattr(PreProcessHelper, "original_to_copy_map", {}) or {}
+        ).items():
+            if copy_name == obj_name:
+                candidate_names.append(original_name)
+
+        for candidate_name in OrderedDict.fromkeys(candidate_names):
+            obj = bpy.data.objects.get(candidate_name)
+            if obj is None or obj.type != "MESH" or obj.data is None:
+                continue
+            loop_vertex_indices = np.empty(len(obj.data.loops), dtype=np.int32)
+            obj.data.loops.foreach_get("vertex_index", loop_vertex_indices)
+            return loop_vertex_indices
+        return None
 
     def _build_slot_position_overrides_from_preprocess_records(self, slot_to_name_to_objects, calculated_ranges, runtime_infos, source_object_map):
         slot_position_overrides = defaultdict(dict)
@@ -315,28 +336,38 @@ class DirectShapeKeySamplingMixin:
                         skip_reason_counts[obj_prefix]["empty_indices"] += 1
                         continue
 
-                    loop_state = object_state["loop_state"]
-                    if loop_state is None or loop_state[0] is not record_loop_vertex_indices:
-                        loop_vertex_indices = np.asarray(record_loop_vertex_indices, dtype=np.int32)
+                    source_vertex_ids = object_state["source_vertex_ids"]
+                    if source_vertex_ids is None:
+                        live_loop_vertex_indices = object_state["live_loop_vertex_indices"]
+                        if live_loop_vertex_indices is None:
+                            live_loop_vertex_indices = (
+                                self._live_loop_vertex_indices_for_object(obj_name)
+                            )
+                            object_state["live_loop_vertex_indices"] = (
+                                live_loop_vertex_indices
+                            )
+                        loop_vertex_indices = live_loop_vertex_indices
+                        if (
+                            loop_vertex_indices is None
+                            or int(local_loop_indices.max()) >= len(loop_vertex_indices)
+                        ):
+                            loop_vertex_indices = np.asarray(
+                                record_loop_vertex_indices, dtype=np.int32
+                            )
                         if int(local_loop_indices.max()) >= len(loop_vertex_indices):
                             raise ShapeKeyDirectExportError(
                                 f"槽位 {slot_index}: 物体 '{obj_name}' 的形态键记录 loop 映射越界"
                             )
-                        sampled_vertex_indices = loop_vertex_indices[local_loop_indices]
-                        sampled_vertex_max = (
-                            int(sampled_vertex_indices.max()) if sampled_vertex_indices.size else -1
-                        )
-                        loop_state = (
-                            record_loop_vertex_indices,
-                            loop_vertex_indices,
-                            sampled_vertex_indices,
-                            sampled_vertex_max,
-                        )
-                        object_state["loop_state"] = loop_state
-                    else:
-                        loop_vertex_indices = loop_state[1]
-                        sampled_vertex_indices = loop_state[2]
-                        sampled_vertex_max = loop_state[3]
+                        source_vertex_ids = loop_vertex_indices[
+                            local_loop_indices
+                        ].astype(np.int32, copy=False)
+                        object_state["source_vertex_ids"] = source_vertex_ids
+                    sampled_vertex_indices = source_vertex_ids
+                    sampled_vertex_max = (
+                        int(sampled_vertex_indices.max())
+                        if sampled_vertex_indices.size
+                        else -1
+                    )
 
                     coords = np.asarray(coords, dtype=np.float32)
                     if sampled_vertex_indices.size and sampled_vertex_max >= len(coords):
@@ -428,6 +459,7 @@ class DirectShapeKeySamplingMixin:
                         slot_position_overrides[slot_index][obj_name] = {
                             "position_bytes": base_slice,
                             "export_indices": export_indices,
+                            "source_vertex_ids": source_vertex_ids,
                             "is_identity": True,
                         }
                         skip_reason_counts[obj_prefix]["same_as_base"] += 1
@@ -436,6 +468,7 @@ class DirectShapeKeySamplingMixin:
                     slot_position_overrides[slot_index][obj_name] = {
                         "position_bytes": position_bytes,
                         "export_indices": export_indices,
+                        "source_vertex_ids": source_vertex_ids,
                     }
                     skip_reason_counts[obj_prefix]["active_overrides"] += 1
 
@@ -982,6 +1015,10 @@ class DirectShapeKeySamplingMixin:
                         slot_position_overrides[slot_index][obj_name] = {
                             "position_bytes": base_slice,
                             "export_indices": export_indices,
+                            "source_vertex_ids": np.asarray(
+                                sample_context.get("loop_vertex_indices", []),
+                                dtype=np.int32,
+                            ),
                             "is_identity": True,
                         }
                         skip_reason_counts[obj_prefix]["same_as_base"] += 1
@@ -990,6 +1027,10 @@ class DirectShapeKeySamplingMixin:
                     slot_position_overrides[slot_index][obj_name] = {
                         "position_bytes": position_bytes,
                         "export_indices": export_indices,
+                        "source_vertex_ids": np.asarray(
+                            sample_context.get("loop_vertex_indices", []),
+                            dtype=np.int32,
+                        ),
                     }
                     skip_reason_counts[obj_prefix]["active_overrides"] += 1
 
@@ -1055,17 +1096,10 @@ class DirectShapeKeySamplingMixin:
                         )
                         base_slice_cache[(runtime_info["logical_hash"], export_indices_key)] = base_slice
 
-                    if position_bytes == base_slice:
-                        slot_position_overrides[slot_index][obj_name] = {
-                            "position_bytes": position_bytes,
-                            "export_indices": export_indices,
-                            "is_identity": True,
-                        }
-                        continue
-
                     slot_position_overrides[slot_index][obj_name] = {
                         "position_bytes": position_bytes,
                         "export_indices": export_indices,
+                        "is_identity": position_bytes == base_slice,
                     }
 
         return slot_position_overrides

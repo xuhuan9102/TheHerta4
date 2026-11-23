@@ -2489,7 +2489,13 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
     # 名字以此结尾的是布局常量（position_w / normal_w，16 字节步长的补齐位），不参与增量。
     DELTA_CHANNEL_EXCLUDED_SUFFIX = "_w"
 
-    def _resolve_delta_channel_plan(self, hash_val=None, struct_definition=None, num_floats_per_vertex=None):
+    def _resolve_delta_channel_plan(
+        self,
+        hash_val=None,
+        struct_definition=None,
+        num_floats_per_vertex=None,
+        force_all_vertex_channels=None,
+    ):
         """解析增量通道列计划：``[(通道名, 起始 float 下标, float 分量数), ...]``。
 
         - 关闭「存储全部顶点属性增量」时恒为 ``[("position", 0, 3)]``，与旧版逐字节一致。
@@ -2503,7 +2509,12 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         - 超出实际每顶点 float 数的通道会被裁掉（例如手填的 40B 顶点属性定义遇上工作空间
           16B 的 IB），避免着色器读到缓冲区之外、也避免写出未声明字段的写回行。
         """
-        if not bool(getattr(self, "store_all_vertex_channels", False)):
+        include_all = (
+            bool(getattr(self, "store_all_vertex_channels", False))
+            if force_all_vertex_channels is None
+            else bool(force_all_vertex_channels)
+        )
+        if not include_all:
             return [("position", 0, 3)]
 
         definition = struct_definition or self._get_vertex_struct_definition(hash_val=hash_val)
@@ -2570,13 +2581,20 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
     def _channel_plan_names(plan):
         return [name for name, _start, _count in plan]
 
-    def _resolve_delta_stride(self, hash_val=None, vertex_stride=None, struct_definition=None):
+    def _resolve_delta_stride(
+        self,
+        hash_val=None,
+        vertex_stride=None,
+        struct_definition=None,
+        force_all_vertex_channels=None,
+    ):
         """增量记录每条的字节步长（旧版恒为 12）。"""
         num_floats = int(vertex_stride) // 4 if vertex_stride and int(vertex_stride) > 0 else None
         plan = self._resolve_delta_channel_plan(
             hash_val=hash_val,
             struct_definition=struct_definition,
             num_floats_per_vertex=num_floats,
+            force_all_vertex_channels=force_all_vertex_channels,
         )
         return 4 * self._channel_plan_float_count(plan)
 
@@ -2684,7 +2702,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
 
         return self._DELTA_BUFFER_DECL_RE.sub(_replace, content, count=1)
 
-    def _update_shader_file(self, shader_path, hash_slot_data, use_packed, use_delta, unique_names, unique_objects, use_optimized=False, merge_slot_files=False, drag_drive_enabled=False, drag_zone_ids=None, drag_click_stages=None, drag_stage_count=1, drag_dirs=None, hash_val=None, source_path=None, use_sparse_vertex_index=False):
+    def _update_shader_file(self, shader_path, hash_slot_data, use_packed, use_delta, unique_names, unique_objects, use_optimized=False, merge_slot_files=False, drag_drive_enabled=False, drag_zone_ids=None, drag_click_stages=None, drag_stage_count=1, drag_dirs=None, hash_val=None, source_path=None, use_sparse_vertex_index=False, force_all_vertex_channels=None):
         """把配置注入着色器模板并写到 ``shader_path``。
 
         ``source_path`` 指定读取的模板；缺省（None）时读 ``shader_path`` 自身，
@@ -2706,6 +2724,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
             channel_plan = self._resolve_delta_channel_plan(
                 hash_val=hash_val,
                 num_floats_per_vertex=(workspace_stride // 4) if workspace_stride > 0 else None,
+                force_all_vertex_channels=force_all_vertex_channels,
             )
             channel_names = self._channel_plan_names(channel_plan)
             extra_channels = [name for name in channel_names if name != "position"]
@@ -3732,7 +3751,11 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                                 "_0",
                                 source_candidates=[res_name],
                             )
-                            block_lines.extend([f"    if $ssmt_sk_base_mesh == {i}", f"        cs-u5 = copy {res_name}_0", f"        {res_name} = ref cs-u5", "    endif"])
+                            block_lines.extend([
+                                f"    if $ssmt_sk_base_mesh == {i}",
+                                f"        cs-u5 = copy {res_name}_0",
+                                "    endif",
+                            ])
                     else:
                         res_name = res_to_bind[0]
                         ensure_resource_alias_section(
@@ -3741,10 +3764,23 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
                             "_0",
                             source_candidates=[res_name],
                         )
-                        block_lines.extend([f"    cs-u5 = copy {res_name}_0", f"    {res_name} = ref cs-u5"])
+                        block_lines.append(f"    cs-u5 = copy {res_name}_0")
 
                     dispatch_count = self._compute_dispatch_group_count(vertex_counts.get(h_prefix, 0), threads_per_group=16)
-                    block_lines.extend([f"    Dispatch = {dispatch_count}, 1, 1", "    cs-u5 = null", *[f"    {reg} = null" for reg in sorted(list(set(t_registers_to_null)))]])
+                    block_lines.append(f"    Dispatch = {dispatch_count}, 1, 1")
+                    if len(res_to_bind) > 1:
+                        for i, res_name in enumerate(res_to_bind, 1):
+                            block_lines.extend([
+                                f"    if $ssmt_sk_base_mesh == {i}",
+                                f"        {res_name} = copy cs-u5",
+                                "    endif",
+                            ])
+                    else:
+                        block_lines.append(f"    {res_to_bind[0]} = copy cs-u5")
+                    block_lines.extend([
+                        "    cs-u5 = null",
+                        *[f"    {reg} = null" for reg in sorted(list(set(t_registers_to_null)))],
+                    ])
                     compute_blocks_to_add[block_name] = block_lines
                     # 权重搬运段：每帧「写打包窗口 → 搬运 → 清零」，必须排在 Anim 之前
                     compute_blocks_to_add[f"[CustomShaderShapeKeyWeightSync_{h}]"] = sync_lines

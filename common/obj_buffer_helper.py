@@ -18,6 +18,11 @@ from ..utils.ssmt_error_utils import SSMTErrorUtils, Fatal
 from .logic_name import LogicName
 from .global_config import GlobalConfig
 from .global_properties import GlobalProterties
+from .mesh_attribute_names import (
+    IMPORTED_NORMAL_XYZ,
+    IMPORTED_TANGENT_W,
+    IMPORTED_TANGENT_XYZ,
+)
 
 
 import bpy
@@ -167,10 +172,27 @@ class ObjBufferHelper:
         return positions
 
     @staticmethod
-    def _parse_normal(mesh_loops, mesh_loops_length, d3d11_element, has_encoded_data=False):
+    def _parse_normal(
+        mesh_loops,
+        mesh_loops_length,
+        d3d11_element,
+        has_encoded_data=False,
+        mesh=None,
+    ):
         # 统一获取法线数据
-        normals = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
-        mesh_loops.foreach_get('normal', normals)
+        normals = None
+        if mesh is not None:
+            attr = mesh.attributes.get(IMPORTED_NORMAL_XYZ)
+            if attr is not None and len(attr.data) == len(mesh.vertices):
+                loop_vertex_indices = numpy.empty(mesh_loops_length, dtype=numpy.int32)
+                mesh_loops.foreach_get("vertex_index", loop_vertex_indices)
+                values = numpy.empty(len(mesh.vertices) * 3, dtype=numpy.float32)
+                attr.data.foreach_get("vector", values)
+                values = values.reshape(-1, 3)
+                normals = values[loop_vertex_indices].reshape(-1)
+        if normals is None:
+            normals = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
+            mesh_loops.foreach_get('normal', normals)
 
         if d3d11_element.Format == 'R16G16B16A16_FLOAT':
             result = numpy.ones(mesh_loops_length * 4, dtype=numpy.float32)
@@ -263,12 +285,36 @@ class ObjBufferHelper:
             return result
 
     @staticmethod
-    def _parse_tangent(mesh_loops, mesh_loops_length, d3d11_element):
+    def _parse_tangent(mesh_loops, mesh_loops_length, d3d11_element, mesh=None):
         result = numpy.empty(mesh_loops_length * 4, dtype=numpy.float32)
 
+        imported_xyz = None
+        imported_w = None
+        if mesh is not None:
+            xyz_attr = mesh.attributes.get(IMPORTED_TANGENT_XYZ)
+            w_attr = mesh.attributes.get(IMPORTED_TANGENT_W)
+            if (
+                xyz_attr is not None
+                and w_attr is not None
+                and len(xyz_attr.data) == len(mesh.vertices)
+                and len(w_attr.data) == len(mesh.vertices)
+            ):
+                loop_vertex_indices = numpy.empty(mesh_loops_length, dtype=numpy.int32)
+                mesh_loops.foreach_get("vertex_index", loop_vertex_indices)
+                xyz = numpy.empty(len(mesh.vertices) * 3, dtype=numpy.float32)
+                xyz_attr.data.foreach_get("vector", xyz)
+                xyz = xyz.reshape(-1, 3)
+                imported_xyz = xyz[loop_vertex_indices].reshape(-1)
+                w = numpy.empty(len(mesh.vertices), dtype=numpy.float32)
+                w_attr.data.foreach_get("value", w)
+                imported_w = w[loop_vertex_indices]
+
         # 使用 foreach_get 批量获取切线和副切线符号数据
-        tangents = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
-        mesh_loops.foreach_get("tangent", tangents)
+        if imported_xyz is None:
+            tangents = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
+            mesh_loops.foreach_get("tangent", tangents)
+        else:
+            tangents = imported_xyz
 
         # 将切线分量放置到输出数组中
         result[0::4] = tangents[0::3]  # x 分量
@@ -292,6 +338,8 @@ class ObjBufferHelper:
             # 这里翻转（翻转指的就是 *= -1）是因为如果要确保Unity游戏中渲染正确，必须翻转TANGENT的W分量
             bitangent_signs *= -1
             result[3::4] = bitangent_signs  # w 分量 (副切线符号)
+        if imported_w is not None:
+            result[3::4] = imported_w
         # 重塑 output_tangents 成 (mesh_loops_length, 4) 形状的二维数组
         result = result.reshape(-1, 4)
 
@@ -730,13 +778,24 @@ class ObjBufferHelper:
                 if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI ):
                     pass
                 else:
-                    data = ObjBufferHelper._parse_normal(mesh_loops, mesh_loops_length, d3d11_element, has_encoded_data)
+                    data = ObjBufferHelper._parse_normal(
+                        mesh_loops,
+                        mesh_loops_length,
+                        d3d11_element,
+                        has_encoded_data,
+                        mesh=mesh,
+                    )
 
             elif d3d11_element_name == 'TANGENT':
                 if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI ):
                     pass
                 else:
-                    data = ObjBufferHelper._parse_tangent(mesh_loops, mesh_loops_length, d3d11_element)
+                    data = ObjBufferHelper._parse_tangent(
+                        mesh_loops,
+                        mesh_loops_length,
+                        d3d11_element,
+                        mesh=mesh,
+                    )
 
             elif d3d11_element_name.startswith('BINORMAL'):
                 if has_encoded_data and (GlobalConfig.logic_name == LogicName.EFMI):
