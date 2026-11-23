@@ -23,6 +23,7 @@ try:
     )
     node = tree.nodes.new("SSMTNode_PostProcess_DragInteraction")
     assert node.tear_enabled is False
+    assert node.tear_reset_key == "ctrl alt R"
     assert node.cloth_slide_enabled is False
     assert node.cloth_drag_sensitivity == 2.0
     assert node.cloth_surface_gap_mm == 1.0
@@ -81,9 +82,15 @@ try:
         def __getattr__(self, name):
             return lambda *args, **kwargs: self
 
+    node.tear_enabled = False
+    node.draw_buttons(bpy.context, Layout())
+    assert "tear_reset_key" not in properties
+    properties.clear()
+    node.tear_enabled = True
     node.draw_buttons(bpy.context, Layout())
     for name in (
         "tear_enabled",
+        "tear_reset_key",
         "collision_enabled",
         "cloth_slide_enabled",
         "cloth_drag_sensitivity",

@@ -322,12 +322,13 @@ def _live_draw_index(lines, index):
 
 
 def emit(node, sections, tail, components, ns, assets):
-    enabled = f"$ssmtdragtear_enabled_{ns}"
     active = f"$ssmtdragtear_active_{ns}"
     ready = f"$ssmtdragtear_ready_{ns}"
     epoch = f"$ssmtdragtear_epoch_{ns}"
+    reset = f"$ssmtdragtear_reset_{ns}"
+    drawn = f"$ssmtdrag_drawn_{ns}"
     previous_x, previous_y = (f"$ssmtdragtear_prev_{axis}_{ns}" for axis in ("x", "y"))
-    guard = f"if {enabled} == 1 && {ready} == 1"
+    guard = f"if {ready} == 1"
     gesture_shader, mask_shader = [assets.put(name, (SHADER_DIR / name).read_bytes()) for name in (
         "rzm_tear_gesture.hlsl", "rzm_tear_mask.hlsl",
     )]
@@ -392,15 +393,16 @@ def emit(node, sections, tail, components, ns, assets):
 
     sections[f"[ResourceDragTearSavedPS_{ns}]"] = []
     sections["[Constants]"].extend([
-        BEGIN, f"global {enabled} = 1", f"global {active} = 0", f"global {ready} = 0", f"global {epoch} = 0",
+        BEGIN, f"global {active} = 0", f"global {ready} = 0", f"global {epoch} = 0", f"global {reset} = 0",
         f"global {previous_x} = -1", f"global {previous_y} = -1", f"global $ssmtdragtear_saved_magic_{ns} = 0", END,
     ])
     _emit_pixel_regex(sections, ns)
     if ttl_masks:
         filename = "rzm_tear_ttl.hlsl"
         _emit_ttl(sections, ttl_masks, ns, epoch, assets.put(filename, (SHADER_DIR / filename).read_bytes()))
-    sections[f"[KeyDragTear_{ns}]"] = [
-        f"condition = $ssmtdrag_drawn_{ns} == 1", "key = ctrl alt Y", "type = cycle", f"{enabled} = 0, 1",
+    reset_key = " ".join(getattr(node, "tear_reset_key", "ctrl alt R").replace("+", " ").split()) or "ctrl alt R"
+    sections[f"[KeyDragTearReset_{ns}]"] = [
+        f"condition = {drawn} == 1", f"key = {reset_key}", "type = activate", f"{reset} = 1",
     ]
     mode = node._runtime_variable_names(ns)[0]
     update = f"CommandListDragTearUpdate_{ns}"
@@ -411,7 +413,7 @@ def emit(node, sections, tail, components, ns, assets):
         save_slots.append(f"\t{saved} = ref cs-t{slot}")
         restore_slots.extend((f"\tcs-t{slot} = ref {saved}", f"\t{saved} = null"))
     sections[f"[{update}]"] = [
-        f"if {enabled} == 1 && {mode} >= 2 && $isMouseButtonDown == 1"
+        f"if {reset} == 0 && {active} >= 0 && {mode} >= 2 && $isMouseButtonDown == 1"
         f" && ({active} == 0 || {previous_x} != $cursorX || {previous_y} != $cursorY)",
         f"\tif {ready} == 0", *("\t\t" + line for line in clear_masks),
         f"\t\t{ready} = 1", "\tendif",
@@ -427,10 +429,23 @@ def emit(node, sections, tail, components, ns, assets):
     pin[index:index] = ["\t" + BEGIN, f"\trun = {update}", "\t" + END]
     present = sections["[Present]"]
     index = next(i for i, line in enumerate(present) if line.strip() == "; --- DRAG PRESENT END ---")
+    end_frame = f"CommandListDragTearEndFrame_{ns}"
+    sections[f"[{end_frame}]"] = [
+        f"if {reset} == 1",
+        f"\tif {drawn} == 1",
+        f"\t\tif {ready} == 1",
+        *("\t\t\t" + line for line in (*clear_masks, *clears)),
+        "\t\tendif",
+        f"\t\t{ready} = 0", f"\t\t{epoch} = {epoch} + 1",
+        # A held grab is blocked until release so the reset cannot tear again.
+        f"\t\t{active} = 0 - $isMouseButtonDown",
+        "\tendif", f"\t{reset} = 0", "endif",
+        f"if {active} != 0 && ($isMouseButtonDown == 0 || ({active} == 1 && ({mode} < 2"
+        f" || $inputMode != 0 || $ssmtdrag_mode_{ns} == 0 || {drawn} == 0)))",
+        f"\t{active} = 0", "endif",
+    ]
     present[index:index] = [
-        BEGIN, f"if {active} == 1 && ({enabled} == 0 || {mode} < 2 || $isMouseButtonDown == 0"
-        f" || $inputMode != 0 || $ssmtdrag_mode_{ns} == 0 || $ssmtdrag_drawn_{ns} == 0)",
-        f"\t{active} = 0", "endif", END,
+        BEGIN, f"if {reset} == 1 || {active} != 0", f"\trun = {end_frame}", "endif", END,
     ]
     assets.finish()
     return tail

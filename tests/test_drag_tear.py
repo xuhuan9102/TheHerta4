@@ -106,9 +106,16 @@ class DragTearTests(unittest.TestCase):
             settings = node._collect_enabled_zones()[0].ssmt_drag_zone
             settings.include_objects.append(SimpleNamespace(object=SimpleNamespace(name="Body_copy")))
             node.tear_enabled = True
+            node.tear_reset_key = "Ctrl+Alt+K"
             node.execute_postprocess(temp)
             enabled = ini.read_text("utf8")
-            self.assertIn("[KeyDragTear_unit]", enabled)
+            self.assertIn(
+                "[KeyDragTearReset_unit]\ncondition = $ssmtdrag_drawn_unit == 1\n"
+                "key = Ctrl Alt K\ntype = activate\n$ssmtdragtear_reset_unit = 1",
+                enabled,
+            )
+            self.assertNotIn("[KeyDragTear_unit]", enabled)
+            self.assertNotIn("$ssmtdragtear_enabled_unit", enabled)
             self.assertIn(f"{self.tear.PIXEL_SLOT} = ref ResourceDragTearMask_abc123P0M1_unit", enabled)
             self.assertNotIn("ib = ref ResourceDragTear", enabled)
             self.assertTrue((root / "res/drag_tear").is_dir())
@@ -119,7 +126,7 @@ class DragTearTests(unittest.TestCase):
             )
             self.assertFalse(owners[body_offset // 3:(body_offset + body_count) // 3].any())
             node.execute_postprocess(temp)
-            self.assertEqual(ini.read_text("utf8").count("[KeyDragTear_unit]"), 1)
+            self.assertEqual(ini.read_text("utf8").count("[KeyDragTearReset_unit]"), 1)
             node.tear_enabled = False
             node.hash_values = "deadbeef"
             node.execute_postprocess(temp)
@@ -220,10 +227,6 @@ class DragTearTests(unittest.TestCase):
                 render.execute(update)
                 self.assertEqual(render.dispatches, 0)
                 render.variables["$isMouseButtonDown"] = 1
-                render.variables["$ssmtdragtear_enabled_unit"] = 0
-                render.execute(update)
-                self.assertEqual(render.dispatches, 0)
-                render.variables["$ssmtdragtear_enabled_unit"] = 1
                 render.execute(update)
                 move(20)
                 self.assertFalse(_tear_fields(render, display).any())
@@ -250,6 +253,7 @@ class DragTearTests(unittest.TestCase):
                 np.testing.assert_array_equal(_tear_fields(render, display), far)
 
                 # TTL writes depth from the combined opacity texture before its color pass.
+                saved_cs = {slot: render.resources[f"cs-t{slot}"] for slot in (106, 107)}
                 output = render.resource("ResourceDragTearTTL_abc123P0M1_unit")
                 render.sections["[ResourceDragTearSavedTTL_unit]"] = [
                     "type = Texture2D", "width = 4", "height = 4", "format = R32G32B32A32_FLOAT",
@@ -286,5 +290,38 @@ class DragTearTests(unittest.TestCase):
                 self.assertFalse(composed[unchanged].any())
                 self.assertTrue((composed[empty] == 1).all())
                 self.assertTrue((composed[run] > 0).all() and (composed[run] < 1).all())
+                for slot, resource in saved_cs.items():
+                    render.resources[f"cs-t{slot}"] = resource
+                    render.gpu.bind(slot, render.view(resource, False))
+
+                end_frame = "CommandListDragTearEndFrame_unit"
+                reset = "$ssmtdragtear_reset_unit"
+                drawn = "$ssmtdrag_drawn_unit"
+                ready = "$ssmtdragtear_ready_unit"
+                epoch = "$ssmtdragtear_epoch_unit"
+                before_reset = render.variables[epoch]
+                render.variables[drawn] = 0
+                render.variables[reset] = 1
+                render.execute(end_frame)
+                self.assertEqual(render.variables[reset], 0)
+                self.assertEqual(render.variables[epoch], before_reset)
+                np.testing.assert_array_equal(_tear_fields(render, display), far)
+
+                render.variables[drawn] = 1
+                render.variables["$isMouseButtonDown"] = 1
+                render.variables[reset] = 1
+                render.execute(end_frame)
+                self.assertEqual(render.variables[ready], 0)
+                self.assertEqual(render.variables[epoch], before_reset + 1)
+                self.assertFalse(_tear_fields(render, display).any())
+                dispatches = render.dispatches
+                move(50)
+                self.assertEqual(render.dispatches, dispatches)
+                render.variables["$isMouseButtonDown"] = 0
+                render.execute(end_frame)
+                render.variables["$isMouseButtonDown"] = 1
+                render.execute(update)
+                move(35)
+                self.assertTrue(_tear_fields(render, display).any())
             finally:
                 render.close()

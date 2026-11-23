@@ -1147,8 +1147,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
 
     tear_enabled: bpy.props.BoolProperty(
         name="启用丝袜破洞",
-        description="拖动区域包含的衣物时在绘制中生成破洞；游戏内 Ctrl+Alt+Y 切换显示",
+        description="拖动区域包含的衣物时在绘制中生成破洞",
         default=False,
+    )
+    tear_reset_key: bpy.props.StringProperty(
+        name="破洞重置键",
+        description="仅当该角色正在绘制时清除破洞，例如 Ctrl+Alt+R",
+        default="ctrl alt R",
     )
     cloth_slide_enabled: bpy.props.BoolProperty(
         name="启用上下拖拽",
@@ -1351,11 +1356,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         collision_row = feature_box.row()
         collision_row.enabled = not is_efmi
         collision_row.prop(self, "collision_enabled", text="启用碰撞检测")
-        tear_row = feature_box.row()
+        tear_row = feature_box.row(align=True)
         tear_row.enabled = cloth_supported
         tear_row.prop(self, "tear_enabled")
         if getattr(self, "tear_enabled", False) and cloth_supported:
-            feature_box.label(text="为区域显式包含的衣物生成破洞，Ctrl+Alt+Y 切换显示", icon='INFO')
+            tear_row.prop(self, "tear_reset_key", text="重置键")
         cloth_row = feature_box.row()
         cloth_row.enabled = cloth_supported or self._cloth_enabled()
         cloth_row.prop(self, "cloth_slide_enabled", text="启用上下拖拽")
