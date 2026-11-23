@@ -26,7 +26,8 @@ void main()
         Owners.GetDimensions(ownerCount);
         Original.GetDimensions(indexCount);
         Rest.GetDimensions(vertexCount, stride);
-        if (Hit[0].x < 0.0 || Hit[1].w != 7.0 || Hit[4].w < 0.5 ||
+        // The detector also accepts nearby hits and gives them valid edge barycentrics.
+        if (Hit[0].x < 0.0 || Hit[1].w != 7.0 ||
             Hit[13].x != (float)Owners[0] || Hit[7].y != (float)Owners[1] ||
             distance(Grab[2].xyz, Hit[1].xyz) > 1e-5)
             return;

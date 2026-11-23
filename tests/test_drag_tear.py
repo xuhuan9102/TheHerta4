@@ -131,7 +131,9 @@ class DragTearTests(unittest.TestCase):
             hit = np.zeros((15, 4), np.float32)
             hit[1, 3] = 7
             hit[2, 3] = face
-            hit[4] = (0.4, 0.3, 0.3, 1)
+            # The detector accepts hits within its cursor padding and projects
+            # them onto a triangle edge, with the inside flag left at zero.
+            hit[4] = (0.12837, 0, 0.87163, 0)
             hit[13, 0] = 1
             grab = np.zeros((15, 4), np.float32)
             grab[3, 3] = 1
