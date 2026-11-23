@@ -424,7 +424,8 @@ class SSMTNode_PostProcess_SliderPanel(SSMTNode_PostProcess_Base):
             "blend = ADD SRC_ALPHA INV_SRC_ALPHA",
             "cull = none",
             "topology = triangle_strip",
-            "o0 = set_viewport bb",
+            "scissor_enable = false", "depth_enable = false", "stencil_enable = false",
+            "od = null", "o0 = set_viewport bb",
             "Draw = 4,0",
             "clear = ps-t100"
         ]

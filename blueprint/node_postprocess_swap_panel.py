@@ -2173,7 +2173,9 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
                 "hs = null", "ds = null", "gs = null", "cs = null",
                 "vs = ./res/draw_2d.hlsl", "ps = ./res/draw_2d.hlsl",
                 "blend = ADD SRC_ALPHA INV_SRC_ALPHA", "cull = none",
-                "topology = triangle_strip", "o0 = set_viewport bb", "Draw = 4,0", "clear = ps-t100"
+                "topology = triangle_strip", "scissor_enable = false",
+                "depth_enable = false", "stencil_enable = false", "od = null",
+                "o0 = set_viewport bb", "Draw = 4,0", "clear = ps-t100"
             ]
             for line in shader_def:
                 sections['[CustomShaderDraw]'].append(line)
@@ -2742,7 +2744,9 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
             "hs = null", "ds = null", "gs = null", "cs = null",
             "vs = ./res/draw_2d.hlsl", "ps = ./res/draw_2d.hlsl",
             "blend = ADD SRC_ALPHA INV_SRC_ALPHA", "cull = none",
-            "topology = triangle_strip", "o0 = set_viewport bb", "Draw = 4,0", "clear = ps-t100"
+            "topology = triangle_strip", "scissor_enable = false",
+            "depth_enable = false", "stencil_enable = false", "od = null",
+            "o0 = set_viewport bb", "Draw = 4,0", "clear = ps-t100"
         ]
 
         # 5. 合并写入 ini

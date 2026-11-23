@@ -1,6 +1,6 @@
 // **** RESPONSIVE UI SHADER (Dynamic Sampling - 3dmigoto Compatible) ****
 // Contributors: SinsOfSeven, Fixed by Assistant
-// 修复说明：增加了点采样器，根据缩放比例动态切换采样方式，彻底解决放大模糊和缩小锯齿问题。
+// Panel filtering uses explicit texel reads.
 
 Texture1D<float4> IniParams : register(t120);
 
@@ -70,21 +70,28 @@ float3 linear_to_srgb(float3 value)
     );
 }
 
-// 线性采样器（用于缩小/抗锯齿）
-sampler linearSampler : register(s0) = sampler_state
+float4 sample_panel(float2 uv, int2 size, bool use_point_filter)
 {
-    Filter = MIN_MAG_MIP_LINEAR;
-    AddressU = Clamp;
-    AddressV = Clamp;
-};
+    float2 pixel = uv * size;
+    int2 last = size - 1;
+    float4 color = 0;
+    if (use_point_filter) {
+        color = tex.Load(int3(clamp(int2(floor(pixel)), 0, last), 0));
+    } else {
+        // Center the bilinear footprint on texels and clamp at the edges.
+        pixel -= 0.5f;
+        int2 lower = int2(floor(pixel));
+        int2 upper = lower + 1;
+        float2 weight = frac(pixel);
+        lower = clamp(lower, 0, last);
+        upper = clamp(upper, 0, last);
 
-// 点采样器（用于放大时保持清晰）
-sampler pointSampler : register(s1) = sampler_state
-{
-    Filter = MIN_MAG_MIP_POINT;
-    AddressU = Clamp;
-    AddressV = Clamp;
-};
+        float4 top = lerp(tex.Load(int3(lower, 0)), tex.Load(int3(upper.x, lower.y, 0)), weight.x);
+        float4 bottom = lerp(tex.Load(int3(lower.x, upper.y, 0)), tex.Load(int3(upper, 0)), weight.x);
+        color = lerp(top, bottom, weight.y);
+    }
+    return color;
+}
 
 void main(vs2ps input, out float4 result : SV_Target0)
 {
@@ -100,11 +107,7 @@ void main(vs2ps input, out float4 result : SV_Target0)
     float maxScale = max(scale.x, scale.y);
 
     // 动态采样：放大或 1:1 时用点采样（锐利，与原 Load 语义一致），缩小时用线性采样（抗锯齿）
-    if (maxScale >= 1.0f) {
-        result = tex.Sample(pointSampler, input.uv);
-    } else {
-        result = tex.Sample(linearSampler, input.uv);
-    }
+    result = sample_panel(input.uv, int2(dims), maxScale >= 1.0f);
     result.rgb = linear_to_srgb(result.rgb);
 }
 #endif
