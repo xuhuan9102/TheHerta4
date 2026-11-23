@@ -21,9 +21,12 @@ def _install_module(name, **attrs):
 
 
 PKG = "_export_shapekey_hash_slot_map_test_pkg"
-for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.utils"):
+for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common", f"{PKG}.utils"):
     package = _install_module(package_name)
     package.__path__ = []
+
+from tests import _real_modules as _real_modules
+_real_modules.register_real_common_modules(f"{PKG}.common")
 
 _install_module(
     f"{PKG}.utils.log_utils",

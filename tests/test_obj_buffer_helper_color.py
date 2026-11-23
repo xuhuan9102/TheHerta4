@@ -20,6 +20,9 @@ for package_name in (PKG, f"{PKG}.common", f"{PKG}.utils"):
     package = _install_module(package_name)
     package.__path__ = []
 
+from tests import _real_modules as _real_modules
+_real_modules.register_real_common_modules(f"{PKG}.common")
+
 
 _install_module("bpy", types=types.SimpleNamespace(Object=object, Mesh=object))
 _install_module(f"{PKG}.common.d3d11_gametype", D3D11GameType=object)

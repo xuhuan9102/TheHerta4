@@ -518,9 +518,14 @@ def _assert_override_entries_equal(test_case, new_overrides, old_overrides):
         test_case.assertEqual(list(new_slot.keys()), list(old_slot.keys()), f"槽位 {slot_index} 对象键/顺序不一致")
         for obj_name, old_entry in old_slot.items():
             new_entry = new_slot[obj_name]
+            # #92 起 overrides 多一个 source_vertex_ids（原生表情来源顶点）；
+            # 旧实现没有该字段，故允许「旧键 + source_vertex_ids」这一种扩展。
+            expected_keys = list(old_entry.keys())
+            if "source_vertex_ids" in new_entry and "source_vertex_ids" not in expected_keys:
+                expected_keys.append("source_vertex_ids")
             test_case.assertEqual(
-                list(new_entry.keys()),
-                list(old_entry.keys()),
+                sorted(new_entry.keys()),
+                sorted(expected_keys),
                 f"槽位 {slot_index} / {obj_name} 的 overrides 键不一致",
             )
             test_case.assertEqual(

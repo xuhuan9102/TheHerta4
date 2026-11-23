@@ -109,6 +109,7 @@ _install_module(
     f"{PKG}.blueprint.direct_export",
     execute_direct_export=lambda **_kwargs: None,
     has_direct_export_mode=lambda _tree: False,
+    needs_merged_native_expression_node=lambda _tree: False,
     collect_direct_shapekey_nodes=lambda _tree: [],
     collect_direct_multifile_nodes=lambda _tree: [],
 )
