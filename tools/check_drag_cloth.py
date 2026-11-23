@@ -26,6 +26,32 @@ spec.loader.exec_module(base)
 
 
 class GPU(base.D3D):
+    def texture2d(self, width, height, fmt, *, staging=False):
+        desc = (ct.c_uint * 11)(width, height, 1, 1, fmt, 1, 0,
+                               3 if staging else 0, 0 if staging else 8 | 128,
+                               0x20000 if staging else 0, 0)
+        texture = ct.c_void_p()
+        self.check(self.method(self.device, 5, [ct.c_void_p, ct.c_void_p, ct.c_void_p],
+                               ct.byref(desc), None, ct.byref(texture)))
+        return self.keep(texture)
+
+    def texture_view(self, resource, writable):
+        view = ct.c_void_p()
+        self.check(self.method(self.device, 8 if writable else 7,
+                               [ct.c_void_p, ct.c_void_p, ct.c_void_p], resource, None, ct.byref(view)))
+        return self.keep(view)
+
+    def read_texture(self, texture, width, height, fmt, stride):
+        staging = self.texture2d(width, height, fmt, staging=True)
+        self.method(self.context, 47, [ct.c_void_p, ct.c_void_p], staging, texture, result=None)
+        mapped = base.Mapped()
+        self.check(self.method(self.context, 14,
+                               [ct.c_void_p, ct.c_uint, ct.c_uint, ct.c_uint, ct.c_void_p],
+                               staging, 0, 1, 0, ct.byref(mapped)))
+        result = np.frombuffer(ct.string_at(mapped.data, mapped.row * height), np.uint8)
+        self.method(self.context, 15, [ct.c_void_p, ct.c_uint], staging, 0, result=None)
+        return result.reshape(height, mapped.row)[:, :width * stride].copy()
+
     def shader(self, path):
         source = path.read_bytes()
         cache = Path(tempfile.gettempdir()) / "ssmt-cloth-shader-tests"
@@ -118,6 +144,7 @@ class GPU(base.D3D):
 FORMATS = {
     "R32_UINT": (42, 4),
     "R32_FLOAT": (41, 4),
+    "R32G32_UINT": (17, 8),
     "R32G32B32A32_FLOAT": (2, 16),
     "R32G32B32A32_UINT": (3, 16),
     "R32G32B32_FLOAT": (6, 12),
@@ -136,6 +163,7 @@ class Resource:
         self.fmt = fmt
         self.structured = structured
         self.views = {}
+        self.texture = None
 
 
 class GeneratedCloth:
@@ -158,7 +186,7 @@ class GeneratedCloth:
         self.shaders = {}
         self.bindings = {}
         self.dispatches = 0
-        self.params = np.zeros((128, 4), np.float32)
+        self.params = np.zeros((512, 4), np.float32)
         self.ini, self.ini_view = self.gpu.ini(self.params)
         self.gpu.bind(120, self.ini_view)
         self.variables = {
@@ -232,6 +260,12 @@ class GeneratedCloth:
         fmt, element = FORMATS.get(
             decl.get("format", "UNKNOWN").replace("DXGI_FORMAT_", ""), (0, 0)
         )
+        if decl.get("type", "").casefold() == "texture2d":
+            width, height = int(decl["width"]), int(decl["height"])
+            resource = Resource(self.gpu.texture2d(width, height, fmt), width * height * element, element, fmt)
+            resource.texture = (width, height)
+            self.resources[name] = resource
+            return resource
         stride = int(decl.get("stride", element))
         structured = "structured" in decl.get("type", "").lower()
         if (
@@ -277,6 +311,9 @@ class GeneratedCloth:
 
     def view(self, value, writable):
         if writable not in value.views:
+            if value.texture is not None:
+                value.views[writable] = self.gpu.texture_view(value.pointer, writable)
+                return value.views[writable]
             unit = (
                 value.stride
                 if value.structured
@@ -345,6 +382,8 @@ class GeneratedCloth:
             if isinstance(node, ast.Constant):
                 return node.value
             if isinstance(node, ast.Name):
+                if re.fullmatch("[xyzw][0-9]+", node.id):
+                    return self.params[int(node.id[1:]), "xyzw".index(node.id[0])]
                 return values[node.id]
             if isinstance(node, ast.BinOp):
                 return binary[type(node.op)](evaluate(node.left), evaluate(node.right))
@@ -412,6 +451,8 @@ class GeneratedCloth:
                 raise ValueError("Unsupported generated command: " + line)
             if key.startswith("$"):
                 self.variables[key] = self._eval(value)
+            elif key.startswith("local $"):
+                self.variables[key.removeprefix("local ")] = self._eval(value)
             elif re.fullmatch("[xyzw][0-9]+", key):
                 self.params[int(key[1:]), "xyzw".index(key[0])] = self._eval(value)
             elif key == "run":
@@ -444,7 +485,8 @@ class GeneratedCloth:
                     0,
                     result=None,
                 )
-                self.gpu.dispatch(self.current_shader, int(value.split(",")[0]))
+                groups = tuple(int(part) for part in value.split(","))
+                self.gpu.dispatch(self.current_shader, *groups)
                 self.dispatches += 1
             elif key == "clear":
                 resource = self.resource(value)

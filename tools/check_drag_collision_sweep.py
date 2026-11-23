@@ -141,9 +141,9 @@ class D3D:
             self.method(self.context, 67, [ct.c_uint, ct.c_uint, ct.c_void_p],
                         slot, 1, views, result=None)
 
-    def dispatch(self, shader, groups):
+    def dispatch(self, shader, groups, groups_y=1, groups_z=1):
         self.method(self.context, 69, [ct.c_void_p, ct.c_void_p, ct.c_uint], shader, None, 0, result=None)
-        self.method(self.context, 41, [ct.c_uint, ct.c_uint, ct.c_uint], groups, 1, 1, result=None)
+        self.method(self.context, 41, [ct.c_uint, ct.c_uint, ct.c_uint], groups, groups_y, groups_z, result=None)
 
     def query(self, kind):
         desc = (ct.c_uint * 2)(kind, 0)

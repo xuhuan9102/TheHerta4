@@ -2228,7 +2228,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         untouched_tokens = {drag_tear.asset_token(ns, name) for name in ini_files if name not in written_inis}
         drag_tear.prune(mod_export_path, ns, tear_tokens | untouched_tokens)
         if getattr(self, "tear_enabled", False) and not tear_tokens:
-            print("[DragInteraction][WARNING] 丝袜破洞未找到可绘制的衣物，请检查区域的包含物体和 R32_UINT 索引")
+            print("[DragInteraction][WARNING] 丝袜破洞未找到可生成遮罩的衣物，请检查区域的包含物体、主 UV 和 R32_UINT 索引")
         if self._cloth_enabled() and not cloth_tokens:
             raise ValueError("上下拖拽：衣物没有匹配到有效拖拽组件，请检查目标哈希、区域包含物体和身体碰撞体")
         print("[DragInteraction] 完成")

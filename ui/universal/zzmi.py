@@ -8300,6 +8300,12 @@ class ExportZZMI(ExportUnity):
         texture_override_ib_section.append("handling = skip")
         texture_override_ib_section.new_line()
 
+        tear_uv = None
+        if any(getattr(node, "tear_enabled", False) for node in getattr(self.blueprint_model, "postprocess_nodes", ()) or ()):
+            from ...blueprint.drag_tear_uv import uv_annotation
+
+            tear_uv = uv_annotation(drawib_model.d3d11GameType)
+
         for submesh_model in drawib_model.submesh_model_list:
             if expand_render_suffix:
                 _submesh_suffix = str(
@@ -8422,6 +8428,8 @@ class ExportZZMI(ExportUnity):
 
             texture_override_ib_section.append("ib = " + ib_resource_name)
 
+            if tear_uv:
+                texture_override_ib_section.append(tear_uv)
             if flow_setup:
                 texture_override_ib_section.extend(flow_setup)
 

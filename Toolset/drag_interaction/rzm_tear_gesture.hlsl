@@ -14,7 +14,7 @@ void main()
     float4 shape = Gesture[1];  // reference normal, minor radius
     float4 axis = Gesture[2];   // reference tangent, major radius
     float4 drag = Gesture[3];   // cursor at capture, peak travel, seed face
-    Gesture[1] = float4(shape.xyz, 0.0); // The index pass only applies new growth.
+    Gesture[1] = float4(shape.xyz, 0.0); // The mask pass only applies new growth.
     float4 cursor = IniParams[69];
     if (any(cursor.xy < 0.0) || any(cursor.xy > cursor.zw) || Grab[3].w < 0.99)
         return;
