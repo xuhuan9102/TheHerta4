@@ -10,6 +10,7 @@ def surface_draw_scope(tag, draw_id, speed, brightness, color, height_scale=0.0,
     prefix = f"$zzmi_surface_{tag}_{draw_id}"
     color_slots = tuple(zip(("x496", "y496", "z496"), color))
     saved = f"ResourceZZMISurfaceFlowSaved{tag}"
+    brightness_expr = brightness if isinstance(brightness, str) else f"{brightness:.6f}"
     return (
         (
             f"local {prefix}_x = x498",
@@ -22,7 +23,7 @@ def surface_draw_scope(tag, draw_id, speed, brightness, color, height_scale=0.0,
             + (f" * ({switch} != 0)" if switch else ""),
             f"pre y498 = {height_scale:.9f}",
             f"pre x497 = time * {-speed:.6f}",
-            f"pre y497 = {brightness:.6f}",
+            f"pre y497 = {brightness_expr}",
             *(f"pre {slot} = {component:.6f}" for slot, component in color_slots),
         ),
         (

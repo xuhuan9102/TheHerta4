@@ -1007,7 +1007,7 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         collect(tree)
         return collected
 
-    def _collect_custom_material_switch_groups(self):
+    def _collect_custom_material_switch_groups(self, *, include_glow_sliders=False):
         """Collect switch groups from custom material and Glow FX nodes."""
         tree = getattr(self, "id_data", None)
         if tree is None:
@@ -1023,7 +1023,11 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
             for node in current_tree.nodes:
                 if node.bl_idname == 'SSMTNode_PostProcess_GlowFX' and not node.mute:
                     group = node.effect_switch_group()
-                    if group is not None:
+                    slider = node.brightness_slider_enabled()
+                    combined = self.bl_idname == "SSMTNode_PostProcess_CombinedPanel"
+                    if (include_glow_sliders and slider) or (
+                        group is not None and not (combined and slider)
+                    ):
                         collected.append((node, None, group))
                 elif node.bl_idname == 'SSMTNode_PostProcess_CustomMaterialAssign' and not node.mute:
                     if bool(getattr(node, "use_global_assign", False)):
@@ -1645,7 +1649,17 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         #    （VELO/EFMI 桥接等外部流程只写 INI；有节点时仍以当前蓝图为准）。
         ini_path = str(target_ini_file or "").strip()
         if not buttons and ini_path and os.path.isfile(ini_path):
+            slider_switches = set()
+            if self.bl_idname == "SSMTNode_PostProcess_CombinedPanel":
+                slider_switches = {
+                    group.switch_variable.casefold()
+                    for node, _, group in self._collect_custom_material_switch_groups(include_glow_sliders=True)
+                    if group is not None and node.bl_idname == "SSMTNode_PostProcess_GlowFX"
+                    and node.brightness_slider_enabled()
+                }
             for swap in self._parse_ini_key_swaps(ini_path):
+                if swap["var_name"].casefold() in slider_switches:
+                    continue
                 add_button({
                     "var_name": swap["var_name"],
                     "comment": swap["comment"],
@@ -2329,26 +2343,46 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
 
         print(f"物体切换面板{'原地刷新' if _in_place else '开始执行'}: {target_ini_file}")
 
+        brightness_panel = False
+        if getattr(self, "bl_idname", "") == "SSMTNode_PostProcess_CombinedPanel":
+            brightness_panel, backed_up = self._emit_glow_brightness_panel(
+                mod_export_path, target_ini_file, self.create_cumulative_backup and not _skip_backup,
+            )
+            _skip_backup = _skip_backup or backed_up
+
         # 1. 收集按钮数据
         buttons = self._build_button_list(target_ini_file)
         if not buttons:
+            if brightness_panel and _in_place and self.namespace:
+                result = self._read_ini_to_ordered_dict(target_ini_file)
+                if result is not None:
+                    sections, tail, driver = result
+                    marker = self.BLOCK_BEGIN.format(ns=self.namespace)
+                    if marker in sections.get("[Constants]", []):
+                        if self.create_cumulative_backup and not _skip_backup:
+                            self._create_cumulative_backup(target_ini_file, mod_export_path)
+                        self._remove_owned_config(sections, self.namespace)
+                        self._remove_gui_only_guards(sections, self.namespace)
+                        self._write_ordered_dict_to_ini(sections, target_ini_file, tail, driver)
+            if brightness_panel:
+                self.last_mod_ini_path = target_ini_file
             print("未检测到任何物体切换节点 / [KeySwap_*] 配置，跳过面板生成")
-            return False
+            return brightness_panel
 
         # 2. 检测形态键滑块面板：存在**且确实产出**时走附加模式（不生成独立浮动面板）
         slider_node = self._find_slider_panel_node()
-        if slider_node is not None and self.panel_mode != 'INDEPENDENT':
+        if (slider_node is not None or brightness_panel) and self.panel_mode != 'INDEPENDENT':
             # 附加模式复用的是滑块面板的「无命名空间」全局变量（$img0_x / $zoom0 / $help …），
             # 它们只在滑块面板真的写出时才有定义：节点勾了开关但没有可建滑块的形态键参数、
             # 或节点没被连进后处理链时，附加块会引用不存在的变量（3Dmigoto 侧读到 0）。
             if self._slider_panel_emitted(target_ini_file):
-                print(f"[物体切换面板] 检测到形态键滑块面板节点 '{slider_node.name}'，布局={self.panel_mode}")
+                print(f"[物体切换面板] 检测到滑块面板，布局={self.panel_mode}")
                 # 附加模式总是替换旧配置，允许从独立模式平滑切换过来（不残留旧的独立面板段落）
                 return self._generate_attached_panel(
                     mod_export_path, target_ini_file, buttons, _in_place=True
                 )
             print(
-                f"[物体切换面板] 节点 '{slider_node.name}' 未在本 ini 中产出滑块面板"
+                "[物体切换面板] 未在本 ini 中产出滑块面板"
                 f"（缺少可建滑块的形态键参数或节点未接入后处理链），改用独立浮动面板"
             )
 
@@ -2837,6 +2871,44 @@ class SSMTNode_PostProcess_SwapPanel(SSMTNode_PostProcess_Base):
 _apply_swap_panel_implementation(SSMTNode_PostProcess_SwapPanel)
 
 
+class _CombinedBrightnessSlider:
+    """Use the shared slider renderer with settings from a standalone combined panel."""
+
+    def __init__(self, panel, renderer):
+        self.panel = panel
+        self.renderer = renderer
+        self.config_fields = {target: source for source, target in panel.SLIDER_CONFIG_MAP.items()}
+        self.play_group_settings = ()
+        self.auto_play_toggle_key = ""
+        self.auto_play_key_global = False
+
+    def _find_combined_slider_panel(self):
+        return self.panel
+
+    def _ensure_namespace(self):
+        return self.panel._ensure_namespace()
+
+    def _collect_slider_freq_params(self, sections, exclude_vars):
+        return set(), []
+
+    def __getattr__(self, name):
+        source = self.config_fields.get(name)
+        if source is not None:
+            if name in {
+                "auto_crop_background", "help_key", "reset_key", "zoom_in_key", "zoom_out_key",
+                "drag_key", "detect_hash", "detect_index_count", "panel_default_scale",
+                "button_bg_color", "button_border_color", "button_border_width", "button_opacity",
+                "background_corner_radius", "background_border_color", "background_border_width",
+                "background_opacity",
+            }:
+                source = name
+            return getattr(self.panel, source)
+        attribute = vars(self.renderer).get(name)
+        if attribute is None:
+            raise AttributeError(name)
+        return attribute.__get__(self, type(self)) if hasattr(attribute, "__get__") else attribute
+
+
 class SSMTNode_PostProcess_CombinedPanel(SSMTNode_PostProcess_Base):
     """统一呈现切换按钮与形态键滑块设置的面板节点。
 
@@ -2921,6 +2993,37 @@ class SSMTNode_PostProcess_CombinedPanel(SSMTNode_PostProcess_Base):
         "slider_panel_border_color": "background_border_color",
         "slider_panel_border_width": "background_border_width", "slider_panel_opacity": "background_opacity",
     }
+
+    def _emit_glow_brightness_panel(self, export_dir, ini_path, create_backup):
+        if not self.slider_use_slider_panel:
+            return False, False
+        from .node_postprocess_shapekey_ext import SSMTNode_PostProcess_ShapeKeyExt
+
+        result = self._read_ini_to_ordered_dict(ini_path)
+        if result is None:
+            return False, False
+        sections, tail, driver = result
+        sliders = SSMTNode_PostProcess_ShapeKeyExt._glow_brightness_sliders(sections)
+        if not sliders:
+            return False, False
+        present = "\n".join(sections.get("[Present]", []))
+        bindings = dict(re.findall(r"(?m)^\s*(\$\w+) = (\$param\d+)[ \t]*$", present))
+        groups = SSMTNode_PostProcess_ShapeKeyExt._group_glow_brightness_sliders(sliders)
+        if all(
+            leader in bindings and all(bindings.get(member) == bindings[leader] for member in members)
+            for leader, members in groups.items()
+        ) and len({bindings[leader] for leader in groups}) == len(groups):
+            return True, False
+        shape = self._find_shape_ext_node()
+        renderer = shape or _CombinedBrightnessSlider(self, SSMTNode_PostProcess_ShapeKeyExt)
+        if self.SLIDER_PANEL_MARKER in present:
+            renderer._remove_owned_config(sections, "")
+        if not renderer._apply_slider_panel(export_dir, ini_path, sections):
+            return False, False
+        if create_backup:
+            self._create_cumulative_backup(ini_path, export_dir)
+        self._write_ordered_dict_to_ini(sections, ini_path, tail, driver)
+        return self._slider_panel_emitted(ini_path), create_backup
 
     def _find_shape_ext_node(self):
         root = getattr(self, "id_data", None)
@@ -3180,7 +3283,14 @@ class SSMTNode_PostProcess_CombinedPanel(SSMTNode_PostProcess_Base):
     def draw_buttons(self, context, layout):
         slider_node = self._find_shape_ext_node()
         emitted_slider_node = self._find_slider_panel_node()
-        attached_mode = emitted_slider_node is not None and self.panel_mode != 'INDEPENDENT'
+        glow_sliders = {}
+        for node, _, _ in self._collect_custom_material_switch_groups(include_glow_sliders=True):
+            if getattr(node, "bl_idname", "") == "SSMTNode_PostProcess_GlowFX" and node.brightness_slider_enabled():
+                remark = node.brightness_slider_remark()
+                key = ("remark", remark) if remark else ("node", node)
+                glow_sliders[key] = remark or f"{node.label or node.name} · {node.brightness_slider_label()}"
+        attached_mode = bool(emitted_slider_node or (self.slider_use_slider_panel and glow_sliders))
+        attached_mode &= self.panel_mode != 'INDEPENDENT'
 
         self._draw_common_panel_settings(layout, slider_node, emitted_slider_node)
 
@@ -3191,16 +3301,17 @@ class SSMTNode_PostProcess_CombinedPanel(SSMTNode_PostProcess_Base):
         left_box.label(text="物体切换设置", icon='OBJECT_DATA')
         left = left_box.column()
         right_box = right.box()
-        right_box.label(text="形态键滑块设置", icon='SHAPEKEY_DATA')
+        right_box.label(text="滑块设置", icon='SHAPEKEY_DATA')
         right = right_box.column()
         self._draw_switch_controls(
             context, left, attached_mode, show_shared_scale=False, show_switch_layout=True
         )
         self._draw_switch_data(left, attached_mode, show_target_detection=False)
         self._draw_switch_appearance(left, attached_mode, show_shared_styles=False)
+        for label in glow_sliders.values():
+            right.label(text=label)
         if slider_node is None:
-            box = right.box()
-            box.label(text="滑块设置需要同一蓝图中的形态键扩展配置节点", icon='INFO')
+            right.prop(self, "slider_use_slider_panel")
             return
         slider_node._draw_slider_ui(
             layout,
