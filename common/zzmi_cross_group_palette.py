@@ -283,6 +283,23 @@ def merged_components(profile: dict) -> list[dict]:
     return [component for component in profile["components"] if component["role"] == ROLE_MERGED]
 
 
+def merged_pool_slot_maps(profile: dict) -> dict[str, dict[int, int]]:
+    """Map local bone IDs to the shared pool slots stored in exported VGMaps."""
+    components = merged_components(profile)
+    representative = {}
+    for component in components:
+        offset = component["vg_offset"]
+        for local, canonical in component["vg_map"].items():
+            representative.setdefault(int(canonical), offset + int(local))
+    return {
+        component["ib_hash"]: {
+            int(local): representative[int(canonical)]
+            for local, canonical in component["vg_map"].items()
+        }
+        for component in components
+    }
+
+
 def get_component_by_ib(profile: dict) -> dict[str, dict]:
     return {component["ib_hash"]: component for component in profile["components"]}
 
@@ -1232,27 +1249,12 @@ def plan_from_parts(parts: dict[str, dict]) -> tuple[dict, dict, dict, list[str]
     warnings.extend(plan_warnings)
     profile = validate_profile(profile)
 
-    vg_maps: dict[str, dict] = {}
-    vg_offsets: dict[str, int] = {}
     # 顶点里的骨号必须是**骨骼池槽位**（参考实现的运行期按池槽位索引调色板，没有
     # 第二层 remap）。共用骨只留一个顶点组：取「按 pose 顺序第一个拥有它的部件」
     # 的池槽位当代表槽 —— 任何部件绘制时，那个槽位都会被换算到本部件空间，所以
     # 一份顶点组对所有绘制部件都成立。
-    representative: dict[int, int] = {}
-    for component in merged_components(profile):
-        offset = int(component["vg_offset"])
-        for local, canonical in component["vg_map"].items():
-            representative.setdefault(
-                int(canonical), offset + int(local)
-            )
-    for component in merged_components(profile):
-        draw_ib = component["ib_hash"]
-        offset = int(component["vg_offset"])
-        vg_maps[draw_ib] = {
-            int(local): int(representative.get(int(canonical), offset + int(local)))
-            for local, canonical in component["vg_map"].items()
-        }
-        vg_offsets[draw_ib] = offset
+    vg_maps = merged_pool_slot_maps(profile)
+    vg_offsets = {component["ib_hash"]: int(component["vg_offset"]) for component in merged_components(profile)}
 
     # 没参与合并的部件（形态键、缺物体矩阵、和角色不共用骨骼）也要有槽位：
     # 在骨骼池末尾给它们各自一段私有空间，本地骨号原样映射 —— 它们的矩阵本来就

@@ -12,9 +12,11 @@ run = CustomShaderZZMSPaletteConv_X_s<k>；且换算 run 必须与 attach run �
 （不在任何 if/endif 之间）——本 fork 里 if 内的 run 不执行 ⇒ 骨架为空 ⇒ 模型消失。
 """
 
+import json
 import re
 import struct
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -142,6 +144,89 @@ def _palette_profile():
         "format_version": _PALETTE.PROFILE_FORMAT_VERSION,
         "components": components,
     }
+
+
+class ZZMILodPaletteFallbackTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.pool = _palette_profile()
+        self.pool["components"] = self.pool["components"][:1]
+        self.pool["pool_bones"] = 119
+        self.identities = ("LOD0.a23aa8a3-20-0", "LOD0.b30db54e-50-0")
+        self.write_submesh(self.identities[0], 0, 105)
+        self.write_submesh(self.identities[1], 105, 14)
+        _PALETTE.write_profile(str(self.root), self.pool)
+
+    def submesh_path(self, identity):
+        lod, bare = identity.split(".", 1)
+        return self.root / lod / bare / "TYPE_test" / (bare + ".json")
+
+    def write_submesh(self, identity, offset, count):
+        path = self.submesh_path(identity)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "SkeletonMergeMode": "cross_group", "VGOffset": offset, "VGCount": count,
+            "VGMap": {str(local): offset + local for local in range(count)},
+        }), encoding="utf-8")
+
+    def resolve_through_export(self):
+        skeleton = types.ModuleType(f"{PKG}.common.zzmi_skeleton")
+        skeleton.fusion_lod = lambda identity: identity.split(".", 1)[0]
+        skeleton.ZZMISkeletonMergeHelper = types.SimpleNamespace(
+            cross_group_profile=None,
+            _resolve_submesh_json_path=lambda root, identity: str(self.submesh_path(identity)),
+        )
+
+        class Probe:
+            @ZZMI_MODULE._in_lod_fusion_scope
+            def __init__(self, blueprint):
+                self.profile = ZZMI_MODULE._merged_palette_profile()
+
+        blueprint = types.SimpleNamespace(ordered_draw_obj_data_model_list=[
+            types.SimpleNamespace(get_workspace_unique_str=lambda value=value: value)
+            for value in self.identities
+        ])
+        with (
+            mock.patch.dict(sys.modules, {skeleton.__name__: skeleton}),
+            mock.patch.object(ZZMI_MODULE, "_zzmi_prop_flag", return_value=True),
+            mock.patch.object(ZZMI_MODULE.GlobalConfig, "path_workspace_folder", return_value=str(self.root)),
+            mock.patch.object(ZZMI_MODULE.GlobalProterties, "import_merged_vgmap", return_value=True),
+        ):
+            return Probe(blueprint).profile
+
+    def test_missing_lod_scheme_uses_legacy_root_with_matching_private_slots(self):
+        selected = self.resolve_through_export()
+        self.assertEqual(selected["pool_bones"], 119)
+
+    def test_root_without_space_for_the_exported_private_slots_fails(self):
+        self.pool["pool_bones"] = 105
+        _PALETTE.write_profile(str(self.root), self.pool)
+        with self.assertRaisesRegex(ZZMI_MODULE.Fatal, "LOD0.*骨骼池"):
+            self.resolve_through_export()
+
+    def test_lod_scheme_takes_priority(self):
+        local = dict(self.pool, source_frame_dump="LOD0-source")
+        _PALETTE.write_profile(str(self.root / "LOD0"), local)
+        self.assertEqual(self.resolve_through_export()["source_frame_dump"], "LOD0-source")
+
+    def test_unreadable_lod_scheme_uses_matching_root(self):
+        (self.root / "LOD0" / _PALETTE.PROFILE_FILENAME).write_text("{", encoding="utf-8")
+        self.assertEqual(self.resolve_through_export()["pool_bones"], 119)
+
+    def test_root_matching_pool_width_with_different_slot_ids_fails(self):
+        path = self.submesh_path(self.identities[0])
+        data = json.loads(path.read_text("utf-8"))
+        data["VGMap"]["0"], data["VGMap"]["1"] = 1, 0
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ZZMI_MODULE.Fatal, "LOD0.*骨骼池"):
+            self.resolve_through_export()
+
+    def test_root_scheme_cannot_be_reused_when_a_member_exists_in_another_lod(self):
+        self.write_submesh("LOD1.a23aa8a3-20-0", 0, 105)
+        with self.assertRaisesRegex(ZZMI_MODULE.Fatal, "LOD0.*骨骼池"):
+            self.resolve_through_export()
 
 
 def _enable_palette_route(case, profile=None):

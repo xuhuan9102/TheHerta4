@@ -27,7 +27,9 @@ from .unity import ExportUnity
 from contextlib import nullcontext
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
 
 # 「条件判断」后处理节点需要知道每个 ini 段属于哪个 draw_ib：导出期用
 # ``register.draw_ib_context(draw_ib)`` 包住「构建该 draw_ib 的 ini 段」的代码，
@@ -111,6 +113,74 @@ except Exception:  # pragma: no cover
         return False
 
 
+def _read_lod_vgmap(workspace, identity, resolve_submesh_json_path):
+    path = resolve_submesh_json_path(workspace, identity)
+    if not path and identity.startswith("LOD0.") and not (Path(workspace) / "LOD0").is_dir():
+        path = resolve_submesh_json_path(workspace, identity.removeprefix("LOD0."))
+    if not path:
+        return None
+    try:
+        value = JsonUtils.LoadFromFile(path)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _legacy_palette_matches_lod(profile, workspace, scope, metadata, resolve_submesh_json_path):
+    """Verify a root-level pool against this LOD's exported and dependency rows."""
+    from ...common.zzmi_cross_group_palette import MAX_POOL_BONES, merged_components, merged_pool_slot_maps
+
+    if not metadata or any(data is None for data in metadata.values()):
+        return False
+    maps = merged_pool_slot_maps(profile)
+    merged_offsets = {c["ib_hash"]: c["vg_offset"] for c in merged_components(profile)}
+    merged_end = max(merged_offsets[ib] + len(vg_map) for ib, vg_map in maps.items())
+    lod_folder = Path(workspace) / scope.lod
+    entries = dict(metadata)
+    selected = {identity.rsplit(".", 1)[-1].split("-", 1)[0].lower() for identity in entries}
+    participant_ibs = selected | maps.keys()
+    try:
+        for folder in Path(workspace).iterdir():
+            if folder == lod_folder or not re.fullmatch(r"LOD\d+", folder.name, re.IGNORECASE) or not folder.is_dir():
+                continue
+            if any(entry.is_dir() and entry.name.split("-", 1)[0].lower() in participant_ibs for entry in folder.iterdir()):
+                # The old root file cannot disambiguate a DrawIB shared by two LODs.
+                return False
+        if maps.keys() - selected:
+            directory = lod_folder if lod_folder.is_dir() else Path(workspace)
+            for ib in maps.keys() - selected:
+                matches = sorted(folder for folder in directory.glob(f"{ib}-*") if folder.is_dir())
+                if not matches:
+                    return False
+                for folder in matches:
+                    identity = f"{scope.lod}.{folder.name}" if directory == lod_folder else folder.name
+                    entries[identity] = _read_lod_vgmap(workspace, identity, resolve_submesh_json_path)
+
+        pool_size = int(profile.get("pool_bones", profile["bones_count"]))
+        if not merged_end <= pool_size <= MAX_POOL_BONES:
+            return False
+        spans = {}
+        for identity, data in entries.items():
+            if not data or data.get("SkeletonMergeMode") == "group":
+                return False
+            ib = identity.rsplit(".", 1)[-1].split("-", 1)[0].lower()
+            offset, count = int(data["VGOffset"]), int(data["VGCount"])
+            if count <= 0 or offset < 0 or offset + count > pool_size:
+                return False
+            if spans.setdefault(ib, (offset, offset + count)) != (offset, offset + count):
+                return False
+            vg_map = {int(local): int(slot) for local, slot in data["VGMap"].items()}
+            if ib in maps:
+                if offset != merged_offsets[ib] or count != len(maps[ib]) or vg_map != maps[ib]:
+                    return False
+            elif offset < merged_end or vg_map != {local: offset + local for local in range(count)}:
+                return False
+        ordered = sorted(spans.values())
+        return all(previous[1] <= following[0] for previous, following in zip(ordered, ordered[1:]))
+    except (KeyError, AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 def _merged_palette_profile() -> dict | None:
     """本次会话算出来的骨骼池方案（导入期算好，挂在骨架助手类上）。
 
@@ -119,30 +189,41 @@ def _merged_palette_profile() -> dict | None:
     """
     try:
         from ...common.zzmi_skeleton import ZZMISkeletonMergeHelper
-        from ...common.zzmi_cross_group_palette import load_profile, get_profile_path
+        from ...common.zzmi_cross_group_palette import load_profile
     except Exception:
         return None
     per_lod = _zzmi_prop_flag("zzmi_fusion_per_lod", False)
     workspace_folder = str(GlobalConfig.path_workspace_folder() or "") if per_lod else ""
     if per_lod and workspace_folder:
-        # 按 LOD 分批时，**先**看本 LOD 自己的方案文件：类属性里只留着最后一批
-        # 导入算出的方案（单例），先命中单例会让 LOD0 用上 LOD1 的池表。
-        lod_folder = os.path.join(workspace_folder, _zzmi_scope_lod())
+        lod = _zzmi_scope_lod()
+        scope = _lod_fusion_scope.get()
+        if scope is not None and scope.profile_resolved:
+            return scope.profile
         try:
-            lod_profile_path = get_profile_path(lod_folder)
+            loaded = load_profile(os.path.join(workspace_folder, lod), required=False)
         except Exception:
-            lod_profile_path = ""
-        if lod_profile_path and os.path.isfile(lod_profile_path):
+            loaded = None
+        if loaded is None and scope is not None:
+            resolve = ZZMISkeletonMergeHelper._resolve_submesh_json_path
+            metadata = {
+                identity: _read_lod_vgmap(workspace_folder, identity, resolve)
+                for identity in scope.identities
+            }
             try:
-                loaded = load_profile(lod_folder, required=False)
+                root_profile = load_profile(workspace_folder, required=False)
             except Exception:
-                loaded = None
-            if isinstance(loaded, dict) and loaded.get("components"):
-                return loaded
-        # per-LOD 模式下**不能**回落到单例：类属性里是最后一批导入算的方案
-        # （别的 LOD 的池表），拿它发 ini 会让本 LOD 的槽位整片错位。
-        if per_lod:
-            return None
+                root_profile = None
+            if root_profile is not None and _legacy_palette_matches_lod(
+                root_profile, workspace_folder, scope, metadata, resolve
+            ):
+                loaded = root_profile
+                print(f"[ZZMI骨骼合并] {lod} 使用工作区根目录中与 VGMap 一致的骨骼池方案")
+            elif any(data and data.get("SkeletonMergeMode") == "cross_group" for data in metadata.values()):
+                raise Fatal(f"ZZMI {lod} 缺少与网格 VGMap 匹配的骨骼池方案；已检查 LOD 目录和工作区根目录，请重新导入该 LOD 的合并骨骼。")
+        if scope is not None:
+            scope.profile = loaded
+            scope.profile_resolved = True
+        return loaded
     profile = getattr(ZZMISkeletonMergeHelper, "cross_group_profile", None)
     if isinstance(profile, dict):
         return profile
@@ -263,13 +344,21 @@ def _zzmi_prop_flag(name: str, default: bool) -> bool:
         return bool(default)
 
 
+@dataclass
+class _LodFusionScope:
+    lod: str
+    identities: tuple[str, ...]
+    profile: dict | None = None
+    profile_resolved: bool = False
+
+
 _lod_fusion_scope = ContextVar("zzmi_lod_fusion_scope", default=None)
 
 
 def _zzmi_scope_lod() -> str:
     """当前导出的 LOD 名；不在分批导出里时按 LOD0。"""
     scope = _lod_fusion_scope.get()
-    return scope if isinstance(scope, str) and scope else "LOD0"
+    return scope.lod if scope is not None else "LOD0"
 
 
 @contextmanager
@@ -304,7 +393,10 @@ def _in_lod_fusion_scope(method):
                     self._lod_fusion_batches = batches
                     return None
                 if batches:
-                    self._lod_fusion_data = next(iter(batches))
+                    lod, draws = next(iter(batches.items()))
+                    self._lod_fusion_data = _LodFusionScope(
+                        lod, tuple(dict.fromkeys(draw.get_workspace_unique_str() for draw in draws))
+                    )
         if method.__name__ in {"export", "export_buffers_only"} and getattr(self, "_lod_fusion_batches", None):
             return self._export_lod_batches(method.__name__)
         token = _lod_fusion_scope.set(getattr(self, "_lod_fusion_data", None))
