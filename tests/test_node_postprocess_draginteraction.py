@@ -5061,6 +5061,24 @@ class DragCollisionTests(unittest.TestCase):
         self.assertNotIn("cs-t79", text)
         self.assertNotIn("cs-t83", text)
 
+    def test_redirect_collision_matches_the_current_vertex_buffer_and_lod(self):
+        node, sections, comps = self._emit_with_collision_grid()
+        comp = comps[0]
+        part_lines = sections[comp["parts"][0]["section"]]
+        for slot in (1, 2):
+            output = f"ResourceZZSkinOut_G3_s{slot}_LOD1"
+            palette = f"ResourceZZRedirectPalette_G3_s{slot}_LOD1"
+            part_lines.append(f"    vb0 = ref {output}")
+            sections[f"[{output}]"] = ["type = Buffer"]
+            sections[f"[{palette}]"] = ["type = RWBuffer"]
+            sections[f"[ResourceZZMergedSkeleton_G3_s{slot}_LOD1]"] = ["type = RWBuffer"]
+        node._emit_jiggle_section(sections, comp, "testns")
+        lines = sections[f"[CustomShaderDragJiggle{comp['comp_name']}_testns]"]
+        for branch, slot in (("if", 1), ("elif", 2)):
+            index = lines.index(f"\t{branch} @vb0 != 0 && @vb0 == @ResourceZZSkinOut_G3_s{slot}_LOD1")
+            self.assertEqual(lines[index + 1], f"\t\tcs-t88 = ref ResourceZZRedirectPalette_G3_s{slot}_LOD1")
+        self.assertNotIn("\t\tcs-t88 = ref ResourceZZMergedSkeleton_G3_s1", lines)
+
     def test_component_resources_emit_collider_sections(self):
         node, sections, comps = self._emit_with_collision_grid()
         cn = comps[0]["comp_name"]

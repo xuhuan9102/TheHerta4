@@ -47,6 +47,9 @@ class _FakeIniSection:
     def append(self, line):
         self.SectionLineList.append(line)
 
+    def extend(self, lines):
+        self.SectionLineList.extend(lines)
+
     def new_line(self):
         self.SectionLineList.append("")
 

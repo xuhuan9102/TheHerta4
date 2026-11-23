@@ -67,7 +67,11 @@ StructuredBuffer<ZZBlend32> src_blend : register(t1);
 // 同一处「声明步长 vs 视图元素尺寸」不匹配（AMD 驱动按 SBS 取址 → 索引放大 3 倍）。
 Buffer<float4> merged_skeleton : register(t2);
 // 目标 SO：uav_byte_stride = 4 ⇒ 4 字节元素的结构化 UAV
+#ifdef ZZMI_SKIN_TYPED_OUTPUT
+RWBuffer<float> dst_rows : register(u0);
+#else
 RWStructuredBuffer<float> dst_rows : register(u0);
+#endif
 
 // ini 参数纹理。**不在编译期绑定索引**（[0]/[1] 的归属随 fork 变化），
 // 具体取哪一组由 main 里按「资源行数」判据在运行时决定。

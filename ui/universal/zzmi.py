@@ -3202,6 +3202,127 @@ class ExportZZMI(ExportUnity):
                 return plan
         return None
 
+    def _merged_owned_redirect_plan(self, skeleton_group: int) -> dict | None:
+        if not self._merged_palette_enabled():
+            return None
+        plan = self._merged_group_redirect_plan(skeleton_group)
+        if plan and self._merged_skin_publish_supported(plan):
+            return plan
+        return None
+
+    def _merged_redirect_space_components(self, plan: dict) -> list[dict]:
+        return [
+            self.merged_skeleton_components[int(component_id)]
+            for component_id in plan["required_component_ids"]
+        ]
+
+    def _append_owned_redirect_resources(self, section, skeleton_group, plan, slots, bones_count):
+        """Declare the structured skin inputs, instance captures and full-sized VB."""
+        owner_ib = plan["so_owner_ib"]
+        components = self._merged_redirect_space_components(plan)
+        export_helper = globals().get("_BpHelper")
+        folder = export_helper.get_current_buffer_folder_name() if export_helper else "Meshes"
+        repacked_blends = {
+            name: filename for name, _stride, filename, _payload
+            in self._redirect_blend_retargets.values()
+        }
+        for index, (draw_ib, (_position, blend, _count)) in enumerate(
+            zip(plan["deform_draw_ibs"], plan["deform_draws"], strict=True)
+        ):
+            blend_filename = (
+                f"Meshes/{repacked_blends[blend]}" if blend in repacked_blends
+                else f"{folder}/{draw_ib}-Blend.buf"
+            )
+            for kind, stride, filename in (
+                ("Position", ZZMI_MERGED_SKIN_POSITION_ROW_BYTES, f"{folder}/{draw_ib}-Position.buf"),
+                ("Blend", ZZMI_MERGED_SKIN_BLEND_ROW_BYTES, blend_filename),
+            ):
+                section.extend([
+                    f"[ResourceZZRedirectSkin{kind}_G{skeleton_group}_c{index}]",
+                    "type = StructuredBuffer", f"stride = {stride}",
+                    "bind_flags = shader_resource", f"filename = {filename}", "",
+                ])
+        for component in components:
+            ib = component["draw_ib"]
+            section.extend([
+                f"[ResourceZZRedirectSpaceRange_{ib}]",
+                "type = Buffer", "format = R32G32B32A32_UINT",
+                f"data = {component['vg_offset']} {component['vg_count']} {int(ib == owner_ib)} 0",
+                "",
+            ])
+        for slot in slots:
+            suffix = f"G{skeleton_group}_s{slot}"
+            palette = f"ResourceZZRedirectPalette_{suffix}"
+            section.extend([
+                f"[{self._merged_skin_out_name(skeleton_group, slot)}]",
+                "type = Buffer", f"stride = {plan['so_stride']}",
+                f"array = {plan['so_vertex_count']}",
+                "bind_flags = unordered_access vertex_buffer shader_resource",
+                "misc_flags = none", "",
+                f"[ResourceZZRedirectSkinWrite_{suffix}]",
+                "type = Buffer", "stride = 4", "format = R32_FLOAT", "",
+                f"[{palette}]", "type = RWBuffer", "format = R32G32B32A32_FLOAT",
+                f"array = {bones_count * 3}",
+                "bind_flags = shader_resource unordered_access", "",
+            ])
+            for component in components:
+                ib = component["draw_ib"]
+                section.extend([
+                    f"[ResourceZZSpaceSO_{ib}_s{slot}]", "type = Buffer",
+                    f"stride = {plan['so_stride']}", "",
+                    f"[ResourceZZSpaceCB1_{ib}_s{slot}]", "type = Buffer",
+                    "stride = 16", "format = R32G32B32A32_FLOAT",
+                    "bind_flags = shader_resource", "misc_flags = none", "",
+                    f"[CustomShaderZZRebasePalette_{ib}_s{slot}]",
+                    "cs = ./res/zzmi_cb1_palette_rebase.hlsl",
+                    f"cs-t0 = ref {self._merged_skeleton_name(skeleton_group, slot)}",
+                    f"cs-t1 = ref ResourceZZSpaceCB1_{ib}_s{slot}",
+                    f"cs-t2 = ref ResourceZZSpaceCB1_{owner_ib}_s{slot}",
+                    f"cs-t3 = ref ResourceZZRedirectSpaceRange_{ib}",
+                    f"cs-u0 = ref {palette}",
+                    f"Dispatch = {self._merged_skin_dispatch_count(component['vg_count'])}, 1, 1",
+                    "cs-u0 = null", "cs-t0 = null", "cs-t1 = null", "cs-t2 = null", "cs-t3 = null",
+                    "",
+                ])
+
+    def _append_owned_redirect_render(self, section, draw_ib):
+        component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
+        if component_id is None:
+            return
+        group = int(self.merged_skeleton_components[component_id]["skeleton_group"])
+        plan = self._merged_owned_redirect_plan(group)
+        if not plan or component_id not in plan["required_component_ids"]:
+            return
+        components = self._merged_redirect_space_components(plan)
+        is_owner = draw_ib == plan["so_owner_ib"]
+        params = ("x1", "y1", "z1", "w1")
+        if is_owner:
+            for param in params:
+                section.append(f"local $zz_ms_saved_{param} = {param}")
+        for index, slot in enumerate(self._merged_skeleton_slots()):
+            condition = "if" if index == 0 else "elif"
+            section.append(
+                f"{condition} @vb0 != 0 && @vb0 == @ResourceZZSpaceSO_{draw_ib}_s{slot}"
+            )
+            section.append(f"    ResourceZZSpaceCB1_{draw_ib}_s{slot} = copy vs-cb1 unless_null")
+            if is_owner:
+                ready = " && ".join(
+                    f"ResourceZZSpaceCB1_{component['draw_ib']}_s{slot}->size >= 64"
+                    for component in components
+                )
+                section.append(f"    if {ready}")
+                for component in components:
+                    section.append(f"        run = CustomShaderZZRebasePalette_{component['draw_ib']}_s{slot}")
+                for carrier_index, (_position, _blend, row_count) in enumerate(plan["deform_draws"]):
+                    if row_count > 0:
+                        name = self._merged_skin_cs_name(group, slot, carrier_index)
+                        section.append(f"        run = {name}")
+                for param in params:
+                    section.append(f"        {param} = $zz_ms_saved_{param}")
+                section.append(f"        vb0 = ref {self._merged_skin_out_name(group, slot)}")
+                section.append("    endif")
+        section.append("endif")
+
     def _append_merged_skin_publish_block(
         self,
         section,
@@ -3236,6 +3357,8 @@ class ExportZZMI(ExportUnity):
         同时当 UAV 写会撞 D3D11 的输入/输出互斥。
         """
         if not group_plan:
+            return
+        if group_plan is self._merged_owned_redirect_plan(skeleton_group):
             return
         if not self._merged_skin_publish_supported(group_plan):
             # B2：锚点行布局 ≠ CS 写死的行布局 ⇒ **不发 CS**（发了就是静默错读
@@ -3284,20 +3407,7 @@ class ExportZZMI(ExportUnity):
         slots,
         use_skin_out: bool = False,
     ) -> None:
-        """发一组蒙皮 CS 段定义（重定向计划与跨组发布计划共用）。
-
-        段体与历史逐字一致；抽成方法只是为了让「跨组吸收宿主组」（F3-CS，
-        `_merged_cross_group_publish_plan`）能复用同一套段定义 —— 它没有重定向
-        计划，却必须能在最后一个供骨件到达处重发布合并几何。
-
-        `use_skin_out=True`（仅跨组发布计划）把 UAV 写目标从
-        `ResourceZZRedirectSO_*`（= `ref so0` 别名）换成**自建**的
-        `ResourceZZSkinOut_*`：跨组路径下这个别名会被拆分绘制当 `vb0` 读，
-        于是目标带上 `unordered_access vertex_buffer`，而游戏 SO 只有
-        `vertex_buffer shader_resource stream_output` ⇒ 视图创建失败 ⇒
-        绑定它的绘制全部无效（展示页整屏卡死）。重定向路径不读该别名当 VB，
-        保持原样以免动到已投产行为。
-        """
+        """发出蒙皮 CS。骨骼池重定向在渲染段使用校准后的骨骼和自建 VB。"""
         if not group_plan:
             return
         if not self._merged_skin_publish_supported(group_plan):
@@ -3309,6 +3419,11 @@ class ExportZZMI(ExportUnity):
                 self._merged_skin_layout_diag(skeleton_group, group_plan),
             )
             return
+        owned_redirect = group_plan is self._merged_owned_redirect_plan(skeleton_group)
+        shader_filename = (
+            "zzmi_merged_skin_owned_output.hlsl"
+            if owned_redirect else self._merged_skin_shader_filename()
+        )
         so_prefix_rows = int(group_plan.get("so_prefix_rows", 0) or 0)
         # 每行 float 数 = SO 行 stride / 4（Position 类目 stride = SO override_byte_stride）。
         # 2026-09-22：skin CS 已改为从 src_rows 的 stride 自行推算行宽，这里
@@ -3321,13 +3436,16 @@ class ExportZZMI(ExportUnity):
         ):
             if int(draw_count or 0) <= 0:
                 continue
+            if owned_redirect:
+                vb0_resource = f"ResourceZZRedirectSkinPosition_G{skeleton_group}_c{carrier_index}"
+                vb2_resource = f"ResourceZZRedirectSkinBlend_G{skeleton_group}_c{carrier_index}"
             for slot in slots:
                 cs_name = self._merged_skin_cs_name(skeleton_group, slot, carrier_index)
                 section.append(f"[{cs_name}]")
                 section.append(
                     "flags = optimization_level3 all_resources_bound skip_validation"
                 )
-                section.append(f"cs = ./res/{self._merged_skin_shader_filename()}")
+                section.append(f"cs = ./res/{shader_filename}")
                 # x1 有双重身份，**不要删除、不要改语义**：
                 # ① 本 carrier 的合并几何行数（导出侧口径）；
                 # ② skin CS 判定 ini 参数纹理布局（fork 相关：本 fork 从 [1] 起、
@@ -3351,24 +3469,26 @@ class ExportZZMI(ExportUnity):
                 # 「该部件」= `so_owner_ib`（写这份 SO 几何的部件），不是目标 IB：
                 # target 只有占位几何时两者不同，绑 target 的换算 ⇒ 全部顶点被同一份
                 # 常量仿射左乘（实机：整体刚性下沉、插进地里）。
-                section.append(
-                    "cs-t2 = ref "
-                    + self._merged_deform_palette_name(
+                if owned_redirect:
+                    suffix = f"G{skeleton_group}_s{slot}"
+                    palette = f"ResourceZZRedirectPalette_{suffix}"
+                    output = f"ResourceZZRedirectSkinWrite_{suffix}"
+                    section.append(f"{output} = ref {self._merged_skin_out_name(skeleton_group, slot)}")
+                else:
+                    palette = self._merged_deform_palette_name(
                         self._merged_so_space_palette_ib(
                             group_plan, str(group_plan.get("target_ib", ""))
                         ),
                         skeleton_group,
                         slot,
                     )
-                )
-                section.append(
-                    "cs-u0 = ref "
-                    + (
+                    output = (
                         self._merged_skin_out_name(skeleton_group, slot)
                         if use_skin_out
                         else self._merged_redirect_so_name(skeleton_group, slot)
                     )
-                )
+                section.append(f"cs-t2 = ref {palette}")
+                section.append(f"cs-u0 = ref {output}")
                 section.append(
                     "Dispatch = "
                     + str(
@@ -4494,6 +4614,9 @@ class ExportZZMI(ExportUnity):
                 f"{indent}{self._merged_palette_name(draw_ib, target_slot)} = "
                 "copy vs-t0 unless_null"
             )
+            owned_plan = self._merged_owned_redirect_plan(skeleton_group)
+            if owned_plan and component_id in owned_plan["required_component_ids"]:
+                section.append(f"{indent}ResourceZZSpaceSO_{draw_ib}_s{target_slot} = ref so0")
             if owner:
                 so_name = (
                     self._merged_absorbed_so_name(skeleton_group, target_slot, draw_ib)
@@ -4816,6 +4939,7 @@ class ExportZZMI(ExportUnity):
             bool(so_owner_target_ibs) or is_absorbed_host or is_cross_group_host
         )
         if not key_driven_capture:
+            owned_plan = self._merged_owned_redirect_plan(skeleton_group)
             for index, slot in enumerate(slots):
                 palette_line = (
                     f"{self._merged_palette_name(draw_ib, slot)} = copy vs-t0 unless_null"
@@ -4823,6 +4947,8 @@ class ExportZZMI(ExportUnity):
                 condition = f"if {occ_var} == {slot}" if index == 0 else "else"
                 capture_lines.append(condition)
                 capture_lines.append(f"    {palette_line}")
+                if owned_plan and component_id in owned_plan["required_component_ids"]:
+                    capture_lines.append(f"    ResourceZZSpaceSO_{draw_ib}_s{slot} = ref so0")
                 for _so_owner_target_ib in so_owner_target_ibs:
                     capture_lines.append(
                         f"    {self._merged_redirect_so_name(skeleton_group, slot)} = ref so0"
@@ -7630,7 +7756,7 @@ class ExportZZMI(ExportUnity):
         # （`ResourceZZRedirectSO_* = ref so0`）会因 bind flag 不兼容而创建失败
         # （源无 `unordered_access`、目标要当 UAV 写），失败后绑定它的绘制全部
         # 无效 ⇒ 角色展示页整屏卡死。详见 `_merged_skin_out_name` 的日志铁证。
-        # 只给跨组发布计划发：重定向路径不读该别名当 VB，继续走 RedirectSO。
+        # 这里声明跨组拆分绘制的输出。骨骼池重定向和它的校准资源一起声明。
         for skeleton_group, plan in sorted(
             self._merged_cross_group_publish_plans().items()
         ):
@@ -7978,6 +8104,11 @@ class ExportZZMI(ExportUnity):
         # 一个供骨件到达处」用当帧骨架重发布。见 `_merged_cross_group_publish_plan`。
         # ---------------------------------------------------------------
         for skeleton_group in groups:
+            owned_plan = self._merged_owned_redirect_plan(skeleton_group)
+            if owned_plan:
+                self._append_owned_redirect_resources(
+                    section, skeleton_group, owned_plan, slots, bones_count
+                )
             self._append_merged_skin_cs_sections(
                 section,
                 int(skeleton_group),
@@ -8037,6 +8168,12 @@ class ExportZZMI(ExportUnity):
             "zzmi_merged_skeleton_attach.hlsl",
             self._merged_skin_shader_filename(),
         ]
+        owned_redirect = any(
+            self._merged_owned_redirect_plan(group)
+            for group in self._merged_skeleton_groups()
+        )
+        if owned_redirect:
+            shader_names.append("zzmi_cb1_palette_rebase.hlsl")
         if _merged_palette_route_active():
             # 骨骼池路线：deform 之前要把池里每根 canonical 骨换算到本部件空间，
             # 少了这个着色器整条路线静默失效（palette 空 ⇒ 全塌到原点）。
@@ -8056,6 +8193,11 @@ class ExportZZMI(ExportUnity):
                 os.path.join(res_dir, shader_name),
                 shader_payload,
             )
+            if owned_redirect and shader_name == self._merged_skin_shader_filename():
+                self._atomic_write_binary(
+                    os.path.join(res_dir, "zzmi_merged_skin_owned_output.hlsl"),
+                    b"#define ZZMI_SKIN_TYPED_OUTPUT 1\n" + shader_payload,
+                )
 
     def add_unity_vs_resource_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
         super().add_unity_vs_resource_vb_sections(ini_builder=ini_builder, drawib_model=drawib_model)
@@ -8207,10 +8349,8 @@ class ExportZZMI(ExportUnity):
             # 一个运行时匹配键下：纹理、透明、shader replace 和 mesh 备注互相
             # 覆盖；target 的占位段还会用 ib=null 把对应物体整个跳过。
             #
-            # 现在每个段始终使用自己的 hash/first_index。carrier 的合并行由**本实例**
-            # 的 deform 段重放写入本实例 SO，渲染段沿用游戏原生 vb0（不再覆写
-            # RedirectSO）；target/缺失部件的占位 IB 保持可见（几何尺寸为 1e-6），
-            # 不再使用 ib=null 作为“跳过”手段。
+            # 每个段使用自己的 hash/first_index。骨骼池重定向按原生 SO 的资源
+            # 身份选中当前实例，再换到对应的自建顶点缓冲。占位部件保留极小三角。
             redirect_carrier_info = self._redirect_carrier_map.get(draw_ib)
             override_hash = draw_ib
             override_first_index = submesh_model.match_first_index
@@ -8252,13 +8392,7 @@ class ExportZZMI(ExportUnity):
                             " = copy vs-cb1 unless_null"
                         )
 
-            # 2026-09 多实例分离 v2（用户实测通过）：carrier 的渲染 draw
-            # **不再覆写 vb0**。旧实现 `vb0 = ResourceZZRedirectSO_<target>` 把该
-            # IB 的所有实例都钉到同一个 SO 资源变量上（后到实例的捕获会改指向，
-            # 先到实例的渲染因此读到别的实例的蒙皮结果）。游戏渲染 draw 的 vb0
-            # 天然是本实例 deform 的 SO（so0=vb0 指针族严格分实例），重放已把
-            # 本实例的合并行写进去；索引仍属于 carrier，渲染匹配键仍保持
-            # carrier hash，不会与 target 或同 DrawIB 的其它子网格串台。
+            # 原生 vb0 的资源身份对应当前实例的 deform SO。
 
             ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, None)
             if ib_buf is None or len(ib_buf) == 0:
@@ -8302,6 +8436,8 @@ class ExportZZMI(ExportUnity):
                 and int(getattr(submesh_model, "original_vertex_count", 0) or 0) > 0
             ):
                 texture_override_ib_section.append(f"vb1 = Resource{draw_ib}Texcoord")
+
+            self._append_owned_redirect_render(texture_override_ib_section, draw_ib)
 
             texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
             if not GlobalProterties.forbid_auto_texture_ini() and texture_markup_info_list:

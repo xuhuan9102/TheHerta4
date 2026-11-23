@@ -499,14 +499,33 @@ class ZZMIPaletteConvSoOwnerSpaceTests(base._ZZMIGroup3RedirectFixture, unittest
         self.assertNotIn(("0", "1"), self._replay_binds(vb_text))
         self.assertNotIn(("0", "2"), self._replay_binds(vb_text))
 
-    def test_skin_cs_reads_the_so_owner_palette(self):
-        """皮肤 CS 的 cs-t2 与重放同源：也必须是 so_owner（C1）的换算。"""
-        _exporter, _vb_text, skeleton = self._generate()
-        self.assertIn("cs-t2 = ref ResourceZZPaletteConv_C1_s1", skeleton)
-        self.assertIn("cs-t2 = ref ResourceZZPaletteConv_C1_s2", skeleton)
-        self.assertNotIn("cs-t2 = ref ResourceZZPaletteConv_C0_", skeleton)
-        self.assertIn("[CustomShaderZZMISkin_G3_s1]", skeleton)
-        self.assertIn("[CustomShaderZZMISkin_G3_s2]", skeleton)
+    def test_redirect_skin_uses_full_output_in_the_carrier_space(self):
+        exporter, _vb_text, skeleton = self._generate()
+        carrier = next(m for m in exporter.drawib_model_list if m.draw_ib == "b20f90ea")
+        builder = base._FakeIniBuilder()
+        exporter.add_unity_vs_texture_override_ib_sections(builder, carrier)
+        render = "\n".join(base._all_builder_lines(builder))
+        for slot in (1, 2):
+            with self.subTest(slot=slot):
+                out = f"ResourceZZSkinOut_G3_s{slot}"
+                definition = skeleton.split(f"[{out}]", 1)[1].split("\n[", 1)[0]
+                self.assertIn("array = 18779", definition)
+                skin = skeleton.split(f"[CustomShaderZZMISkin_G3_s{slot}]", 1)[1]
+                skin = skin.split("\n[", 1)[0]
+                self.assertIn("cs-t0 = ref ResourceZZRedirectSkinPosition_G3_c0", skin)
+                self.assertIn("cs-t1 = ref ResourceZZRedirectSkinBlend_G3_c0", skin)
+                self.assertIn(f"cs-t2 = ref ResourceZZRedirectPalette_G3_s{slot}", skin)
+                self.assertIn(f"ResourceZZRedirectSkinWrite_G3_s{slot} = ref {out}", skin)
+                self.assertIn(f"@vb0 == @ResourceZZSpaceSO_b20f90ea_s{slot}", render)
+                self.assertIn(f"cs-t2 = ref ResourceZZSpaceCB1_b20f90ea_s{slot}", skeleton)
+                self.assertLess(
+                    render.index(f"run = CustomShaderZZRebasePalette_a23aa8a3_s{slot}"),
+                    render.index(f"run = CustomShaderZZMISkin_G3_s{slot}"),
+                )
+                self.assertLess(
+                    render.index(f"run = CustomShaderZZMISkin_G3_s{slot}"),
+                    render.index(f"vb0 = ref {out}"),
+                )
 
     def test_every_deform_section_computes_the_palette_it_binds(self):
         """每个 deform 段先跑它要绑的那份换算（含 target 自己的段）。"""

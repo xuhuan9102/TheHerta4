@@ -1850,6 +1850,24 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         return next(iter(groups)), next(iter(occ_ids)), ""
 
     @staticmethod
+    def _redirect_collision_inputs(sections, comp):
+        """Read the actual render bindings, including the optional LOD suffix."""
+        inputs = {}
+        for part in comp.get("parts", ()):
+            for line in sections.get(part["section"], ()):
+                match = re.fullmatch(
+                    r"vb0\s*=\s*ref\s+(ResourceZZSkinOut_G(\d+)_s([12])(_LOD\d+)?)",
+                    line.strip(),
+                    re.IGNORECASE,
+                )
+                if match:
+                    output, group, slot, lod_suffix = match.groups()
+                    palette = f"ResourceZZRedirectPalette_G{group}_s{slot}{lod_suffix or ''}"
+                    if f"[{palette}]" in sections:
+                        inputs[output] = palette
+        return inputs
+
+    @staticmethod
     def _strip_legacy_help_mode_block(text):
         """Remove every old help-gated drag-mode override from UI tails."""
         lines = str(text or "").splitlines(keepends=True)
@@ -5678,35 +5696,33 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 lines.append(f"cs-u3 = ResourceDragJiggleSlideState_{cn}_{ns}")
                 lines.append(f"cs-t86 = ResourceDragJiggleBlendTyped_{cn}_{ns}")
                 lines.append(f"cs-u2 = ResourceDragJiggleBlendOut_{cn}_{ns}")
-                # 碰撞面跟随动画（t22）：碰撞三角形顶点要按「当帧骨架」蒙皮，否则碰撞面留在
-                # 导出姿态，角色一摆腿顶点就穿过薄壳（实测漂移 >1 mm 即穿，gap 只有 0.37~1.74 mm）。
-                # 合并骨架是 s1/s2 ping-pong：本件 deform 段按「自己的」 $zz_ms_occ_<cid> 选一份
-                # 写入（occ==1 → s1、occ==2 → s2），而拖拽 CS 在渲染 draw 上执行 ⇒ 绑定必须用
-                # 同一条计数器、同一套槽位口径。计数器每帧被 [Present] 清零，本件 deform 段
-                # 还没跑时是 0 ⇒ 只有 2 对应 s2，0/1 都按 s1（旧口径 occ == 1 把 0 判成 s2，
-                # 读到上一帧第 2 次出现留下的旧值或全零骨架）。
-                # 组号/cid 一律从产物推导：猜错组号会 ref 一个不存在的资源，整个 ini 加载失败。
-                # 非合并产物既没有 [ResourceZZMergedSkeleton_G<n>_s<k>] 也没有出现次计数器，
-                # 那本就不该有 t88 绑定 ⇒ 静默整块跳过（不加这条门控时每个非合并部件都会
-                # 走一次「推导不出」的告警，文案在非合并场景是误导）。
+                # 碰撞蒙皮与当前 vb0 使用同一份骨骼表。旧产物依照 deform 的出现次选槽。
                 if self._is_merged_skeleton_product(sections):
+                    calibrated_inputs = self._redirect_collision_inputs(sections, comp)
                     skeleton_group, skeleton_occ, skeleton_reason = self._merged_skeleton_binding(
                         sections, comp
                     )
-                    if skeleton_group is None or skeleton_occ is None:
+                    for i, (output, palette) in enumerate(calibrated_inputs.items()):
+                        branch = "if" if i == 0 else "elif"
+                        lines.extend([
+                            f"\t{branch} @vb0 != 0 && @vb0 == @{output}",
+                            f"\t\tcs-t88 = ref {palette}",
+                        ])
+                    if skeleton_group is not None and skeleton_occ is not None:
+                        branch = "elif" if calibrated_inputs else "if"
+                        lines.extend([
+                            f"\t{branch} $zz_ms_occ_{skeleton_occ} == 2",
+                            f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s2",
+                            "\telse",
+                            f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s1",
+                            "\tendif",
+                        ])
+                    elif calibrated_inputs:
+                        lines.extend(["\telse", "\t\tcs-t88 = null", "\tendif"])
+                    else:
                         _warn_missing_merged_skeleton_binding(
                             comp.get("comp_name", ""), skeleton_reason
                         )
-                    else:
-                        lines.append(f"\tif $zz_ms_occ_{skeleton_occ} == 2")
-                        lines.append(
-                            f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s2"
-                        )
-                        lines.append("\telse")
-                        lines.append(
-                            f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s1"
-                        )
-                        lines.append("\tendif")
         surface = comp.get("collision_surface") if collision_grid else None
         lines.append(f"x115 = {1 if surface else 0}")
         lines.extend([
