@@ -5,6 +5,19 @@ import numpy
 
 UV_LAYER = "TEXCOORD2.xy"
 
+# 只有蓝图里存在 Glow FX 节点且勾选「独立表面流光」时，才允许导出器
+# 生成 NativeHeightFlow / PrimaryMaterialUV 这两段 ShaderRegex。
+NATIVE_FLOW_NODE = "SSMTNode_PostProcess_GlowFX"
+
+
+def has_native_flow_node(blueprint_model):
+    """Return True only when the blueprint explicitly enables the native flow."""
+    return any(
+        getattr(node, "bl_idname", "") == NATIVE_FLOW_NODE
+        and bool(getattr(node, "enable_native_surface_flow", False))
+        for node in getattr(blueprint_model, "postprocess_nodes", ())
+    )
+
 _FLOAT_FORMATS = {
     "R16G16_FLOAT": "<f2",
     "R16G16B16A16_FLOAT": "<f2",

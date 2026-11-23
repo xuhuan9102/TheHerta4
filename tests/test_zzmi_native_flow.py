@@ -239,5 +239,29 @@ class FlowShaderSectionsTests(unittest.TestCase):
         self.assertIn("${sample_uv}", text)
 
 
+class HasNativeFlowNodeTests(unittest.TestCase):
+    def test_missing_or_other_nodes_are_false(self):
+        self.assertFalse(flow.has_native_flow_node(types.SimpleNamespace()))
+        self.assertFalse(flow.has_native_flow_node(types.SimpleNamespace(
+            postprocess_nodes=[types.SimpleNamespace(bl_idname="SSMTNode_PostProcess_ShapeKey")],
+        )))
+
+    def test_glowfx_node_must_enable_native_surface_flow(self):
+        disabled = types.SimpleNamespace(
+            bl_idname=flow.NATIVE_FLOW_NODE,
+            enable_native_surface_flow=False,
+        )
+        enabled = types.SimpleNamespace(
+            bl_idname=flow.NATIVE_FLOW_NODE,
+            enable_native_surface_flow=True,
+        )
+        self.assertFalse(flow.has_native_flow_node(types.SimpleNamespace(
+            postprocess_nodes=[disabled],
+        )))
+        self.assertTrue(flow.has_native_flow_node(types.SimpleNamespace(
+            postprocess_nodes=[disabled, enabled],
+        )))
+
+
 if __name__ == "__main__":
     unittest.main()
