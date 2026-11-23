@@ -25,6 +25,9 @@ from ...utils.format_utils import Fatal
 from ...utils.timer_utils import TimerUtils
 from .unity import ExportUnity
 from contextlib import nullcontext
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 
 # 「条件判断」后处理节点需要知道每个 ini 段属于哪个 draw_ib：导出期用
 # ``register.draw_ib_context(draw_ib)`` 包住「构建该 draw_ib 的 ini 段」的代码，
@@ -237,6 +240,58 @@ def _zzmi_prop_flag(name: str, default: bool) -> bool:
         return bool(getter())
     except Exception:
         return bool(default)
+
+
+_lod_fusion_scope = ContextVar("zzmi_lod_fusion_scope", default=None)
+
+
+def _zzmi_scope_lod() -> str:
+    """当前导出的 LOD 名；不在分批导出里时按 LOD0。"""
+    scope = _lod_fusion_scope.get()
+    return scope if isinstance(scope, str) and scope else "LOD0"
+
+
+@contextmanager
+def _zzmi_lod_output(path):
+    """把单个 LOD 的产物临时输出到 staging 目录（切 GlobalConfig 的 Mod 目录）。"""
+    original = vars(GlobalConfig)["path_generate_mod_folder"]
+    GlobalConfig.path_generate_mod_folder = classmethod(lambda cls: path)
+    try:
+        yield
+    finally:
+        GlobalConfig.path_generate_mod_folder = original
+
+
+def _in_lod_fusion_scope(method):
+    """按 LOD 分批导出：__init__ 里分组，export/export_buffers_only 里跑批。"""
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        if method.__name__ == "__init__":
+            self._lod_fusion_batches = None
+            self._lod_fusion_data = None
+            if _zzmi_prop_flag("zzmi_fusion_per_lod", False) and GlobalProterties.import_merged_vgmap():
+                from ...common.zzmi_skeleton import fusion_lod
+
+                blueprint = args[0] if args else kwargs.get("blueprint_model")
+                batches = {}
+                for draw in getattr(blueprint, "ordered_draw_obj_data_model_list", ()):
+                    lod = fusion_lod(draw.get_workspace_unique_str())
+                    batches.setdefault(lod, []).append(draw)
+                if len(batches) > 1:
+                    self.blueprint_model = blueprint
+                    self.drawib_model_list = []
+                    self._lod_fusion_batches = batches
+                    return None
+                if batches:
+                    self._lod_fusion_data = next(iter(batches))
+        if method.__name__ in {"export", "export_buffers_only"} and getattr(self, "_lod_fusion_batches", None):
+            return self._export_lod_batches(method.__name__)
+        token = _lod_fusion_scope.set(getattr(self, "_lod_fusion_data", None))
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _lod_fusion_scope.reset(token)
+    return invoke
 
 
 class ZZMITextureMarkName:
@@ -583,6 +638,7 @@ class ExportZZMI(ExportUnity):
         ZZMITextureMarkName.ZglowMap: r"Resource\ZZMI\GlowMap",
     }
 
+    @_in_lod_fusion_scope
     def __init__(self, blueprint_model):
         # ZZMI 骨骼合并（分支选项）：复选框开启时，为「DrawIB 内存在但蓝图里没有对象」
         # 的部件自动创建极限小三角面占位对象（必须在 super().__init__ 组装模型之前注入）
@@ -8480,12 +8536,62 @@ class ExportZZMI(ExportUnity):
             )
         return missing_report
 
+    def _export_lod_batches(self, method_name):
+        """按 LOD 分批导出：每批只读自己的提取目录，最后合并进同一个 Mod。"""
+        from tempfile import TemporaryDirectory
+        from ...common.texture_export_plan import TextureExportPlan
+        from ...common.zzmi_lod_export import publish_lod_exports
+
+        main_ini = GlobalConfig.path_generate_mod_ini()
+        exports = []
+        models = []
+        seen_ibs = set()
+        workspace = GlobalConfig.path_workspace_folder()
+        for lod in sorted(self._lod_fusion_batches):
+            map_path = os.path.join(workspace, lod, "DrawIB-Component.json")
+            mapping = JsonUtils.LoadFromFile(map_path) if os.path.isfile(map_path) else {}
+            ibs = set(mapping or {}) | {draw.match_draw_ib for draw in self._lod_fusion_batches[lod]}
+            conflicts = seen_ibs & ibs
+            if conflicts:
+                raise Fatal(
+                    "多个 LOD 共用绘制哈希，无法安全区分："
+                    + ", ".join(sorted(conflicts))
+                )
+            seen_ibs.update(ibs)
+
+        staging = TemporaryDirectory(prefix="zzmi_lod_export_")
+        try:
+            for lod, draws in sorted(self._lod_fusion_batches.items()):
+                child = copy.copy(self.blueprint_model)
+                child.ordered_draw_obj_data_model_list = [copy.copy(draw) for draw in draws]
+                folder = os.path.join(staging.name, lod)
+                os.makedirs(folder, exist_ok=True)
+                print(f"[ZZMI 按 LOD 导出] {lod}（{len(draws)} 个绘制）")
+                with _zzmi_lod_output(folder):
+                    exporter = ExportZZMI(child)
+                    getattr(exporter, method_name)()
+                exports.append((lod, child, exporter, folder))
+                models.extend(exporter.drawib_model_list)
+
+            self.drawib_model_list = models
+            if method_name == "export" and getattr(self.blueprint_model, "postprocess_nodes", ()):
+                self.blueprint_model._zzmi_lod_exports = (staging, exports, main_ini)
+                return
+            TextureExportPlan.finalize(staging.name)
+            publish_lod_exports(exports, main_ini, buffers_only=method_name == "export_buffers_only")
+        except Exception:
+            staging.cleanup()
+            raise
+        staging.cleanup()
+
+    @_in_lod_fusion_scope
     def export(self):
         try:
             self._export_impl()
         finally:
             self._cleanup_stub_objects()
 
+    @_in_lod_fusion_scope
     def export_buffers_only(self):
         """多轮导出的纯缓冲路径也必须闭合占位对象事务。"""
         try:

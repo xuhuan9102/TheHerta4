@@ -89,6 +89,15 @@ _ZZMI_MERGE_MODE_CROSS = "cross_group"
 _ZZMI_MERGE_MODE_GROUP = "group"
 
 
+def fusion_lod(unique_str: str) -> str:
+    """部件身份所属的 LOD 名（``LOD0.95de0d39-...`` → ``LOD0``）；无前缀按 LOD0。"""
+    value = str(unique_str or "").strip()
+    head, sep, _ = value.partition(".")
+    if sep and head.upper().startswith("LOD") and head[3:].isdigit():
+        return head
+    return "LOD0"
+
+
 class ZZMILogParser:
     """解析 ZZZ FrameAnalysis/log.txt，提供 deform pass 与资源绑定查询。
 

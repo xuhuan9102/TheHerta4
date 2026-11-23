@@ -672,6 +672,9 @@ class PanelBasicInformation(bpy.types.Panel):
             # 但仍按用户要求默认开启；保留显式开关用于出问题时对照关闭。
             # 关闭时仍使用合并骨架与单一合并对象。
             layout.prop(global_properties, "zzmi_merged_redirect_enabled")
+            # 按 LOD 融合：每个 LOD 只读自己的提取目录、各自算一套合并骨骼，
+            # 产物仍合并进同一个 Mod（同名资源按 LOD 前缀改名）。
+            layout.prop(global_properties, "zzmi_fusion_per_lod")
         # EFMI 专用：多 LOD 使用 LOD0 分组投影，关闭则两侧独立去重。
         if GlobalConfig.logic_name == LogicName.EFMI:
             layout.prop(global_properties, "efmi_lod_group_projection")

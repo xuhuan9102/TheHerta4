@@ -297,6 +297,17 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    zzmi_fusion_per_lod: bpy.props.BoolProperty(
+        name="按 LOD 融合骨骼",
+        description=(
+            "每个 LOD 独立生成骨骼池：导出时按部件身份前缀（LOD0./LOD1.）分批，"
+            "每批只读该 LOD 自己的提取目录（<工作区>/<LOD>/<部件>/…），"
+            "产物合并进同一个 Mod（同名资源按 LOD 前缀改名）。"
+            "切换后需要重新导入，让每个 LOD 的 VGMap 按自己的物体计算。"
+        ),
+        default=False,
+    ) # type: ignore
+
     cross_group_merged_vgmap_test: bpy.props.BoolProperty(
         name="跨组融合统一顶点组测试",
         description=(
@@ -638,6 +649,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def import_merged_vgmap(cls):
         return cls._instance().import_merged_vgmap
+
+    @classmethod
+    def zzmi_fusion_per_lod(cls):
+        return cls._instance().zzmi_fusion_per_lod
 
     @classmethod
     def set_import_merged_vgmap(cls, value: bool):
