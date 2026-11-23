@@ -89,7 +89,27 @@ class IniTrace:
 def generated(count=3, remap=False):
     instance = _bare_node([_emitter() for _ in range(count)])
     instance.remap_ini_params = remap
-    return instance._build_main_ini('FluidTest', [])
+    return instance._build_main_ini('FluidTest', ['9040e2c4'])
+
+
+def test_absent_character_skips_runtime_work_and_resets_on_exit():
+    trace = IniTrace(generated())
+    trace.values.update({'$fluid_seen': 1, '$fluid_emitting': 1, '$fluid_initialized': 1,
+                         '$fluid_emitter_gate_dirty': 1, '$fluid_any_simulation': 1,
+                         'o3': 1, 'od': 1, 'vs-cb1': 3120464, 'o0->Width': 1920})
+    for entry in ('ShaderRegexLiquidMainView', 'ShaderOverrideLiquidTonemap',
+                  'CommandListCaptureSurface', 'CommandListInjectWorld',
+                  'CommandListDrawWorld', 'Present'):
+        trace.run(entry)
+    assert trace.work == []
+    assert 'CommandListUpdateEmitterGate' not in trace.calls
+    assert trace.values['$fluid_emitting'] == 0
+    assert trace.values['$fluid_initialized'] == 0
+
+    trace.run('TextureOverrideFluidGate_9040e2c4')
+    trace.run('ShaderRegexLiquidMainView')
+    assert 'CommandListUpdateEmitterGate' in trace.calls
+    assert [row[2] for row in trace.work if row[1] == 'copy'] == ['ResourceCameraSource']
 
 
 @pytest.mark.parametrize('enabled', list(product((0, 1), repeat=3)))

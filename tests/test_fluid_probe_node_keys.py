@@ -137,7 +137,6 @@ def _bare_node(emitters):
     inst = cls.__new__(cls)
     for name, value in dict(
         remap_ini_params=False,
-        gate_by_host_hash=False,
         include_shaders_cache=False,
         force_scale=1.0,
         particle_radius=0.0028,
@@ -271,6 +270,21 @@ class FamilyFlagTests(unittest.TestCase):
 
 
 class EmitterKeyExportTests(unittest.TestCase):
+    def test_character_gate_is_required_even_with_an_old_disabled_setting(self):
+        cls = node.SSMTNode_PostProcess_FluidProbe
+        self.assertNotIn("gate_by_host_hash", cls.__annotations__)
+        inst = _bare_node([_emitter(key="VK_F1")])
+        inst.gate_by_host_hash = False
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "character.ini").write_text(
+                "[TextureOverrideBody]\nhash = 9040e2c4\n", encoding="utf-8"
+            )
+            host_hashes = inst._host_hashes(folder)
+        sections = merge.parse_sections(inst._build_main_ini("FluidTest", host_hashes))
+        self.assertIn("$fluid_present = 1", sections["TextureOverrideFluidGate_9040e2c4"])
+        self.assertIn("condition = $fluid_present == 1",
+                      [line.strip() for line in sections["KeyFluidEmit0"]])
+
     def test_empty_key_binds_nothing(self):
         """留空 = 不绑键：一个 ``[KeyFluidEmitN]`` 段都不许有，也不许自作主张给 NUMPAD1。"""
         text = _bare_node([_emitter(), _emitter()])._build_main_ini("FluidTest", [])
@@ -282,8 +296,27 @@ class EmitterKeyExportTests(unittest.TestCase):
     def test_explicit_key_on_the_second_emitter_is_kept(self):
         text = _bare_node([_emitter(), _emitter(key="VK_F1")])._build_main_ini(
             "FluidTest", [])
-        self.assertIn("[KeyFluidEmit1]", text)
-        self.assertIn("key = no_alt no_ctrl no_shift VK_F1", text)
+        key = [line.strip() for line in merge.parse_sections(text)["KeyFluidEmit1"]]
+        self.assertIn("key = no_alt no_ctrl no_shift VK_F1", key)
+        self.assertIn("condition = $fluid_present == 1", key)
+
+    def test_all_hotkeys_use_host_presence_even_when_all_emitters_start_off(self):
+        inst = _bare_node([_emitter(key="VK_F1", enable=False), _emitter(key="VK_F2", enable=False)])
+        sections = merge.parse_sections(inst._build_main_ini("FluidTest", ["9040e2c4"]))
+
+        self.assertIn("$fluid_present = 1", sections["TextureOverrideFluidGate_9040e2c4"])
+        self.assertIn("post $fluid_present = 0", sections["Present"])
+        keys = {name: [line.strip() for line in lines] for name, lines in sections.items()
+                if name.startswith("Key")}
+        self.assertEqual(set(keys), {"KeyFluidEmit0", "KeyFluidEmit1", "KeyAutoPulse", "KeyManualPulse", "KeyTrickle9"})
+        for key in keys.values():
+            self.assertIn("condition = $fluid_present == 1", key)
+        self.assertIn("type = hold", keys["KeyManualPulse"])
+        for slot in range(2):
+            self.assertIn(f"global $fluid_emit_{slot} = 0", sections["Constants"])
+            key = keys[f"KeyFluidEmit{slot}"]
+            self.assertIn(f"$fluid_emit_{slot} = 1,0", key)
+            self.assertIn("run = CommandListMarkFluidEmitterGateDirty,CommandListMarkFluidEmitterGateDirty", key)
 
     def test_exported_template_has_no_manual_master_switch(self):
         text = _bare_node([_emitter()])._build_main_ini("FluidTest", [])
@@ -474,7 +507,7 @@ class StrengthLevelTests(unittest.TestCase):
     """发射量档位是独立输入：填了用填的，勾「跟随速度」才反解。"""
 
     def _emu(self, **kw):
-        cfg = dict(remap_ini_params=False, gate_by_host_hash=False, force_scale=1.0,
+        cfg = dict(remap_ini_params=False, force_scale=1.0,
                    particle_radius=0.02, gravity_scale=1.0, viscosity=0.05,
                    launch_speed=1.5, enabled=True, depth_test=True, auto_pulse=False,
                    tint_r=0.9, tint_g=0.75, tint_b=0.03, absorb_m=0.015,
@@ -598,10 +631,20 @@ class ExportFailModeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 inst.execute_postprocess(td)
 
+    def test_missing_host_hash_stops_export_before_deployment(self):
+        inst = _bare_node([_emitter()])
+        inst._namespace_conflicts = lambda *a: []
+        deployed = []
+        inst._deploy = lambda *args: deployed.append(args)
+        with tempfile.TemporaryDirectory() as folder:
+            inst.execute_postprocess(folder)
+            self.assertEqual(list(Path(folder).iterdir()), [])
+        self.assertEqual(deployed, [])
+
     def test_generated_ns_problems_abort_export(self):
         inst = _bare_node([_emitter()])
         inst._namespace_conflicts = lambda *a: []
-        inst._host_hashes = lambda *a: []
+        inst._host_hashes = lambda *a: ["9040e2c4"]
         inst._deploy = lambda *a, **k: (0, 0, 0, [])
         inst._inject_emitter_hooks = lambda *a: 0
         inst._verify_generated_ns = lambda *a: ["裸 Fluid_mod（缺 8 位后缀）: x.ini"]

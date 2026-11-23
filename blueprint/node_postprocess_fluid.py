@@ -29,8 +29,7 @@
 
 角色门控
 --------
-参考实现的 ``$costume_mods`` 全文只被读、从未被赋值（5 处门控全靠它），
-3Dmigoto 未定义变量求值为 0 ⇒ 整条链跳过。这里统一换成 ``$fluid_present``：
+生成器用 ``$fluid_present`` 表示角色在场，快捷键和流体运行入口共用该标记。
 
 - 为宿主每个 ``hash =`` 生成一段 gate：``[TextureOverrideFluidGate_<hash>]``
   + ``hash = <hash>`` + ``$fluid_present = 1``
@@ -786,7 +785,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         default=True,
     )
 
-    #: 是否生成角色门控段
     host_ini_path: bpy.props.StringProperty(
         name='宿主 ini（可选）',
         description=(
@@ -795,12 +793,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         ),
         subtype='FILE_PATH',
         default='',
-    )
-    gate_by_host_hash: bpy.props.BoolProperty(
-        name='角色门控',
-        description='为宿主 ini 里每个 TextureOverride hash 生成 $fluid_present 置位段。'
-                    '关闭后流体将常驻计算（不受角色是否在场影响）',
-        default=True,
     )
     # 全局快捷键：出厂值直接填在输入栏里，用户一眼看到「现在按什么」，
     # 改成别的就覆盖，清空则回到出厂值。名字对齐
@@ -1099,7 +1091,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         row = col.row(align=True)
         row.enabled = not self.remap_ini_params
         row.prop(self, 'include_shaders_cache')
-        col.prop(self, 'gate_by_host_hash')
         col.prop(self, 'emit_legacy_buffers')
 
         layout.separator()
@@ -1734,7 +1725,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             print("[FluidProbe][WARN] " + message)
 
         # gate 段：宿主每个 hash 一段，只写变量，不绑定任何资源。
-        if self.gate_by_host_hash and host_hashes:
+        if host_hashes:
             blocks = []
             for h in host_hashes:
                 blocks.append(
@@ -1758,10 +1749,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 len(slots),
                 sum(len(v) for v in slots.values()),
             ))
-        # 发射器键位：**第 1 个发射器留空时默认小键盘 1**（原来那个总开关键位，
-        # 现在总开关改成角色门控硬关了，这个键空着不如给第一个发射器）；第 2 个起
-        # 留空 = 不绑，免得几个发射器抢同一个键。策略放在这里而不是
-        # ``apply_emitter_keys`` 里：那个函数的契约是「空串 = 不绑」，测试直接调它。
         emitter_key_entries = _emitter_key_entries(self.emitters)
         # 全局快捷键改名。留空的一律保持模板默认（小键盘），一个都不改时
         # 输出与模板逐字节一致，所以注入幂等测试不受影响。
@@ -1773,10 +1760,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             },
             emitter_keys=[spec for _slot, spec in emitter_key_entries],
         )
-        # 每个发射器自己的开关键。放在前缀改名之前，和力场同一个理由：
-        # 这里按模板原名 $emit_N 工作，改完再统一改名。
-        # 槽号超限的发射器现在**跳过并告警**（以前在这里抛 ValueError，
-        # 抛穿 _deploy ⇒ 整次导出一个文件都不写），所以 warnings 必须往外打。
+        # 即使所有发射器都关闭，宿主绘制仍会置位，快捷键可以重新开启发射器。
         text = fluid_ini_merge.apply_emitter_keys(
             text,
             emitter_key_entries,
@@ -2368,8 +2352,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
 
     def _host_hashes(self, mod_export_path):
         """读宿主 ini，收集 hash。只读，不改宿主 ini。"""
-        if not self.gate_by_host_hash:
-            return []
         hashes = []
         # 面板里填了宿主 ini 时优先用它：导出目录里可能还没生成任何 ini
         # （刚建好 mod 就要报一次数），也可能一次导出多个 ini 让人分不清是哪个。
@@ -2568,13 +2550,10 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
         # 必须判在 _deploy 之前：写盘顺序是 _deploy（fluid_probe.ini + 全部 hlsl +
         # Profiles/*.json）→ _inject_emitter_hooks（改宿主 ini）。等写完再报错，
         # 盘上留下的是「门控段缺失、$fluid_present 恒 0」的半成品，还得用户自己回滚。
-        if self.gate_by_host_hash and not host_hashes:
+        if not host_hashes:
             print(
-                "[FluidProbe][ERROR] 开了「按宿主 hash 门控」却一个 hash 都没收到。"
-                "这会让 $fluid_present 恒为 0，流体在游戏里完全不生效。请任选其一："
-                "①在节点里填「宿主 ini（可选）」指向角色的 ini；"
-                "②导出时确保角色 ini 与流体同目录；"
-                "③关掉门控（流体常驻计算，多角色同屏时会互相干扰）。"
+                "[FluidProbe][ERROR] 找不到角色门控所需的宿主 hash，流体导出已中止。"
+                "请确保导出目录中有角色 ini，或在节点的「宿主 ini（可选）」中指定它。"
             )
             return
 
@@ -2610,10 +2589,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             hooks if hooks >= 0 else 0,
             "" if hooks > 0 else "（没有 first_index 落在任何 draw 区间内的发射器）",
         ))
-        print("[FluidProbe] 门控 hash: {} 个{}".format(
-            len(host_hashes),
-            "" if host_hashes else "（未找到宿主 hash；门控已关，流体常驻计算）",
-        ))
+        print("[FluidProbe] 门控 hash: {} 个".format(len(host_hashes)))
         print("[FluidProbe] IniParams 重映射: {}；着色器缓存: {}".format(
             "开 (237-243/251-255 → 29-40)" if self.remap_ini_params else "关",
             "带" if (self.include_shaders_cache and not self.remap_ini_params) else "不带",
@@ -3601,24 +3577,17 @@ class SSMT_OT_FluidCheckHost(bpy.types.Operator):
         if node.remap_ini_params and node.include_shaders_cache:
             problems.append('「重映射 IniParams」与「携带 .bin」同时开启：hlsl 会被改写，旧的 .bin 必然失配')
 
-        if node.gate_by_host_hash:
-            base = ''
-            hpath = (getattr(node, 'host_ini_path', '') or '').strip()
-            if hpath:
-                base = os.path.dirname(hpath) or '.'
-            elif node.id_data is not None and getattr(node.id_data, 'filepath', ''):
-                base = os.path.dirname(node.id_data.filepath) or '.'
-            hashes = []
-            if base and os.path.isdir(base):
-                hashes = node._host_hashes(base)
-            if not hashes:
-                problems.append(
-                    '门控开着但读不到任何 hash → $fluid_present 恒为 0，流体在游戏里完全不生效'
-                )
-            else:
-                notes.append('门控 hash: %d 个' % len(hashes))
+        base = ''
+        hpath = (getattr(node, 'host_ini_path', '') or '').strip()
+        if hpath:
+            base = os.path.dirname(hpath) or '.'
+        elif node.id_data is not None and getattr(node.id_data, 'filepath', ''):
+            base = os.path.dirname(node.id_data.filepath) or '.'
+        hashes = node._host_hashes(base) if base and os.path.isdir(base) else []
+        if hashes:
+            notes.append('门控 hash: %d 个' % len(hashes))
         else:
-            notes.append('门控关闭 → 流体常驻计算（多角色同屏时会互相干扰）')
+            problems.append('找不到角色门控所需的宿主 hash，请检查角色 ini')
 
         if not node.emitters:
             problems.append('没有发射器 → 喷口永远回退到 (0, 0.85, 0)')

@@ -5,6 +5,7 @@ from test_fluid_probe_node_keys import _bare_node, _emitter
 
 def test_static_main_view_recomputes_only_once():
     trace = IniTrace(generated())
+    trace.run('TextureOverrideFluidGate_9040e2c4')
     for _ in range(100):
         trace.run('ShaderRegexLiquidMainView')
     assert trace.calls.count('CommandListUpdateEmitterGate') == 1
@@ -14,6 +15,7 @@ def test_runtime_assignment_refreshes_the_next_consumer():
     text = generated() + '\n[CommandListChangeInputs]\n$fluid_slot_count = 1\n$fluid_emit_0 = 0\n'
     text = merge.mark_emitter_gate_writes(text)
     trace = IniTrace(text)
+    trace.run('TextureOverrideFluidGate_9040e2c4')
     trace.run('ShaderRegexLiquidMainView')
     assert trace.values['$fluid_any_emitter'] == 1
     trace.run('CommandListChangeInputs')
@@ -65,6 +67,7 @@ def test_transition_key_disables_cache_until_reload():
 
 def test_low_frequency_refresh_still_observes_uninstrumented_external_changes():
     trace = IniTrace(generated())
+    trace.run('TextureOverrideFluidGate_9040e2c4')
     trace.run('ShaderRegexLiquidMainView')
     trace.run('Present')
     for i in range(8):

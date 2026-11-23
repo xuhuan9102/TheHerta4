@@ -999,6 +999,7 @@ def build_emitter_key_block(entries, warnings=None):
     out = [EMITTER_KEY_MARKER]
     for slot_i, key in sorted(rows):
         out.append("[KeyFluidEmit%d]" % slot_i)
+        out.append("    condition = $fluid_present == 1")
         out.append("    key = %s" % key)
         out.append("    type = cycle")
         out.append("    $%semit_%d = 1,0" % (VARIABLE_PREFIX, slot_i))
