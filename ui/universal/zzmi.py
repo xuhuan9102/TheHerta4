@@ -6101,6 +6101,21 @@ class ExportZZMI(ExportUnity):
                     with open(buffer_path, "wb") as file_obj:
                         category_buffer.tofile(file_obj)
 
+    @staticmethod
+    def _skin_input_aliases(draw_ib, category_hash):
+        """Read verified alternate skinning inputs for this DrawIB and input hash."""
+        path = os.path.join(GlobalConfig.path_workspace_folder(), "Config", "ZZMISkinInputAliases.json")
+        if not os.path.isfile(path):
+            return ()
+        with open(path, encoding="utf-8-sig") as file:
+            aliases = json.load(file).get(draw_ib, {}).get(category_hash, [])
+        if not isinstance(aliases, list) or any(
+            not isinstance(alias, str) or not re.fullmatch(r"[0-9a-f]{8}", alias)
+            for alias in aliases
+        ):
+            raise ValueError(f"Invalid ZZMI skin input aliases for DrawIB {draw_ib}: {path}")
+        return tuple(dict.fromkeys(alias for alias in aliases if alias != category_hash))
+
     def add_unity_vs_texture_override_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
         d3d11_game_type = drawib_model.d3d11GameType
         draw_ib = drawib_model.draw_ib
@@ -6165,6 +6180,7 @@ class ExportZZMI(ExportUnity):
             texture_override_vb_name_suffix = "VB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + category_name
             texture_override_vb_section.append("[TextureOverride_" + texture_override_vb_name_suffix + "]")
             texture_override_vb_section.append("hash = " + category_hash)
+            body_start = len(texture_override_vb_section.SectionLineList)
 
             for original_category_name, draw_category_name in d3d11_game_type.CategoryDrawCategoryDict.items():
                 if category_name != draw_category_name:
@@ -6201,6 +6217,14 @@ class ExportZZMI(ExportUnity):
                         texture_override_vb_section.append("$ActiveCharacter = 1")
 
             texture_override_vb_section.new_line()
+            if draw_category_name is not None and category_name == draw_category_name:
+                body = texture_override_vb_section.SectionLineList[body_start:]
+                for alias in self._skin_input_aliases(draw_ib, category_hash):
+                    texture_override_vb_section.append(
+                        f"[TextureOverride_{texture_override_vb_name_suffix}_SkinInput_{alias}]"
+                    )
+                    texture_override_vb_section.append(f"hash = {alias}")
+                    texture_override_vb_section.extend(body)
 
         ini_builder.append_section(texture_override_vb_section)
 
