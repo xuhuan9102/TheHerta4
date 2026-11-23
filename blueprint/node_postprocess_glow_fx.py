@@ -929,7 +929,7 @@ class SSMTNode_PostProcess_GlowFX(
                 shader_lines[0] = f"ps = res/surface_flow_replay_{layout.lower()}_ps.hlsl"
                 sections[f"[{shader}{layout}]"] = shader_lines
             sections[f"[CommandListZZMISurfaceReplay{name}{tag}]"] = [
-                r"if @od && @o0 && @o3 && !@o4 && $\slotfix\is_color_shader && !$\slotfix\is_outline_shader"
+                r"if @od && @o0 && @o3 && !@o4 && !$\slotfix\is_outline_shader"
                 + (f" && {switch} != 0" if switch else ""),
                 "    local $saved_width = x495",
                 "    local $saved_height = y495",
