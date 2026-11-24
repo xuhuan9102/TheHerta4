@@ -772,9 +772,15 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         tree = getattr(self, "id_data", None)
         if tree is None:
             return None
-        for node in tree.nodes:
+        from ..common.global_config import GlobalConfig
+        from .export_helper import BlueprintExportHelper
+
+        output_tree = GlobalConfig._get_output_blueprint_tree()
+        nodes = BlueprintExportHelper._collect_postprocess_nodes(output_tree) if output_tree else tree.nodes
+        for node in nodes:
             if (
                 getattr(node, "bl_idname", "") == "SSMTNode_PostProcess_DragInteraction"
+                and not getattr(node, "mute", False)
                 and self._drag_node_skd_enabled(node)
             ):
                 return node

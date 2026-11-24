@@ -640,6 +640,10 @@ class BluePrintModel:
         self._collect_postprocess_nodes(output_node)
         self._collect_special_nodes(tree)
         self._collect_nested_postprocess_nodes()
+        if any(node.bl_idname == "SSMTNode_PostProcess_BoneMatrix" for node in self.postprocess_nodes):
+            from .deform_chain import order_bone_matrix_nodes
+
+            self.postprocess_nodes = order_bone_matrix_nodes(self.postprocess_nodes)
         validate_postprocess_node_constraints(self.postprocess_nodes)
 
         if self.FORWARD_PARSE_MODE:

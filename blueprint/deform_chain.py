@@ -50,6 +50,30 @@ _REF_RE = re.compile(r"^\s*(\S+)\s*=\s*ref\s+cs-u5\s*$")
 _POST_RUN_RE = re.compile(r"^\s*post\s+run\s*=\s*(CustomShader_\S+)\s*$")
 _DIRECT_SHAPEKEY_PRESENT_BEGIN = "; --- SSMT DIRECT SHAPEKEY PRESENT BEGIN ---"
 
+_BONE_MATRIX_ORDER = {
+    "SSMTNode_PostProcess_MultiFile": 0,
+    "SSMTNode_PostProcess_ShapeKey": 1,
+    "SSMTNode_PostProcess_ShapeKeyExt": 2,
+    "SSMTNode_PostProcess_Material": 3,
+    "SSMTNode_PostProcess_CustomMaterialAssign": 3,
+    "SSMTNode_PostProcess_BoneMatrix": 4,
+    "SSMTNode_PostProcess_DragInteraction": 5,
+    "SSMTNode_PostProcess_FluidProbe": 6,
+}
+
+
+def order_bone_matrix_nodes(nodes):
+    """Order the nodes that share a ZZMI draw while keeping other nodes in place."""
+    bone_matrix = "SSMTNode_PostProcess_BoneMatrix"
+    if not any(node.bl_idname == bone_matrix and not getattr(node, "mute", False) for node in nodes):
+        return nodes
+    edits = [i for i, node in enumerate(nodes) if node.bl_idname in _BONE_MATRIX_ORDER]
+    ordered = sorted((nodes[i] for i in edits), key=lambda node: _BONE_MATRIX_ORDER[node.bl_idname])
+    result = list(nodes)
+    for i, node in zip(edits, ordered):
+        result[i] = node
+    return result
+
 
 # ---- 小工具 ------------------------------------------------------------------
 

@@ -1856,9 +1856,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     @staticmethod
     def _redirect_collision_inputs(sections, comp):
         """Read the actual render bindings, including the optional LOD suffix."""
+        from ..common.zzmi_bone_matrix_render_calibration import bone_draw_palettes
+
         inputs = {}
         for part in comp.get("parts", ()):
-            for line in sections.get(part["section"], ()):
+            lines = sections.get(part["section"], ())
+            inputs.update((output, palette) for output, (_, palette) in bone_draw_palettes(sections, lines).items())
+            for line in lines:
                 match = re.fullmatch(
                     r"vb0\s*=\s*ref\s+(ResourceZZSkinOut_G(\d+)_s([12])(_LOD\d+)?)",
                     line.strip(),
@@ -5152,6 +5156,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
 
         # ---- 每组件资源 + Detect / Bake×8 / Jiggle / PinComponent 段 ----
         for comp in components:
+            if comp.get("cloth"):
+                from ..common.zzmi_bone_matrix_render_calibration import bone_draw_palettes
+                from .drag_cloth import component_sections
+
+                comp["cloth_bone_input"] = any(
+                    bone_draw_palettes(sections, sections.get(name, ())) for name in component_sections(comp)
+                )
             self._emit_component_resources(sections, comp, ns)
             self._emit_detect_section(sections, comp, ns)
             self._emit_bake_sections(sections, comp, ns)
@@ -5726,8 +5737,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                     )
                     choices = []
                     if cloth_var:
+                        source = "EffectivePalette" if comp.get("cloth_bone_input") else "SkinPalette"
                         choices.extend(
-                            (f"{cloth_var}jiggle_slot == {slot}", f"ResourceSSMTCloth_{cn}_{ns}_SkinPalette_s{slot}")
+                            (f"{cloth_var}jiggle_slot == {slot}", f"ResourceSSMTCloth_{cn}_{ns}_{source}_s{slot}")
                             for slot in (1, 2)
                         )
                     choices.extend((f"@vb0 != 0 && @vb0 == @{output}", palette)
@@ -6543,28 +6555,53 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     # =======================================================================
 
     def _inject_draw_hooks(self, sections, comp, ns):
-        cn = comp["comp_name"]
+        from ..common.zzmi_bone_matrix_render_calibration import BONE_DRAW_READY, bone_draw_palettes
 
-        # 1) 物体显隐 flag：注入到每条绘制行（drawindexed=/run=）之前、其 if 块内部。
-        #    分支执行才置位——条件求值留给 ini 引擎（活条件，手改即生效，零复制）。
-        #    同段内按行号倒序插入避免索引位移；幂等防护同站点方案。
+        cn = comp["comp_name"]
+        managed_sites = {}
+        scoped_parts = set()
+        for p_idx, part in enumerate(comp["parts"]):
+            for record in part.get("draw_records", ()):
+                section = record["section"]
+                if section not in managed_sites:
+                    ready = False
+                    managed_sites[section] = set()
+                    for i, line in enumerate(sections.get(section, ())):
+                        command = line.strip()
+                        if command == BONE_DRAW_READY:
+                            ready = True
+                        elif command == "; SSMT bone matrix end":
+                            ready = False
+                        elif ready:
+                            managed_sites[section].add(i)
+                index = record["line_index"]
+                if index in managed_sites[section]:
+                    scoped_parts.add(p_idx)
+                    break
+
+        # Keep per-draw edits in the same pass so earlier insertions cannot shift later sites.
         name_to_id = comp.get("object_id_map") or {}
         sites = {}
-        for part in comp["parts"]:
+        for p_idx, part in enumerate(comp["parts"]):
             for record in part.get("draw_records") or []:
                 oid = name_to_id.get(self._record_object_key(record))
-                if oid is None:
-                    continue
-                sites.setdefault(record["section"], []).append((record["line_index"], oid))
+                if p_idx in scoped_parts or oid is not None:
+                    sites.setdefault(record["section"], {})[record["line_index"]] = (p_idx, oid)
+        comp["bone_draw_scoped_sections"] = scoped_sections = set()
         for section, items in sites.items():
             lines = sections.get(section)
             if not lines:
                 continue
-            for line_idx, oid in sorted(items, key=lambda item: -item[0]):
+            inputs = bone_draw_palettes(sections, lines)
+            for line_idx, (p_idx, oid) in sorted(items.items(), reverse=True):
                 target = ""
                 if 0 <= line_idx < len(lines):
                     target = (lines[line_idx] or "").strip().casefold()
-                if not (target.startswith("drawindexed =") or target.startswith("run =")):
+                if not re.match(r"(?:drawindexed(?:instanced)?|run)\s*=", target):
+                    continue
+                if p_idx in scoped_parts:
+                    self._insert_drag_in_bone_draw(sections, lines, line_idx, comp, p_idx, ns, inputs, oid)
+                    scoped_sections.add(section)
                     continue
                 window = lines[max(0, line_idx - 4):line_idx]
                 if any("$ssmtdrag_objvis_{}_{}".format(ns, oid) in (line or "") for line in window):
@@ -6574,6 +6611,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
 
         # 2) 提升式 part 钩子（探针 + Bake + Detect + jiggle + vb0）
         for p_idx, part in enumerate(comp["parts"]):
+            if p_idx in scoped_parts:
+                continue
             section = part["section"]
             lines = sections.get(section)
             if not lines:
@@ -6590,6 +6629,33 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # 3) 已删除：TTL 既不建 copy 段，也不再另建命令列表。TTL 调用就地替换原段里
         #    那一笔绘制，上面第 2) 步的段级 part 钩子（vb0 换绑）天然作用在它上面，
         #    当年「命令列表内层 vb0 传播不到 run = 嵌套绘制」的缺口不复存在。
+
+    def _insert_drag_in_bone_draw(self, sections, lines, index, comp, p_idx, ns, inputs, oid):
+        cn = comp["comp_name"]
+        for slot in (0, 2):
+            sections.setdefault(f"[ResourceDragSavedVB{slot}_{cn}_{ns}]", [])
+        sections.setdefault(f"[ResourceDragLastSourceVB0_{cn}_{ns}]", [])
+        part_tag = f"{cn}P{p_idx}_{ns}"
+        sections.setdefault(f"[ResourceDragLastDetectVB0_{part_tag}]", [])
+        declaration = f"global $ssmtdrag_last_detect_{part_tag} = -1"
+        constants = sections.setdefault("[Constants]", [])
+        if declaration not in constants:
+            constants.append(declaration)
+        draw = lines[index]
+        indent = draw[:len(draw) - len(draw.lstrip())]
+        before = self._build_hook_block(comp, p_idx, ns, bone_draw=inputs)
+        if oid is not None:
+            before.insert(-1, f"$ssmtdrag_objvis_{ns}_{oid} = 1")
+        after = [f"; --- DRAG HOOK BEGIN restore_{cn}_{ns} ---"]
+        for slot in (2, 0):
+            resource = f"ResourceDragSavedVB{slot}_{cn}_{ns}"
+            after.extend((f"vb{slot} = ref {resource}", f"{resource} = null"))
+        if comp.get("cloth_bone_input"):
+            from .drag_cloth import bind_bone_matrix_input
+
+            after.extend(bind_bone_matrix_input(comp, ns, {}))
+        after.append(f"; --- DRAG HOOK END restore_{cn}_{ns} ---")
+        lines[index:index + 1] = [*(indent + line for line in before), draw, *(indent + line for line in after)]
 
     @classmethod
     def _find_part_hook_insert_index(cls, lines, part):
@@ -6636,13 +6702,20 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # 没有 run/drawindexed（异常）：插到 ib 后一行
         return ib_idx + 1
 
-    def _build_hook_block(self, comp, p_idx, ns, include_detect=True):
+    def _build_hook_block(self, comp, p_idx, ns, include_detect=True, bone_draw=None):
         drag_mode_var, _ui_detected_var, _ui_zone_var = self._runtime_variable_names(ns)
         cn = comp["comp_name"]
         part_tag = f"{cn}P{p_idx}"
         temp_vb0 = f"ResourceDragJiggleTempVB0_{cn}_{ns}"
         last_dispatch = f"$ssmtdrag_last_dispatch_{cn}_{ns}"
         lines = [f"\t; --- DRAG HOOK BEGIN {part_tag}_{ns} ---"]
+        if bone_draw is not None:
+            for slot in (0, 2):
+                lines.append(f"ResourceDragSavedVB{slot}_{cn}_{ns} = ref vb{slot}")
+            if comp.get("cloth_bone_input"):
+                from .drag_cloth import bind_bone_matrix_input
+
+                lines.extend(bind_bone_matrix_input(comp, ns, bone_draw))
         if comp.get('cloth_bind'):
             lines.append('\trun = ' + comp['cloth_bind'])
         if self.enable_viewport_probe:
@@ -6658,12 +6731,23 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             ])
         lines.append(f"\t$ssmtdrag_drawn_{ns} = 1")
         if include_detect:
+            gate = f"\tif {drag_mode_var} >= 1 && $ObjectDetectAllowed_{ns} == 1"
+            next_detect = []
+            if bone_draw is not None:
+                last_frame = f"$ssmtdrag_last_detect_{part_tag}_{ns}"
+                last_source = f"ResourceDragLastDetectVB0_{part_tag}_{ns}"
+                gate += f" && (frame_number != {last_frame} || @vb0 !== @{last_source})"
+                next_detect = [
+                    f"\t\t{last_frame} = frame_number",
+                    f"\t\t{last_source} = ref vb0",
+                ]
             lines.extend([
                 # 悬停检测不要求 Alt（与实机验证过的可用配置一致）：
                 # 模式开关（drag_mode_var >= 1）打开即检测，Alt 只门控实际形变（jiggle 门）。
-                f"\tif {drag_mode_var} >= 1 && $ObjectDetectAllowed_{ns} == 1",
+                gate,
                 f"\t\trun = CustomShaderDragBake{part_tag}_{ns}",
                 f"\t\trun = CustomShaderDragDetect{part_tag}_{ns}",
+                *next_detect,
                 "\tendif",
             ])
         cloth_var = f"$ssmtcloth_{ns}_{cn}_" if comp.get('cloth') else None
@@ -6672,6 +6756,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         if cloth_var:
             can_jiggle += f" && ({cloth_var}intent == 1 || $isMouseButtonDown == 0)"
             dispatch += f" || {cloth_var}jiggle_dispatch_slot != {cloth_var}jiggle_slot"
+        if bone_draw is not None:
+            saved_source = f"ResourceDragLastSourceVB0_{cn}_{ns}"
+            dispatch += f" || @vb0 !== @{saved_source}"
         lines.append(can_jiggle)
         if cloth_var:
             lines += [
@@ -6683,6 +6770,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             ]
         lines.extend([
             dispatch,
+            *([f"\t\t\t{saved_source} = ref vb0"] if bone_draw is not None else []),
             f"\t\t\trun = CustomShaderDragJiggle{cn}_{ns}",
             f"\t\t\t{last_dispatch} = time",
             *([f"\t\t\t{cloth_var}jiggle_dispatch_slot = {cloth_var}jiggle_slot"] if cloth_var else []),
@@ -6707,7 +6795,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             lines += [f"\t\t{cloth_var}overlay_time = time"]
         lines.extend([
             "\tendif",
-            *(['\trun = ' + comp['cloth_publish'], '\tpost run = ' + comp['cloth_restore']] if comp.get('cloth_publish') else []),
+            *(['\trun = ' + comp['cloth_publish']] if comp.get('cloth_publish') else []),
+            *(['\tpost run = ' + comp['cloth_restore']] if comp.get('cloth_publish') and bone_draw is None else []),
             f"\t; --- DRAG HOOK END {part_tag}_{ns} ---",
         ])
         return lines

@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from .zzmi_draw_calls import indexed_draw_ranges
 from .zzmi_bone_matrix_layers import LAYER_CONTROL, LAYER_FALLBACK, LAYER_FULL, LAYER_UPDATE
 from .zzmi_bone_matrix_render_inputs import (
     BLEND_LAYOUT_MARKER, BLEND_STRIDE, POSITION_STRIDE, extra_weighted_slots,
@@ -41,6 +42,10 @@ _FILENAME = re.compile(r"^\s*filename\s*=\s*(.+?)\s*$", re.IGNORECASE)
 _HANDLING_SKIP = re.compile(r"^\s*handling\s*=\s*skip\s*$", re.IGNORECASE)
 _ORIGINAL_VB = f"{_RESOURCE}OriginalVB"
 _ORIGINAL_UV = f"{_RESOURCE}OriginalUV"
+_PUBLISH_POSITION = re.compile(r"^\s*(Resource\w*Position(?:_LOD\d+)?)\s*=\s*(?:ref|copy)\s+cs-u5\s*$", re.I)
+_POSITION_INPUT = re.compile(r"^\s*vb0\s*=\s*(?:ref\s+)?(Resource\w+)\s*$", re.I)
+BONE_DRAW_READY = "; SSMT bone matrix before draw"
+BONE_SLOT = "; SSMT bone matrix slot "
 SUPPORT_FILE = "SSMTBoneMatrixGroundSupport.buf"
 
 
@@ -53,7 +58,7 @@ class RenderBinding:
     palette: str
     seen: str
     sites: list[tuple[int, str]]
-    native_expression: bool
+    live_position: bool
 
     @property
     def resource(self):
@@ -73,12 +78,19 @@ def _sections(lines):
 
 
 def _deform_bindings(lines, sections, capacities):
+    published_positions = {
+        match[1].casefold() for line in lines if (match := _PUBLISH_POSITION.fullmatch(line))
+    }
     bindings = {}
     for name, start, end in sections:
         if not name.casefold().startswith("textureoverride"):
             continue
         area = lines[start + 1:end]
-        native_expression = any("run = customshaderzzminativeexpression_" in line.casefold() for line in area)
+        live_position = any(
+            "run = customshaderzzminativeexpression_" in line.casefold()
+            or ((position := _POSITION_INPUT.fullmatch(line)) and position[1].casefold() in published_positions)
+            for line in area
+        )
         occurrence = _OCCURRENCE.search("\n".join(area))
         if occurrence is None:
             continue
@@ -95,7 +107,7 @@ def _deform_bindings(lines, sections, capacities):
                 binding = bindings.setdefault(key, RenderBinding(
                     len(bindings), ib, lod, slot,
                     next(iter(palettes[capture[3]])),
-                    f"${occurrence[1]}zz_ms_seen_{occurrence[2]}{slot}", [], native_expression,
+                    f"${occurrence[1]}zz_ms_seen_{occurrence[2]}{slot}", [], live_position,
                 ))
                 binding.sites.append((index, capture[1]))
     return bindings.values()
@@ -230,6 +242,25 @@ def _instance_guard(bindings, binding):
     return f"{binding.seen} > 0 && @vb0 === @{binding.resource}SO{unique}"
 
 
+def bone_draw_palettes(sections, lines):
+    """Return the effective palettes for private bone skinning outputs at a draw."""
+    inputs = {}
+    for line in lines:
+        match = re.fullmatch(r"\s*vb0\s*=\s*ref\s+(ResourceSSMTBoneMatrixRender\d+)Output", line, re.I)
+        if not match:
+            continue
+        resource = match[1]
+        palette = resource + "ResolvedPalette"
+        if f"[{palette}]" not in sections:
+            continue
+        output = resource + "Output"
+        for setting in sections.get(f"[{output}]", ()):
+            if setting.strip().startswith(BONE_SLOT):
+                inputs[output] = (int(setting.strip()[len(BONE_SLOT):]), palette)
+                break
+    return inputs
+
+
 def _restore_cb1():
     return (
         f"if @{ORIGINAL_CB1} != 0",
@@ -249,7 +280,7 @@ def _snapshot_draw(draw, bindings, snapshot, site):
         lines.append("    endif")
     else:
         lines.extend(f"    {line}" for line in snapshot.draw(site, 0, match_vertex_buffer=True))
-    lines.extend(("endif", command, *_restore_cb1(), f"; {_TAG} end"))
+    lines.extend(("endif", BONE_DRAW_READY, command, *_restore_cb1(), f"; {_TAG} end"))
     return [indent + line for line in lines]
 
 
@@ -298,7 +329,7 @@ def _render_draw(draw, bindings, play, references, texcoord, snapshot, site, lay
         else:
             lines.extend(f"        {line}" for line in pose)
     lines.extend((
-        "    endif", "endif", command,
+        "    endif", "endif", BONE_DRAW_READY, command,
         f"if @{_ORIGINAL_VB} != 0",
         f"    vb0 = ref {_ORIGINAL_VB}", f"    {_ORIGINAL_VB} = null",
         "endif",
@@ -315,6 +346,7 @@ def _render_draw(draw, bindings, play, references, texcoord, snapshot, site, lay
 
 
 def _scoped_render_draws(lines, sections, bindings, assets):
+    draw_ranges = indexed_draw_ranges(lines)
     render_by_ib = defaultdict(list)
     for binding in bindings:
         key = binding.ib, binding.lod
@@ -337,7 +369,7 @@ def _scoped_render_draws(lines, sections, bindings, assets):
             continue
         if assets is not None and any(_OVERRIDE_POSITION.match(line) for line in area):
             continue
-        draw_sites = [index for index in range(start + 1, end) if _DRAW.match(lines[index])]
+        draw_sites = [index for index in range(start + 1, end) if index in draw_ranges or _DRAW.match(lines[index])]
         if not draw_sites:
             continue
         if not any(_HANDLING_SKIP.fullmatch(line) for line in area):
@@ -381,10 +413,11 @@ def _resources(bindings, assets, frame, clip, references, support_key, snapshot,
         result.extend((
             f"[{resource}SO]", "",
             f"[{resource}Output]", "type = Buffer", "stride = 40", f"array = {rows}",
+            f"{BONE_SLOT}{binding.slot}",
             "bind_flags = unordered_access vertex_buffer shader_resource", "misc_flags = none", "",
             f"[{resource}Write]", "type = Buffer", "stride = 4", "format = R32_FLOAT", "",
         ))
-        if binding.native_expression:
+        if binding.live_position:
             position = resource + "MorphedPosition"
             result.extend((
                 f"[{position}]", "type = StructuredBuffer", "stride = 40",
@@ -542,7 +575,7 @@ def add_scoped_playback(text, play, frame, clip, capacities, native_slots, suppo
                 f"; {_TAG} begin instance association",
                 f"{binding.resource}SO = ref so0",
             )
-            if clip and binding.native_expression:
+            if clip and binding.live_position:
                 captures += (f"{binding.resource}MorphedPosition = copy vb0",)
             insertions[index + 1] = [indent + command for command in (*captures, f"; {_TAG} end")]
     if full or snapshot:

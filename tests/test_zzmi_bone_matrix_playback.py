@@ -13,6 +13,7 @@ package.__path__ = [str(Path(__file__).resolve().parents[1])]
 sys.modules[package.__name__] = package
 playback = importlib.import_module(package.__name__ + ".common.zzmi_bone_matrix_playback")
 layered = importlib.import_module(package.__name__ + ".common.zzmi_bone_matrix_layers")
+draw_calls = importlib.import_module(package.__name__ + ".common.zzmi_draw_calls")
 
 PALETTE = "ResourceZZMergedSkeleton_G0_s1"
 INI = f"""[Constants]
@@ -180,6 +181,45 @@ def test_expression_input_and_exported_uv_follow_the_private_draw():
     assert "cs-t90 = ref ResourceSSMTBoneMatrixRender0MorphedPosition" in text
     assert "vb1 = ref Resource95de0d39Texcoord" in text
     assert "vb1 = ref ResourceSSMTBoneMatrixRenderOriginalUV" in text
+
+
+def test_authored_shape_and_ttl_draw_share_the_private_skinning_pass():
+    draw = r"run = CommandList\TTL\Draw"
+    source = INI.replace(
+        "$zz_ms_occ_0 = 1", "vb0 = Resource95de0d39Position\n$zz_ms_occ_0 = 1",
+    ).replace(
+        "drawindexed = 3, 0, 0",
+        "\n".join((r"$\TTL\_1 = 3", r"$\TTL\_2 = 0", r"$\TTL\_3 = 0", draw)),
+        1,
+    )
+    source += "\n[CustomShader_95de0d39_Anim]\nResource95de0d39Position = ref cs-u5\n"
+    result, _ = playback._configuration_text(source, "$switch", "$frame", clip())
+    assert "ResourceSSMTBoneMatrixRender0MorphedPosition = copy vb0" in result
+    assert "cs-t90 = ref ResourceSSMTBoneMatrixRender0MorphedPosition" in result
+    assert f"; SSMT bone matrix before draw\n{draw}\n" in result
+    assert result.count("\n" + draw + "\n") == 1
+    assert (3, 0, 0) in draw_calls.indexed_draw_ranges(result.splitlines()).values()
+
+
+def test_draw_ranges_survive_material_and_tear_wrappers():
+    source = r"""
+[TextureOverride_Example]
+run = CustomShaderTransparencyClothA
+if $\TTL\enabled
+    run = CommandListDragTearNativeTTL0_test
+else
+    drawindexed = 6, 15, 2
+endif
+[CustomShaderTransparencyClothA]
+; --- Start of Overridden Mesh Content ---
+drawindexed = 3, 12, 2
+[CommandListDragTearNativeTTL0_test]
+; SSMT draw range 6, 15, 2
+run = CommandList\TTL\Draw
+""".strip().splitlines()
+    result = draw_calls.indexed_draw_ranges(source)
+    assert result[1] == (3, 12, 2)
+    assert result[3] == result[5] == (6, 15, 2)
 
 
 def test_snapshot_key_and_variable_wrap_only_the_matching_draw(tmp_path):

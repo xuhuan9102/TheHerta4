@@ -27,6 +27,7 @@ from ..common.zzmi_bone_matrix_playback import (
     variable_name,
 )
 from ..common.zzmi_bone_matrix_snapshot import DEFAULT_CB1_KEY, DEFAULT_CB1_VARIABLE, hotkey_value
+from .export_helper import BlueprintExportHelper
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 from .node_postprocess_comment_cleanup import SSMTNode_PostProcess_CommentCleanup
 
@@ -463,7 +464,12 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
             for item, _, _, _ in rigs
         ]
         native_capacity = native_palette_size(expected)
-        if self.rigs or any(slot >= native_capacity for clip in clips for slot in clip.slots):
+        output_tree = GlobalConfig._get_output_blueprint_tree() or self.id_data
+        has_drag = any(
+            node.bl_idname == "SSMTNode_PostProcess_DragInteraction"
+            for node in BlueprintExportHelper._collect_postprocess_nodes(output_tree)
+        )
+        if self.rigs or has_drag or any(slot >= native_capacity for clip in clips for slot in clip.slots):
             slots = tuple(sorted({slot for clip in clips for slot in clip.slots}))
             reference = next((clip for clip in clips if clip.pivot is not None and clip.anchor < native_capacity), clips[0])
             manual_parents = tuple(sorted({parent for _, _, _, parents in rigs for parent in parents}))

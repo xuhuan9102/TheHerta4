@@ -2587,6 +2587,49 @@ RWBuffer<float4> Result : register(u0);
             self.assertNotIn("$ssmtcloth_", ini.read_text("utf8"))
             self.assertFalse((root / "res/drag_cloth").exists())
 
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_cloth_uses_private_bone_matrix_vertices_and_palette(self):
+        path = Path(__file__).resolve().parents[1] / "tools/check_drag_cloth.py"
+        spec = importlib.util.spec_from_file_location("cloth_bone_matrix_gpu", path)
+        gpu = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gpu)
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            node, sections, comp = self.prepare(folder)
+            output = "ResourceSSMTBoneMatrixRender0Output"
+            palette = "ResourceSSMTBoneMatrixRender0ResolvedPalette"
+            sections["[TextureOverride_abc123_Draw]"].append(f"vb0 = ref {output}")
+            sections[f"[{output}]"] = ["; SSMT bone matrix slot 1"]
+            sections[f"[{palette}]"] = ["format = R32G32B32A32_FLOAT", "array = 6"]
+            node._emit_sections(sections, [comp], "unit")
+            self.assertTrue(comp["cloth_bone_input"])
+            runner = gpu.GeneratedCloth(folder, sections, comp)
+            try:
+                runner.prepare_identity()
+                runner.frame()
+                runner.variables["time"] += 1 / 60
+                coords = runner.native.copy().view("<f4").reshape(-1, 10)
+                coords[:, 2] += 0.12
+                output_resource = runner.external(output, coords, 40, flags=25)
+                matrices = np.repeat(np.eye(4, dtype=np.float32)[None, :3], 2, axis=0)
+                matrices[0, 2, 3] = 0.12
+                palette_resource = runner.external(palette, matrices, 16, 2)
+                runner.resources["vb0"] = output_resource
+                sections["[TestBoneClothDraw]"] = [
+                    *self.exporter.bind_bone_matrix_input(comp, "unit", {output: (1, palette)}),
+                    f"run = {comp['cloth_bind']}",
+                ]
+                runner.execute("TestBoneClothDraw")
+                native = runner.resources["ResourceSSMTCloth_abc123_unit_NativeSnapshot"]
+                self.assertEqual(runner.resource("ResourceSSMTCloth_abc123_unit_EffectivePalette_s1").pointer,
+                                 palette_resource.pointer)
+                np.testing.assert_array_equal(
+                    runner.gpu.read_bytes(native.pointer, native.size).view("<f4").reshape(-1, 10),
+                    coords,
+                )
+            finally:
+                runner.close()
+
     def test_cloth_can_generate_while_ordinary_collision_is_off(self):
         with tempfile.TemporaryDirectory() as temp:
             node, sections, comp = self.prepare(Path(temp))

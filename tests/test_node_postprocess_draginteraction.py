@@ -1829,6 +1829,38 @@ class DragNodeEmitTests(unittest.TestCase):
             self.assertIn("ResourceDragJiggleTempVB0_abc123_43191_testns", line)
             self.assertNotIn("ShadowVB", line)
 
+    def test_bone_skinning_feeds_drag_for_each_draw_and_bindings_are_restored(self):
+        node = _make_node(self.mod)
+        name = "[TextureOverride_Component]"
+        sections = OrderedDict({
+            name: [
+                "hash = deadbeef", "match_first_index = 0", "ib = ResourceIndex",
+                "vb0 = ref ResourceSSMTBoneMatrixRender0Output",
+                "; SSMT bone matrix before draw",
+                "drawindexed = 3, 0, 0",
+                "vb0 = ref ResourceSSMTBoneMatrixRenderOriginalVB",
+                "vb0 = ref ResourceSSMTBoneMatrixRender1Output",
+                "; SSMT bone matrix before draw",
+                "drawindexed = 3, 3, 0",
+            ],
+            "[ResourceSSMTBoneMatrixRender0Output]": ["; SSMT bone matrix slot 1"],
+            "[ResourceSSMTBoneMatrixRender1Output]": ["; SSMT bone matrix slot 2"],
+            "[ResourceSSMTBoneMatrixRender0ResolvedPalette]": [],
+            "[ResourceSSMTBoneMatrixRender1ResolvedPalette]": [],
+        })
+        comp = {"comp_name": "deadbeef", "parts": node._collect_draw_parts(sections, "deadbeef"),
+                "cloth_bind": "CommandListClothBind", "cloth_publish": "CommandListClothPublish",
+                "cloth_bone_input": True}
+        node._inject_draw_hooks(sections, comp, "testns")
+        text = "\n".join(sections[name])
+        assert text.index("vb0 = ref ResourceSSMTBoneMatrixRender0Output") < text.index("run = CustomShaderDragBake")
+        assert text.count("run = CommandListClothBind") == 2
+        assert text.count("vb0 = ref ResourceDragSavedVB0_deadbeef_testns") == 2
+        assert "@vb0 !== @ResourceDragLastSourceVB0_deadbeef_testns" in text
+        assert "ResourceSSMTCloth_deadbeef_testns_BonePalette = ref ResourceSSMTBoneMatrixRender1ResolvedPalette" in text
+        node._remove_existing_draw_hooks(sections)
+        assert not any("ResourceDragSavedVB" in line for line in sections[name])
+
     def _inline_ttl_section_lines(self):
         """生产形态：TTL 内联在原段段尾，原绘制行被注释接管，参数留在注释里。"""
         return [

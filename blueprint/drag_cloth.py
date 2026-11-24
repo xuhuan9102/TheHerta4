@@ -972,9 +972,14 @@ class _Emitter:
         self.reset = "$ssmtcloth_" + ns + "_reset"
         self.mode = node._runtime_variable_names(ns)[0]
         self.self_collision = bool(getattr(node, "cloth_self_collision", False))
+        self.bone_input = comp.get("cloth_bone_input", False)
 
     def r(self, name):
         return self.prefix + name
+
+    def skin_palette(self, slot):
+        source = "EffectivePalette" if self.bone_input else "SkinPalette"
+        return self.r(f"{source}_s{slot}")
 
     def body_index(self, g):
         return self.meta["garments"][g].get("body_index", 0)
@@ -1084,8 +1089,8 @@ class _Emitter:
         r = lambda name: self.r(f"G{g}_" + name)
         body = lambda name: self.body_name(self.body_index(g), name)
         values = {
-            2: self.r("SkinPalette_s1"),
-            3: self.r("SkinPalette_s2"),
+            2: self.skin_palette(1),
+            3: self.skin_palette(2),
             24: self.r("NativeInput"),
             67: self.r("DetectInput"),
             75: r("Rest"),
@@ -1203,8 +1208,8 @@ class _Emitter:
                 "cs-t95 = ref " + self.r("NativeInput"),
                 "cs-t86 = ref " + self.r("Blend"),
                 "cs-t87 = ref " + self.body_name(self.body_index(g), "BodyVerts"),
-                "cs-t2 = ref " + self.r("SkinPalette_s1"),
-                "cs-t3 = ref " + self.r("SkinPalette_s2"),
+                "cs-t2 = ref " + self.skin_palette(1),
+                "cs-t3 = ref " + self.skin_palette(2),
                 "cs-t82 = ref " + r("Config"),
                 "cs-t94 = ref " + r("Map"),
                 "cs-u6 = ref " + r("Decision"),
@@ -1640,7 +1645,7 @@ class _Emitter:
                     f"cs-t86 = ref {self.r('Blend')}",
                     f"cs-t94 = ref {self.r(f'G{g}_Map')}",
                     f"cs-t110 = ref {self.r(f'G{g}_ControlZones')}",
-                    f"cs-t2 = ref {self.r(f'SkinPalette_s{slot}')}",
+                    f"cs-t2 = ref {self.skin_palette(slot)}",
                     f"cs-u0 = ref {self.r('Intent')}", "dispatch = 1, 1, 1", "cs-u0 = null",
                     *(f"cs-t{binding} = null" for binding in (2, 67, 82, 86, 94, 110)),
                     *(f"{c}67 = $cloth_gesture_{c}67" for c in "xyzw"),
@@ -1735,10 +1740,15 @@ class _Emitter:
             ("mouse_held", 0),
         ]:
             self.global_(name, value)
+        if self.bone_input:
+            self.global_("bone_slot", 0)
+            self.resource("BonePalette", fmt="R32G32B32A32_FLOAT", alias=True)
         for slot in (1, 2):
             self.global_(f"ready_s{slot}", -1)
             self.global_(f"source_valid_s{slot}", 0)
             self.resource(f"SkinSource_s{slot}", stride=stride, alias=True)
+            if self.bone_input:
+                self.resource(f"EffectivePalette_s{slot}", fmt="R32G32B32A32_FLOAT", alias=True)
             self.resource(
                 f"SkinPalette_s{slot}",
                 m["palette_rows"][slot],
@@ -1829,13 +1839,27 @@ class _Emitter:
             f"\t\t\t{self.var}intent = 1", "\t\tendif",
             "\tendif",
             f"\t{self.var}slot = 1",
-            f"\tif vb0 === {source(2)}",
+            *([
+                f"\tif {self.var}bone_slot != 0",
+                f"\t\t{self.var}slot = {self.var}bone_slot",
+                f"\telif vb0 === {source(2)}",
+            ] if self.bone_input else [f"\tif vb0 === {source(2)}"]),
             f"\t\t{self.var}slot = 2",
             f"\telif vb0 === {source(1)}",
             f"\telif $zz_ms_occ_{m['occ']} == 2",
             f"\t\t{self.var}slot = 2",
             "\tendif",
         ]
+        if self.bone_input:
+            for slot in (1, 2):
+                effective_palette = self.skin_palette(slot)
+                lines.extend((
+                    f"\tif {self.var}bone_slot == {slot}",
+                    f"\t\t{effective_palette} = ref {self.r('BonePalette')}",
+                    "\telse",
+                    f"\t\t{effective_palette} = ref {self.r(f'SkinPalette_s{slot}')}",
+                    "\tendif",
+                ))
         lines.extend("\t" + line for line in self.gesture_routing())
         lines += [
             f"\tif {self.var}intent == 2 && $isMouseButtonDown == 1",
@@ -1866,8 +1890,20 @@ class _Emitter:
             "\tendif",
         ]
         for slot in (1, 2):
+            native = self.r(f"Native_s{slot}")
+            valid = f"{self.var}source_valid_s{slot} == 1"
+            bind_native = [f"\t\t\t{native} = ref {source(slot)} unless_null"]
+            if self.bone_input:
+                valid = f"({valid} || {self.var}bone_slot == {slot})"
+                bind_native = [
+                    f"\t\t\tif {self.var}bone_slot == {slot}",
+                    f"\t\t\t\t{native} = ref vb0",
+                    "\t\t\telse",
+                    f"\t\t\t\t{native} = ref {source(slot)} unless_null",
+                    "\t\t\tendif",
+                ]
             lines += [
-                f"\tif {self.var}slot == {slot} && {self.var}source_valid_s{slot} == 1",
+                f"\tif {self.var}slot == {slot} && {valid}",
                 f"\t\t{self.var}need_render = 0",
                 f"\t\tif {self.var}ready_s{slot} != time",
                 f"\t\t\t{self.var}need_render = 1",
@@ -1877,16 +1913,12 @@ class _Emitter:
                 f"\t\t\t{self.var}need_render = 1",
                 "\t\tendif",
                 f"\t\tif {self.var}need_render == 1",
-                "\t\t\t"
-                + self.r(f"Native_s{slot}")
-                + " = ref "
-                + source(slot)
-                + " unless_null",
+                *bind_native,
                 "\t\t\t" + self.r(f"NativeBlend_s{slot}") + " = ref vb2",
                 "\t\t\t"
                 + self.r("NativeSnapshot")
                 + " = copy "
-                + source(slot)
+                + (native if self.bone_input else source(slot))
                 + " unless_null",
                 "\t\t\t"
                 + self.r(f"SeedWrite_s{slot}")
@@ -2042,6 +2074,26 @@ def emit_components(node, sections, components, ns):
             sections[section][index:index] = locations[index]
 
 
+def bind_bone_matrix_input(comp, ns, inputs):
+    """Pair the cloth simulation with the same private palette and vertices."""
+    component = comp["comp_name"]
+    variable = f"$ssmtcloth_{ns}_{component}_bone_slot"
+    target = f"ResourceSSMTCloth_{component}_{ns}_BonePalette"
+    lines = [f"{variable} = 0", f"{target} = null"]
+    if inputs:
+        lines.append("if vb0 !== null")
+    for output, (slot, palette) in inputs.items():
+        lines.extend((
+            f"    if vb0 === {output}",
+            f"        {variable} = {slot}",
+            f"        {target} = ref {palette}",
+            "    endif",
+        ))
+    if inputs:
+        lines.append("endif")
+    return lines
+
+
 def publish_before_draws(sections, comp):
     """Republish after every possible legacy TTL rebind, then restore native VB."""
     publish = comp.get("cloth_publish")
@@ -2055,6 +2107,8 @@ def publish_before_draws(sections, comp):
         if name in visited:
             continue
         visited.add(name)
+        if name in comp.get("bone_draw_scoped_sections", ()):
+            continue
         lines = clean_tail("\n".join(sections.get(name, []))).splitlines()
         if name in roots and not any(
             line.strip() == "run = " + comp["cloth_bind"] for line in lines

@@ -1,7 +1,15 @@
 import unittest
 from collections import OrderedDict
+from types import SimpleNamespace
 
 from blueprint import deform_chain
+
+
+def test_bone_matrix_nodes_plan_their_draw_dependencies():
+    suffixes = ("FluidProbe", "DragInteraction", "AnimDriver", "BoneMatrix", "Material", "ShapeKey")
+    nodes = [SimpleNamespace(bl_idname="SSMTNode_PostProcess_" + suffix) for suffix in suffixes]
+    ordered = deform_chain.order_bone_matrix_nodes(nodes)
+    assert ordered == [nodes[i] for i in (5, 4, 2, 3, 1, 0)]
 
 
 def _sections_with_multifile():
