@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>骨骼覆盖模拟器</title>
+<style>
+:root{color-scheme:dark;--bg:#14191e;--panel:#1c232a;--line:#36434e;--text:#eef3f7;--muted:#aabac7;--a:#ffbf73;--b:#67e0cb;--native:#aabac7;font-family:system-ui,"Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text)}
+main{width:min(1160px,calc(100% - 40px));margin:35px auto 44px}
+header{display:flex;gap:20px;justify-content:space-between;align-items:end;flex-wrap:wrap;margin-bottom:22px}
+h1{font-size:clamp(26px,4vw,38px);letter-spacing:-.035em;margin:0 0 7px}
+h2{font-size:17px;margin:0}
+p{margin:0;color:var(--muted);line-height:1.55}
+button,input,select{font:inherit}
+button,select{background:#222c35;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 10px}
+button{cursor:pointer}
+button:hover,button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #b5e0ff;outline-offset:2px}
+button[aria-pressed=true]{background:#314858;border-color:#7eacc7}
+button:disabled{opacity:.35;cursor:default;outline:none}
+input[type=checkbox],input[type=range]{accent-color:var(--accent,#9bd4ff)}
+input[type=range]{width:100%;min-width:0}
+.presets,.legend{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.workbench{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:15px;align-items:start}
+.panel{border:1px solid var(--line);background:var(--panel);border-radius:10px;overflow:hidden}
+.bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:9px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.legend{font-size:12px;color:var(--muted)}
+.legend span::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;background:var(--accent)}
+.a{--accent:var(--a)}.b{--accent:var(--b)}.native{--accent:var(--native)}
+canvas{display:block;width:100%;height:350px;background:#171e25}
+.summary{border-top:1px solid var(--line);padding:15px 16px;color:var(--text)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:11px 10px;text-align:left;border-top:1px solid var(--line)}
+th{font-size:12px;font-weight:500;color:var(--muted)}
+td:nth-last-child(-n+2){font-family:Consolas,monospace;font-size:15px;font-variant-numeric:tabular-nums}
+.source{color:var(--accent);font-weight:650}
+.layers{padding:12px;display:grid;gap:10px}
+.layer{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:7px;padding:12px}
+.layer[data-on=false]{border-left-color:#65737f}
+.layer-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.layer-head strong{color:var(--accent);flex:1;min-width:105px}
+.moves{display:flex;gap:4px}
+.moves button{padding:3px 7px}
+.field{display:grid;grid-template-columns:auto minmax(0,1fr) 28px;align-items:center;gap:9px;margin-bottom:10px}
+.field output{font-family:Consolas,monospace;text-align:right}
+.tail{display:flex;align-items:center;gap:8px;justify-content:space-between;flex-wrap:wrap}
+.tail select{padding:4px 6px}
+.controls-note{font-size:13px;padding:0 13px 13px}
+@media (max-width:820px){
+  main{width:min(100% - 22px,700px);margin-top:20px}
+  .workbench{grid-template-columns:1fr}
+  canvas{height:278px}
+  th,td{padding:8px 5px}
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>骨骼覆盖模拟器</h1>
+      <p>每层独立选帧。交叉槽按列表位置覆盖，子骨继承实际生效的父骨。</p>
+    </div>
+    <div class="presets" aria-label="测试组合">
+      <button data-preset="a">仅 A</button>
+      <button data-preset="b">仅 B</button>
+      <button data-preset="ab">A + B</button>
+      <button data-preset="native">原生</button>
+    </div>
+  </header>
+  <div class="workbench">
+    <section class="panel">
+      <div class="bar">
+        <h2>当前骨骼姿态</h2>
+        <div class="legend"><span class="a">A 层</span><span class="b">B 层</span><span class="native">原生参考</span></div>
+      </div>
+      <canvas id="view" role="img" aria-label="显示大臂、小臂和实际父子链"></canvas>
+      <p class="summary" id="summary" aria-live="polite"></p>
+      <table aria-label="骨骼计算结果">
+        <thead><tr><th>槽位</th><th>来源</th><th>父骨</th><th>局部角度</th><th>世界角度</th></tr></thead>
+        <tbody id="results"></tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <div class="bar"><h2>骨架列表</h2><span class="legend">下面覆盖上面</span></div>
+      <div class="layers" id="layers"></div>
+      <p class="controls-note">第 15 帧时，A 的两根骨骼各为 +20°，B 的小臂为 −20°。试着调换 A、B 的位置，或单独改变它们的播放帧。</p>
+    </section>
+  </div>
+</main>
+<script id="layer-math">
+const nativeTracks = {
+  1: {parent: null, local: 0, source: 'native'},
+  0: {parent: 1, local: 0, source: 'native'}
+};
+
+function envelope(frame) {
+  const bounded = Math.max(0, Math.min(30, frame));
+  return (1 - Math.cos(2 * Math.PI * bounded / 30)) / 2;
+}
+
+function resolveLayers(layers) {
+  const chosen = new Map();
+  for (const layer of layers) {
+    if (!layer.enabled) continue;
+    const weight = envelope(layer.frame);
+    if (layer.id === 'a') chosen.set(1, {parent: null, local: 20 * weight, source: 'a'});
+    chosen.set(0, {parent: layer.parent, local: (layer.id === 'a' ? 20 : -20) * weight, source: layer.id});
+  }
+  const result = {};
+  function resolve(slot) {
+    if (result[slot]) return result[slot];
+    const pose = chosen.get(slot) || nativeTracks[slot];
+    // An unselected slot keeps the game's complete matrix, including its original parent motion.
+    const parent = pose.parent === null || pose.source === 'native' ? 0 : resolve(pose.parent).world;
+    return result[slot] = {...pose, world: parent + pose.local};
+  }
+  resolve(1);
+  resolve(0);
+  return result;
+}
+</script>
+<script>
+const layers = [
+  {id:'a', enabled:true, frame:15, parent:1, rolling:false, elapsed:0},
+  {id:'b', enabled:true, frame:15, parent:1, rolling:false, elapsed:0}
+];
+const displayName = {a:'A 层', b:'B 层', native:'原生'};
+const rows = document.getElementById('layers');
+const summary = document.getElementById('summary');
+const results = document.getElementById('results');
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+const colors = {a:'#ffbf73', b:'#67e0cb', native:'#aabac7'};
+let last = 0;
+
+function rebuild() {
+  rows.replaceChildren(...layers.map((layer, index) => {
+    const item = document.createElement('article');
+    const title = layer.id === 'a' ? 'A · 大臂和小臂' : 'B · 仅小臂';
+    item.className = 'layer ' + layer.id;
+    item.id = 'layer-' + layer.id;
+    item.innerHTML =
+      '<div class="layer-head"><strong>' + title + '</strong>' +
+      '<label><input type="checkbox" data-field="enabled"> 替换</label>' +
+      '<div class="moves"><button data-move="-1" aria-label="上移 ' + layer.id.toUpperCase() + '">↑</button>' +
+      '<button data-move="1" aria-label="下移 ' + layer.id.toUpperCase() + '">↓</button></div></div>' +
+      '<label class="field">播放帧<input data-field="frame" type="range" min="0" max="30" step="1"><output></output></label>' +
+      '<div class="tail"><label>小臂父骨 <select data-field="parent"><option value="1">1 · 大臂</option>' +
+      '<option value="root">肩部参考点</option></select></label>' +
+      '<button data-field="rolling" aria-pressed="false">循环播放</button></div>';
+    item.querySelector('[data-field="enabled"]').addEventListener('change', event => {
+      layer.enabled = event.target.checked; update();
+    });
+    item.querySelector('[data-field="frame"]').addEventListener('input', event => {
+      layer.rolling = false;
+      layer.frame = Number(event.target.value);
+      update();
+    });
+    item.querySelector('[data-field="parent"]').addEventListener('change', event => {
+      layer.parent = event.target.value === 'root' ? null : 1;
+      update();
+    });
+    item.querySelector('[data-field="rolling"]').addEventListener('click', () => {
+      layer.rolling = !layer.rolling;
+      layer.elapsed = 0;
+      update();
+    });
+    for (const button of item.querySelectorAll('[data-move]')) {
+      const to = index + Number(button.dataset.move);
+      button.disabled = to < 0 || to >= layers.length;
+      button.addEventListener('click', () => {
+        [layers[index],layers[to]] = [layers[to],layers[index]];
+        rebuild();
+      });
+    }
+    return item;
+  }));
+  update();
+}
+
+function formatAngle(value) {
+  const number = Math.abs(value) < .05 ? 0 : Number(value.toFixed(1));
+  return (number > 0 ? '+' : '') + number + '°';
+}
+
+function update() {
+  for (const layer of layers) {
+    const item = document.getElementById('layer-' + layer.id);
+    item.dataset.on = layer.enabled;
+    item.querySelector('[data-field="enabled"]').checked = layer.enabled;
+    item.querySelector('[data-field="frame"]').value = layer.frame;
+    item.querySelector('output').textContent = layer.frame;
+    item.querySelector('[data-field="parent"]').value = layer.parent === null ? 'root' : '1';
+    const play = item.querySelector('[data-field="rolling"]');
+    play.textContent = layer.rolling ? '暂停' : '循环播放';
+    play.setAttribute('aria-pressed', layer.rolling);
+  }
+  const a = layers.find(layer => layer.id === 'a').enabled;
+  const b = layers.find(layer => layer.id === 'b').enabled;
+  const preset = a ? (b ? 'ab' : 'a') : (b ? 'b' : 'native');
+  for (const button of document.querySelectorAll('[data-preset]'))
+    button.setAttribute('aria-pressed',button.dataset.preset === preset);
+
+  const pose = resolveLayers(layers);
+  summary.textContent = '大臂 ' + formatAngle(pose[1].world) + '，小臂 ' + formatAngle(pose[0].world) +
+    (pose[0].parent === 1 && pose[0].source !== 'native' ? '（继承大臂 ' + formatAngle(pose[1].world) +
+      '，再应用局部 ' + formatAngle(pose[0].local) + '）' : '。');
+  results.innerHTML = [1,0].map(slot => {
+    const data = pose[slot];
+    return '<tr><td>' + (slot === 1 ? '1 · 大臂' : '0 · 小臂') + '</td><td class="source ' + data.source + '">' +
+      displayName[data.source] + '</td><td>' + (data.parent === null ? '肩部参考点' : '1 · 大臂') + '</td><td>' +
+      formatAngle(data.local) + '</td><td>' + formatAngle(data.world) + '</td></tr>';
+  }).join('');
+  draw(pose);
+}
+
+function draw(pose) {
+  const w = canvas.clientWidth, h = canvas.clientHeight, dpr = devicePixelRatio || 1;
+  const scaledWidth=Math.round(w*dpr),scaledHeight=Math.round(h*dpr);
+  if (canvas.width!==scaledWidth || canvas.height!==scaledHeight) {
+    canvas.width=scaledWidth; canvas.height=scaledHeight;
+  }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle='#27333d'; ctx.lineWidth=1;
+  ctx.beginPath();
+  for (let x=20;x<w;x+=24) { ctx.moveTo(x,0);ctx.lineTo(x,h); }
+  for (let y=15;y<h;y+=24) { ctx.moveTo(0,y);ctx.lineTo(w,y); }
+  ctx.stroke();
+
+  const length = Math.min(w*.24,h*.36), fore = length*.86;
+  const shoulder = [Math.max(40,w*.17),h*.53];
+  const point = (start,distance,angle) => [
+    start[0]+distance*Math.cos(angle*Math.PI/180),
+    start[1]-distance*Math.sin(angle*Math.PI/180)
+  ];
+  const ghost = point(shoulder,length,0);
+  const wristGhost = point(ghost,fore,0);
+  const shoulderTag = ['肩部', shoulder[0]-13,shoulder[1]-20];
+  segment(shoulder,wristGhost,colors.native,2,true);
+  ctx.fillStyle='#ffffff';
+  dot(shoulder,7,'#e7eef3');
+
+  const elbow = point(shoulder,length,pose[1].world);
+  const lowerOrigin = pose[0].parent === 1 ? elbow : ghost;
+  const wrist = point(lowerOrigin,fore,pose[0].world);
+  segment(shoulder,elbow,colors[pose[1].source],7);
+  segment(lowerOrigin,wrist,colors[pose[0].source],7);
+  dot(elbow,6,colors[pose[1].source]);
+  dot(lowerOrigin,4.2,colors[pose[0].source]);
+  dot(wrist,5,colors[pose[0].source]);
+  text(...shoulderTag);
+  text('1',elbow[0]-5,elbow[1]-14);
+  text('0',wrist[0]+10,wrist[1]+4);
+
+  function segment(start,end,color,width,dash=false) {
+    ctx.beginPath();ctx.lineWidth=width;ctx.strokeStyle=color;ctx.lineCap='round';
+    ctx.setLineDash(dash ? [5,6] : []);
+    ctx.moveTo(...start);ctx.lineTo(...end);ctx.stroke();ctx.setLineDash([]);
+  }
+  function dot(position,r,color) {
+    ctx.beginPath();ctx.fillStyle=color;ctx.arc(position[0],position[1],r,0,Math.PI*2);ctx.fill();
+  }
+  function text(label,x,y) {
+    ctx.fillStyle='#eef3f7';ctx.font='600 15px system-ui';ctx.fillText(label,x,y);
+  }
+}
+
+for (const button of document.querySelectorAll('[data-preset]')) {
+  button.addEventListener('click', () => {
+    const inUse = button.dataset.preset;
+    for (const layer of layers) layer.enabled = inUse === 'ab' || inUse === layer.id;
+    update();
+  });
+}
+new ResizeObserver(() => draw(resolveLayers(layers))).observe(canvas);
+function tick(time) {
+  const dt = last ? Math.min(100,time-last) : 0;
+  last=time;
+  let dirty=false;
+  for (const layer of layers) {
+    if (!layer.rolling) continue;
+    layer.elapsed += dt;
+    if (layer.elapsed>=105) {
+      layer.elapsed -= 105;layer.frame = (layer.frame + 1) % 31;
+      dirty=true;
+    }
+  }
+  if (dirty) update();
+  requestAnimationFrame(tick);
+}
+rebuild();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -6860,10 +6860,11 @@ class ExportZZMI(ExportUnity):
             return bytes(category_buffer)
         return None
 
-    def _has_bone_matrix_playback(self) -> bool:
+    def _has_bone_matrix_playback(self, *, require_rig=False) -> bool:
         return any(
             getattr(node, "bl_idname", "") == "SSMTNode_PostProcess_BoneMatrix"
             and not getattr(node, "mute", False)
+            and (not require_rig or getattr(node, "rigs", ()) or getattr(node, "armature", None) is not None)
             for node in getattr(getattr(self, "blueprint_model", None), "postprocess_nodes", ())
         )
 
@@ -8547,7 +8548,7 @@ class ExportZZMI(ExportUnity):
             texture_override_ib_section.append("[TextureOverride_" + texture_override_name_suffix + "]")
             texture_override_ib_section.append("hash = " + override_hash)
             texture_override_ib_section.append("match_first_index = " + str(override_first_index))
-            if self.has_merged_skeleton and self._has_bone_matrix_playback():
+            if self._has_bone_matrix_playback():
                 index_count = int(submesh_model.match_index_count or 0)
                 if index_count > 0:
                     texture_override_ib_section.append(f"match_index_count = {index_count}")
@@ -9124,7 +9125,7 @@ class ExportZZMI(ExportUnity):
         if self.has_merged_skeleton:
             self.add_merged_skeleton_sections(ini_builder)
             self._copy_merged_skeleton_shader_to_mod()
-            if self._has_bone_matrix_playback():
+            if self._has_bone_matrix_playback(require_rig=True):
                 self._add_bone_matrix_render_inputs(ini_builder)
 
         ini_path = GlobalConfig.path_generate_mod_ini()
