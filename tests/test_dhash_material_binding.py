@@ -580,5 +580,18 @@ class CustomMaterialAssignBindingModeTests(unittest.TestCase):
         self.assertIsNone(getattr(node, "_active_binding_mode", None))
 
 
+class DHashProducerWiringTests(unittest.TestCase):
+    def test_slot_builders_carry_source_fields(self):
+        root = Path(__file__).resolve().parents[1]
+        for relative in (
+            "ui/ntmi_modimp/texture_slot_refresh.py",
+            "ui/ntmi_modimp/ntemi_importer.py",
+        ):
+            text = (root / relative).read_text(encoding="utf-8")
+            self.assertIn("source_dhash", text, relative)
+            self.assertIn("source_format", text, relative)
+            self.assertIn("binding_mode", text, relative)
+
+
 if __name__ == "__main__":
     unittest.main()

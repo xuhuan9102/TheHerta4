@@ -1980,6 +1980,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             filter_name_for,
             filter_name_with_suffix,
             filter_section_lines,
+            role_from_filter_name,
         )
 
         wanted_lines = [str(line) for line in filter_section_lines(fmt, dhash)]
@@ -1988,6 +1989,10 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             text = str(section_name).strip()
             lowered = text.lower()
             if not (lowered.startswith("[filter_") and text.endswith("]")):
+                continue
+            # 去重键必须与导出侧一致：(role, fmt, dhash)。同 dhash/format 的
+            # Diffuse 与 Material 不能复用同一个 Filter 段。
+            if role_from_filter_name(text).casefold() != str(role or "").casefold():
                 continue
             if [str(line).strip() for line in existing] == wanted_normalized:
                 return text[1:-1]
@@ -3056,11 +3061,13 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         resource_name_provider = None
                         if param_name.lower().startswith("ps-t"):
                             resource_name_provider = lambda material, index: self._ps_texture_material_resource_name(material)
+                        fallback_slot_info = self._collect_modimp_texture_slots(obj).get(param_name)
                         generated_lines, next_swap_key_num = self.generate_material_lines(
                             matching_materials, param_name, texture_type, obj, texture_folder, all_sections,
                             object_to_diffuse_swapkey, material_group_to_swapkey,
                             swap_key_prefix, next_swap_key_num, used_swap_keys,
-                            resource_name_provider=resource_name_provider)
+                            resource_name_provider=resource_name_provider,
+                            slot_info=fallback_slot_info)
                         new_lines_for_this_mesh.extend(generated_lines)
                         if param_name.lower().startswith("ps-t"):
                             generated_ps_slots.add(param_name.lower())
@@ -3079,7 +3086,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                     matching_materials, param_name, texture_type, obj, texture_folder, all_sections,
                     object_to_diffuse_swapkey, material_group_to_swapkey,
                     swap_key_prefix, next_swap_key_num, used_swap_keys,
-                    resource_name_provider=resource_name_provider)
+                    resource_name_provider=resource_name_provider,
+                    slot_info=slot_info)
                 new_lines_for_this_mesh.extend(generated_lines)
 
             if (

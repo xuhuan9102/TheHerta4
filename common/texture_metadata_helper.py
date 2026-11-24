@@ -3,7 +3,14 @@ from dataclasses import dataclass, field
 
 from .submesh_metadata import SubmeshMetadataResolver
 try:
-    from .dhash_metadata import normalize_binding_mode, normalize_dhash, normalize_format
+    from .dhash_metadata import (
+        get_mark_binding_mode,
+        get_mark_dhash,
+        get_mark_format,
+        normalize_binding_mode,
+        normalize_dhash,
+        normalize_format,
+    )
 except ImportError:  # tests/ 以 fake 包骨架按文件路径加载本模块（包 __path__ 为空）时走到
     import importlib.util as _importlib_util
     import os as _os
@@ -19,6 +26,9 @@ except ImportError:  # tests/ 以 fake 包骨架按文件路径加载本模块�
         _dhash_metadata = _importlib_util.module_from_spec(_dhash_metadata_spec)
         _sys.modules[_DHASH_METADATA_MODULE_NAME] = _dhash_metadata
         _dhash_metadata_spec.loader.exec_module(_dhash_metadata)
+    get_mark_binding_mode = _dhash_metadata.get_mark_binding_mode
+    get_mark_dhash = _dhash_metadata.get_mark_dhash
+    get_mark_format = _dhash_metadata.get_mark_format
     normalize_binding_mode = _dhash_metadata.normalize_binding_mode
     normalize_dhash = _dhash_metadata.normalize_dhash
     normalize_format = _dhash_metadata.normalize_format
@@ -105,15 +115,9 @@ class TextureMetadataResolver:
             markup_info.mark_hash = texture_info.get("MarkHash", texture_info.get("mark_hash", ""))
             markup_info.mark_slot = texture_info.get("MarkSlot", texture_info.get("mark_slot", ""))
             markup_info.mark_filename = texture_info.get("MarkFileName", texture_info.get("mark_filename", ""))
-            markup_info.source_dhash = normalize_dhash(
-                _first_dict_value(texture_info, ("source_dhash", "dhash", "SourceDHash"))
-            )
-            markup_info.source_format = normalize_format(
-                _first_dict_value(texture_info, ("source_format", "format", "SourceFormat", "format_name"))
-            )
-            markup_info.binding_mode = normalize_binding_mode(
-                _first_dict_value(texture_info, ("binding_mode", "BindingMode"))
-            )
+            markup_info.source_dhash = get_mark_dhash(texture_info)
+            markup_info.source_format = get_mark_format(texture_info)
+            markup_info.binding_mode = get_mark_binding_mode(texture_info)
             normalized_texture_info_list.append(markup_info)
 
         return normalized_texture_info_list

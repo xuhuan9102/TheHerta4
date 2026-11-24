@@ -121,7 +121,8 @@ COND_MARKER_PREFIX = "; @@COND:"
 
 #: 段根匹配键：这些行必须留在 ``if`` 之外。
 _MATCH_KEY_RE = re.compile(
-    r"^(hash|match_first_index|match_index_count|match_priority|allow_duplicate_hash|filter_index)\s*=",
+    r"^(hash|match_first_index|match_index_count|match_priority|allow_duplicate_hash|"
+    r"filter_index|match_format|match_dhash|match_confidence)\s*=",
     re.IGNORECASE,
 )
 
@@ -485,7 +486,7 @@ def _collect_draw_ibs_for_objects(model, object_names):
 
 
 #: 不参与门控的段名前缀（小写比较）：资源声明段、本节点自己的检测段。
-_EXCLUDED_SECTION_PREFIXES = ("resource", "textureoverridecheckhash")
+_EXCLUDED_SECTION_PREFIXES = ("resource", "filter", "textureoverridecheckhash")
 
 
 def _collect_target_section_names(model, object_names, ini_path):

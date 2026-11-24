@@ -475,5 +475,42 @@ class TestDHashTextureFilters(unittest.TestCase):
         )
 
 
+class DHashReviewFixTests(unittest.TestCase):
+    def test_bad_alias_does_not_shadow_good_dhash(self):
+        mark = {
+            "MarkName": "DiffuseMap",
+            "MarkType": "Slot",
+            "MarkSlot": "ps-t3",
+            "MarkFileName": "aaaa-6-0-DiffuseMap.dds",
+            "source_dhash": "bad",
+            "dhash": "0123456789abcdef",
+            "source_format": "bad format!",
+            "format": "DXGI_FORMAT_BC7_UNORM_SRGB",
+            "binding_mode": "filter",
+        }
+        normalized = TextureMetadataResolver.normalize_texture_markup_info_list([mark])[0]
+        self.assertEqual(normalized.source_dhash, "0123456789abcdef")
+        self.assertEqual(normalized.source_format, "BC7_UNORM_SRGB")
+        self.assertEqual(normalized.binding_mode, "filter")
+
+    def test_generate_ini_file_wires_dhash_helpers(self):
+        import inspect
+        source = inspect.getsource(ExportEFMI.generate_ini_file)
+        self.assertIn("_try_append_dhash_binding(", source)
+        self.assertIn("_append_dhash_filter_sections(ini_builder)", source)
+
+    def test_filter_section_is_top_level_resource_texture(self):
+        _FakeGlobalProterties.use_dhash = True
+        submesh = _FakeSubmesh("aaaa-6-0")
+        mark = make_mark("DiffuseMap", "0123456789abcdef", "BC7_UNORM_SRGB", "filter", "ps-t3")
+        exporter = make_exporter([(submesh, [mark])])
+        binding_section = M_IniSection(M_SectionType.TextureOverrideIB)
+        self.assertTrue(exporter._try_append_dhash_binding(binding_section, submesh, mark))
+        builder = M_IniBuilder()
+        exporter._append_dhash_filter_sections(builder)
+        self.assertEqual(len(builder.ini_section_list), 1)
+        self.assertEqual(builder.ini_section_list[0].SectionType, M_SectionType.ResourceTexture)
+
+
 if __name__ == "__main__":
     unittest.main()

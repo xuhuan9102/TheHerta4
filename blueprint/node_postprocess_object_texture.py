@@ -421,13 +421,9 @@ def _ps_assignment_matches_param(match, param):
         return True
     filter_name = (match.group("ps_filter") or "").strip()
     if filter_name:
-        segments = [part for part in filter_name.lower().split("_") if part]
-        while segments and (
-            re.fullmatch(r"[0-9a-f]{8}", segments[-1]) or segments[-1].isdigit()
-        ):
-            segments.pop()
-        role = segments[-1] if segments else ""
-        return re.sub(r"map$", "", role) == param_key
+        from ..common.dhash_metadata import role_from_filter_name
+        role = role_from_filter_name(filter_name)
+        return re.sub(r"map$", "", role.lower()) == param_key
     target = str(match.group("target") or "").lower()
     return bool(param_key) and param_key in target
 

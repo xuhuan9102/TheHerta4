@@ -54,8 +54,8 @@ def normalize_binding_mode(value) -> str:
     return "slot"
 
 
-def _first_mark_value(mark, names):
-    """按顺序读标记对象的第一个非空字段；兼容 dict 与属性两种载体。"""
+def _iter_mark_values(mark, names):
+    """按顺序读标记对象的别名值；兼容 dict 与属性两种载体。"""
     for name in names:
         try:
             if isinstance(mark, dict):
@@ -70,20 +70,33 @@ def _first_mark_value(mark, names):
             continue
         if isinstance(value, str) and not value.strip():
             continue
-        return value
-    return ""
+        yield value
 
 
 def get_mark_dhash(mark):
-    return _first_mark_value(mark, ("source_dhash", "dhash", "SourceDHash"))
+    """逐别名 normalize，取第一个合法 16hex；坏别名不会遮蔽后面的好值。"""
+    for value in _iter_mark_values(mark, ("source_dhash", "dhash", "SourceDHash")):
+        normalized = normalize_dhash(value)
+        if normalized:
+            return normalized
+    return ""
 
 
 def get_mark_format(mark):
-    return _first_mark_value(mark, ("source_format", "format", "SourceFormat"))
+    """逐别名 normalize，取第一个合法格式；坏别名不会遮蔽后面的好值。"""
+    for value in _iter_mark_values(mark, ("source_format", "format", "SourceFormat")):
+        normalized = normalize_format(value)
+        if normalized:
+            return normalized
+    return ""
 
 
 def get_mark_binding_mode(mark):
-    return _first_mark_value(mark, ("binding_mode", "BindingMode"))
+    """逐别名看，任一为 filter/dhash 即返回 filter；否则 slot。"""
+    for value in _iter_mark_values(mark, ("binding_mode", "BindingMode")):
+        if normalize_binding_mode(value) == "filter":
+            return "filter"
+    return "slot"
 
 
 def _sanitize_token(value, fallback: str) -> str:
@@ -103,6 +116,29 @@ def role_for_mark_name(mark_name) -> str:
     if mapped is not None:
         return mapped
     return _sanitize_token(name, _DEFAULT_ROLE)
+
+
+def role_from_filter_name(filter_name) -> str:
+    """从 `Filter_<token>_<role>[_<dhash8>[_<n>]]` 取 role。
+
+    跳过末尾的 8hex / 纯数字消歧段；与 `filter_name_for` /
+    `filter_name_with_suffix` 的命名规则成对维护。不是 Filter_ 时返回空串。
+    """
+    text = str(filter_name if filter_name is not None else "").strip()
+    if text.startswith("["):
+        text = text[1:]
+    if text.endswith("]"):
+        text = text[:-1]
+    if not text.lower().startswith(_DHASH_FILTER_PREFIX.lower()):
+        return ""
+    segments = [part for part in text.split("_") if part]
+    if segments and segments[0].lower() == _DHASH_FILTER_PREFIX.rstrip("_").lower():
+        segments = segments[1:]
+    while segments and (
+        re.fullmatch(r"[0-9a-f]{8}", segments[-1]) or segments[-1].isdigit()
+    ):
+        segments.pop()
+    return segments[-1] if segments else ""
 
 
 def _filter_name(token: str, role: str, suffix: str = "") -> str:

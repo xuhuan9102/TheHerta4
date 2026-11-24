@@ -251,6 +251,16 @@ def _build_texture_slots_from_workspace(
             "mark_type": mark_type,
             "mark_name": mark_name,
             "mark_filename": mark_filename,
+            # dHash 契约：工作区 json 有就用，没有则消费侧逐条降级。
+            "source_dhash": str(
+                mark.get("dhash", mark.get("SourceDHash", "")) or ""
+            ).strip().lower(),
+            "source_format": str(
+                mark.get("format", mark.get("SourceFormat", "")) or ""
+            ).strip().upper(),
+            "binding_mode": str(
+                mark.get("binding_mode", mark.get("BindingMode", "slot")) or "slot"
+            ).strip().lower(),
         }
     return slots
 
