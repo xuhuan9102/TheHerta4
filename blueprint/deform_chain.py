@@ -32,6 +32,8 @@ RANK_SHAPEKEY = 20
 # 形态键权重搬运必须先于形态键 CS：先把打包窗口搬进 mod 专属权重缓冲并清零窗口，
 # Anim CS 才能从缓冲读到本帧强度。rank 取 18（< RANK_SHAPEKEY=20）保证排序在前。
 RANK_SHAPEKEY_WEIGHT_SYNC = 18
+# 原生 morph 权重在 Present 的 Anim CS 消费完后才能清掉；下一帧重新捕获。
+RANK_NATIVE_MORPH_CLEAR = 30
 
 _INDENT = "    "
 
@@ -39,6 +41,9 @@ _INDENT = "    "
 _CHAIN_RUN_RE = re.compile(r"^\s*run\s*=\s*CustomShader_(.+)_1Anim\s*$")
 _CHAIN_RUN_SHAPEKEY_WEIGHT_SYNC_RE = re.compile(r"^\s*run\s*=\s*CustomShaderShapeKeyWeightSync_(.+)\s*$")
 _CHAIN_RUN_SHAPEKEY_RE = re.compile(r"^\s*run\s*=\s*CustomShader_(.+)_Anim\s*$")
+_CHAIN_RUN_NATIVE_MORPH_CLEAR_RE = re.compile(
+    r"^\s*run\s*=\s*CustomShaderZZMINativeMorphClear_(.+)\s*$"
+)
 
 _MF_REF_RE = re.compile(r"^\s*(\S+)_mf\s*=\s*ref\s+cs-u5\s*$")
 _REF_RE = re.compile(r"^\s*(\S+)\s*=\s*ref\s+cs-u5\s*$")
@@ -87,6 +92,9 @@ def classify_chain_run(line) -> Optional[Tuple[int, str]]:
     m = _CHAIN_RUN_SHAPEKEY_RE.match(line)
     if m:
         return (RANK_SHAPEKEY, m.group(1))
+    m = _CHAIN_RUN_NATIVE_MORPH_CLEAR_RE.match(line)
+    if m:
+        return (RANK_NATIVE_MORPH_CLEAR, m.group(1))
     return None
 
 

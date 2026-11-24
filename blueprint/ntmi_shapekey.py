@@ -255,6 +255,7 @@ class NTMIShapeKeyNodeAdapter:
         hash_val=None,
         source_path=None,
         use_sparse_vertex_index=False,
+        force_all_vertex_channels=None,
     ):
         # 调用方（``DirectShapeKeyGenerator.generate``）走的是「读模板、写目标」的
         # 通用契约，因此会传 ``source_path``；本适配器**不读模板**——着色器源码在
@@ -266,7 +267,7 @@ class NTMIShapeKeyNodeAdapter:
         # ``use_sparse_vertex_index`` 同理只接住不使用：崩铁 NTMI 路径沿用稠密
         # FREQ 模型（与帧表一致，本适配器不实现新模型）。
         del unique_objects, use_packed, use_delta, use_optimized, merge_slot_files, hash_val, source_path
-        del use_sparse_vertex_index
+        del use_sparse_vertex_index, force_all_vertex_channels
         num_slots = max(hash_slot_data.keys()) if hash_slot_data else 0
         zone_ids = list(drag_zone_ids or []) if drag_drive_enabled else []
         click_stages = list(drag_click_stages or []) if drag_drive_enabled else []

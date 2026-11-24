@@ -30,6 +30,9 @@ _REAL_MODULES = (
 	("utils", "tbn_codec"),
 	("utils", "format_utils"),
 	("common", "safe_write"),
+	("common", "mesh_attribute_names"),
+	("common", "shapekey_import_layout"),
+	("common", "native_shapekey_attributes"),
 	# t75：共享骨图 / 通道骨判定的唯一实现（zzmi_skeleton 与 zzmi.py 都依赖它）。
 	("common", "zzmi_channel"),
 	("common", "zzmi_native_flow"),

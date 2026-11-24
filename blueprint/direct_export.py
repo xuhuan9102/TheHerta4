@@ -329,7 +329,22 @@ def has_direct_export_mode(tree) -> bool:
     if not tree:
         return False
 
-    return bool(collect_direct_shapekey_nodes(tree) or collect_direct_multifile_nodes(tree))
+    return bool(
+        collect_direct_shapekey_nodes(tree)
+        or collect_direct_multifile_nodes(tree)
+        or needs_merged_native_expression_node(tree)
+    )
+
+
+def needs_merged_native_expression_node(tree):
+    from .export_background import has_merged_native_expression_keys
+
+    if BlueprintExportHelper.collect_shapekey_postprocess_nodes(tree):
+        return False
+    return has_merged_native_expression_keys(
+        bpy.data.objects.get(getattr(node, "object_name", ""))
+        for node in BlueprintExportHelper.collect_connected_start_nodes(tree)
+    )
 
 
 def sync_shapekey_direct_mode(node, context=None):
@@ -1023,7 +1038,14 @@ def execute_direct_export(context, tree):
     # 直出运行时开关：后处理在 session.run() 内部执行，所以整个会话期间都置真，
     # 结束后（异常也）复位，让普通 / 后台 / 并行导出看到的一直是「不是直出」。
     BlueprintExportHelper.set_direct_export_active(True)
+    auto_shape_node = None
     try:
+        if needs_merged_native_expression_node(tree):
+            output_node = BlueprintExportHelper.get_result_output_node(tree)
+            if output_node is not None:
+                auto_shape_node = tree.nodes.new("SSMTNode_PostProcess_ShapeKey")
+                auto_shape_node.direct_export_mode = True
+                tree.links.new(output_node.outputs[0], auto_shape_node.inputs[0])
         refresh_blueprint_sync_state(tree=tree, context=context, include_all_blueprints=True)
         BlueprintExportHelper.validate_object_info_references(tree)
         session = DirectExportSession(context=context, tree=tree)
@@ -1031,6 +1053,8 @@ def execute_direct_export(context, tree):
     finally:
         BlueprintExportHelper.set_direct_export_active(False)
         BlueprintExportHelper.runtime_blueprint_tree_name = previous_runtime_tree_name
+        if auto_shape_node is not None:
+            tree.nodes.remove(auto_shape_node)
 
 
 classes = (

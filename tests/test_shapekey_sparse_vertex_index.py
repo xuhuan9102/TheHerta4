@@ -191,10 +191,12 @@ _install_module(
 _install_module(f"{PKG_MIXIN}.utils.log_utils", LOG=types.SimpleNamespace())
 _install_module(
     f"{PKG_MIXIN}.common.safe_write",
+    write_bytes_if_changed=lambda *_args, **_kwargs: None,
     write_text_if_changed=lambda *_args, **_kwargs: None,
 )
 _install_module(
     f"{PKG_MIXIN}.blueprint.direct_export_runtime_utils",
+    apply_full_vertex_override_in_place=lambda *_args, **_kwargs: None,
     apply_position_override_in_place=lambda *_args, **_kwargs: None,
     extract_position_bytes_by_indices=lambda *_args, **_kwargs: b"",
     assemble_drawib_position_bytes=lambda *_args, **_kwargs: (b"", 0),
@@ -822,7 +824,7 @@ class _NodeStub:
     def _describe_delta_scope(self, use_delta, hash_val=None):
         return "否" if not use_delta else "仅位置"
 
-    def _resolve_delta_stride(self, hash_val=None, vertex_stride=None, struct_definition=None):
+    def _resolve_delta_stride(self, hash_val=None, vertex_stride=None, struct_definition=None, *, force_all_vertex_channels=False):
         return 12
 
     def _resolve_delta_channel_plan(self, hash_val=None, struct_definition=None, num_floats_per_vertex=None):

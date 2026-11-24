@@ -325,6 +325,7 @@ _install_module(
     f"{PKG}.blueprint.direct_export",
     execute_direct_export=lambda **_kwargs: None,
     has_direct_export_mode=lambda _tree: False,
+    needs_merged_native_expression_node=lambda _tree: False,
     collect_direct_shapekey_nodes=lambda _tree: [],
     collect_direct_multifile_nodes=lambda _tree: [],
 )
@@ -2408,6 +2409,21 @@ class OperatorInvokeTests(_BackgroundTestBase):
         self.assertNotIn("直出-形态键附加轮次", expected)
         # 7 顶层 + 8 前处理 + 2 直出形态键前处理 + 8 基础导出 + 2 节点 + 2 生成 + 收尾
         self.assertEqual(len(expected), 7 + 8 + 2 + 8 + 2 + 2 + 1)
+
+    def test_merged_native_expressions_plan_direct_export_without_explicit_node(self):
+        detect = ui_func_export.needs_merged_native_expression_node
+        self.addCleanup(setattr, ui_func_export, "needs_merged_native_expression_node", detect)
+        ui_func_export.needs_merged_native_expression_node = lambda _tree: True
+        session = self._make_operator(None)._create_background_session(_FakeExportTree())
+
+        self.assertTrue(session.kwargs["direct_export"])
+        self.assertTrue(session.kwargs["has_shapekey_export"])
+        expected = export_step_plan.build_step_plan(
+            _FakeExportTree(), direct_export=True, has_shapekey_export=True,
+            round_plans=session.kwargs["round_plans"], postprocess_nodes=[],
+        )
+        self.assertIn("直出-形态键生成", expected)
+        self.assertEqual(session.kwargs["total_steps"], len(expected))
 
     def test_estimate_total_steps_includes_standard_shapekey_round_stage(self):
         """有未启用直出的形态键后处理节点时，直出还要补跑传统附加轮次（多 1 步）。"""

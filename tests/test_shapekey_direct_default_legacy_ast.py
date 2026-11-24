@@ -207,6 +207,12 @@ class ShapeKeyDirectExportDefaultTests(unittest.TestCase):
 
     def test_no_module_shadows_direct_export_mode_with_a_literal(self):
         """除属性定义外，任何地方都不得用字面量赋值覆盖直出开关。"""
+        # #92 原生表情：导出管线在检测到原生表情键时自动挂一个已开启直出的
+        # 形态键节点。这两个位置是白名单（有注释说明），其它模块仍不得硬编码。
+        allowed = {
+            "blueprint/direct_export.py",
+            "blueprint/export_background.py",
+        }
         offenders = []
         for path, tree in _repo_trees():
             for node in ast.walk(tree):
@@ -217,6 +223,7 @@ class ShapeKeyDirectExportDefaultTests(unittest.TestCase):
                         isinstance(target, ast.Attribute)
                         and target.attr == "direct_export_mode"
                         and isinstance(node.value, ast.Constant)
+                        and path.relative_to(REPO_ROOT).as_posix() not in allowed
                     ):
                         offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
 

@@ -53,6 +53,7 @@ _install_module(
 _install_module(
     f"{PKG}.common.safe_write",
     write_text_if_changed=lambda *_args, **_kwargs: None,
+    write_bytes_if_changed=lambda *_args, **_kwargs: None,
 )
 
 
@@ -69,6 +70,7 @@ _install_module(
     f"{PKG}.blueprint.direct_export_runtime_utils",
     apply_position_override_in_place=_apply_position_override,
     extract_position_bytes_by_indices=lambda *_args, **_kwargs: b"",
+    apply_full_vertex_override_in_place=lambda *_args, **_kwargs: None,
     assemble_drawib_position_bytes=lambda *_args, **_kwargs: (b"", 0),
     iter_drawib_models=lambda *_args, **_kwargs: [],
 )

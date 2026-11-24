@@ -19,13 +19,19 @@ from ..common.mod_path_compat import derive_shapekey_vertex_entry_packed_resourc
 from ..common.mod_path_compat import derive_shapekey_vertex_entry_start_resource_name
 from ..common.mod_path_compat import derive_shapekey_weight_resource_name
 from ..common.mod_path_compat import ensure_resource_alias_section
+from ..common.safe_write import write_bytes_if_changed
 from ..common.safe_write import write_text_if_changed
 from ..utils.log_utils import LOG
+from .direct_export_runtime_utils import apply_full_vertex_override_in_place
 from .direct_export_runtime_utils import apply_position_override_in_place
 from .direct_export_runtime_utils import assemble_drawib_position_bytes
 from .direct_export_runtime_utils import extract_position_bytes_by_indices as _extract_position_bytes_by_indices
 from .direct_export_runtime_utils import iter_drawib_models as _iter_drawib_models
 from .direct_export_shapekey_shared import ShapeKeyDirectExportError, _buffer_to_bytes, resolve_use_delta
+try:
+    from . import native_morph_driver as native_morph
+except ImportError:
+    from blueprint import native_morph_driver as native_morph
 try:
     from .shapekey_sparse_index import (
         NO_FREQ_INDEX,
@@ -63,6 +69,9 @@ except Exception:
 # 一致——两条生成路径写的是同一份 shader、同一张共享表、同一批槽位。
 WEIGHT_SYNC_SHADER_NAME = "shapekey_weight_sync.hlsl"
 WEIGHT_SYNC_SHADER_REL = "./res/" + WEIGHT_SYNC_SHADER_NAME
+NATIVE_WEIGHT_SYNC_SHADER_NAME = native_morph.WEIGHT_SYNC_SHADER_NAME
+NATIVE_WEIGHT_SYNC_SHADER_REL = "./res/" + NATIVE_WEIGHT_SYNC_SHADER_NAME
+SHAPEKEY_VERTEX_BUFFER_BIND_FLAGS = "unordered_access vertex_buffer"
 
 
 class DirectShapeKeyOutputMixin:
@@ -189,7 +198,13 @@ class DirectShapeKeyOutputMixin:
         lines.append(self._PRESENT_RUN_END)
         return lines
 
-    def _delta_stride_for(self, logical_hash, vertex_stride, struct_definition=None):
+    def _delta_stride_for(
+        self,
+        logical_hash,
+        vertex_stride,
+        struct_definition=None,
+        force_all_vertex_channels=None,
+    ):
         """增量资源在 INI 里声明的 stride。
 
         关闭「存储全部顶点属性增量」时恒为 12（仅位置）；开启时 = 4 × 通道 float 数
@@ -199,6 +214,7 @@ class DirectShapeKeyOutputMixin:
             hash_val=logical_hash,
             vertex_stride=vertex_stride,
             struct_definition=struct_definition,
+            force_all_vertex_channels=force_all_vertex_channels,
         )
 
     def _delta_channel_columns(self, runtime_info, num_floats_per_vertex, struct_definition=None):
@@ -217,6 +233,11 @@ class DirectShapeKeyOutputMixin:
             hash_val=runtime_info.get("logical_hash") if runtime_info else None,
             struct_definition=struct_definition,
             num_floats_per_vertex=num_floats_per_vertex,
+            force_all_vertex_channels=(
+                True
+                if (runtime_info or {}).get("force_all_vertex_channels", False)
+                else None
+            ),
         )
 
     @classmethod
@@ -1096,36 +1117,46 @@ class DirectShapeKeyOutputMixin:
         slot_bytes = bytearray(base_bytes)
 
         slot_overrides = slot_position_overrides.get(slot_index, {})
-        for objects in names_data.values():
+        for shapekey_name, objects in names_data.items():
             for obj_name in objects:
-                override_entry = slot_overrides.get(obj_name)
-                if not override_entry:
-                    continue
-
                 obj_hash = self.node._extract_hash_from_name(obj_name)
                 obj_prefix = self.node._extract_hash_prefix(obj_hash) if obj_hash else None
                 hash_prefix = self.node._extract_hash_prefix(logical_hash)
                 if obj_prefix != hash_prefix:
                     continue
 
+                override_entry = slot_overrides.get(obj_name)
+                if not override_entry:
+                    continue
+
                 export_indices = np.asarray(override_entry.get("export_indices", []), dtype=np.int32)
+                full_vertex_bytes = override_entry.get("full_vertex_bytes")
                 position_bytes = override_entry.get("position_bytes", b"")
-                if export_indices.size == 0 or not position_bytes:
+                if export_indices.size == 0 or (not position_bytes and not full_vertex_bytes):
                     continue
 
                 expected_bytes = export_indices.size * position_stride
-                if len(position_bytes) != expected_bytes:
+                override_bytes = full_vertex_bytes or position_bytes
+                if len(override_bytes) != expected_bytes:
                     raise ShapeKeyDirectExportError(
-                        f"物体 '{obj_name}' 的 Position 数据长度异常，期望={expected_bytes}，实际={len(position_bytes)}"
+                        f"物体 '{obj_name}' 的形态键顶点数据长度异常，期望={expected_bytes}，实际={len(override_bytes)}"
                     )
 
                 try:
-                    apply_position_override_in_place(
-                        state_bytes=slot_bytes,
-                        position_bytes=position_bytes,
-                        export_indices=export_indices,
-                        position_stride=position_stride,
-                    )
+                    if full_vertex_bytes:
+                        apply_full_vertex_override_in_place(
+                            state_bytes=slot_bytes,
+                            vertex_bytes=full_vertex_bytes,
+                            export_indices=export_indices,
+                            vertex_stride=position_stride,
+                        )
+                    else:
+                        apply_position_override_in_place(
+                            state_bytes=slot_bytes,
+                            position_bytes=position_bytes,
+                            export_indices=export_indices,
+                            position_stride=position_stride,
+                        )
                 except ValueError as exc:
                     raise ShapeKeyDirectExportError(str(exc)) from exc
 
@@ -1186,6 +1217,9 @@ class DirectShapeKeyOutputMixin:
                 LOG.warning(f"直出形态键跳过哈希 {logical_hash}: 基础 Position 顶点数无效")
                 continue
 
+            native_attributes = self._native_shapekey_attributes_for_hash(
+                actual_hash, logical_hash
+            )
             runtime_infos[logical_hash] = {
                 "logical_hash": logical_hash,
                 "actual_hash": actual_hash,
@@ -1194,6 +1228,10 @@ class DirectShapeKeyOutputMixin:
                 "position_stride": position_stride,
                 "vertex_count": vertex_count,
                 "drawib_model": drawib_model,
+                "native_shapekey_attributes": native_attributes,
+                "force_all_vertex_channels": bool(
+                    native_attributes and native_attributes.has_non_position_deltas
+                ),
                 "object_export_context_lookup": self._build_drawib_object_context_lookup(drawib_model),
             }
 
@@ -1233,6 +1271,9 @@ class DirectShapeKeyOutputMixin:
                 LOG.warning(f"直出形态键跳过哈希 {logical_hash}: 基础 Position 顶点数无效")
                 continue
 
+            native_attributes = self._native_shapekey_attributes_for_hash(
+                actual_hash, logical_hash
+            )
             runtime_infos[logical_hash] = {
                 "logical_hash": logical_hash,
                 "actual_hash": actual_hash,
@@ -1242,6 +1283,10 @@ class DirectShapeKeyOutputMixin:
                 "vertex_count": vertex_count,
                 "drawib_model": drawib_model,
                 "shapekey_buffers": shapekey_buffers,
+                "native_shapekey_attributes": native_attributes,
+                "force_all_vertex_channels": bool(
+                    native_attributes and native_attributes.has_non_position_deltas
+                ),
                 "object_export_context_lookup": self._build_drawib_object_context_lookup(drawib_model),
             }
 
@@ -1274,6 +1319,9 @@ class DirectShapeKeyOutputMixin:
 
             draw_ib = getattr(drawib_model, "draw_ib", logical_hash)
             actual_hash = draw_ib if draw_ib else logical_hash
+            native_attributes = self._native_shapekey_attributes_for_hash(
+                actual_hash, logical_hash
+            )
 
             runtime_infos[logical_hash] = {
                 "logical_hash": logical_hash,
@@ -1283,6 +1331,10 @@ class DirectShapeKeyOutputMixin:
                 "position_stride": position_stride,
                 "vertex_count": vertex_count,
                 "drawib_model": drawib_model,
+                "native_shapekey_attributes": native_attributes,
+                "force_all_vertex_channels": bool(
+                    native_attributes and native_attributes.has_non_position_deltas
+                ),
                 "object_export_context_lookup": self._build_drawib_object_context_lookup(drawib_model),
             }
 
@@ -1290,6 +1342,139 @@ class DirectShapeKeyOutputMixin:
             raise ShapeKeyDirectExportError("直出形态键未找到任何可用的基础 Position 数据（内存回退）")
 
         return runtime_infos
+
+    @staticmethod
+    def _set_resource_bind_flags(sections, resource_name, flags):
+        section_name = str(resource_name or "").strip()
+        if not section_name:
+            return
+        if not section_name.startswith("["):
+            section_name = f"[{section_name}]"
+        lines = sections.get(section_name)
+        if lines is None:
+            return
+        sections[section_name] = [
+            line for line in lines
+            if not str(line or "").strip().lower().startswith("bind_flags")
+        ]
+        sections[section_name].append(f"bind_flags = {flags}")
+
+    @staticmethod
+    def _set_resource_field(sections, resource_name, field, value):
+        section_name = str(resource_name or "").strip()
+        if not section_name:
+            return
+        if not section_name.startswith("["):
+            section_name = f"[{section_name}]"
+        lines = sections.get(section_name)
+        if lines is None:
+            return
+        field_name = str(field or "").strip().lower()
+        rendered = f"{field} = {value}"
+        updated = []
+        replaced = False
+        for line in lines:
+            match = re.match(r"^\s*([^=;#]+?)\s*=", str(line or ""))
+            if match and match.group(1).strip().lower() == field_name:
+                updated.append(rendered)
+                replaced = True
+            else:
+                updated.append(line)
+        if not replaced:
+            updated.append(rendered)
+        sections[section_name] = updated
+
+    def _prepare_native_morph_bridge(
+        self,
+        runtime_infos,
+        logical_hashes,
+        hash_slot_data_map,
+        sections,
+        dest_res_dir,
+        shader_source_path,
+    ):
+        keys_by_hash = {}
+        slot_map_by_hash = {}
+        metadata_key_count = 0
+        for logical_hash in logical_hashes:
+            runtime_info = runtime_infos.get(logical_hash) or {}
+            drawib_model = runtime_info.get("drawib_model")
+            if drawib_model is None:
+                continue
+
+            slot_data = hash_slot_data_map.get(logical_hash, {}) or {}
+            shape_key_names = list(
+                OrderedDict.fromkeys(
+                    name
+                    for per_slot_names in slot_data.values()
+                    for name in per_slot_names.keys()
+                )
+            )
+            native_keys = self._native_morph_keys_for_export(
+                logical_hash, drawib_model, shape_key_names
+            )
+            if not native_keys:
+                continue
+            metadata_key_count += len(native_keys)
+            slot_map = native_morph.shape_key_runtime_slot_by_index(shape_key_names)
+            if not slot_map:
+                continue
+            keys_by_hash[logical_hash] = native_keys
+            slot_map_by_hash[logical_hash] = slot_map
+
+        if not keys_by_hash:
+            if metadata_key_count:
+                LOG.warning(
+                    "直出形态键: 工作空间含原生 morph 元数据，但当前形态键名称没有 "
+                    "Deform N 对应项，未启用原生权重桥接"
+                )
+            return {}, {}
+
+        plans = native_morph.build_native_morph_plans(
+            keys_by_hash,
+            slot_map_by_hash,
+            reserved_filter_indices=native_morph.collect_reserved_filter_indices(
+                sections
+            ),
+        )
+        if not plans:
+            return {}, {}
+
+        toolset_dir = os.path.dirname(shader_source_path)
+        for shader_name in (
+            native_morph.CAPTURE_SHADER_NAME,
+            native_morph.CLEAR_SHADER_NAME,
+            NATIVE_WEIGHT_SYNC_SHADER_NAME,
+        ):
+            source_path = os.path.join(toolset_dir, shader_name)
+            if not os.path.exists(source_path):
+                raise ShapeKeyDirectExportError(
+                    f"直出形态键: 原生 morph 权重桥接缺少着色器模板 {source_path}"
+                )
+            with open(source_path, "r", encoding="utf-8") as file_obj:
+                write_text_if_changed(
+                    os.path.join(dest_res_dir, shader_name),
+                    file_obj.read(),
+                )
+
+        lookup_files = {}
+        for logical_hash, plan in plans.items():
+            file_name = (
+                f"{native_morph.safe_name(logical_hash)}"
+                "-NativeMorphLookup.buf"
+            )
+            write_bytes_if_changed(
+                os.path.join(self.meshes_dir, file_name),
+                plan.lookup_buffer,
+            )
+            lookup_files[logical_hash] = f"Meshes0000/{file_name}"
+
+        LOG.info(
+            "直出形态键: 原生 morph 权重桥接已启用 "
+            f"hashes={sorted(plans)}, lookups="
+            f"{sum(plan.lookup_count for plan in plans.values())}"
+        )
+        return plans, lookup_files
 
     def _parse_hash_to_base_resources(self, sections):
         return collect_base_position_resource_map(sections, self.node._extract_hash_prefix)
@@ -1353,7 +1538,13 @@ class DirectShapeKeyOutputMixin:
         frame_table_meta_map=None,
         use_sparse_index=False,
         frame_shader_sources=None,
+        force_all_vertex_channels_hashes=None,
+        native_morph_plans=None,
+        native_morph_lookup_files=None,
     ):
+        native_morph_plans = dict(native_morph_plans or {})
+        native_morph_lookup_files = dict(native_morph_lookup_files or {})
+        force_all_vertex_channels_hashes = set(force_all_vertex_channels_hashes or ())
         if '[Constants]' not in sections:
             sections['[Constants]'] = []
         constants_lines = sections['[Constants]']
@@ -1362,6 +1553,12 @@ class DirectShapeKeyOutputMixin:
             target_ini_file, original_hashes, frame_table_meta_map,
             hash_slot_data_map, hash_to_actual_file_hash, frame_shader_sources or {},
         )
+        native_hashes = set(native_morph_plans).intersection(unique_hashes)
+        manual_hashes = [
+            logical_hash
+            for logical_hash in unique_hashes
+            if logical_hash not in native_hashes
+        ]
         if frame_shader_sources:
             shader_dir = Path(target_ini_file).parent / "res"
             for logical_hash in unique_hashes:
@@ -1453,6 +1650,9 @@ class DirectShapeKeyOutputMixin:
         } | {
             f"run = CustomShaderShapeKeyWeightSync_{logical_hash}"
             for logical_hash in original_hashes
+        } | {
+            f"run = {native_morph.custom_shader_clear_name(logical_hash)}"
+            for logical_hash in native_hashes
         }
         line_index = 0
         while line_index < len(present_lines):
@@ -1488,26 +1688,64 @@ class DirectShapeKeyOutputMixin:
             if stripped_line in generated_run_lines:
                 line_index += 1
                 continue
+            if stripped_line.startswith(
+                "run = CustomShaderZZMINativeMorphClear_"
+            ):
+                line_index += 1
+                continue
 
             rebuilt_present_lines.append(present_lines[line_index])
             line_index += 1
 
-        # 签名变量：本帧所有形态键强度（+ 基础网格切换开关）。没变化就不 dispatch，
-        # 拖拽臂动（Alt）期间强制 dispatch —— 拖拽驱动缓冲每帧都在变，签名看不出来。
+        # 原生 morph 权重不在 IniParams 里，不能靠手工强度签名门控。原生 hash
+        # 每帧无条件 dispatch；其余 hash 继续使用签名优化。
+        manual_names = {
+            name
+            for logical_hash in manual_hashes
+            for slot_data in hash_slot_data_map.get(logical_hash, {}).values()
+            for name in slot_data.keys()
+        }
         signature_vars = sorted({
-            str(param).strip() for param in shapekey_freq_params.values() if str(param).strip()
+            str(shapekey_freq_params.get(name, "")).strip()
+            for name in manual_names
+            if str(shapekey_freq_params.get(name, "")).strip()
         })
-        if "$ssmt_sk_base_mesh" in vars_to_define:
+        if manual_hashes and "$ssmt_sk_base_mesh" in vars_to_define:
             signature_vars.append("$ssmt_sk_base_mesh")
-        rebuilt_present_lines.extend(self._build_present_run_block(
-            unique_hashes,
-            signature_vars=signature_vars,
-            drag_active_var=self._drag_mode_variable_for(drag_drive_resource),
-        ))
+        if manual_hashes:
+            rebuilt_present_lines.extend(self._build_present_run_block(
+                manual_hashes,
+                signature_vars=signature_vars,
+                drag_active_var=self._drag_mode_variable_for(drag_drive_resource),
+            ))
+        if native_hashes:
+            native_lines = [self._PRESENT_RUN_BEGIN]
+            guard_open = ['if $active0 == 1'] if self._uses_active_guard() else []
+            indent = "    " * len(guard_open)
+            native_lines.extend(guard_open)
+            native_lines.extend(
+                f"{indent}run = CustomShaderShapeKeyWeightSync_{logical_hash}"
+                for logical_hash in unique_hashes
+                if logical_hash in native_hashes
+            )
+            native_lines.extend(
+                f"{indent}run = CustomShader_{logical_hash}_Anim"
+                for logical_hash in unique_hashes
+                if logical_hash in native_hashes
+            )
+            if guard_open:
+                native_lines.append("endif")
+            native_lines.extend(
+                f"run = {native_morph.custom_shader_clear_name(logical_hash)}"
+                for logical_hash in unique_hashes
+                if logical_hash in native_hashes
+            )
+            native_lines.append(self._PRESENT_RUN_END)
+            rebuilt_present_lines.extend(native_lines)
         sections['[Present]'] = rebuilt_present_lines
 
         if signature_vars:
-            signature_var, prev_var = self._sk_signature_var_names(unique_hashes)
+            signature_var, prev_var = self._sk_signature_var_names(manual_hashes)
             for declaration in (
                 f"global {signature_var} = 0",
                 # 初值 -1：第一帧必然与签名不同 → 至少 dispatch 一次
@@ -1567,12 +1805,28 @@ class DirectShapeKeyOutputMixin:
                     f"    {'xyzw'[slot % 4]}{self.node.INTENSITY_START_INDEX + slot // 4} = {group['progress']}"
                     f" \n; frame group ordinal {ordinal} (group {group['group']})"
                 )
-            sync_lines.extend([
-                f"    cs = {WEIGHT_SYNC_SHADER_REL}",
-                f"    cs-u0 = {weight_resource}",
-                f"    Dispatch = {max(1, (weight_slots + 63) // 64)}, 1, 1",
-                "    cs-u0 = null",
-            ])
+            if logical_hash in native_hashes:
+                lookup_resource = (
+                    native_morph.derive_native_morph_lookup_resource_name(
+                        _weight_primary_base,
+                        logical_hash,
+                    )
+                )
+                sync_lines.extend([
+                    f"    cs = {NATIVE_WEIGHT_SYNC_SHADER_REL}",
+                    f"    cs-t0 = copy {lookup_resource}",
+                    f"    cs-u0 = {weight_resource}",
+                    f"    Dispatch = {max(1, (weight_slots + 63) // 64)}, 1, 1",
+                    "    cs-t0 = null",
+                    "    cs-u0 = null",
+                ])
+            else:
+                sync_lines.extend([
+                    f"    cs = {WEIGHT_SYNC_SHADER_REL}",
+                    f"    cs-u0 = {weight_resource}",
+                    f"    Dispatch = {max(1, (weight_slots + 63) // 64)}, 1, 1",
+                    "    cs-u0 = null",
+                ])
             # 搬运后立即清零：共享表里不留形态键值，别的 mod 即使也占用这些槽位，
             # 渲染期读到的也永远是 0。
             for index in range(weight_slots):
@@ -1683,7 +1937,11 @@ class DirectShapeKeyOutputMixin:
                         "_0",
                         source_candidates=[res_name],
                     )
-                    block_lines.extend([f"    if $ssmt_sk_base_mesh == {index}", f"        cs-u5 = copy {res_name}_0", f"        {res_name} = ref cs-u5", "    endif"])
+                    block_lines.extend([
+                        f"    if $ssmt_sk_base_mesh == {index}",
+                        f"        cs-u5 = copy {res_name}_0",
+                        "    endif",
+                    ])
             else:
                 res_name = res_to_bind[0]
                 ensure_resource_alias_section(
@@ -1692,13 +1950,33 @@ class DirectShapeKeyOutputMixin:
                     "_0",
                     source_candidates=[res_name],
                 )
-                block_lines.extend([f"    cs-u5 = copy {res_name}_0", f"    {res_name} = ref cs-u5"])
+                block_lines.append(f"    cs-u5 = copy {res_name}_0")
 
             dispatch_count = self.node._compute_dispatch_group_count(
                 hash_to_vertex_count.get(hash_prefix, 0),
                 threads_per_group=16,
             )
-            block_lines.extend([f"    Dispatch = {dispatch_count}, 1, 1", "    cs-u5 = null", *[f"    {reg} = null" for reg in sorted(list(set(t_registers_to_null)))]] )
+            # Dispatch 前把目标资源 ref 到 cs-u5（main 行为，零拷贝回写）。
+            # 原生表情路径同样不需要 Dispatch 后再 copy 回同一个资源；
+            # 只有合并骨架等「别的资源」才在 Dispatch 后从 cs-u5 取数据。
+            if len(res_to_bind) > 1:
+                for index, res_name in enumerate(res_to_bind, 1):
+                    block_lines.extend([
+                        f"    if $ssmt_sk_base_mesh == {index}",
+                        f"        {res_name} = ref cs-u5",
+                        "    endif",
+                    ])
+            else:
+                block_lines.append(f"    {res_to_bind[0]} = ref cs-u5")
+            block_lines.append(f"    Dispatch = {dispatch_count}, 1, 1")
+            if logical_hash in native_hashes:
+                for _plan, skin_input in self._merged_native_morph_carriers(logical_hash):
+                    if f"[{skin_input}]" in sections:
+                        block_lines.append(f"    {skin_input} = copy cs-u5")
+            block_lines.extend([
+                "    cs-u5 = null",
+                *[f"    {reg} = null" for reg in sorted(list(set(t_registers_to_null)))],
+            ])
             compute_blocks_to_add[block_name] = block_lines
             # 权重搬运段：每帧「写打包窗口 → 搬运 → 清零」，必须排在 Anim 之前
             compute_blocks_to_add[f"[CustomShaderShapeKeyWeightSync_{logical_hash}]"] = sync_lines
@@ -1732,8 +2010,26 @@ class DirectShapeKeyOutputMixin:
             section_name = f"[{derive_shapekey_base_resource_name(primary_base_resource)}]"
             if section_name not in sections and section_name not in generated_section_names:
                 stride = hash_to_stride.get(hash_prefix, 40)
-                new_resource_lines.extend([section_name, "type = Buffer", f"stride = {stride}", f"filename = Meshes0000/{actual_file_hash}-Position.buf", ""])
+                resource_lines = [
+                    section_name,
+                    "type = Buffer",
+                    f"stride = {stride}",
+                    f"filename = Meshes0000/{actual_file_hash}-Position.buf",
+                ]
+                if logical_hash in native_hashes:
+                    # 只有原生表情路径需要 UAV 顶点缓冲；普通形态键保持 main 产物。
+                    resource_lines.append(
+                        f"bind_flags = {SHAPEKEY_VERTEX_BUFFER_BIND_FLAGS}"
+                    )
+                resource_lines.append("")
+                new_resource_lines.extend(resource_lines)
                 generated_section_names.add(section_name)
+            self._set_resource_field(
+                sections,
+                section_name,
+                "stride",
+                hash_to_stride.get(hash_prefix, 40),
+            )
 
             # 形态键权重缓冲：mod 专属 RWBuffer（资源名即命名空间），由
             # CustomShaderShapeKeyWeightSync 每帧写入。不给 filename 即零初始化。
@@ -1749,6 +2045,12 @@ class DirectShapeKeyOutputMixin:
                     "",
                 ])
                 generated_section_names.add(weight_section_name)
+            self._set_resource_field(
+                sections,
+                weight_section_name,
+                "array",
+                max(1, int(hash_weight_counts.get(logical_hash, 1))),
+            )
 
             # 帧表 + 各组顶点局部索引表（帧表模式专用）
             frame_meta = (frame_table_meta_map or {}).get(logical_hash)
@@ -1787,7 +2089,17 @@ class DirectShapeKeyOutputMixin:
 
                 actual_file_hash = hash_to_actual_file_hash.get(logical_hash, logical_hash)
                 base_stride = hash_to_stride.get(hash_prefix, 40)
-                data_stride = self._delta_stride_for(logical_hash, base_stride) if use_delta else base_stride
+                data_stride = (
+                    self._delta_stride_for(
+                        logical_hash,
+                        base_stride,
+                        force_all_vertex_channels=(
+                            logical_hash in force_all_vertex_channels_hashes
+                        ),
+                    )
+                    if use_delta
+                    else base_stride
+                )
                 base_resources = hash_to_base_resources.get(hash_prefix, [])
                 primary_base_resource = base_resources[0] if base_resources else f"Resource_{self.node._hash_to_resource_prefix(logical_hash)}_Position"
                 # 帧表模式：shader 只读帧表与组映射，不再读 merged delta/map。
@@ -1799,6 +2111,12 @@ class DirectShapeKeyOutputMixin:
                     if data_section not in sections and data_section not in generated_section_names:
                         new_resource_lines.extend([data_section, "type = Buffer", f"stride = {data_stride}", f"filename = {data_filename}", ""])
                         generated_section_names.add(data_section)
+                    self._set_resource_field(
+                        sections,
+                        data_section,
+                        "stride",
+                        data_stride,
+                    )
 
                     map_section = f"[{derive_shapekey_merged_map_resource_name(primary_base_resource)}]"
                     map_filename = f"Meshes0000/{actual_file_hash}-Position_merged_map.buf"
@@ -1818,7 +2136,13 @@ class DirectShapeKeyOutputMixin:
                     primary_base_resource = base_resources[0] if base_resources else f"Resource_{self.node._hash_to_resource_prefix(logical_hash)}_Position"
                     if use_delta:
                         res_suffix = "_packed_pos_delta" if use_packed else "_pos_delta"
-                        stride = self._delta_stride_for(logical_hash, base_stride)
+                        stride = self._delta_stride_for(
+                            logical_hash,
+                            base_stride,
+                            force_all_vertex_channels=(
+                                logical_hash in force_all_vertex_channels_hashes
+                            ),
+                        )
                     elif use_packed:
                         res_suffix = "_packed"
                         stride = base_stride
@@ -1832,6 +2156,12 @@ class DirectShapeKeyOutputMixin:
                         if section_name not in sections and section_name not in generated_section_names:
                             new_resource_lines.extend([section_name, "type = Buffer", f"stride = {stride}", f"filename = {filename}", ""])
                             generated_section_names.add(section_name)
+                        self._set_resource_field(
+                            sections,
+                            section_name,
+                            "stride",
+                            stride,
+                        )
 
                     if use_packed:
                         map_section = f"[{derive_shapekey_slot_map_resource_name(primary_base_resource, slot_num)}]"
@@ -1913,6 +2243,9 @@ class DirectShapeKeyOutputMixin:
             sections[";; --- Generated Shape Key Meshess ---"] = new_resource_lines
 
         for logical_hash in unique_hashes:
+            # 只有原生表情路径需要 UAV 顶点缓冲；普通形态键保持 main 的产物不变。
+            if logical_hash not in native_hashes:
+                continue
             hash_prefix = self.node._extract_hash_prefix(logical_hash)
             for res_name in hash_to_base_resources.get(hash_prefix, [f"Resource_{self.node._hash_to_resource_prefix(logical_hash)}_Position"]):
                 ensure_resource_alias_section(
@@ -1921,7 +2254,74 @@ class DirectShapeKeyOutputMixin:
                     "_0",
                     source_candidates=[res_name],
                 )
+                self._set_resource_bind_flags(
+                    sections,
+                    res_name,
+                    SHAPEKEY_VERTEX_BUFFER_BIND_FLAGS,
+                )
+                self._set_resource_bind_flags(
+                    sections,
+                    f"{res_name}_0",
+                    SHAPEKEY_VERTEX_BUFFER_BIND_FLAGS,
+                )
+                self._set_resource_bind_flags(
+                    sections,
+                    derive_shapekey_base_resource_name(res_name),
+                    SHAPEKEY_VERTEX_BUFFER_BIND_FLAGS,
+                )
 
+        for section_name in list(sections.keys()):
+            if (
+                section_name.startswith("[ShaderOverrideZZMINativeMorph_")
+                or section_name.startswith(
+                    f"[{native_morph.SHADER_OVERRIDE_PREFIX}_"
+                )
+                or section_name.startswith(
+                    f"[{native_morph.GENERIC_CAPTURE_SECTION}"
+                )
+                or section_name == f"[{native_morph.GENERIC_CAPTURE_COMMAND}]"
+                or section_name.startswith("[TextureOverrideZZMINativeMorphSource_")
+                or section_name.startswith("[CommandListZZMINativeMorphCapture_")
+                or section_name.startswith("[CustomShaderZZMINativeMorphCapture_")
+                or section_name.startswith("[CustomShaderZZMINativeMorphClear_")
+                or section_name.startswith("[ResourceZZMINativeMorphSaved")
+                or section_name.endswith("_NativeMorphLookup]")
+            ):
+                sections.pop(section_name, None)
         sections.update(compute_blocks_to_add)
+        if native_morph_plans:
+            lookup_resource_by_hash = {}
+            weight_resource_by_hash = {}
+            for logical_hash in native_morph_plans:
+                hash_prefix = self.node._extract_hash_prefix(logical_hash)
+                base_resources = hash_to_base_resources.get(hash_prefix, [])
+                primary_base_resource = (
+                    base_resources[0]
+                    if base_resources
+                    else f"Resource_{self.node._hash_to_resource_prefix(logical_hash)}_Position"
+                )
+                lookup_resource_by_hash[logical_hash] = (
+                    native_morph.derive_native_morph_lookup_resource_name(
+                        primary_base_resource,
+                        logical_hash,
+                    )
+                )
+                weight_resource_by_hash[logical_hash] = (
+                    derive_shapekey_weight_resource_name(primary_base_resource)
+                )
+            sections.update(
+                native_morph.render_native_morph_ini_sections(
+                    plans_by_hash=native_morph_plans,
+                    lookup_resource_by_hash=lookup_resource_by_hash,
+                    weight_resource_by_hash=weight_resource_by_hash,
+                    lookup_filename_by_hash=native_morph_lookup_files,
+                    capture_shader_rel=(
+                        f"./res/{native_morph.CAPTURE_SHADER_NAME}"
+                    ),
+                    clear_shader_rel=(
+                        f"./res/{native_morph.CLEAR_SHADER_NAME}"
+                    ),
+                )
+            )
         self.node._write_ordered_dict_to_ini(sections, target_ini_file, preserved_tail_content, preserved_driver_content)
         return unique_hashes
