@@ -1956,29 +1956,20 @@ class DirectShapeKeyOutputMixin:
                 hash_to_vertex_count.get(hash_prefix, 0),
                 threads_per_group=16,
             )
-            if logical_hash not in native_hashes:
-                # 老路径（main 行为）：Dispatch 前把资源 ref 到 cs-u5，零拷贝。
-                if len(res_to_bind) > 1:
-                    for index, res_name in enumerate(res_to_bind, 1):
-                        block_lines.extend([
-                            f"    if $ssmt_sk_base_mesh == {index}",
-                            f"        {res_name} = ref cs-u5",
-                            "    endif",
-                        ])
-                else:
-                    block_lines.append(f"    {res_to_bind[0]} = ref cs-u5")
+            # Dispatch 前把目标资源 ref 到 cs-u5（main 行为，零拷贝回写）。
+            # 原生表情路径同样不需要 Dispatch 后再 copy 回同一个资源；
+            # 只有合并骨架等「别的资源」才在 Dispatch 后从 cs-u5 取数据。
+            if len(res_to_bind) > 1:
+                for index, res_name in enumerate(res_to_bind, 1):
+                    block_lines.extend([
+                        f"    if $ssmt_sk_base_mesh == {index}",
+                        f"        {res_name} = ref cs-u5",
+                        "    endif",
+                    ])
+            else:
+                block_lines.append(f"    {res_to_bind[0]} = ref cs-u5")
             block_lines.append(f"    Dispatch = {dispatch_count}, 1, 1")
             if logical_hash in native_hashes:
-                # 原生表情路径：Dispatch 后把写入结果 copy 回资源（新功能需要）。
-                if len(res_to_bind) > 1:
-                    for index, res_name in enumerate(res_to_bind, 1):
-                        block_lines.extend([
-                            f"    if $ssmt_sk_base_mesh == {index}",
-                            f"        {res_name} = copy cs-u5",
-                            "    endif",
-                        ])
-                else:
-                    block_lines.append(f"    {res_to_bind[0]} = copy cs-u5")
                 for _plan, skin_input in self._merged_native_morph_carriers(logical_hash):
                     if f"[{skin_input}]" in sections:
                         block_lines.append(f"    {skin_input} = copy cs-u5")
