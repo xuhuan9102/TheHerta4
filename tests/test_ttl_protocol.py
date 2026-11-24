@@ -95,3 +95,20 @@ class BuildTransparencyDrawLinesTests(unittest.TestCase):
         )
         self.assertIn(r"$\TTL\alpha = 0.25", lines)
         self.assertIn(r"Resource\TTL\TransparencyTex = null", lines)
+
+    def test_mask_invert_follows_panel_switch(self):
+        """面板 mask_invert=False/True → ZZMI 变量 0/1。
+
+        特性锁（旧代码即通过）：这里锁住两档，防止以后把 0/1 写死；面板默认
+        True 对应 D2 的 1，EFMI 走独立常量，不该出现在这份 ZZMI 参数组里。
+        """
+        off = build_transparency_draw_lines(
+            self._info("TEXTURE", mask_invert=False), "Resource_Diffuse_A", 100, 20, 3,
+        )
+        on = build_transparency_draw_lines(
+            self._info("TEXTURE", mask_invert=True), "Resource_Diffuse_A", 100, 20, 3,
+        )
+        self.assertIn(r"$\TTL\mask_invert = 0", off)
+        self.assertIn(r"$\TTL\mask_invert = 1", on)
+        joined = "\n".join(off + on)
+        self.assertNotIn(r"$\EFMITTL\mask_invert", joined)

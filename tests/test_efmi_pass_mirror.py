@@ -437,9 +437,13 @@ class ToggleSwitchSourceTests(unittest.TestCase):
         self.assertIn("efmi_pass_mirror_enabled()", body)
         self.assertIn("return", body)
 
-    def test_import_writeback_gated(self):
-        """导入侧的工作空间布局写回同样受开关控制。"""
-        self.assertIn("efmi_pass_mirror_enabled", self.import_code)
+    def test_import_always_stages_efmi_pass_layouts(self):
+        self.assertNotIn("efmi_pass_mirror_enabled", self.import_code)
+        self.assertRegex(
+            self.import_code,
+            r"if GlobalConfig\.logic_name == LogicName\.EFMI:\s*try:\s*"
+            r"from \.\.common\.efmi_skeleton import EFMISkeletonMergeHelper as _EFMIPassHelper",
+        )
 
 
 if __name__ == "__main__":

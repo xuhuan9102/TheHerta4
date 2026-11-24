@@ -246,6 +246,10 @@ class SSMTNode_PostProcess_AnimDriver(SSMTNode_PostProcess_Base):
             else:
                 merged_content = stripped_tail
 
+        if "; SSMT bone matrix default" in merged_content:
+            from ..common.zzmi_bone_matrix_playback import reconcile_bone_matrix_defaults
+
+            merged_content = reconcile_bone_matrix_defaults(merged_content)
         return merged_content
 
     @staticmethod

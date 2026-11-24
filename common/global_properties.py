@@ -301,9 +301,16 @@ class GlobalProterties(bpy.types.PropertyGroup):
         name="使用融合统一顶点组",
         description=(
             "导入并导出融合后的全局顶点组。ZZMI 开启时同时启用跨组融合、"
-            "合并网格自动重定向，并在工作空间导入完成后生成骨架。"
+            "合并网格自动重定向。"
         ),
         default=True,
+    ) # type: ignore
+
+    zzmi_generate_armature_on_import: bpy.props.BoolProperty(
+        name="导入时生成骨架",
+        description="融合成功后自动为导入的 ZZMI 网格创建 Blender 骨架并绑定权重。"
+        "导入所需的骨骼数据照常缓存到工作空间",
+        default=False,
     ) # type: ignore
 
     zzmi_fusion_from_workspace: bpy.props.BoolProperty(
@@ -626,6 +633,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def import_merged_vgmap(cls):
         return cls._instance().import_merged_vgmap
+
+    @classmethod
+    def zzmi_generate_armature_on_import(cls) -> bool:
+        return cls._bool_attr("zzmi_generate_armature_on_import", False)
 
     @classmethod
     def zzmi_fusion_per_lod(cls):

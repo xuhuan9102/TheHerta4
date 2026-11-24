@@ -31,6 +31,9 @@ class SSMTNode_Transparency(SSMTNodeBase):
         ),
         default='3',
     )
+    # 面板只服务 ZZMI（见 draw_buttons 的「仅在 ZZMI 模式生成 TTL 绘制」）：
+    # TTLib 需要 1 才是「白 = 不透明」，与 DiffuseMap / TTLMap 的 A = 不透明度一致。
+    # EFMI 另走 $\EFMITTL\mask_invert 常量（默认 0），不读这个面板值。
     mask_invert: BoolProperty(name="反转通道", default=True)
     alpha: FloatProperty(name="Alpha", default=0.5, min=0.0, max=1.0)
     brightness: FloatProperty(name="亮度", default=1.5, min=0.0, soft_max=5.0)

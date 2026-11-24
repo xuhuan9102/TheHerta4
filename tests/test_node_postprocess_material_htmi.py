@@ -2915,6 +2915,33 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(second.count(r"CommandList\EFMITTL\Draw"), 1)
 
+    def test_efmi_ttl_reexport_replaces_stale_mask_invert(self):
+        r"""旧导出块里的 $\EFMITTL\mask_invert = 1 重导时必须改成 0。
+
+        RED-BY: 旧代码在段里已有 CommandList\\EFMITTL\\Draw 时直接 return，
+        旧值 1 原样留下，此测试的 =0 计数断言失败。
+        """
+        BS = chr(92)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sections, section_name = self._make_efmi_ttl_fixture(
+                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE")
+            self._run_efmi_ttl(sections, section_name)
+            # 模拟 88ecd04 导出的旧块：把新写的 0 改回旧值 1。
+            stale_key = f"${BS}EFMITTL{BS}mask_invert = 1"
+            sections[section_name] = [
+                stale_key if str(line).strip().startswith(f"${BS}EFMITTL{BS}mask_invert")
+                else line
+                for line in sections[section_name]
+            ]
+            self.assertIn(stale_key, "\n".join(str(line) for line in sections[section_name]))
+
+            self._run_efmi_ttl(sections, section_name)
+            body = "\n".join(str(line) for line in sections[section_name])
+
+        self.assertEqual(body.count(f"${BS}EFMITTL{BS}mask_invert = 0"), 1)
+        self.assertEqual(body.count(f"${BS}EFMITTL{BS}mask_invert = 1"), 0)
+        self.assertEqual(body.count(f"run = CommandList{BS}EFMITTL{BS}Draw"), 1)
+
     def test_efmi_ttl_generates_without_library_file_present(self):
         """无需检测 EFMITTL 库文件是否存在，直接生成 TTL 绘制约定。"""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2929,6 +2956,66 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertIn(r"$\EFMITTL\first = 34", body)
             self.assertIn(r"Resource\EFMITTL\Mask = ref Resource_TTLMap_Body", body)
             node._process_ttl_sections.assert_not_called()
+
+    def test_efmi_ttl_mask_invert_defaults_to_zero(self):
+        r"""EFMI 侧 $\EFMITTL\mask_invert 默认 0（EFMITTL 直接乘通道值，白=不透明）。
+
+        RED-BY: 旧代码把该行硬写成 1，此测试在旧代码上计数断言失败。
+        """
+        BS = chr(92)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sections, section_name = self._make_efmi_ttl_fixture(
+                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE")
+            self._run_efmi_ttl(sections, section_name)
+
+            body = "\n".join(str(line) for line in sections[section_name])
+
+        self.assertEqual(body.count(f"${BS}EFMITTL{BS}mask_invert = 0"), 1)
+        self.assertEqual(body.count(f"${BS}EFMITTL{BS}mask_invert = 1"), 0)
+        # EFMI 分支不许出现 ZZMI 的变量名。
+        self.assertNotIn(f"${BS}TTL{BS}mask_invert", body)
+
+    def test_ttl_mask_invert_constants_are_namespaced(self):
+        """两套命名空间各有一个具名常量：EFMI 0、ZZMI 1，不许共用同一个值。
+
+        RED-BY: 旧代码没有 _EFMITTL_MASK_INVERT / _TTL_MASK_INVERT 两个属性，
+        此测试在旧代码上直接 AttributeError。
+        """
+        self.assertEqual(node_postprocess_material._EFMITTL_MASK_INVERT, 0)
+        self.assertEqual(node_postprocess_material._TTL_MASK_INVERT, 1)
+        self.assertNotEqual(
+            node_postprocess_material._EFMITTL_MASK_INVERT,
+            node_postprocess_material._TTL_MASK_INVERT,
+        )
+
+    def test_zzmi_ttl_mask_invert_is_one_and_never_efmi_name(self):
+        r"""ZZMI 侧 $\TTL\mask_invert = 1 恰一次，EFMI 变量名不出现。
+
+        特性锁（旧代码即通过）：D2/D3 的回归护栏，不承担 RED-BY。
+        """
+        BS = chr(92)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ttl_path = _write_png(temp_dir, "ttl.png")
+            mesh_name = "LOD0.drawhash-12-56.Body"
+            obj = _FakeObject(mesh_name, {}, [("TTLMap_Body", ttl_path)])
+            _fake_bpy.data.objects[obj.name] = obj
+            sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "ZZMI"
+            section_name = "[TextureOverride_ZZMI_Probe]"
+            sections = OrderedDict([
+                (section_name, [
+                    "hash = 241deac5",
+                    "match_first_index = 0",
+                    "ib = Resource_LOD0.drawhash_12_56_Index",
+                    f"; [mesh:{mesh_name}] [vertex_count:77]",
+                    "drawindexed = 12, 0, 0",
+                ]),
+                ("_config_path", temp_dir),
+            ])
+            _run_process(_ttl_node(), sections, section_name)
+            body = "\n".join(str(line) for line in sections[section_name])
+
+        self.assertEqual(body.count(f"${BS}TTL{BS}mask_invert = 1"), 1)
+        self.assertNotIn(f"${BS}EFMITTL{BS}mask_invert", body)
 
     def test_efmi_ttl_draw_args_only_accepts_single_instance_draws(self):
         """只有「单实例、无 base vertex、纯数字」的绘制才能交接给库。"""

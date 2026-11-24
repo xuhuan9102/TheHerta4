@@ -665,6 +665,9 @@ class PanelBasicInformation(bpy.types.Panel):
         if GlobalConfig.logic_name in _merged_skeleton_logic_names():
             layout.prop(global_properties, "import_merged_vgmap")
         if GlobalConfig.logic_name == LogicName.ZZMI:
+            row = layout.row()
+            row.enabled = global_properties.import_merged_vgmap
+            row.prop(global_properties, "zzmi_generate_armature_on_import")
             # 按 LOD 融合：每个 LOD 只读自己的提取目录、各自算一套合并骨骼，
             # 产物仍合并进同一个 Mod（同名资源按 LOD 前缀改名）。
             layout.prop(global_properties, "zzmi_fusion_per_lod")

@@ -1957,14 +1957,13 @@ class MergedMetadataRestoreTests(unittest.TestCase):
     def _write_gpu_json(self, payload):
         self.gpu_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    def test_present_keys_yield_false(self):
-        """GPU json 键完好 → False（幂等快路径，不触发修复重生成）。"""
+    def test_present_keys_without_source_caches_require_repair(self):
         self._write_gpu_json({
             "GPU-PreSkinning": True,
             "VGMap": {"0": 0, "1": 1},
             "VGMapAlgorithmVersion": 15,
         })
-        self.assertFalse(
+        self.assertTrue(
             EFMISkeletonMergeHelper.missing_merged_metadata_exist(
                 str(self.ws), ["LOD0.aaaabbbb-100-0"]
             )

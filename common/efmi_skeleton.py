@@ -6135,18 +6135,7 @@ class EFMISkeletonMergeHelper:
     def missing_merged_metadata_exist(
         cls, workspace_root: str, unique_str_list: list[str]
     ) -> bool:
-        """EFMI GPU 子网格是否存在缺失的合并元数据（VGMap 系列键）。
-
-        t15 活性修复：用户执行「清除骨骼合并VGMap缓存（clear_vgmap_cache）+
-        重新导入」时，若重导入的 import_merged_vgmap 复选框处于关闭状态，导入
-        预生成 ensure 被门控跳过 → json 的 VGOffset/VGCount/VGMap 键保持被清空
-        （域前置/导出依赖这些键；L0 段读空 → 域前置全拦，佩丽卡 13:12 实况）。
-
-        本方法供导入侧判断「无论复选框如何都需要修复性重生成」：请求集内含
-        GPU（GPU-PreSkinning != False）子网格且其 json 缺失 VGMap/VGMapAlgorithmVersion
-        即返回 True；键完好时返回 False（幂等快路径，零行为变化）。只检查请求
-        集内可解析的 json；CPU/无 GPU-PreSkinning 标记的 json 不参与判定。
-        """
+        """检查 GPU 子网格的融合映射和日后重建所需的两份来源缓存。"""
         if not workspace_root or not unique_str_list:
             return False
         for unique_str in unique_str_list:
@@ -6162,6 +6151,8 @@ class EFMISkeletonMergeHelper:
             if payload.get("GPU-PreSkinning") is False:
                 continue
             if not payload.get("VGMap") or not payload.get("VGMapAlgorithmVersion"):
+                return True
+            if cls._load_workspace_skeleton_source(payload, json_path, unique_str) is None:
                 return True
         return False
 

@@ -60,6 +60,28 @@ def _extract_gametype_name(import_folder_path: str) -> str:
     return normalized[index + len(marker):].strip("/").strip()
 
 
+def _apply_workspace_dhash_after_import() -> int:
+    """导入后把 FrameAnalysis log.txt 的 dHash 落进工作空间。
+
+    导出侧读的是 SubmeshJson 的 ``TextureMarkUpInfoList``，所以这一步必须
+    写回 JSON，不能只写 ``Config/TextureDHashCache.json``。找不到抓帧目录、
+    log 或任何可配对标记时静默跳过，绝不能阻断导入。
+    """
+    try:
+        from ..common.dhash_source import apply_workspace_dhash
+
+        workspace_root = str(GlobalConfig.path_workspace_folder() or "").strip()
+        if not workspace_root:
+            return 0
+        matched = apply_workspace_dhash(workspace_root)
+        if matched:
+            print(f"[dHash] 工作空间贴图 dHash 已回填: {matched} 个标记写入")
+        return matched
+    except Exception as exc:
+        print(f"[dHash] 导入后回填失败（不阻断导入）: {exc}")
+        return 0
+
+
 # 骨架组合集的轮换颜色（COLOR_01~08 轮换，便于在大纲视图区分不同组；
 # 直接用字符串字面量而非 CollectionColor 枚举——测试环境 stub 没有完整枚举值）
 _SKELETON_GROUP_COLORS = [
@@ -476,6 +498,10 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
     # 域前置全拦）。这里检测「合并元数据缺失」：无论复选框如何，缺失即修复性
     # 重生成（键完好时 missing_merged_metadata_exist=False → 门控保持原语义，
     # 幂等零行为变化；复选框开时行为不变）。
+    efmi_merged_consumption = (
+        GlobalConfig.logic_name == LogicName.EFMI
+        and GlobalProterties.import_merged_vgmap()
+    )
     _efmi_merged_metadata_missing = False
     if GlobalConfig.logic_name == LogicName.EFMI:
         try:
@@ -491,13 +517,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
 
     # EFMI 骨骼合并数据预生成：导入前把 FrameAnalysis 反查的 VGMap 写回工作空间 json，
     # 使导入流程走全局骨骼索引（json 有 VGMap 且 import_merged_vgmap 开启时自动生效）。
-    if (
-        GlobalConfig.logic_name == LogicName.EFMI
-        and (
-            GlobalProterties.import_merged_vgmap()
-            or _efmi_merged_metadata_missing
-        )
-    ):
+    if efmi_merged_consumption or _efmi_merged_metadata_missing:
         merged_vgmap_ready = False
         try:
             from ..common.efmi_skeleton import EFMISkeletonMergeHelper
@@ -510,18 +530,20 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
             )
             print(f"[EFMI骨骼合并] {message}")
             merged_vgmap_ready = bool(ok)
-            if ok:
+            if ok and efmi_merged_consumption:
                 self.report({'INFO'}, message)
-            else:
+            elif not ok:
                 print(f"[EFMI骨骼合并] 未生成骨骼数据：{message}")
                 # 部分/全部子网格未生成合并骨架数据时会走普通导入路线，
                 # 必须显式警告，避免用户误以为骨骼合并已完整生效。
-                self.report({'WARNING'}, f"骨骼合并未完整生成：{message}")
+                if efmi_merged_consumption:
+                    self.report({'WARNING'}, f"骨骼合并未完整生成：{message}")
         except Exception as e:
             import traceback
             print(f"[EFMI骨骼合并] 预生成失败（不阻断导入）: {e}")
             traceback.print_exc()
-            self.report({'WARNING'}, f"EFMI 骨骼合并预生成异常，已回退普通导入：{e}")
+            if efmi_merged_consumption:
+                self.report({'WARNING'}, f"EFMI 骨骼合并预生成异常，已回退普通导入：{e}")
 
         # 分组投影导入过滤（契约 C1-C5）：EFMI 多 LOD 投影模式下，非基准 LOD 目标
         # 只放行“明确匹配成功”者——GPU 有 VGMap / CPU/无顶点组有
@@ -531,12 +553,10 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
         # 由 ensure_skeleton_data 在内部任何失败点之前写入，因此合并预生成失败、
         # 回退普通导入时同样必须过滤，绝不让 CPU unknown（68 个实况）借“合并
         # 失败”路径绕过 C4 重新漏过。仅当本次导入实际执行过合并预生成
-        #（merged_vgmap_ready 为 True 或 False）时生效；复选框关闭（None，未
-        # 执行预生成、无裁决标记可依赖）时保留旧普通导入语义（C5 单 LOD/投影
-        # 关闭/未开启合并行为不变）。
+        #（merged_vgmap_ready 为 True 或 False）且请求使用融合编号时生效。
         if (
             merged_vgmap_ready is not None
-            and GlobalConfig.logic_name == LogicName.EFMI
+            and efmi_merged_consumption
             and GlobalProterties.efmi_lod_group_projection()
         ):
             try:
@@ -605,16 +625,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
     # 提取文件还在；来源日志更新时读侧自动淘汰、回退实时扫描（生成侧
     # efmi.py::_efmi_pass_layouts 先读此缓存）。按 IB 增量合并：本批导入只更新
     # 自己这些部件，旧批次部件不丢。任何失败都不阻断导入（生成侧有兜底）。
-    # 受导出节点「多pass贴图槽位镜像」总开关控制
-    # （GlobalProterties.efmi_pass_mirror_enabled，默认关）：开启时本流程才走并写缓存；
-    # 默认关 ⇒ 不写缓存（生成侧开关同为关闭态，缓存存在与否无所谓）。
-    # 访问器兜底（与本文件既有 getattr 习惯一致）：轻量宿主（测试桩、旧版本 add-on
-    # 的 GlobalProterties）可能没有该访问器，此时按属性默认值「关」处理，与属性声明
-    # 一致；访问器存在时读它的真实返回值（开启即走本流程）。
-    _efmi_pass_mirror_enabled = getattr(
-        GlobalProterties, "efmi_pass_mirror_enabled", lambda: False
-    )
-    if GlobalConfig.logic_name == LogicName.EFMI and _efmi_pass_mirror_enabled():
+    if GlobalConfig.logic_name == LogicName.EFMI:
         try:
             from ..common.efmi_skeleton import EFMISkeletonMergeHelper as _EFMIPassHelper
             from .universal.efmi_pass_mirror import (
@@ -707,7 +718,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
                     settings = {
                         "workspace_source": GlobalProterties.zzmi_fusion_from_workspace(),
                         "per_lod": GlobalProterties.zzmi_fusion_per_lod(),
-                        "cross_group": ZZMISkeletonMergeHelper.cross_group_merged_enabled(),
+                        "cross_group": True,
                     }
                     if not settings["workspace_source"]:
                         settings["frame_analysis_dir"] = ZZMISkeletonMergeHelper.resolve_frame_analysis_dir(
@@ -861,7 +872,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
                 self.report({'WARNING'}, f"HIMI 骨骼合并预生成异常，已回退普通导入：{e}")
 
     if merged_vgmap_ready is False and (
-        GlobalConfig.logic_name != LogicName.ZZMI
+        efmi_merged_consumption
         or zzmi_merged_consumption
         or himi_merged_consumption
     ):
@@ -876,9 +887,11 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
             "修复骨骼来源后可重新开启并再次导入",
         )
 
-    # 消费侧覆盖值：HIMI/ZZMI 复选框关闭时，即使数据已预生成到工作空间，也必须走
+    # 消费侧覆盖值：EFMI/HIMI/ZZMI 复选框关闭时走
     # 普通（局部）顶点组路线——传 None = 按全局选项决定，不改变旧版导入结果。
     merged_vgmap_import_override = merged_vgmap_ready
+    if GlobalConfig.logic_name == LogicName.EFMI and not efmi_merged_consumption:
+        merged_vgmap_import_override = None
     if GlobalConfig.logic_name == LogicName.ZZMI and not zzmi_merged_consumption:
         merged_vgmap_import_override = None
     if GlobalConfig.logic_name == _himi_logic_name and not himi_merged_consumption:
@@ -971,6 +984,9 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
     yield 89, "整理网格和顶点组"
     save_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict, filepath=save_import_json_path)
+    # 工作空间已解析、SubmeshJson 已就绪：把 FrameAnalysis 的 dHash 写回
+    # TextureMarkUpInfoList，供导出侧 filter 绑定读取；缺 log 时静默跳过。
+    _apply_workspace_dhash_after_import()
 
     if GlobalProterties.enable_non_mirror_workflow():
         total = len(imported_objects)
@@ -978,10 +994,14 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
             if index % 4 == 0:
                 yield 89 + 4 * index / total, f"整理网格 {index + 1}/{total}"
 
-    if zzmi_merged_consumption and merged_vgmap_ready is True:
+    if (
+        zzmi_merged_consumption
+        and merged_vgmap_ready is True
+        and GlobalProterties.zzmi_generate_armature_on_import()
+    ):
         yield 93, "重建导入骨架"
         try:
-            from ..blueprint.node_postprocess_bone_matrix import bind_imported_workspace_rigs
+            from ..common.zzmi_armature_reconstruction import bind_imported_workspace_rigs
 
             rigs = bind_imported_workspace_rigs(
                 context, Path(GlobalConfig.path_workspace_folder()), import_records,
@@ -1123,7 +1143,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
         )
         if (
             merged_vgmap_ready is True
-            and GlobalConfig.logic_name == LogicName.EFMI
+            and efmi_merged_consumption
             and GlobalProterties.efmi_lod_group_projection()
         ):
             try:
@@ -1458,6 +1478,8 @@ def _iter_workspace_import_ntemi(self, context, workspace_collection):
     yield 80, "整理网格和顶点组"
     save_import_json_path = os.path.join(workspace_root, "Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict, filepath=save_import_json_path)
+    # NTEMI 分支同样在 SubmeshJson 就绪后回填一次；缺 log 静默跳过。
+    _apply_workspace_dhash_after_import()
 
     if GlobalProterties.enable_non_mirror_workflow():
         total = len(imported_objects)

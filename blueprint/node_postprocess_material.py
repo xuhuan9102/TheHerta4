@@ -57,6 +57,15 @@ _TTL_LAYER_MAX_INDEX = 4
 _TTL_LAYER_COUNT = _TTL_LAYER_MAX_INDEX + 1
 _TTL_LAYER_SUFFIX_RE = re.compile(r'_TTL层([^\s_]*)', re.IGNORECASE)
 _TTL_WEIGHT_SUFFIX_RE = re.compile(r'_TTL权重([^\s_]*)', re.IGNORECASE)
+# ZZMI/TTLib 的遮罩方向：CaptureMask.hlsl 先按 invert 做 `1 - mask`，再用
+# `coverage = 1 - mask` 算覆盖率；TTLMap 的 A 通道是不透明度（白 = 不透明），
+# 所以必须写 1 才能抵消库里的那次取反。EFMITTL 的公式是直接乘通道值，方向
+# 相反，用 _EFMITTL_MASK_INVERT（0），两套命名空间不能共用这个值。
+# 例外：drag_tear 的撕裂遮罩会临时写 `$\TTL\mask_invert = 0` 再恢复
+# （blueprint/drag_tear.py:294，配套 shader 先做了预反相），那是独立语义，
+# 不要按这个常量去“统一”它。
+_TTL_MASK_INVERT = 1
+_TTL_MASK_INVERT_LINE = "$\\TTL\\mask_invert = {}".format(_TTL_MASK_INVERT)
 # ── EFMI 半透明（EFMITTL）──────────────────────────────────────────────
 # 末地 EFMI 没有 ZZMI/TTLib 那种「把这一笔改写成第二遍绘制」的 TTL；它的半透明由
 # 一个共享库接管**这一次**绘制：调用方只交出场参数（索引数 / 起始索引，可选 alpha
@@ -70,9 +79,19 @@ _EFMITTL_KEY = "EFMITTL"
 _EFMITTL_LIBRARY_FILE = os.path.join(_EFMITTL_KEY, "translucency.ini")
 _EFMITTL_MASK_PARAM = "Resource\\EFMITTL\\Mask"
 _EFMITTL_DRAW_LINE = "run = CommandList\\EFMITTL\\Draw"
-# TTLMap 的 A 通道存不透明度。EFMITTL 的 invert=0 直接使用 A。
+# 遮罩默认读透明通道（3 = A）：库自己的默认是 0（R），我们不跟它，每次显式写 3。
+# 提取工具的透明通道贴图四个通道同值，所以 3 读到的就是那张遮罩本身。
+#
+# 遮罩方向由两个库各自的取样公式决定，不能共用同一个值：
+# * EFMITTL（shaders/opacity.hlsli:41,49）invert=0 时直接返回通道值，
+#   `alpha *= saturate(mask)`；TTLMap 的 A 通道存的是不透明度（白 = 不透明），
+#   所以 EFMI 必须写 0。写 1 会走 `1 - v`，把整块透明度反相。
+# * TTLib（Shaders/CaptureMask.hlsl:18,32）先按 invert 做 `1 - mask`，再用
+#   `coverage = (1 - mask)` 算覆盖率；同一张 A = 不透明度的 TTLMap 要抵消这次
+#   取反，ZZMI 侧必须写 1（见 _TTL_MASK_INVERT）。
 _EFMITTL_MASK_CHANNEL_LINE = "$\\EFMITTL\\mask_channel = 3"
-_EFMITTL_MASK_INVERT_LINE = "$\\EFMITTL\\mask_invert = 0"
+_EFMITTL_MASK_INVERT = 0
+_EFMITTL_MASK_INVERT_LINE = "$\\EFMITTL\\mask_invert = {}".format(_EFMITTL_MASK_INVERT)
 _EFMITTL_DRAW_RE = re.compile(
     r'^(?P<indent>\s*)drawindexed(?:instanced)?\s*=\s*(?P<args>[^;]+?)\s*$',
     re.IGNORECASE,
@@ -2460,7 +2479,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 alpha_line_provider=alpha_line_provider)
             param_lines.extend(ttl_ref_lines)
             param_lines.append("${}TTL{}mask_channel = 3".format(chr(92), chr(92)))
-            param_lines.append("${}TTL{}mask_invert = 1".format(chr(92), chr(92)))
+            param_lines.append(_TTL_MASK_INVERT_LINE)
             if alpha_line_provider is None:
                 alpha_value = self._ttl_alpha_for_material(ttl_materials[0])
                 alpha_value = self._ttl_apply_weight(alpha_value, layer_weight)
@@ -2785,6 +2804,48 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             return None
         return count, first
 
+    @staticmethod
+    def _efmi_ttl_refresh_mask_invert(lines):
+        """把已有 EFMI 块里的旧 ``mask_invert`` 同步到当前常量。
+
+        88ecd04 生成的是 ``= 1``；重导时段里已经有库调用，不能整段跳过，否则
+        老工程仍留着反相值。只改这一行（重复行只留第一条），参数顺序与其它
+        行不动；极老的块没有这一行时补在 ``count`` / ``Draw`` 之前。
+        """
+        pattern = re.compile(
+            r'^(\s*)\$\\EFMITTL\\mask_invert\s*=\s*[^;\s]+',
+            re.IGNORECASE,
+        )
+        first = None
+        index = 0
+        while index < len(lines):
+            match = pattern.match(str(lines[index]))
+            if not match:
+                index += 1
+                continue
+            if first is None:
+                lines[index] = match.group(1) + _EFMITTL_MASK_INVERT_LINE
+                first = index
+                index += 1
+            else:
+                del lines[index]
+        if first is not None:
+            return
+
+        insert_at = len(lines)
+        for index, line in enumerate(lines):
+            if re.match(r'^\s*\$\\EFMITTL\\count\s*=', str(line), re.IGNORECASE):
+                insert_at = index
+                break
+        else:
+            for index, line in enumerate(lines):
+                if _EFMITTL_DRAW_LINE.casefold() in str(line).casefold():
+                    insert_at = index
+                    break
+        indent_match = re.match(r'^(\s*)', str(lines[insert_at])) if insert_at < len(lines) else None
+        indent = indent_match.group(1) if indent_match else ''
+        lines.insert(insert_at, indent + _EFMITTL_MASK_INVERT_LINE)
+
     def _process_efmi_ttl_sections(self, section_name, lines, all_sections,
                                    material_group_to_swapkey, swap_key_prefix,
                                    next_swap_key_num, used_swap_keys, texture_folder):
@@ -2806,7 +2867,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         """
         from ..utils.log_utils import LOG as _LOG
         if any(_EFMITTL_DRAW_LINE.casefold() in str(line).casefold() for line in lines):
-            # 这个段已经交给库了：重复导出时别把参数行叠第二遍。
+            # 这个段已经交给库了：别把参数行叠第二遍，但要把旧版本的方向常量
+            # 同步到当前值（88ecd04 生成的是 = 1，EFMITTL 需要 0）。
+            self._efmi_ttl_refresh_mask_invert(lines)
             return next_swap_key_num
 
         mesh_lines_info = [(i, self.extract_mesh_name(line))

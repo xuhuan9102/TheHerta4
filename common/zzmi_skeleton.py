@@ -1374,6 +1374,8 @@ class ZZMISkeletonMergeHelper:
                 payload, json_path, unique_str, expect_cross=expect_cross
             ):
                 return True
+            if not cls._zzmi_source_cache_intact(payload, json_path, unique_str):
+                return True
         return False
 
     @classmethod
@@ -1423,12 +1425,10 @@ class ZZMISkeletonMergeHelper:
     def _cross_numbering_expected(cls, workspace_root: str) -> bool:
         """本工作空间是否应按**骨骼池编号**判定缓存是否可用。
 
-        开关开着、并且池方案文件就在盘上时才成立：没有方案文件时历史分组编号
+        池方案文件就在盘上时才成立：没有方案文件时历史分组编号
         才是这个工作空间的正常态（提取源没有锚点骨可锚），不能因此把它常年判成
         「缺件」反复重建。
         """
-        if not cls.cross_group_merged_enabled():
-            return False
         # 按 LOD 分批时方案文件在 <工作区>/<LOD>/ 下，根文件通常不存在：
         # 这时仍应按"跨组编号"校验（缺本 LOD 方案 ⇒ 缓存判 stale 重建），
         # 否则历史分组编号的旧缓存会被当成完整缓存永久跳过。
@@ -1445,25 +1445,6 @@ class ZZMISkeletonMergeHelper:
             return os.path.isfile(get_profile_path(workspace_root))
         except Exception:  # pragma: no cover - 磁盘异常
             return False
-
-    @staticmethod
-    def cross_group_merged_enabled() -> bool:
-        """跨组骨骼合并开关（`cross_group_merged_vgmap_test`）。
-
-        `common/` 不能反向 import `ui/`，这里只按名字取 `GlobalProterties` 上的同名
-        访问器；宿主没注册该属性时退回插件里的默认值（开启，与属性声明一致）。
-        """
-        try:
-            from .global_properties import GlobalProterties
-        except Exception:
-            return True
-        getter = getattr(GlobalProterties, "cross_group_merged_vgmap_test", None)
-        if not callable(getter):
-            return True
-        try:
-            return bool(getter())
-        except Exception:
-            return True
 
     @classmethod
     def _cross_group_plan_or_none(cls, ready_groups: dict) -> dict | None:
@@ -1740,7 +1721,7 @@ class ZZMISkeletonMergeHelper:
         # 按 LOD 分批时，池方案文件在 <工作区>/<LOD>/ 下：门控必须看本批自己的那份，
         # 否则根文件不存在会把 cross 缓存判成"没有方案"而永久跳过重建。
         profile_root = os.path.join(workspace_root, _lod) if _lod else workspace_root
-        expect_cross = settings["cross_group"] if settings is not None else bool(cls.cross_group_merged_enabled())
+        expect_cross = settings["cross_group"] if settings is not None else True
         pool_profile_ready = False
         profile_path = ""
         if expect_cross:
@@ -2394,7 +2375,7 @@ class ZZMISkeletonMergeHelper:
         # 逐 LOD 共用会让后一个 LOD 覆盖前一个（前一个 LOD 的 VGMap 与最终方案不符）。
         cross_plan = (
             cls._cross_group_plan_or_none(ready_groups)
-            if cls.cross_group_merged_enabled()
+            if expect_cross
             else None
         )
         if cross_plan is not None:

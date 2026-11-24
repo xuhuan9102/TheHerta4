@@ -6860,6 +6860,52 @@ class ExportZZMI(ExportUnity):
             return bytes(category_buffer)
         return None
 
+    def _has_bone_matrix_playback(self) -> bool:
+        return any(
+            getattr(node, "bl_idname", "") == "SSMTNode_PostProcess_BoneMatrix"
+            and not getattr(node, "mute", False)
+            for node in getattr(getattr(self, "blueprint_model", None), "postprocess_nodes", ())
+        )
+
+    def _add_bone_matrix_render_inputs(self, ini_builder):
+        from ...common.zzmi_bone_matrix_render_inputs import (
+            BLEND_STRIDE,
+            POSITION_STRIDE,
+            compatible_position,
+            normalized_blend,
+        )
+
+        mod_dir = GlobalConfig.path_generate_mod_folder()
+        mesh_dir = GlobalConfig.path_generatemod_buffer_folder()
+        folder = os.path.relpath(mesh_dir, mod_dir).replace("\\", "/")
+        section = M_IniSection(M_SectionType.ResourceBuffer)
+        for component in self.merged_skeleton_components:
+            ib = component["draw_ib"]
+            if not compatible_position(self._drawib_category_layout(ib, "Position")):
+                continue
+            packed = normalized_blend(
+                self._drawib_exported_blend_bytes(ib) or b"", self._drawib_blend_layout(ib),
+            )
+            if not packed:
+                continue
+            rows = len(packed) // BLEND_STRIDE
+            position_file = f"{ib}-Position.buf"
+            position_path = os.path.join(mesh_dir, position_file)
+            if not os.path.isfile(position_path) or os.path.getsize(position_path) != rows * POSITION_STRIDE:
+                continue
+            blend_file = f"ssmt_bone_matrix_{ib}_Blend.buf"
+            self._atomic_write_binary(os.path.join(mesh_dir, blend_file), packed)
+            for kind, stride, filename in (
+                ("Position", POSITION_STRIDE, position_file),
+                ("Blend", BLEND_STRIDE, blend_file),
+            ):
+                section.extend((
+                    f"[ResourceSSMTBoneMatrixBind{kind}_{ib}]", "type = StructuredBuffer",
+                    f"stride = {stride}", f"array = {rows}", "bind_flags = shader_resource",
+                    f"filename = {folder}/{filename}", "",
+                ))
+        ini_builder.append_section(section)
+
     def _build_redirect_blend_retarget(
         self, carrier_ib: str, anchor_layout: dict
     ) -> tuple[str, int, str, bytes] | None:
@@ -8501,6 +8547,10 @@ class ExportZZMI(ExportUnity):
             texture_override_ib_section.append("[TextureOverride_" + texture_override_name_suffix + "]")
             texture_override_ib_section.append("hash = " + override_hash)
             texture_override_ib_section.append("match_first_index = " + str(override_first_index))
+            if self.has_merged_skeleton and self._has_bone_matrix_playback():
+                index_count = int(submesh_model.match_index_count or 0)
+                if index_count > 0:
+                    texture_override_ib_section.append(f"match_index_count = {index_count}")
 
             # F2 跨组校准：在本部件**自己的渲染 draw** 处捕获本骨架组的
             # 「对象→世界 cb1」到 `ResourceZZCb1_G<N>`。
@@ -9074,6 +9124,8 @@ class ExportZZMI(ExportUnity):
         if self.has_merged_skeleton:
             self.add_merged_skeleton_sections(ini_builder)
             self._copy_merged_skeleton_shader_to_mod()
+            if self._has_bone_matrix_playback():
+                self._add_bone_matrix_render_inputs(ini_builder)
 
         ini_path = GlobalConfig.path_generate_mod_ini()
         if getattr(self, "_native_flow_height", None) is not None:

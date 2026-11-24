@@ -4,8 +4,7 @@
 用户要求（生成侧 / 消费侧分离）：
 
 1. **生成侧**：首次导入、或「清除骨骼合并VGMap缓存」后重新导入时，无论
-   「使用融合统一顶点组」以及两个实验开关（启用合并网格自动重定向 /
-   跨组融合统一顶点组测试）是否开启，都必须把提取文件里的骨骼合并数据
+   融合编号和自动生成 Blender 骨架是否开启，都必须把提取文件里的骨骼合并数据
    完整反查并落盘到工作空间，之后打开任何开关都不再需要提取文件；
 2. **消费侧**：复选框仍决定本次导入/导出是否使用这份数据——关闭时导入
    结果必须与旧版一致（走局部顶点组、不按 SkeletonGroup 归集）。
@@ -20,6 +19,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMPORT_UI = REPO_ROOT / "ui" / "ui_func_import_ssmt.py"
 ZZMI_SKELETON = REPO_ROOT / "common" / "zzmi_skeleton.py"
+GLOBAL_PROPERTIES = REPO_ROOT / "common" / "global_properties.py"
+IMPORT_PANEL = REPO_ROOT / "ui" / "ui_panel_basic.py"
 
 EXPERIMENTAL_SWITCHES = ("zzmi_merged_redirect_enabled", "cross_group_merged_vgmap_test")
 
@@ -79,8 +80,9 @@ class GenerationGateTests(unittest.TestCase):
         )
         self.assertIsNotNone(match, "缺少预生成失败回退块")
         condition = match.group("cond")
-        self.assertIn("LogicName.ZZMI", condition)
         self.assertIn("zzmi_merged_consumption", condition)
+        self.assertIn("efmi_merged_consumption", condition)
+        self.assertIn("himi_merged_consumption", condition)
 
 
 class ConsumptionGateTests(unittest.TestCase):
@@ -90,18 +92,19 @@ class ConsumptionGateTests(unittest.TestCase):
         self.source = _read(IMPORT_UI)
 
     def test_import_override_forced_none_when_not_consuming(self):
-        match = re.search(
-            r"merged_vgmap_import_override = merged_vgmap_ready\n"
-            r"\s+if GlobalConfig\.logic_name == LogicName\.ZZMI "
-            r"and not zzmi_merged_consumption:\n"
-            r"\s+merged_vgmap_import_override = None",
-            self.source,
-        )
-        self.assertIsNotNone(
-            match,
-            "ZZMI 复选框关闭时，必须把 use_merged_vgmap 覆盖为 None（沿用全局"
-            "选项 = 局部顶点组），不能因为数据已预生成而改变导入结果",
-        )
+        override = self.source.split("merged_vgmap_import_override = merged_vgmap_ready", 1)[1]
+        override = override.split("foldername_gametypename_dict", 1)[0]
+        for logic_name, setting in (
+            ("LogicName.EFMI", "efmi_merged_consumption"),
+            ("LogicName.ZZMI", "zzmi_merged_consumption"),
+            ("_himi_logic_name", "himi_merged_consumption"),
+        ):
+            with self.subTest(logic_name=logic_name):
+                self.assertIn(
+                    f"if GlobalConfig.logic_name == {logic_name} and not {setting}:\n"
+                    "        merged_vgmap_import_override = None",
+                    override,
+                )
 
     def test_create_mesh_uses_override(self):
         self.assertIn("use_merged_vgmap=merged_vgmap_import_override", self.source)
@@ -122,6 +125,26 @@ class ConsumptionGateTests(unittest.TestCase):
             3,
             "INFO/WARNING 上报与自动关闭选项都必须以「本次确实请求消费」为前提",
         )
+
+    def test_armature_creation_is_opt_in_below_the_merge_checkbox(self):
+        props = _read(GLOBAL_PROPERTIES)
+        panel = _read(IMPORT_PANEL)
+        self.assertRegex(props, r"(?s)zzmi_generate_armature_on_import: bpy\.props\.BoolProperty\([^)]*default=False")
+        self.assertRegex(
+            panel,
+            r'layout\.prop\(global_properties, "import_merged_vgmap"\)\n'
+            r'\s+if GlobalConfig\.logic_name == LogicName\.ZZMI:\n'
+            r'\s+row = layout\.row\(\)\n'
+            r'\s+row\.enabled = global_properties\.import_merged_vgmap\n'
+            r'\s+row\.prop\(global_properties, "zzmi_generate_armature_on_import"\)',
+        )
+        self.assertRegex(
+            self.source,
+            r"if \(\s*zzmi_merged_consumption\s*and merged_vgmap_ready is True"
+            r"\s*and GlobalProterties\.zzmi_generate_armature_on_import\(\)\s*\):"
+            r'\s*yield 93, "重建导入骨架"',
+        )
+        self.assertEqual(self.source.count("zzmi_generate_armature_on_import"), 1)
 
 
 class SwitchIndependenceTests(unittest.TestCase):
