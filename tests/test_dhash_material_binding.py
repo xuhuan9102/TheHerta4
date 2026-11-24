@@ -6,7 +6,7 @@
    ``all_sections`` 里不出现任何 ``[Filter_...]``（默认关零变化）。
 2. 全局开关开启但部件 ``binding_mode == "FIXED"``：仍旧写法。
 3. 开启 + DHASH + slot_info 带合法 16 位 dhash/format：返回
-   ``ps-t[Filter_...] = ref ...``，并在 ``all_sections`` **顶层**注册
+   ``ps-t[Filter_...] = Resource...``，并在 ``all_sections`` **顶层**注册
    ``[Filter_...]``（``match_format`` 去掉 ``DXGI_FORMAT_`` 前缀，
    ``match_dhash`` 逐字符一致）。
 4. 两个物体 dhash 不同 → 两个 Filter 段；dhash 相同 → 复用同一个段。
@@ -288,7 +288,7 @@ class DHashMaterialBindingTests(unittest.TestCase):
         )
         filter_name = "Filter_LOD0_abcd_1_0_Body_Diffuse"
         self.assertEqual(
-            line, "ps-t[{}] = ref Resource_DiffuseMap_Body".format(filter_name)
+            line, "ps-t[{}] = Resource_DiffuseMap_Body".format(filter_name)
         )
         filter_key = "[" + filter_name + "]"
         self.assertEqual(_filter_keys(sections), [filter_key])

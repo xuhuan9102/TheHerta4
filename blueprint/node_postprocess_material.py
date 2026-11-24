@@ -35,6 +35,34 @@ _reverse_name_mapping_cache = {}
 _rabbitfx_outputs = {}
 # 资源缓存按“材质内容签名”去重，避免同一套贴图被重复复制/重复生成 Resource。
 _material_resource_cache = {}
+# dHash 贴图快照/还原：块首/块尾两条 run 名由主人指定；当前两句都叫
+# RestoreInitialTextures，两个常量分开，未来只改一处即可。
+_RUN_BEFORE_DRAW = "RestoreInitialTextures"
+_RUN_AFTER_DRAW = "RestoreInitialTextures"
+# 段名对应的 3Dmigoto 内置小写命令（只在对应 run 名出现时发段）。
+_DHASH_RUN_BUILTIN = {
+    "SnapshotInitialTextures": "snapshotoriginaltextures",
+    "RestoreInitialTextures": "restoreoriginaltextures",
+}
+
+
+def _dhash_run_names():
+    """实际用到的 run 名（去重、保持首次出现顺序）。"""
+    names = []
+    for name in (_RUN_BEFORE_DRAW, _RUN_AFTER_DRAW):
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _is_dhash_run_line(line):
+    stripped = str(line or "").strip()
+    return stripped in tuple("run = " + name for name in _dhash_run_names())
+
+
+_DHASH_FILTER_BINDING_RE = re.compile(
+    r"^(ps-t\[(Filter_[^\]]+)\])\s*=\s*(\S.*)$", re.IGNORECASE
+)
 # 旧版把 TTL 写成段尾一整组，靠这两个标记在重导出时整组摘掉。现在是就地替换，
 # 标记只剩兼容用途：老工程文件里残留的组仍由 _strip_ttl_groups 摘走。
 _TTL_GROUP_MARKER = "; [SSMT-TTL] {}"
@@ -1378,7 +1406,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
     def build_mapping_for_section(self, lines):
         mapping = OrderedDict()
-        line_pattern = re.compile(r'^(ps-t\d+|Resource\\[^\s=]+)\s*=\s*(?:ref\s+)?(.*)$')
+        line_pattern = re.compile(
+            r'^(ps-t(?:\d+|\[[^\]]+\])|Resource\\[^\s=]+)\s*=\s*(?:ref\s+)?(.*)$'
+        )
         for line in lines:
             resource_match = line_pattern.match(line.strip())
             if resource_match:
@@ -1958,7 +1988,28 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         """从 slot_info 取规范化后的 ``(dhash, format)``；非法时返回空串。"""
         if not isinstance(slot_info, dict):
             return "", ""
-        from ..common.dhash_metadata import normalize_dhash, normalize_format
+        try:
+            from ..common.dhash_metadata import normalize_dhash, normalize_format
+        except ImportError:  # tests/ 以 fake 包骨架按文件路径加载本模块时走到
+            import importlib.util as _importlib_util
+            import os as _os
+            import sys as _sys
+
+            _dhash_name = "theherta4_dhash_metadata_for_material"
+            _dhash_mod = _sys.modules.get(_dhash_name)
+            if _dhash_mod is None:
+                _dhash_spec = _importlib_util.spec_from_file_location(
+                    _dhash_name,
+                    _os.path.join(
+                        _os.path.dirname(_os.path.abspath(__file__)),
+                        "..", "common", "dhash_metadata.py",
+                    ),
+                )
+                _dhash_mod = _importlib_util.module_from_spec(_dhash_spec)
+                _sys.modules[_dhash_name] = _dhash_mod
+                _dhash_spec.loader.exec_module(_dhash_mod)
+            normalize_dhash = _dhash_mod.normalize_dhash
+            normalize_format = _dhash_mod.normalize_format
 
         dhash = ""
         for key in ("source_dhash", "dhash", "texture_dhash", "SourceDHash", "DHash"):
@@ -1977,7 +2028,27 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
     @classmethod
     def _dhash_role_for_mark_name(cls, mark_name):
         """DiffuseMap/NormalMap/... → Filter 角色名：统一走共享函数。"""
-        from ..common.dhash_metadata import role_for_mark_name
+        try:
+            from ..common.dhash_metadata import role_for_mark_name
+        except ImportError:  # tests/ fake 包
+            import importlib.util as _importlib_util
+            import os as _os
+            import sys as _sys
+
+            _dhash_name = "theherta4_dhash_metadata_for_material"
+            _dhash_mod = _sys.modules.get(_dhash_name)
+            if _dhash_mod is None:
+                _dhash_spec = _importlib_util.spec_from_file_location(
+                    _dhash_name,
+                    _os.path.join(
+                        _os.path.dirname(_os.path.abspath(__file__)),
+                        "..", "common", "dhash_metadata.py",
+                    ),
+                )
+                _dhash_mod = _importlib_util.module_from_spec(_dhash_spec)
+                _sys.modules[_dhash_name] = _dhash_mod
+                _dhash_spec.loader.exec_module(_dhash_mod)
+            role_for_mark_name = _dhash_mod.role_for_mark_name
         return role_for_mark_name(mark_name)
 
     @staticmethod
@@ -1995,12 +2066,35 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         Filter 段；同名不同数据用 dhash 前 8 位加后缀消歧，绝不覆盖已有 Filter。
         与 ``ui/universal/efmi.py`` 的 ``_dhash_filter_name`` 同一套命名/去重口径。
         """
-        from ..common.dhash_metadata import (
-            filter_name_for,
-            filter_name_with_suffix,
-            filter_section_lines,
-            role_from_filter_name,
-        )
+        try:
+            from ..common.dhash_metadata import (
+                filter_name_for,
+                filter_name_with_suffix,
+                filter_section_lines,
+                role_from_filter_name,
+            )
+        except ImportError:  # tests/ fake 包
+            import importlib.util as _importlib_util
+            import os as _os
+            import sys as _sys
+
+            _dhash_name = "theherta4_dhash_metadata_for_material"
+            _dhash_mod = _sys.modules.get(_dhash_name)
+            if _dhash_mod is None:
+                _dhash_spec = _importlib_util.spec_from_file_location(
+                    _dhash_name,
+                    _os.path.join(
+                        _os.path.dirname(_os.path.abspath(__file__)),
+                        "..", "common", "dhash_metadata.py",
+                    ),
+                )
+                _dhash_mod = _importlib_util.module_from_spec(_dhash_spec)
+                _sys.modules[_dhash_name] = _dhash_mod
+                _dhash_spec.loader.exec_module(_dhash_mod)
+            filter_name_for = _dhash_mod.filter_name_for
+            filter_name_with_suffix = _dhash_mod.filter_name_with_suffix
+            filter_section_lines = _dhash_mod.filter_section_lines
+            role_from_filter_name = _dhash_mod.role_from_filter_name
 
         wanted_lines = [str(line) for line in filter_section_lines(fmt, dhash)]
         wanted_normalized = [line.strip() for line in wanted_lines]
@@ -2038,7 +2132,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
     def _build_dhash_binding_line(self, obj, slot_info, binding_mode, resource_name,
                                   all_sections):
-        """DHASH 模式返回 ``ps-t[Filter_...] = ref <resource>``，否则返回 None。"""
+        """DHASH 模式返回按 Filter 选择槽位的材质绑定。"""
         if str(binding_mode or "FIXED").strip().upper() != "DHASH":
             return None
         if not self._dhash_texture_enabled():
@@ -2054,7 +2148,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         filter_name = self._register_dhash_filter_section(
             all_sections, token, role, fmt, dhash
         )
-        return "ps-t[{}] = ref {}".format(filter_name, resource_name)
+        return "ps-t[{}] = {}".format(filter_name, resource_name)
 
     def create_resource_entry(self, material, param_name, texture_folder, all_sections,
                               resource_name_override=None, workspace_source_path=None,
@@ -2247,7 +2341,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 continue
 
             if inside_mesh_block and self._is_generated_material_line(stripped):
-                ps_match = re.match(r"^(ps-t\d+)\s*=", stripped, re.IGNORECASE)
+                ps_match = re.match(
+            r"^(ps-t(?:\d+|\[[^\]]+\]))\s*=", stripped, re.IGNORECASE
+        )
                 if ps_match and ps_match.group(1).strip().lower() in preserved_ps_slots:
                     cleaned_lines.append(line)
                     continue
@@ -3570,6 +3666,332 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                     paths.add(bpy.path.abspath(image.filepath, library=image.library))
         TextureExportPlan.prewarm_sources(sorted(paths))
 
+    def _iter_draw_units(self, lines, material_target=False):
+        """基类兜底：普通材质节点对整个段负责，所有绘制单元都算目标。
+
+        pro 节点覆盖本方法，用 ``material_target=True`` 只返回真正生成了材质行的
+        目标单元；快照/还原 wrapper 只依赖本方法的返回结构。
+        """
+        from . import ini_scope
+
+        return list(ini_scope.iter_draw_units(lines))
+
+    @staticmethod
+    def _add_snapshot_restore_for_units(lines, units):
+        """逐绘制单元补「块首 run → 该笔自己的 Filter → draw → 块尾 run」。
+
+        从后往前插，避免行号漂移；没有 ``ps-t[Filter_`` 或已有同名 run 行的
+        单元跳过。返回插入组数。
+        """
+        edits = []
+        claimed_filters = set()
+        for unit in units:
+            if unit.get("is_target") is False:
+                continue
+            try:
+                start = int(unit.get("start", 0))
+                end = int(unit.get("end", 0))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if start < 0 or end > len(lines) or start >= end:
+                continue
+            draw_lines = []
+            for index in unit.get("draw_lines") or []:
+                try:
+                    index = int(index)
+                except (TypeError, ValueError):
+                    continue
+                if start <= index < end:
+                    draw_lines.append(index)
+            if not draw_lines:
+                continue
+            filter_lines = [
+                index
+                for index in range(start, end)
+                if index not in claimed_filters
+                and "ps-t[Filter_" in str(lines[index] or "")
+            ]
+            if not filter_lines:
+                continue
+            if any(_is_dhash_run_line(lines[index]) for index in range(start, end)):
+                continue
+            snapshot_at = filter_lines[0]
+            restore_at = max(draw_lines) + 1
+            if restore_at <= snapshot_at:
+                continue
+            claimed_filters.update(
+                index
+                for index in range(start, end)
+                if "ps-t[Filter_" in str(lines[index] or "")
+            )
+            edits.append((snapshot_at, restore_at))
+
+        for snapshot_at, restore_at in reversed(edits):
+            lines.insert(restore_at, "run = " + _RUN_AFTER_DRAW)
+            lines.insert(snapshot_at, "run = " + _RUN_BEFORE_DRAW)
+        return len(edits)
+
+    def _rewrite_block_to_per_draw_groups(self, lines, draw_units):
+        """把「块顶堆 Filter 绑定 + 块级 run 对」重写成逐绘制组。
+
+        只在块内每一笔 draw 都有自己独立的 ``ps-t[Filter_`` 时调用：先删块顶
+        共享 Filter 绑定和旧 run 行，再按 ``; [mesh:...]`` 单元重新插入。
+        """
+        try:
+            first_unit_start = min(int(unit.get("start", 0)) for unit in draw_units)
+        except (AttributeError, TypeError, ValueError):
+            return 0
+
+        # 块顶共享绑定：先把能按 ``Filter_<物体token>_`` 对上的 Filter 分给
+        # 各自的 ``; [mesh:...]`` 单元，再删块顶剩余 Filter；数字槽只删
+        # “该块每笔自己又生成了一份”的槽，避免误删公共默认绑定。
+        def _mesh_token(mesh_name):
+            # Blender 复制后缀 `.001` / `.002` 与导出的 `_copy` 尾巴都要剥掉：
+            # 三笔 `.001_copy/.002_copy/.003_copy` 共用同一个源物体 token。
+            text = re.sub(r"\.\d+(?=_copy$|$)", "", str(mesh_name or ""))
+            text = text.replace("_copy", "")
+            text = re.sub(r"[^a-z0-9_]+", "_", text.lower())
+            return text.strip("_")
+
+        unit_token_to_meshes = {}
+        for unit in draw_units:
+            mesh = str(unit.get("mesh", "") or "")
+            if not mesh:
+                continue
+            token = _mesh_token(mesh)
+            if not token:
+                continue
+            unit_token_to_meshes.setdefault(token, []).append(mesh)
+
+        top_filters_by_mesh = {}
+        top_filter_indices = []
+        for index in range(0, max(0, first_unit_start)):
+            stripped = str(lines[index] or "").strip()
+            if "ps-t[Filter_" not in stripped:
+                continue
+            top_filter_indices.append(index)
+            name_match = re.search(r"ps-t\[([^\]]+)\]", stripped, re.IGNORECASE)
+            filter_name = (
+                re.sub(r"[^a-z0-9_]+", "_", name_match.group(1).lower())
+                if name_match else ""
+            )
+            matched_tokens = [
+                token for token in unit_token_to_meshes
+                if token
+                and (
+                    filter_name == "filter_" + token
+                    or filter_name.startswith("filter_" + token + "_")
+                )
+            ]
+            if len(matched_tokens) != 1:
+                raise ValueError(
+                    "dHash 逐绘制重写：块顶 Filter 无法精确分派（匹配 "
+                    + str(len(matched_tokens)) + " 个物体 token）: "
+                    + stripped + "；可选 token: "
+                    + ", ".join(sorted(unit_token_to_meshes))
+                )
+            for mesh in unit_token_to_meshes[matched_tokens[0]]:
+                top_filters_by_mesh.setdefault(mesh, []).append(stripped)
+
+        # 同一个源物体的多个复制（.001/.002/.003）会共用同一组 Filter，
+        # 因此分派后的行数可以大于块顶原条数；这里只校验每条都至少分到一次。
+        assigned_unique = {
+            line for items in top_filters_by_mesh.values() for line in items
+        }
+        original_unique = {
+            str(lines[index] or "").strip() for index in top_filter_indices
+        }
+        if assigned_unique != original_unique:
+            raise ValueError(
+                "dHash 逐绘制重写：块顶 Filter 分派不完整: 原 "
+                + str(len(original_unique)) + " 条，分派 "
+                + str(len(assigned_unique)) + " 条"
+            )
+
+        unit_numeric_slots = set()
+        for unit in draw_units:
+            start = int(unit.get("start", 0))
+            end = int(unit.get("end", 0))
+            for index in range(max(0, start), min(len(lines), end)):
+                match = re.match(
+                    r"^(ps-t\d+)\s*=", str(lines[index] or "").strip(), re.IGNORECASE
+                )
+                if match:
+                    unit_numeric_slots.add(match.group(1).lower())
+
+        top_bindings = list(top_filter_indices)
+        for index in range(0, max(0, first_unit_start)):
+            stripped = str(lines[index] or "").strip()
+            match = re.match(r"^(ps-t\d+)\s*=", stripped, re.IGNORECASE)
+            if match and match.group(1).lower() in unit_numeric_slots:
+                top_bindings.append(index)
+        for index in sorted(set(top_bindings), reverse=True):
+            del lines[index]
+
+        lines[:] = [
+            line for line in lines if not _is_dhash_run_line(line)
+        ]
+
+        # 删完块顶行后行号已漂移，按 mesh 重新取单元，再把各自绑定插到
+        # ``; [mesh:...]`` 下面（draw 之前）。倒序插，避免前面单元漂移。
+        units = self._iter_draw_units(lines)
+        for unit in reversed(units):
+            if not unit["draw_lines"]:
+                continue
+            insert_at = unit["start"] + 1
+            lines[insert_at:insert_at] = top_filters_by_mesh.get(unit["mesh"], ())
+
+        self._dedupe_filter_bindings(lines)
+        units = self._iter_draw_units(lines)
+        return self._add_snapshot_restore_for_units(lines, units)
+
+    @staticmethod
+    def _ensure_dhash_run_sections(sections):
+        """缺哪个 run 段就补哪个；EFMI 导出已发过时保持原样。"""
+        added = 0
+        for name in _dhash_run_names():
+            key = "[" + name + "]"
+            if key in sections:
+                continue
+            sections[key] = ["run = " + _DHASH_RUN_BUILTIN[name]]
+            added += 1
+        return added
+
+    @staticmethod
+    def _dedupe_filter_bindings(lines):
+        """同一绘制和分支内，材质绑定优先于同名的默认绑定。"""
+        from . import ini_scope
+
+        by_name = {}
+        remove = set()
+        for index, line in enumerate(lines):
+            stripped = str(line or "").strip()
+            if (
+                "; [mesh:" in stripped
+                or ini_scope.classify_line(stripped) in {"if", "endif", "draw", "run"}
+                or ini_scope.is_else_line(stripped)
+            ):
+                by_name.clear()
+            match = _DHASH_FILTER_BINDING_RE.match(stripped)
+            if not match:
+                continue
+            lhs, name, rhs = match.groups()
+            resource = re.sub(r"^ref\s+", "", rhs, flags=re.IGNORECASE)
+            is_material = resource.lower().startswith("resourcetexture_")
+            if is_material and resource != rhs:
+                indent = str(line)[: len(str(line)) - len(str(line).lstrip())]
+                lines[index] = f"{indent}{lhs} = {resource}"
+            name = name.lower()
+            previous = by_name.get(name)
+            if previous:
+                previous_index, previous_is_material = previous
+                if previous_is_material and not is_material:
+                    remove.add(index)
+                    continue
+                remove.add(previous_index)
+            by_name[name] = (index, is_material)
+        for index in sorted(remove, reverse=True):
+            del lines[index]
+
+    def _apply_snapshot_restore_to_sections(self, sections):
+        """序列化前给材质目标段补逐绘制 run 组；全局开关关闭时零改动。
+
+        材质转资源处理后的块如果每笔 draw 都有独立的 ``ps-t[Filter_``，就把
+        EFMI 的块级形态重写成逐绘制组（块顶不再留共享绑定）；否则保持 EFMI
+        原样，避免把没生成材质行的绘制拆坏。
+        """
+        if not self._dhash_texture_enabled():
+            return 0
+        inserted = 0
+        section_names = list(self._material_target_section_names(sections))
+        # 材质转资源真实输出也可能落在 `[CommandList_Draw_*]` 等非
+        # TextureOverride 段；只要段内已有 Filter，就必须纳入逐绘制补 run。
+        for _name, _lines in sections.items():
+            if _name in section_names or not isinstance(_lines, list):
+                continue
+            if any("ps-t[Filter_" in str(line or "") for line in _lines):
+                section_names.append(_name)
+        for section_name in section_names:
+            lines = sections.get(section_name)
+            if not isinstance(lines, list):
+                continue
+            self._dedupe_filter_bindings(lines)
+            units = self._iter_draw_units(lines, material_target=True)
+            if not any("ps-t[Filter_" in str(line or "") for line in lines):
+                continue
+            draw_units = []
+            for unit in units:
+                if not unit.get("draw_lines"):
+                    continue
+                if unit.get("is_target") is False:
+                    continue
+                start = int(unit.get("start", 0))
+                end = int(unit.get("end", 0))
+                draw_units.append((unit, start, end))
+
+            section_inserted = 0
+            if draw_units:
+                every_draw_has_filter = True
+                for _unit, start, end in draw_units:
+                    if not any(
+                        "ps-t[Filter_" in str(lines[index] or "")
+                        for index in range(start, end)
+                    ):
+                        every_draw_has_filter = False
+                        break
+                # 只处理整块都是材质目标的段；混排段里非目标绘制还依赖块顶的
+                # EFMI 共享绑定，不能按目标笔数拆走。
+                all_draw_units = [
+                    unit
+                    for unit in self._iter_draw_units(lines, material_target=False)
+                    if unit.get("draw_lines")
+                ]
+                if len(all_draw_units) != len(draw_units):
+                    every_draw_has_filter = False
+
+                # 真实材质转资源输出可能是「块顶一份共享 Filter + 各笔 draw」；
+                # 这种形态也要走逐绘制重写，不能只等每笔自己已有 Filter。
+                first_draw_start = min(start for _unit, start, _end in draw_units)
+                has_top_filters = any(
+                    "ps-t[Filter_" in str(lines[index] or "")
+                    for index in range(0, max(0, first_draw_start))
+                )
+
+                if (every_draw_has_filter or has_top_filters) and len(all_draw_units) == len(draw_units):
+                    section_inserted += self._rewrite_block_to_per_draw_groups(
+                        lines, [unit for unit, _start, _end in draw_units]
+                    )
+                elif not any(_is_dhash_run_line(line) for line in lines):
+                    section_inserted += self._add_snapshot_restore_for_units(lines, units)
+
+            # 兜底：目标部件判定可能因 `_copy/.001` 名称、全局分配或材质名匹配
+            # 失败而漏掉单元；只要段里实际已有 `ps-t[Filter_`，就按所有绘制
+            # 单元补 run。否则实机会出现“绑定有了、run 一条没有”。
+            if section_inserted == 0:
+                fallback_units = [
+                    unit for unit in self._iter_draw_units(lines, material_target=False)
+                    if unit.get("draw_lines")
+                ]
+                if fallback_units:
+                    fallback_first = min(int(unit["start"]) for unit in fallback_units)
+                    fallback_top = any(
+                        "ps-t[Filter_" in str(lines[index] or "")
+                        for index in range(0, max(0, fallback_first))
+                    )
+                    if fallback_top:
+                        section_inserted += self._rewrite_block_to_per_draw_groups(
+                            lines, fallback_units
+                        )
+                    else:
+                        section_inserted += self._add_snapshot_restore_for_units(
+                            lines, fallback_units
+                        )
+            inserted += section_inserted
+
+        if inserted:
+            self._ensure_dhash_run_sections(sections)
+        return inserted
+
     @_material_lookup_scope
     def execute_postprocess(self, mod_export_path, exporter=None):
         from ..utils.log_utils import LOG as _LOG
@@ -3656,6 +4078,10 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 )
 
             self.define_swapkeys_in_sections(sections, used_swap_keys)
+
+            # dHash 材质绑定是逐绘制生效的：序列化前按绘制单元补快照/还原，
+            # 开关关闭时本方法直接返回，不产生任何新行。
+            self._apply_snapshot_restore_to_sections(sections)
 
             new_content = self._serialize_ini_content(
                 preamble_lines,

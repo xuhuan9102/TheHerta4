@@ -49,7 +49,9 @@ _MARK_RE = re.compile(r"^;MARK", re.IGNORECASE)
 #: 绘制命令（含 instanced 变体）。
 _DRAW_RE = re.compile(r"^(?:drawindexed(?:instanced)?|draw(?:instanced)?)\s*=", re.IGNORECASE)
 #: TTL 库调用完成这一笔绘制；只用于单元边界，保持通用 run 分类不变。
-_TTL_DRAW_CALL_RE = re.compile(r"^run\s*=\s*CommandList\\TTL\\Draw\s*(?:;.*)?$", re.IGNORECASE)
+_TTL_DRAW_CALL_RE = re.compile(
+    r"^run\s*=\s*CommandList\\(?:EFMI)?TTL\\Draw\s*(?:;.*)?$", re.IGNORECASE
+)
 #: 命令列表调用（合并骨架 attach 等副作用，复制到多个块会重复执行）。
 _RUN_RE = re.compile(r"^run\s*=", re.IGNORECASE)
 #: 缓冲/着色器绑定行。
@@ -313,7 +315,7 @@ def iter_draw_units(lines, is_target=None):
             kind = classify_line(line_list[index])
             if kind == "texture_ref":
                 material_lines.append(index)
-            elif kind == "draw":
+            elif kind == "draw" or _TTL_DRAW_CALL_RE.match(str(line_list[index]).strip()):
                 draw_lines.append(index)
 
         unit = {
