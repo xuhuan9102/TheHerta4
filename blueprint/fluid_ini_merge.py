@@ -224,7 +224,7 @@ DRAW_INDEXED_RE = re.compile(
 )
 
 
-def locate_draw_line(ini_text, object_name, first_index):
+def locate_draw_line(ini_text, object_name, first_index, draw_ranges=None):
     """找到该插 hook 的那一行 ``drawindexed``，返回 ``(行尾偏移, 该行缩进)``。
 
     两个条件必须**同时**成立：
@@ -240,17 +240,19 @@ def locate_draw_line(ini_text, object_name, first_index):
     """
     cur = None
     offset = 0
-    for line in ini_text.splitlines(keepends=True):
+    for index, line in enumerate(ini_text.splitlines(keepends=True)):
         body = line.rstrip("\r\n")
+        if body.lstrip().startswith("["):
+            cur = None
         m = MESH_COMMENT_RE.match(body.strip())
         if m:
             cur = m.group("name")
             offset += len(line)
             continue
         d = DRAW_INDEXED_RE.match(body)
-        if d and cur:
-            count = int(d.group(1))
-            start = int(d.group(2))
+        draw = draw_ranges.get(index) if draw_ranges is not None else (tuple(map(int, d.groups())) if d else None)
+        if draw and cur:
+            count, start, _ = draw
             if mesh_names_match(cur, object_name) and start <= first_index < start + count:
                 indent = body[:len(body) - len(body.lstrip())]
                 return offset + len(body), indent
@@ -258,7 +260,7 @@ def locate_draw_line(ini_text, object_name, first_index):
     return None
 
 
-def scan_mesh_draws(ini_text):
+def scan_mesh_draws(ini_text, draw_ranges=None):
     """把宿主 ini 里的 draw 语句按 ``; [mesh:名]`` 归属到网格。
 
     返回 ``[(mesh_name, start, count, base_vertex), ...]``，按出现顺序。
@@ -273,15 +275,18 @@ def scan_mesh_draws(ini_text):
     """
     out = []
     cur = None
-    for line in ini_text.splitlines():
+    for index, line in enumerate(ini_text.splitlines()):
+        if line.lstrip().startswith("["):
+            cur = None
         m = MESH_COMMENT_RE.match(line.strip())
         if m:
             cur = m.group("name")
             continue
         d = DRAW_INDEXED_RE.match(line)
-        if d:
-            # group(1)=count, group(2)=start, group(3)=baseVertex
-            out.append((cur, int(d.group(2)), int(d.group(1)), int(d.group(3))))
+        draw = draw_ranges.get(index) if draw_ranges is not None else (tuple(map(int, d.groups())) if d else None)
+        if draw:
+            count, start, base = draw
+            out.append((cur, start, count, base))
     return out
 
 

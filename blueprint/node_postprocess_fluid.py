@@ -2426,9 +2426,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             r"[ \t]*;\s*nhd-pick\s+\d+\s+end[^\n]*\n",
             re.S,
         )
-        draw_re = re.compile(
-            r"^([ \t]*)drawindexed\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)[ \t]*$", re.M
-        )
+        from ..common.zzmi_draw_calls import TEAR_DRAW_PREFIX, indexed_draw_ranges
 
         touched = 0
         for name in sorted(os.listdir(mod_export_path)):
@@ -2447,14 +2445,15 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
             # 清完块之后这份 ini 可能已经没有 draw 行（例如块是它唯一的流体内容）。
             # 只要本轮**删掉过**块，就必须写回；否则条件退化成「有东西才写」，
             # 又变回「旧的块永远删不掉」。
-            if not draw_re.search(text) and not cleared:
+            draw_ranges = indexed_draw_ranges(text.splitlines())
+            if not draw_ranges and not cleared:
                 continue
 
             inserts = []
             # 先按「; [mesh:名]」把每个 draw 归属到网格，才能用 (物体, 面序号) 反算首索引。
             # 注释放的位置见 node_postprocess_draginteraction.py:2361——它是唯一写这行
             # 注释的地方，格式固定为 ``; [mesh:<object_name>]``。
-            mesh_draws = scan_mesh_draws(text)
+            mesh_draws = scan_mesh_draws(text, draw_ranges)
             has_mesh_comment = any(d[0] for d in mesh_draws)
             for idx, em in enumerate(self.emitters):
                 if idx >= fluid_ini_merge.EMITTER_CAPACITY:
@@ -2484,7 +2483,7 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 # `0,72336` 和 `0,38448`），于是同一个 fi 会同时命中好几行，
                 # 取第一个就会插到别的部件上——那一帧水从另一块网格喷出来。
                 hit = locate_draw_line(
-                    text, getattr(em, "object_name", ""), fi
+                    text, getattr(em, "object_name", ""), fi, draw_ranges
                 )
                 if not hit:
                     print(
@@ -2493,7 +2492,17 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                             idx, fi, getattr(em, "object_name", "")))
                     continue
                 pos, indent = hit
-                bv = int(getattr(em, "base_vertex", 0))
+                line_start = text.rfind("\n", 0, max(pos - 1, 0)) + 1
+                if int(getattr(em, "poly_index", -1)) >= 0:
+                    bv = draw_ranges[text.count("\n", 0, line_start)][2]
+                else:
+                    bv = int(getattr(em, "base_vertex", 0))
+                if text[line_start:pos].strip().casefold().startswith(f"run = {TEAR_DRAW_PREFIX}"):
+                    previous = text.rfind("\n", 0, line_start - 1) + 1
+                    gate = text[previous:line_start]
+                    if gate.strip().casefold() == r"if $\ttl\enabled":
+                        line_start = previous
+                        indent = gate[:len(gate) - len(gate.lstrip())]
                 block = (
                     "{i}; nhd-pick {idx} begin\n"
                     "{i}if $\\{ns}\\fluid_emit_{idx} > 0.5 || $\\{ns}\\fluid_live_{idx} > 0.5\n"
@@ -2510,7 +2519,6 @@ class SSMTNode_PostProcess_FluidProbe(SSMTNode_PostProcess_Base):
                 # 日志里是 "Optimised out post [..._LOD0.9040e2c4_16194_56844]
                 # run = commandlist\fluid_mod\markpresent"，于是 $fluid_present
                 # 永远停在 0，整条链一帧都不跑。
-                line_start = text.rfind("\n", 0, max(pos - 1, 0)) + 1
                 inserts.append((line_start, block + "\n"))
 
             if not inserts and not cleared:

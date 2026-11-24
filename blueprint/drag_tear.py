@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..common.zzmi_draw_calls import DRAW_RANGE_MARKER
 from .drag_cloth import _Assets, _field, prune_assets
 from .drag_tear_uv import MASK_SIZE, rasterize_reference, read_uv
 
@@ -295,6 +296,7 @@ def _emit_native_ttl_draw(sections, ns, tag, index, count, first, base):
     ttl_var = "$\\TTL\\"
     ready = f"$ssmtdragtear_ready_{ns}"
     sections[f"[{command}]"] = [
+        f"{DRAW_RANGE_MARKER}{count}, {first}, {base}",
         *(f"local $ssmtdragtear_old_{key} = {ttl_var}{key}" for key in args),
         f"{original} = ref {TTL_MASK}", f"{TTL_MASK} = null",
         *(f"{ttl_var}{key} = {value}" for key, value in args.items()),
