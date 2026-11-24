@@ -763,7 +763,7 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         return f"${assigned_name}"
 
     def _find_drag_drive_node(self):
-        """在同一节点树中查找已开启形态键驱动输出的拖拽交互节点。
+        """在导出链或节点所在的树中查找启用形态键驱动的拖拽节点。
 
         四开关迁移后改读拖拽节点的 _feature_skd()（形态键联动总开关，含旧值迁移
         与消费方约束）；旧版本/测试桩无该方法时回退 enable_shapekey_drive。
@@ -773,10 +773,13 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         if tree is None:
             return None
         from ..common.global_config import GlobalConfig
-        from .export_helper import BlueprintExportHelper
 
         output_tree = GlobalConfig._get_output_blueprint_tree()
-        nodes = BlueprintExportHelper._collect_postprocess_nodes(output_tree) if output_tree else tree.nodes
+        nodes = tree.nodes
+        if output_tree is not None:
+            from .export_helper import BlueprintExportHelper
+
+            nodes = BlueprintExportHelper._collect_postprocess_nodes(output_tree)
         for node in nodes:
             if (
                 getattr(node, "bl_idname", "") == "SSMTNode_PostProcess_DragInteraction"

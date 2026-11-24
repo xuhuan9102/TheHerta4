@@ -7,6 +7,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests import _real_modules
 
@@ -28,6 +29,8 @@ for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common"):
 # 真实 common 子模块按 fake 包前缀注册（空 __path__ 假包解析不了相对导入）
 _real_modules.register_real_common_modules(f"{PKG}.common")
 _safe_write = sys.modules[f"{PKG}.common.safe_write"]
+_config = types.SimpleNamespace(_get_output_blueprint_tree=lambda: None)
+_install_module(f"{PKG}.common.global_config", GlobalConfig=_config)
 
 _fake_bpy = types.SimpleNamespace(
     types=types.SimpleNamespace(PropertyGroup=object, Operator=object, UIList=object, Node=object),
@@ -68,6 +71,10 @@ _install_module(
 )
 _install_module(f"{PKG}.blueprint.direct_export", sync_shapekey_direct_mode=lambda self, ctx: None)
 _install_module(f"{PKG}.blueprint.deform_chain")
+_install_module(
+    f"{PKG}.blueprint.export_helper",
+    BlueprintExportHelper=types.SimpleNamespace(_collect_postprocess_nodes=lambda tree: tree.nodes),
+)
 _install_module(
     f"{PKG}.blueprint.variable_registry",
     allocate_shape_key_variable_name=lambda name, **_kw: f"Freq_{name}",
@@ -266,6 +273,19 @@ class ShapeKeyDragDriveTests(unittest.TestCase):
         # 新旧混排：开启者胜出
         node.id_data = types.SimpleNamespace(nodes=[off, on])
         self.assertIs(node._find_drag_drive_node(), on)
+
+    def test_find_drag_drive_node_uses_active_output_tree(self):
+        drag = types.SimpleNamespace(
+            bl_idname="SSMTNode_PostProcess_DragInteraction",
+            enable_shapekey_drive=True,
+        )
+        muted = types.SimpleNamespace(**vars(drag), mute=True)
+        node = _make_node({})
+        node.id_data = types.SimpleNamespace(nodes=[])
+        output_tree = types.SimpleNamespace(nodes=[muted, drag])
+
+        with patch.object(_config, "_get_output_blueprint_tree", return_value=output_tree):
+            self.assertIs(node._find_drag_drive_node(), drag)
 
     def test_non_directional_stages_and_directional_slot_layout(self):
         node = _make_node(

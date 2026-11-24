@@ -230,7 +230,9 @@ def _set_logic_name(value):
     name = "_ssmt_root.common.global_config"
     if _SAVED_GLOBAL_CONFIG_MODULE is None:
         _SAVED_GLOBAL_CONFIG_MODULE = sys.modules.get(name)
-    gc = types.SimpleNamespace(GlobalConfig=types.SimpleNamespace(logic_name=value))
+    gc = types.SimpleNamespace(
+        GlobalConfig=types.SimpleNamespace(logic_name=value, _get_output_blueprint_tree=lambda: None)
+    )
     sys.modules[name] = gc
     return gc
 
