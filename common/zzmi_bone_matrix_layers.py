@@ -10,6 +10,7 @@ LAYER_CONTROL_WRITE = "ResourceSSMTBoneMatrixLayerControlWrite"
 LAYER_UPDATE = "CommandListSSMTBoneMatrixUpdateLayers"
 LAYER_FULL = "$ssmt_bm_layers_full"
 LAYER_EPOCH = "$ssmt_bone_matrix_calibration_epoch"
+LAYER_FALLBACK = "ResourceSSMTBoneMatrixLayerFallback"
 _TAG = "SSMT bone matrix"
 _INVALID = 0xFFFFFFFF
 
@@ -33,6 +34,8 @@ class LayeredPose:
     coverage: tuple
     assets: tuple
     tracks: int
+    native_capacity: int
+    custom_fallback: tuple
 
     @property
     def enabled(self):
@@ -54,6 +57,11 @@ class LayeredPose:
             lines.extend((
                 f"[ResourceSSMTBoneMatrix{name}]", "type = Buffer", f"format = {fmt}",
                 f"filename = res/{filename}", "",
+            ))
+        if self.custom_fallback:
+            lines.extend((
+                f"[{LAYER_FALLBACK}]", "type = Buffer", "format = R32_UINT",
+                "filename = res/SSMTBoneMatrixLayerFallback.buf", "",
             ))
         lines.extend((
             f"[{LAYER_CONTROL}]", "type = RWBuffer", "format = R32G32B32A32_FLOAT",
@@ -108,9 +116,30 @@ class LayeredPose:
         return lines
 
 
-def pack_layers(layers, capacity, reference_clip):
+def _custom_fallback(candidates, tracks, native_capacity):
+    """Resolve each extra slot to a native ancestor for ordinary deform draws."""
+    result = {}
+    for slot in range(native_capacity, len(candidates)):
+        if not candidates[slot]:
+            continue
+        chain = set()
+        parent = slot
+        while parent >= native_capacity:
+            if parent in result:
+                parent = result[parent]
+                break
+            if parent in chain or not candidates[parent]:
+                raise ValueError(f"新增骨骼 {slot} 的父骨链存在循环或引用了没有定义的骨骼 {parent}")
+            chain.add(parent)
+            parent = tracks[candidates[parent][-1]][1]
+        result.update((child, parent) for child in chain)
+    return tuple(result.get(slot, _INVALID) for slot in range(native_capacity, len(candidates)))
+
+
+def pack_layers(layers, native_capacity, reference_clip):
     tracks = []
     frames = []
+    capacity = max(native_capacity, max(slot for layer in layers for slot in layer.clip.slots) + 1)
     candidates = [[] for _ in range(capacity)]
     for layer_index, layer in enumerate(layers):
         clip = layer.clip
@@ -143,9 +172,16 @@ def pack_layers(layers, capacity, reference_clip):
     for options in candidates:
         spans.append((len(ordered), len(options)))
         ordered.extend(reversed(options))
+    for _, parent in tracks:
+        if native_capacity <= parent < capacity and not candidates[parent]:
+            raise ValueError(f"父骨链引用了没有定义的骨骼 {parent}")
+    for slot in range(native_capacity, capacity):
+        if any(tracks[track][1] == _INVALID for track in candidates[slot]):
+            raise ValueError(f"新增骨骼 {slot} 需要通过父骨链挂接到原生骨骼")
     coverage = ()
-    if reference_clip.pivot is not None and all(candidates):
-        possible = {tuple(sorted({tracks[track][0] for track in choices})) for choices in candidates}
+    native_candidates = candidates[:native_capacity]
+    if reference_clip.pivot is not None and 0 <= reference_clip.anchor < native_capacity and all(native_candidates):
+        possible = {tuple(sorted({tracks[track][0] for track in choices})) for choices in native_candidates}
         coverage = tuple(sorted(group for group in possible if not any(
             set(other) < set(group) for other in possible
         )))
@@ -153,6 +189,7 @@ def pack_layers(layers, capacity, reference_clip):
     def packed(name, values, dtype):
         return name, np.asarray(values, dtype=dtype).tobytes()
 
+    fallback = _custom_fallback(candidates, tracks, native_capacity)
     assets = (
         packed("SSMTBoneMatrixLayerRanges.buf", spans, "<u4"),
         packed("SSMTBoneMatrixLayerCandidates.buf", ordered, "<u4"),
@@ -160,4 +197,6 @@ def pack_layers(layers, capacity, reference_clip):
         packed("SSMTBoneMatrixLayerControl.buf", np.zeros((len(layers), 4)), "<f4"),
         packed("SSMTBoneMatrixFrames.buf", frames, "<f4"),
     )
-    return LayeredPose(tuple(layers), capacity, coverage, assets, len(tracks))
+    if fallback:
+        assets += (packed("SSMTBoneMatrixLayerFallback.buf", fallback, "<u4"),)
+    return LayeredPose(tuple(layers), capacity, coverage, assets, len(tracks), native_capacity, fallback)

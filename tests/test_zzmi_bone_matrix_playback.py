@@ -1,4 +1,5 @@
 import importlib
+import json
 import struct
 import sys
 from pathlib import Path
@@ -309,3 +310,74 @@ def test_layer_priority_and_parent_are_exported_per_candidate(tmp_path):
     assert "CommandListSSMTBoneMatrixUpdateLayers" in result
     playback.export_clip(ini, None, None, clip_a, rig_layers=(a, b))
     assert ini.read_text(encoding="utf-8") == result
+
+
+def test_extended_slots_expand_only_private_palette_and_keep_native_fallback(tmp_path):
+    asset = INI.replace(
+        "[ResourceSSMTBoneMatrixBindBlend_95de0d39]",
+        "[ResourceSSMTBoneMatrixBindBlend_95de0d39]\nfilename = Meshes/private.buf",
+    )
+    layout = {"stride": 32, "elements": [
+        {"semantic": "BLENDWEIGHT", "index": 0, "format": "R32G32B32A32_FLOAT", "byte_width": 16, "offset": 0},
+        {"semantic": "BLENDINDICES", "index": 0, "format": "R32G32B32A32_UINT", "byte_width": 16, "offset": 16},
+    ]}
+    asset = asset.replace("filename = Meshes/private.buf", "filename = Meshes/private.buf\n"
+                          "; SSMT private blend layout " + json.dumps(layout))
+    asset += "\n[Resource95de0d39Blend]\nfilename = Meshes/native.buf\n"
+    asset += "\n[ResourceZZSkinBlend_95de0d39]\nfilename = ./Meshes/native.buf\n"
+    (tmp_path / "Meshes").mkdir()
+    data = struct.pack("<4f4I", 0.25, 0.75, 0.0, 0.0, 4, 6, 0, 0) * 3
+    for fname in ("native", "private"):
+        (tmp_path / "Meshes" / f"{fname}.buf").write_bytes(data)
+    ini = tmp_path / "extended.ini"
+    ini.write_text(asset, encoding="utf-8")
+    extended = _translated_clip([5, 6], [(0, 0, 1), (0, 1, 0)])
+    layer = layered.BoneMatrixLayer(extended, {5: 3, 6: 5}, {}, "$active", "$frame", False, 0)
+    playback.export_clip(ini, None, None, extended, rig_layers=(layer,))
+    written = ini.read_text(encoding="utf-8")
+    native = written.split(f"[{PALETTE}]", 1)[1].split("[", 1)[0]
+    resolved = written.split("[ResourceSSMTBoneMatrixRender0ResolvedPalette]", 1)[1].split("[", 1)[0]
+    assert "array = 15" in native and "array = 21" in resolved
+    assert "data = 2 1 0 5" in written and "cs-t104 = ref ResourceSSMTBoneMatrixLayerFallback" in written
+    assert written.count("\nfilename = res/SSMTBoneMatrixNativeBlend_95de0d39.buf\n") == 2
+    for part in ("native", "private"):
+        assert (tmp_path / "Meshes" / f"{part}.buf").read_bytes() == data
+    native_blend = (tmp_path / "res/SSMTBoneMatrixNativeBlend_95de0d39.buf").read_bytes()
+    assert native_blend == struct.pack("<4f4I", 0.25, 0.75, 0.0, 0.0, 4, 3, 0, 0) * 3
+    np.testing.assert_array_equal(
+        np.fromfile(tmp_path / "res/SSMTBoneMatrixLayerFallback.buf", "<u4"), [3, 3],
+    )
+    playback.export_clip(ini, None, None, extended, rig_layers=(layer,))
+    assert ini.read_text(encoding="utf-8") == written
+
+    smaller_pool = tmp_path / "smaller-pool.ini"
+    smaller_pool.write_text(
+        asset.replace("array = 15", "array = 9") + "\n[ResourceZZMergedSkeleton_G1_s1]\narray = 15\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="此绘制骨骼池之外"):
+        playback.export_clip(smaller_pool, None, None, extended, rig_layers=(layer,))
+
+    with pytest.raises(ValueError, match="缺少已挂接的新增骨骼"):
+        playback.export_cb1_snapshot(ini, playback.snapshot_settings("freeze", "B"))
+    assert ini.read_text(encoding="utf-8") == written
+    for part in ("native", "private"):
+        (tmp_path / "Meshes" / f"{part}.buf").write_bytes(native_blend)
+    playback.export_cb1_snapshot(ini, playback.snapshot_settings("freeze", "B"))
+    snapshot = ini.read_text(encoding="utf-8")
+    assert "\nfilename = Meshes/native.buf\n" in snapshot
+    assert "\nfilename = ./Meshes/native.buf\n" in snapshot
+
+
+def test_extension_coverage_ignores_gaps_above_original_range_and_validates_parent():
+    clip = playback.BoneMatrixClip((0, 1, 4), 0, 0, 1, bytes(3 * 48), (0, 0, 1))
+    layer = layered.BoneMatrixLayer(clip, {4: 1}, {}, "$active", "$frame", True, 0)
+    packed = layered.pack_layers((layer,), 2, clip)
+    assert packed.capacity == 5 and packed.coverage == ((0,),)
+    assert packed.custom_fallback == (0xffffffff, 0xffffffff, 1)
+    invalid = layered.BoneMatrixLayer(clip, {4: 3}, {}, "$active", "$frame", True, 0)
+    with pytest.raises(ValueError, match="没有定义的骨骼 3"):
+        layered.pack_layers((invalid,), 2, clip)
+    unattached = layered.BoneMatrixLayer(clip, {}, {}, "$active", "$frame", True, 0)
+    with pytest.raises(ValueError, match="新增骨骼 4 需要通过父骨链挂接"):
+        layered.pack_layers((unattached,), 2, clip)

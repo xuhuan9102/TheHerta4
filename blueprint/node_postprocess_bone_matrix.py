@@ -22,6 +22,7 @@ from ..common.zzmi_bone_matrix_playback import (
     export_cb1_snapshot,
     export_clip,
     merge_pose_clips,
+    native_palette_size,
     snapshot_settings,
     variable_name,
 )
@@ -278,7 +279,7 @@ class SSMT_OT_BoneMatrixListEdit(bpy.types.Operator):
 class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
     bl_idname = NODE_IDNAME
     bl_label = "骨骼矩阵控制"
-    bl_description = "按全局顶点组编号驱动 ZZMI 骨骼，支持多骨架挂接和 CB1 定身"
+    bl_description = "按全局顶点组编号驱动 ZZMI 骨骼，支持新增骨骼、多骨架挂接和 CB1 定身"
     bl_icon = "ARMATURE_DATA"
 
     armature: bpy.props.PointerProperty(name="骨架", type=bpy.types.Object, poll=_armatures_only)
@@ -461,9 +462,10 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
             bake_pose_frames(bpy.context, item.armature, self.frame_start, self.frame_end)
             for item, _, _, _ in rigs
         ]
-        if self.rigs:
+        native_capacity = native_palette_size(expected)
+        if self.rigs or any(slot >= native_capacity for clip in clips for slot in clip.slots):
             slots = tuple(sorted({slot for clip in clips for slot in clip.slots}))
-            reference = next((clip for clip in clips if clip.pivot is not None), clips[0])
+            reference = next((clip for clip in clips if clip.pivot is not None and clip.anchor < native_capacity), clips[0])
             manual_parents = tuple(sorted({parent for _, _, _, parents in rigs for parent in parents}))
             clip = BoneMatrixClip(
                 slots, reference.anchor, reference.first_frame, reference.frame_count, b"",
@@ -471,7 +473,13 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
             )
             layers = [
                 BoneMatrixLayer(baked, parents, source, *control)
-                for baked, (_, parents, source, _), control in zip(clips, rigs, self._layer_controls())
+                for baked, (_, parents, source, _), control in zip(
+                    clips, rigs,
+                    self._layer_controls() if self.rigs else [
+                        (variable_name(self.play_variable), variable_name(self.frame_variable),
+                         self.play_on_load, self.initial_frame, ""),
+                    ],
+                )
             ]
             export_clip(
                 expected, None, None, clip, rig_layers=layers,

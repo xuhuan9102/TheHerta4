@@ -1,12 +1,16 @@
 """Build a private skinning pass scoped to an exact ZZMI render override."""
 
+import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from .zzmi_bone_matrix_layers import LAYER_CONTROL, LAYER_FULL, LAYER_UPDATE
-from .zzmi_bone_matrix_render_inputs import BLEND_STRIDE, POSITION_STRIDE, ground_support_vertices
+from .zzmi_bone_matrix_layers import LAYER_CONTROL, LAYER_FALLBACK, LAYER_FULL, LAYER_UPDATE
+from .zzmi_bone_matrix_render_inputs import (
+    BLEND_LAYOUT_MARKER, BLEND_STRIDE, POSITION_STRIDE, extra_weighted_slots,
+    ground_support_vertices, normalized_blend, remap_blend_indices,
+)
 from .zzmi_bone_matrix_snapshot import ORIGINAL_CB1, SNAPSHOT_FRAME, SnapshotSections
 
 RENDER_SHADER = "zzmi_bone_matrix_render_calibration.hlsl"
@@ -114,7 +118,7 @@ def _asset_inputs(lines, sections):
     return inputs
 
 
-def read_ground_support(text, mod_directory, anchor):
+def read_ground_support(text, mod_directory, anchor, layers=None):
     """Find a grounded component among this export's bind buffers."""
     lines = text.splitlines()
     sections = _sections(lines)
@@ -131,12 +135,91 @@ def read_ground_support(text, mod_directory, anchor):
             continue
         if pos_file.stat().st_size != rows * POSITION_STRIDE or blend_file.stat().st_size != rows * BLEND_STRIDE:
             continue
-        support = ground_support_vertices(pos_file.read_bytes(), blend_file.read_bytes(), anchor)
+        blend_data = blend_file.read_bytes()
+        if layers and layers.custom_fallback:
+            blend_data = remap_blend_indices(blend_data, {
+                "stride": BLEND_STRIDE,
+                "elements": [
+                    {"semantic": "BLENDINDICES", "offset": 16, "byte_width": 16, "format": "R32G32B32A32_UINT"},
+                ],
+            }, layers.native_capacity, layers.custom_fallback)
+        support = ground_support_vertices(pos_file.read_bytes(), blend_data, anchor)
         if support:
             rank, payload = support
             if best is None or rank > best[0]:
                 best = rank, key, payload
     return (best[1], best[2]) if best else (None, b"")
+
+
+def prepare_native_blends(text, directory, native_capacity, layers):
+    """Make ordinary game draws bind the nearest native parent for custom weights."""
+    lines = text.splitlines()
+    sections = _sections(lines)
+    bodies = {name.casefold(): lines[start + 1:end] for name, start, end in sections}
+    filenames = {}
+    for name, body in bodies.items():
+        if name.startswith("resource"):
+            match = next((m for line in body if (m := _FILENAME.fullmatch(line))), None)
+            if match:
+                filenames[name] = match[1]
+    directory = Path(directory)
+
+    fallback = layers.custom_fallback if layers else ()
+    fallback_files = {}
+    draws = {}
+    payloads = []
+    for key, (_, bind_blend, _) in _asset_inputs(lines, sections).items():
+        blend_name = bind_blend.casefold()
+        path = filenames.get(blend_name)
+        if not path:
+            continue
+        packed = (directory / path).read_bytes()
+        extras = extra_weighted_slots(packed, native_capacity)
+        if not extras:
+            continue
+        for slot in sorted(extras):
+            offset = slot - native_capacity
+            if offset >= len(fallback) or fallback[offset] == 0xFFFFFFFF:
+                raise ValueError(f"DrawIB {key[0]} 的顶点组 {slot} 缺少已挂接的新增骨骼")
+        ib, lod = key
+        resource = f"resource{ib}blend" + (f"_{lod}" if lod else "")
+        src_file = filenames.get(resource)
+        layout = next((line.strip()[len(BLEND_LAYOUT_MARKER):] for line in bodies[blend_name]
+                       if line.strip().startswith(BLEND_LAYOUT_MARKER)), None)
+        if not src_file or not layout:
+            raise ValueError(f"DrawIB {ib} 缺少原生权重布局，请重新导出网格")
+        src_path = (directory / src_file).resolve()
+        draws[key] = {fallback[slot - native_capacity] for slot in extras}
+        source = src_path.read_bytes()
+        layout = json.loads(layout)
+        if normalized_blend(source, layout) != packed:
+            raise ValueError(f"DrawIB {ib} 的原生权重与扩展蒙皮缓冲不一致，请重新导出网格")
+        if src_path in fallback_files:
+            continue
+        target = f"SSMTBoneMatrixNativeBlend_{ib}{'_' + lod if lod else ''}.buf"
+        replaced = remap_blend_indices(source, layout, native_capacity, fallback)
+        fallback_files[src_path] = f"res/{target}"
+        payloads.append((target, replaced))
+    replacements = {}
+    if fallback_files:
+        for name, path in filenames.items():
+            if target := fallback_files.get((directory / path).resolve()):
+                replacements[name] = target
+    return replacements, draws, payloads
+
+
+def bind_native_blends(text, replacements):
+    lines = text.splitlines()
+    for name, start, end in reversed(_sections(lines)):
+        if (target := replacements.get(name.casefold())) is None:
+            continue
+        index = next(i for i in range(start + 1, end) if _FILENAME.fullmatch(lines[i]))
+        lines[index:index + 1] = [
+            f"; {_TAG} begin blend|{lines[index]}",
+            f"filename = {target}",
+            f"; {_TAG} end",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def _instance_guard(bindings, binding):
@@ -286,6 +369,8 @@ def _resources(bindings, assets, frame, clip, references, support_key, snapshot,
     registers = ("t90", "t91", "t92", "t93", "t94", "t95", "t96", "t98", "u7")
     if layers:
         registers += ("t100", "t101", "t102", "t103")
+        if layers.custom_fallback:
+            registers += ("t104",)
     result = ["", f"; {_TAG} begin scoped render resources", f"[{_ORIGINAL_VB}]", "", f"[{_ORIGINAL_UV}]", ""]
     for register in (*registers, *(("t97", "u6") if references else ())):
         result.extend((f"[{_RESOURCE}Saved{register}]", ""))
@@ -336,7 +421,7 @@ def _resources(bindings, assets, frame, clip, references, support_key, snapshot,
         if layers:
             palette = resource + "ResolvedPalette"
             write_palette = palette + "Write"
-            bone_count = capacities[binding.palette.casefold()]
+            bone_count = layers.capacity if layers.custom_fallback else capacities[binding.palette.casefold()]
             result.extend((
                 f"[{palette}]", "type = Buffer", "format = R32G32B32A32_FLOAT",
                 f"array = {bone_count * 3}", "bind_flags = shader_resource unordered_access", "",
@@ -352,6 +437,8 @@ def _resources(bindings, assets, frame, clip, references, support_key, snapshot,
             if orientation:
                 resolve_inputs.extend((("cs-t96", resource + "ObjectCB"), ("cs-t97", orientation.resource + "World")))
                 resolve_params.append(("z41", _EPOCH))
+            if layers.custom_fallback:
+                resolve_inputs.append(("cs-t104", LAYER_FALLBACK))
             resolve_inputs.append(("cs-u7", write_palette))
             resolve_shader = f"CustomShaderSSMTBoneMatrixResolveLayers{index}"
             result.extend(_dispatch(
@@ -397,7 +484,7 @@ def _resources(bindings, assets, frame, clip, references, support_key, snapshot,
     return result
 
 
-def add_scoped_playback(text, play, frame, clip, capacities, support_key=None, cb1=None, layers=None):
+def add_scoped_playback(text, play, frame, clip, capacities, support_key=None, cb1=None, layers=None, extra_draws=None):
     lines = text.splitlines()
     sections = _sections(lines)
     assets = _asset_inputs(lines, sections) if clip else None
@@ -409,6 +496,15 @@ def add_scoped_playback(text, play, frame, clip, capacities, support_key=None, c
     sites, render_skips = _scoped_render_draws(lines, sections, bindings, assets)
     used = {binding.index for candidates, _ in sites.values() for binding in candidates}
     chosen = [binding for binding in bindings if binding.index in used]
+    extra_draws = extra_draws or {}
+    unsupported = set(extra_draws) - {(binding.ib, binding.lod) for binding in chosen}
+    if unsupported:
+        ib, _ = min(unsupported)
+        raise ValueError(f"DrawIB {ib} 的新增骨骼缺少可隔离的蒙皮绘制，请检查该部件的重放绑定")
+    for binding in chosen:
+        parents = extra_draws.get((binding.ib, binding.lod), ())
+        if parents and max(parents) >= capacities[binding.palette.casefold()]:
+            raise ValueError(f"DrawIB {binding.ib} 的新增骨骼挂接到此绘制骨骼池之外的原生骨骼")
     if not sites:
         raise ValueError("骨骼矩阵控制没有找到可按 IB、起始索引和索引数隔离的 ZZMI 渲染绘制")
     insertions = {}
@@ -425,7 +521,11 @@ def add_scoped_playback(text, play, frame, clip, capacities, support_key=None, c
     snapshot = SnapshotSections(cb1) if cb1 else None
     if clip:
         replacements = {
-            index: _render_draw(lines[index], candidates, play, references, texcoord, snapshot, site, layers)
+            index: _render_draw(
+                lines[index], candidates,
+                "1" if (candidates[0].ib, candidates[0].lod) in extra_draws else play,
+                references, texcoord, snapshot, site, layers,
+            )
             for site, (index, (candidates, texcoord)) in enumerate(sites.items())
         }
     else:

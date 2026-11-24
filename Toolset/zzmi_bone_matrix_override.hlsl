@@ -32,6 +32,7 @@ Buffer<uint2> LayerRanges : register(t100);
 Buffer<uint> LayerCandidates : register(t101);
 Buffer<uint2> LayerTracks : register(t102);
 Buffer<float4> LayerControls : register(t103);
+Buffer<uint> LayerFallback : register(t104);
 Texture1D<float4> IniParams : register(t120);
 RWBuffer<float> RenderVertices : register(u7);
 
@@ -145,14 +146,41 @@ Affine combine(Affine parent, Affine child)
     return result;
 }
 
-Affine layered_matrix(uint slot, uint boneCount, uint4 clip, float4 params)
+Affine identity_affine()
 {
-    Affine native = read_native(slot);
+    Affine result = {float4(1,0,0,0), float4(0,1,0,0), float4(0,0,1,0)};
+    return result;
+}
+
+uint track_or_bind_parent(uint slot, uint nativeRange, out bool animated)
+{
     uint track = chosen_track(slot);
+    animated = track != InvalidSlot;
+    if (!animated && slot >= nativeRange)
+    {
+        uint2 range = LayerRanges[slot];
+        if (range.y != 0)
+            track = LayerCandidates[range.x];
+    }
+    return track;
+}
+
+Affine layered_matrix(uint slot, uint boneCount, uint nativeCount, uint nativeRange, uint4 clip, float4 params)
+{
+    uint fallback = slot;
+    if (slot >= nativeRange)
+        fallback = LayerFallback[slot - nativeRange];
+    Affine native = identity_affine();
+    if (fallback < nativeCount)
+        native = read_native(fallback);
+    bool animated;
+    uint track = track_or_bind_parent(slot, nativeRange, animated);
     if (track == InvalidSlot || clip.y == 0u)
         return native;
 
-    Affine authored = authored_delta(track, clip.y);
+    Affine authored = identity_affine();
+    if (animated)
+        authored = authored_delta(track, clip.y);
     for (uint depth = 0; depth < boneCount; ++depth)
     {
         uint parent = LayerTracks[track].y;
@@ -166,7 +194,7 @@ Affine layered_matrix(uint slot, uint boneCount, uint4 clip, float4 params)
             }
             else
             {
-                if (clip.z >= boneCount)
+                if (clip.z >= nativeCount)
                     return native;
                 root = read_native(clip.z);
             }
@@ -174,9 +202,11 @@ Affine layered_matrix(uint slot, uint boneCount, uint4 clip, float4 params)
         }
         if (parent >= boneCount)
             return native;
-        track = chosen_track(parent);
+        track = track_or_bind_parent(parent, nativeRange, animated);
         if (track == InvalidSlot)
         {
+            if (parent >= nativeCount)
+                return native;
             Affine outside = read_native(parent);
             float determinant = dot(outside.x.xyz, cross(outside.y.xyz, outside.z.xyz));
             if (!isfinite(determinant) || abs(determinant) < 1e-6f ||
@@ -184,7 +214,8 @@ Affine layered_matrix(uint slot, uint boneCount, uint4 clip, float4 params)
                 return native;
             return combine(outside, authored);
         }
-        authored = combine(authored_delta(track, clip.y), authored);
+        if (animated)
+            authored = combine(authored_delta(track, clip.y), authored);
     }
     // Mixed choices can form a cycle even when each source rig is acyclic.
     return native;
@@ -230,9 +261,11 @@ void main(uint3 thread : SV_DispatchThreadID)
     {
         uint ranges;
         LayerRanges.GetDimensions(ranges);
-        uint boneCount = min(nativeRows / 3u, ranges);
+        uint nativeRange = clip.w == 0u ? ranges : clip.w;
+        uint nativeCount = min(nativeRows / 3u, nativeRange);
+        uint boneCount = ranges > nativeRange ? ranges : nativeCount;
         if (i < boneCount)
-            write_layered_matrix(i, layered_matrix(i, boneCount, clip, params));
+            write_layered_matrix(i, layered_matrix(i, boneCount, nativeCount, nativeRange, clip, params));
         return;
     }
 

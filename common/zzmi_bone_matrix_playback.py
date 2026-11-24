@@ -15,6 +15,8 @@ from .zzmi_bone_matrix_render_calibration import (
     SKIN_SHADER,
     SUPPORT_FILE,
     add_scoped_playback,
+    bind_native_blends,
+    prepare_native_blends,
     read_ground_support,
 )
 
@@ -190,18 +192,26 @@ def _palette_capacities(text: str) -> dict[str, int]:
     return capacities
 
 
+def native_palette_size(ini_path: Path) -> int:
+    return max(_palette_capacities(ini_path.read_text(encoding="utf-8-sig")).values(), default=0)
+
+
 def _restore_generated_draw(match):
     header = match[0].splitlines()[0]
     original = header.partition(f"{_BEGIN} draw|")[2]
     if original:
         indent = header[:len(header) - len(header.lstrip())]
         return indent + original + "\n"
+    original_blend = header.partition(f"{_BEGIN} blend|")[2]
+    if original_blend:
+        return original_blend + "\n"
     return ""
 
 
 def _configuration_text(
     content: str, play: str | None, frame: str | None, clip: BoneMatrixClip | None,
     *, play_on_load: bool = False, initial_frame: int | None = None, support_key=None, cb1=None, layers=None,
+    extra_draws=None,
 ):
     text = _BLOCK.sub(_restore_generated_draw, content).rstrip("\r\n")
     capacities = _palette_capacities(text)
@@ -209,13 +219,16 @@ def _configuration_text(
     table = []
     defaults = [_BEGIN + " defaults"]
     if clip:
-        if clip.slots[0] >= size:
+        if size == 0:
             raise ValueError("导出的 INI 没有可替换的 ZZMI 合并骨架槽")
-        if any(parent >= size for parent in clip.manual_parents):
+        capacity = layers.capacity if layers else size
+        if clip.slots[-1] >= capacity:
+            raise ValueError("新增骨骼需要通过可挂接的动画骨架导出")
+        if any(parent >= capacity for parent in clip.manual_parents):
             raise ValueError("手动父骨编号超出导出的全局顶点组范围")
-        table = [0xFFFFFFFF] * size
+        table = [0xFFFFFFFF] * capacity
         for track, slot in enumerate(clip.slots):
-            if slot < size:
+            if slot < capacity:
                 table[slot] = track
         if layers:
             defaults.extend(layers.constants(f"; {_TAG} default"))
@@ -248,16 +261,22 @@ def _configuration_text(
             f"[{_RESOURCE}Parents]", "type = Buffer", "format = R32_UINT",
             "filename = res/SSMTBoneMatrixParents.buf", "",
             f"[{_RESOURCE}Clip]", "type = Buffer", "format = R32G32B32A32_UINT",
-            f"data = {layers.tracks if layers else len(clip.slots)} {clip.frame_count} {clip.anchor} 0", "",
+            f"data = {layers.tracks if layers else len(clip.slots)} {clip.frame_count} {clip.anchor} {size}", "",
             _END,
         ))
-    patched = add_scoped_playback("\n".join(lines) + "\n", play, frame, clip, capacities, support_key, cb1, layers)
+    patched = add_scoped_playback(
+        "\n".join(lines) + "\n", play, frame, clip, capacities, support_key, cb1, layers, extra_draws,
+    )
     return reconcile_bone_matrix_defaults(patched), struct.pack(f"<{len(table)}I", *table)
 
 
 def export_cb1_snapshot(ini_path: Path, cb1: CB1Snapshot):
     """Add scoped CB1 capture without requiring an animation clip or skin assets."""
-    text, _ = _configuration_text(ini_path.read_text(encoding="utf-8-sig"), None, None, None, cb1=cb1)
+    content = _BLOCK.sub(_restore_generated_draw, ini_path.read_text(encoding="utf-8-sig"))
+    capacity = max(_palette_capacities(content).values(), default=0)
+    if capacity:
+        prepare_native_blends(content, ini_path.parent, capacity, None)
+    text, _ = _configuration_text(content, None, None, None, cb1=cb1)
     write_bytes_if_changed_atomic(str(ini_path), text.encode("utf-8"))
 
 
@@ -265,16 +284,21 @@ def export_clip(
     ini_path: Path, play: str, frame: str, clip: BoneMatrixClip,
     *, play_on_load: bool = False, initial_frame: int | None = None, cb1=None, rig_layers=(),
 ):
-    content = ini_path.read_text(encoding="utf-8-sig")
+    content = _BLOCK.sub(_restore_generated_draw, ini_path.read_text(encoding="utf-8-sig"))
     palette_size = max(_palette_capacities(content).values(), default=0)
-    support_key, support = (None, b"")
-    if clip.pivot is not None and clip.slots == tuple(range(palette_size)):
-        support_key, support = read_ground_support(content, ini_path.parent, clip.anchor)
+    if not palette_size:
+        raise ValueError("导出的 INI 没有可替换的 ZZMI 合并骨架槽")
     layers = pack_layers(rig_layers, palette_size, clip) if rig_layers else None
+    support_key, support = (None, b"")
+    if clip.pivot is not None and clip.slots[:palette_size] == tuple(range(palette_size)):
+        support_key, support = read_ground_support(content, ini_path.parent, clip.anchor, layers)
+    native_blends, extra_draws, fallback_assets = prepare_native_blends(content, ini_path.parent, palette_size, layers)
     text, slot_map = _configuration_text(
         content, play, frame, clip, play_on_load=play_on_load,
-        initial_frame=initial_frame, support_key=support_key, cb1=cb1, layers=layers,
+        initial_frame=initial_frame, support_key=support_key, cb1=cb1, layers=layers, extra_draws=extra_draws,
     )
+    if native_blends:
+        text = bind_native_blends(text, native_blends)
     resources = ini_path.parent / "res"
     resources.mkdir(exist_ok=True)
     toolset = Path(__file__).resolve().parents[1] / "Toolset"
@@ -289,6 +313,7 @@ def export_clip(
         ("SSMTBoneMatrixParents.buf", struct.pack(f"<{len(parents)}I", *parents)),
     ]
     assets.extend(layers.assets if layers else (("SSMTBoneMatrixFrames.buf", clip.matrices),))
+    assets.extend(fallback_assets)
     if clip.pivot is not None and f"cs = res/{RENDER_SHADER}" in text:
         assets.extend((
             (RENDER_SHADER, (toolset / RENDER_SHADER).read_bytes()),

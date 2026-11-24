@@ -6870,30 +6870,38 @@ class ExportZZMI(ExportUnity):
 
     def _add_bone_matrix_render_inputs(self, ini_builder):
         from ...common.zzmi_bone_matrix_render_inputs import (
+            BLEND_LAYOUT_MARKER,
             BLEND_STRIDE,
             POSITION_STRIDE,
             compatible_position,
+            extra_weighted_slots,
             normalized_blend,
         )
 
         mod_dir = GlobalConfig.path_generate_mod_folder()
         mesh_dir = GlobalConfig.path_generatemod_buffer_folder()
         folder = os.path.relpath(mesh_dir, mod_dir).replace("\\", "/")
+        native_capacity = max(c["vg_offset"] + c["vg_count"] for c in self.merged_skeleton_components)
         section = M_IniSection(M_SectionType.ResourceBuffer)
         for component in self.merged_skeleton_components:
             ib = component["draw_ib"]
-            if not compatible_position(self._drawib_category_layout(ib, "Position")):
-                continue
-            packed = normalized_blend(
-                self._drawib_exported_blend_bytes(ib) or b"", self._drawib_blend_layout(ib),
-            )
-            if not packed:
-                continue
-            rows = len(packed) // BLEND_STRIDE
+            blend_layout = self._drawib_blend_layout(ib)
+            packed = normalized_blend(self._drawib_exported_blend_bytes(ib) or b"", blend_layout)
+            rows = len(packed) // BLEND_STRIDE if packed else 0
             position_file = f"{ib}-Position.buf"
             position_path = os.path.join(mesh_dir, position_file)
-            if not os.path.isfile(position_path) or os.path.getsize(position_path) != rows * POSITION_STRIDE:
+            if (
+                not rows or not compatible_position(self._drawib_category_layout(ib, "Position"))
+                or not os.path.isfile(position_path) or os.path.getsize(position_path) != rows * POSITION_STRIDE
+            ):
+                extras = extra_weighted_slots(packed, native_capacity) if packed else {
+                    slot for slot in self._collect_drawib_referenced_bone_ids(ib) if slot >= native_capacity
+                }
+                if extras:
+                    raise Fatal(f"DrawIB {ib} 的顶点组 {min(extras)} 无法使用当前 Position/Blend 布局进行扩展蒙皮")
                 continue
+            if ib in self._redirect_carrier_map and extra_weighted_slots(packed, native_capacity):
+                raise Fatal(f"DrawIB {ib} 的新增骨骼需要在自身 IB 上蒙皮，当前网格已重定向到其他 IB")
             blend_file = f"ssmt_bone_matrix_{ib}_Blend.buf"
             self._atomic_write_binary(os.path.join(mesh_dir, blend_file), packed)
             for kind, stride, filename in (
@@ -6903,8 +6911,11 @@ class ExportZZMI(ExportUnity):
                 section.extend((
                     f"[ResourceSSMTBoneMatrixBind{kind}_{ib}]", "type = StructuredBuffer",
                     f"stride = {stride}", f"array = {rows}", "bind_flags = shader_resource",
-                    f"filename = {folder}/{filename}", "",
+                    f"filename = {folder}/{filename}",
                 ))
+                if kind == "Blend":
+                    section.append(BLEND_LAYOUT_MARKER + json.dumps(blend_layout, separators=(",", ":")))
+                section.append("")
         ini_builder.append_section(section)
 
     def _build_redirect_blend_retarget(

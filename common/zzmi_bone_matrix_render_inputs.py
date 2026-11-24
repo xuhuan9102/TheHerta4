@@ -6,6 +6,7 @@ from ..utils.format_utils import FormatUtils
 
 POSITION_STRIDE = 40
 BLEND_STRIDE = 32
+BLEND_LAYOUT_MARKER = "; SSMT private blend layout "
 _POSITION_LAYOUT = (
     ("POSITION", "R32G32B32_FLOAT", 0),
     ("NORMAL", "R32G32B32_FLOAT", 12),
@@ -65,6 +66,34 @@ def normalized_blend(payload: bytes, layout: dict | None) -> bytes | None:
         packed["indices"][:, offset:end] = ids
         offset = end
     return packed.tobytes()
+
+
+def extra_weighted_slots(packed, native_capacity):
+    rows = np.frombuffer(packed, dtype=[("weights", "<f4", 4), ("slots", "<u4", 4)])
+    slots = rows["slots"][(rows["weights"] > 0) & (rows["slots"] >= native_capacity)]
+    return {int(slot) for slot in np.unique(slots)}
+
+
+def remap_blend_indices(payload, layout, native_capacity, fallback):
+    """Keep the game's original blend format and weights for ordinary deformation."""
+    result = bytearray(payload)
+    stride = layout["stride"]
+    for element in layout["elements"]:
+        if element["semantic"] != "BLENDINDICES":
+            continue
+        dtype = np.dtype(FormatUtils.get_nptype_from_format(element["format"]))
+        values = np.ndarray(
+            (len(payload) // stride, element["byte_width"] // dtype.itemsize),
+            dtype=dtype, buffer=result, offset=element["offset"], strides=(stride, dtype.itemsize),
+        )
+        mask = values >= native_capacity
+        slots = values[mask].astype(np.int64) - native_capacity
+        parents = np.zeros(slots.shape, dtype=dtype)
+        valid = slots < len(fallback)
+        resolved = np.asarray(fallback, dtype="<u4")[slots[valid]]
+        parents[valid] = np.where(resolved < native_capacity, resolved, 0)
+        values[mask] = parents
+    return bytes(result)
 
 
 def ground_support_vertices(positions, blends, anchor):
