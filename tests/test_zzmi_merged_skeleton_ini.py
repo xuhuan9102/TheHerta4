@@ -2632,7 +2632,7 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
              "deform_draw": 8, "vg_map": {i: 156 + i for i in range(14)}},
         ]
 
-    def _make_exporter(self, sibling_blend_stride=32):
+    def _make_exporter(self, sibling_blend_stride=32, host_groups=(0, 105, 156)):
         dcm = sys.modules[f"{PKG}.common.draw_call_model"].DrawCallModel
         sub_host = _FakeSubmesh("LOD0.a23aa8a3-42759-0", 0, 105, 0,
                                 deform_draw=20, exported_vertex_count=12482)
@@ -2657,7 +2657,7 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
             "a23aa8a3": 0, "b20f90ea": 1, "b30db54e": 2
         }
         # 宿主的顶点引用了兄弟部件的槽位（105/156）⇒ 几何被吸收 = 合并宿主
-        self._register_obj("LOD0.a23aa8a3-42759-0", [(0, 1.0), (105, 1.0), (156, 1.0)])
+        self._register_obj("LOD0.a23aa8a3-42759-0", [(gid, 1.0) for gid in host_groups])
         self._register_obj("LOD0.b20f90ea-19182-0", [(105, 1.0)])
         self._register_obj("LOD0.b30db54e-7383-0", [(156, 1.0)])
         (
@@ -2734,16 +2734,45 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
         self.assertNotIn("so0 = ref ResourceZZRedirectSO", sib_text)
         self.assertNotIn("vb0 = Resourcea23aa8a3Position", sib_text)
 
-    def test_host_without_compatible_sibling_prints_diagnostic(self):
-        """没有兼容兄弟时大声报警（该组合仍依赖提交顺序，需要开发者介入）。"""
+    def test_last_narrow_donor_publishes_host_without_waiting_for_unused_sibling(self):
+        exporter, models = self._make_exporter(sibling_blend_stride=16, host_groups=(0, 105))
+
+        host_text = self._vb_text(exporter, models[0])
+        donor_text = self._vb_text(exporter, models[1])
+        unused_text = self._vb_text(exporter, models[2])
+        guard = (
+            "if ($zz_ms_seen_01 >= 1) && "
+            "($zz_ms_prev_11 == 0 || $zz_ms_seen_11 >= 1)"
+        )
+        self.assertIn(f"{guard}\n    vs-t0", host_text)
+        self.assertIn(
+            f"{guard} && $zz_ms_occ_1 == 1\n"
+            "    run = CustomShaderZZMISkin_G0_s1_a23aa8a3",
+            donor_text,
+        )
+        self.assertNotIn("CustomShaderZZMISkin_G0_s1_a23aa8a3", unused_text)
+        self.assertNotIn("vb2 = Resourcea23aa8a3Blend", donor_text)
+
+        builder = _FakeIniBuilder()
+        exporter.add_merged_skeleton_sections(builder)
+        skeleton_text = "\n".join(_all_builder_lines(builder))
+        self.assertIn("[CustomShaderZZMISkin_G0_s1_a23aa8a3]", skeleton_text)
+        self.assertIn("cs-u0 = ref ResourceZZSkinWrite_a23aa8a3_s1", skeleton_text)
+
+        render_lines = []
+        exporter._append_merged_absorbed_skin_render(render_lines, "a23aa8a3")
+        self.assertIn("    vb0 = ref ResourceZZSkinOut_a23aa8a3_s1", render_lines)
+
+    def test_host_without_supported_skin_layout_prints_diagnostic(self):
         import contextlib
         import io
 
         exporter, models = self._make_exporter(sibling_blend_stride=16)
+        models[0].d3d11GameType.CategoryStrideDict["Position"] = 28
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self._vb_text(exporter, models[0])
-        self.assertIn("没有 Blend 布局兼容的其它挂点", buf.getvalue())
+        self.assertIn("SKIN_LAYOUT_UNSUPPORTED", buf.getvalue())
 
 
 class ZZMIStubObjectTests(unittest.TestCase):

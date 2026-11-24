@@ -2977,9 +2977,11 @@ class ExportZZMI(ExportUnity):
         return "zzmi_merged_skin.hlsl"
 
     @staticmethod
-    def _merged_skin_cs_name(skeleton_group: int, slot: int, carrier_index: int = 0) -> str:
+    def _merged_skin_cs_name(
+        skeleton_group: int, slot: int, carrier_index: int = 0, host_ib: str = ""
+    ) -> str:
         """(组, 槽, carrier 序号) 的蒙皮 CustomShader 段名。"""
-        suffix = "" if carrier_index == 0 else f"_c{carrier_index}"
+        suffix = f"_{host_ib}" if host_ib else (f"_c{carrier_index}" if carrier_index else "")
         return f"CustomShaderZZMISkin_G{skeleton_group}_s{slot}{suffix}"
 
     @staticmethod
@@ -2987,6 +2989,10 @@ class ExportZZMI(ExportUnity):
         """蒙皮 CS 的 Dispatch 组数（64 线程/组；前缀行也由第一段 CS 写）。"""
         work = max(int(row_count or 0), int(prefix_rows or 0))
         return max(1, (work + 63) // 64)
+
+    @staticmethod
+    def _merged_absorbed_skin_out_name(draw_ib: str, slot: int) -> str:
+        return f"ResourceZZSkinOut_{draw_ib}_s{slot}"
 
     @staticmethod
     def _zzmi_layout_element_format(semantic, element_format) -> str:
@@ -3438,6 +3444,32 @@ class ExportZZMI(ExportUnity):
                 section.append("    endif")
         section.append("endif")
 
+    def _append_merged_absorbed_skin_render(self, section, draw_ib):
+        component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
+        if component_id is None:
+            return
+        group = int(self.merged_skeleton_components[component_id]["skeleton_group"])
+        if self._merged_group_redirect_plan(group) is not None:
+            return
+        host = next(
+            (host for host in self._merged_group_absorbed_hosts(group) if host["draw_ib"] == draw_ib),
+            None,
+        )
+        if host is None:
+            return
+        if not self._merged_skin_publish_supported(self._merged_absorbed_skin_plan(host)):
+            return
+        for index, slot in enumerate(self._merged_skeleton_slots()):
+            condition = "if" if index == 0 else "elif"
+            native_so = self._merged_absorbed_so_name(group, slot, draw_ib)
+            output = self._merged_absorbed_skin_out_name(draw_ib, slot)
+            guard = self._merged_absorbed_guard(host, group, slot)
+            section.extend([
+                f"{condition} @vb0 != 0 && @vb0 == @{native_so} && {output}->size > 0 && {guard}",
+                f"    vb0 = ref {output}",
+            ])
+        section.append("endif")
+
     def _append_merged_skin_publish_block(
         self,
         section,
@@ -3535,9 +3567,10 @@ class ExportZZMI(ExportUnity):
             )
             return
         owned_redirect = group_plan is self._merged_owned_redirect_plan(skeleton_group)
+        direct_host = str(group_plan.get("direct_host_ib") or "")
         shader_filename = (
             "zzmi_merged_skin_owned_output.hlsl"
-            if owned_redirect else self._merged_skin_shader_filename()
+            if owned_redirect or direct_host else self._merged_skin_shader_filename()
         )
         so_prefix_rows = int(group_plan.get("so_prefix_rows", 0) or 0)
         # 每行 float 数 = SO 行 stride / 4（Position 类目 stride = SO override_byte_stride）。
@@ -3555,7 +3588,9 @@ class ExportZZMI(ExportUnity):
                 vb0_resource = f"ResourceZZRedirectSkinPosition_G{skeleton_group}_c{carrier_index}"
                 vb2_resource = f"ResourceZZRedirectSkinBlend_G{skeleton_group}_c{carrier_index}"
             for slot in slots:
-                cs_name = self._merged_skin_cs_name(skeleton_group, slot, carrier_index)
+                cs_name = self._merged_skin_cs_name(
+                    skeleton_group, slot, carrier_index, host_ib=direct_host
+                )
                 section.append(f"[{cs_name}]")
                 section.append(
                     "flags = optimization_level3 all_resources_bound skip_validation"
@@ -3597,11 +3632,14 @@ class ExportZZMI(ExportUnity):
                         skeleton_group,
                         slot,
                     )
-                    output = (
-                        self._merged_skin_out_name(skeleton_group, slot)
-                        if use_skin_out
-                        else self._merged_redirect_so_name(skeleton_group, slot)
-                    )
+                    if direct_host:
+                        own_buffer = self._merged_absorbed_skin_out_name(direct_host, slot)
+                        output = f"ResourceZZSkinWrite_{direct_host}_s{slot}"
+                        section.append(f"{output} = ref {own_buffer}")
+                    elif use_skin_out:
+                        output = self._merged_skin_out_name(skeleton_group, slot)
+                    else:
+                        output = self._merged_redirect_so_name(skeleton_group, slot)
                 section.append(f"cs-t2 = ref {palette}")
                 section.append(f"cs-u0 = ref {output}")
                 section.append(
@@ -4926,6 +4964,24 @@ class ExportZZMI(ExportUnity):
         )
         group_plan = self._merged_group_redirect_plan(skeleton_group)
         if group_plan is None:
+            for host in self._merged_group_absorbed_hosts(skeleton_group):
+                if component_id not in host["required_component_ids"]:
+                    continue
+                skin_plan = self._merged_absorbed_skin_plan(host)
+                if not self._merged_skin_publish_supported(skin_plan):
+                    continue
+                # The last writer can publish regardless of its input layout.
+                occurrence = self._merged_occ_var(component_id)
+                for slot in self._merged_skeleton_slots():
+                    guard = self._merged_absorbed_guard(host, skeleton_group, slot)
+                    shader = self._merged_skin_cs_name(
+                        skeleton_group, slot, host_ib=host["draw_ib"]
+                    )
+                    texture_override_vb_section.extend([
+                        f"if {guard} && {occurrence} == {slot}",
+                        f"    run = {shader}",
+                        "endif",
+                    ])
             # F3-CS：跨组合并的宿主组走直连路径（没有重定向计划），但它的合并几何
             # 混进了别组顶点 ⇒ 必须在**最后一个供骨件到达处**用当帧骨架重发布一次
             # （否则宿主自己那段写 SO 时跨组 palette 还是上一帧的 = 用户实测的
@@ -5636,13 +5692,10 @@ class ExportZZMI(ExportUnity):
         return self._merged_redirect_so_name(skeleton_group, slot)
 
     def _merged_group_absorbed_hosts(self, skeleton_group: int) -> list[dict]:
-        """本组「几何被吸收」的挂点：跨部件的合并几何就挂在这些 DrawIB 的导出 VB 上。
-
-        它们画的几何引用组内其它部件的骨骼 ⇒ 必须等全组当帧到位才能画。返回
-        `[{"component_id", "draw_ib", "draw_count"}]`（按组件号升序）。
-        """
+        """Find direct hosts and the palette writers used by each host's geometry."""
         hosts: list[dict] = []
-        for component_id in self._merged_group_component_ids(skeleton_group):
+        group_component_ids = self._merged_group_component_ids(skeleton_group)
+        for component_id in group_component_ids:
             component = self.merged_skeleton_components[int(component_id)]
             draw_ib = str(component["draw_ib"])
             if not self._merged_component_geometry_absorbed(skeleton_group, draw_ib):
@@ -5650,14 +5703,60 @@ class ExportZZMI(ExportUnity):
             draw_count = int(self._drawib_exported_vertex_count(draw_ib) or 0)
             if draw_count <= 0:
                 continue
+            referenced = self._merged_referenced_bone_ids(draw_ib)
+            required = {int(component_id)}
+            for writer_id in group_component_ids:
+                writer = self.merged_skeleton_components[writer_id]
+                offset = int(writer["vg_offset"])
+                end = offset + int(writer["vg_count"])
+                if referenced.intersection((writer.get("vg_map") or {}).values()) or any(
+                    offset <= bone_id < end for bone_id in referenced
+                ):
+                    required.add(writer_id)
             hosts.append(
                 {
                     "component_id": int(component_id),
                     "draw_ib": draw_ib,
                     "draw_count": draw_count,
+                    "required_component_ids": sorted(required),
                 }
             )
         return hosts
+
+    def _merged_absorbed_skin_plan(self, host: dict) -> dict | None:
+        """Use compute when a required writer cannot replay the host's input layout."""
+        draw_ib = host["draw_ib"]
+        if all(
+            self._merged_absorbed_replay_compatible(
+                self.merged_skeleton_components[component_id]["draw_ib"], draw_ib
+            )
+            for component_id in host["required_component_ids"]
+        ):
+            return None
+        position_layout = self._drawib_category_layout(draw_ib, "Position") or {}
+        return {
+            "direct_host_ib": draw_ib,
+            "target_ib": draw_ib,
+            "deform_draws": [(
+                f"ResourceZZSkinPosition_{draw_ib}",
+                f"ResourceZZSkinBlend_{draw_ib}",
+                host["draw_count"],
+            )],
+            "deform_draw_ibs": [draw_ib],
+            "so_stride": int(position_layout.get("stride", 0) or 0),
+            "anchor_layout": self._drawib_category_layout(draw_ib, "Blend"),
+            "anchor_layout_key": self._drawib_blend_layout_signature(draw_ib),
+            "required_component_ids": host["required_component_ids"],
+        }
+
+    def _merged_absorbed_guard(self, host: dict, skeleton_group: int, slot: int) -> str:
+        gate = self._merged_so_ready_condition([int(host["component_id"])], slot)
+        clauses = self._merged_slot_seen_condition(
+            host["required_component_ids"] + self._merged_cross_group_component_ids(skeleton_group),
+            slot,
+            cull_aware=True,
+        )
+        return self._merged_absorb_redundant_seen_clauses(f"{gate} && {clauses}")
 
     def _merged_absorbed_replay_compatible(self, draw_ib: str, host_ib: str) -> bool:
         """本挂点能否重放宿主导出的合并几何（Blend 输入布局必须一致）。
@@ -5745,11 +5844,9 @@ class ExportZZMI(ExportUnity):
         """组级守卫的合并几何重放：把宿主导出的合并几何写进它捕获的 SO。
 
         宿主在自己的 deform 段顶层把本轮 SO 引用捕获到自己的别名；
-        本块的守卫条件保证**该宿主**当帧在该槽已
-        到达（`_merged_so_ready_condition`，别名一定是本帧刷新的）+ 组内期望集合
-        已到齐，因此任何布局兼容的挂点闭合守卫后都能写。
+        本块等待宿主捕获 SO，并按其网格引用的骨骼检查供骨件的到达情况。
+        守卫闭合后，布局兼容的挂点即可重放蒙皮。
         """
-        gate = self._merged_so_ready_condition([int(host["component_id"])], slot)
         # 跨组供骨件（F3）：合并几何里被吸收的**别组**顶点，其骨骼由跨组 attach 写进
         # 本组缓冲，而那个 attach 读的是**跨组件自己那一段**捕获的 palette。守卫若不
         # 等它们到达，就只可能在宿主自己那段闭合——而宿主常常排在跨组件**之前**
@@ -5760,12 +5857,6 @@ class ExportZZMI(ExportUnity):
         # 自己那段也会发同一套守卫（`_append_merged_cross_group_replays`），落笔点
         # 因此自动跟着引擎的提交顺序走。开关关闭时 `_merged_cross_group_component_ids`
         # 返回空 ⇒ 条件与历史逐字一致。
-        clauses = self._merged_slot_seen_condition(
-            self._merged_group_component_ids(skeleton_group)
-            + self._merged_cross_group_component_ids(skeleton_group),
-            slot,
-            cull_aware=True,
-        )
         # O3：消费点标记（注释行；守卫条件与块体一字不改 ⇒ 逐字节不变量）
         self._append_merged_diag(
             section,
@@ -5773,9 +5864,7 @@ class ExportZZMI(ExportUnity):
                 consumer_ib or str(host["draw_ib"]), skeleton_group, slot, "replay-absorbed"
             ),
         )
-        section.append(
-            f"if {self._merged_absorb_redundant_seen_clauses(' && '.join(p for p in (gate, clauses) if p))}"
-        )
+        section.append(f"if {self._merged_absorbed_guard(host, skeleton_group, slot)}")
         section.append(f"    vs-t0 = {self._merged_deform_palette_name(host['draw_ib'], skeleton_group, slot)}")
         section.append(
             f"    so0 = ref {self._merged_absorbed_so_name(skeleton_group, slot, host['draw_ib'])}"
@@ -5880,21 +5969,10 @@ class ExportZZMI(ExportUnity):
                         self._append_merged_absorbed_replay(
                             section, host, skeleton_group, slot, consumer_ib=draw_ib
                         )
-            group_component_ids = self._merged_group_component_ids(skeleton_group)
-            if len(group_component_ids) > 1 and not any(
-                self._merged_absorbed_replay_compatible(
-                    str(self.merged_skeleton_components[int(other_id)]["draw_ib"]),
-                    str(draw_ib),
-                )
-                for other_id in group_component_ids
-                if int(other_id) != int(own_host["component_id"])
-            ):
-                print(
-                    "⚠️ [ZZMI骨骼合并] 合并宿主 " + str(draw_ib) + " 在本组内没有 Blend "
-                    "布局兼容的其它挂点：合并几何只能由它自己的 deform 段重放，"
-                    "若引擎把它的 deform pass 排在组内其它部件之前，该帧合并几何不写 "
-                    "→ 模型闪/消失。影响：合并（join 成一个物体）的导出。"
-                    "处置：把这条打印发给开发者（需要按 IA 布局兼容性放宽重放挂点）。"
+            skin_plan = self._merged_absorbed_skin_plan(own_host)
+            if skin_plan and not self._merged_skin_publish_supported(skin_plan):
+                self._append_merged_diag(
+                    section, self._merged_skin_layout_diag(skeleton_group, skin_plan)
                 )
             return
 
@@ -8299,6 +8377,35 @@ class ExportZZMI(ExportUnity):
         # 一个供骨件到达处」用当帧骨架重发布。见 `_merged_cross_group_publish_plan`。
         # ---------------------------------------------------------------
         for skeleton_group in groups:
+            if self._merged_group_redirect_plan(skeleton_group) is None:
+                export_helper = globals().get("_BpHelper")
+                folder = export_helper.get_current_buffer_folder_name() if export_helper else "Meshes"
+                for host in self._merged_group_absorbed_hosts(skeleton_group):
+                    skin_plan = self._merged_absorbed_skin_plan(host)
+                    if not self._merged_skin_publish_supported(skin_plan):
+                        continue
+                    host_ib = host["draw_ib"]
+                    for kind, stride in (
+                        ("Position", ZZMI_MERGED_SKIN_POSITION_ROW_BYTES),
+                        ("Blend", ZZMI_MERGED_SKIN_BLEND_ROW_BYTES),
+                    ):
+                        section.extend([
+                            f"[ResourceZZSkin{kind}_{host_ib}]",
+                            "type = StructuredBuffer", f"stride = {stride}",
+                            "bind_flags = shader_resource",
+                            f"filename = {folder}/{host_ib}-{kind}.buf", "",
+                        ])
+                    for slot in slots:
+                        section.extend([
+                            f"[{self._merged_absorbed_skin_out_name(host_ib, slot)}]",
+                            "type = Buffer", f"stride = {skin_plan['so_stride']}",
+                            f"array = {host['draw_count']}",
+                            "bind_flags = unordered_access vertex_buffer shader_resource",
+                            "misc_flags = none", "",
+                            f"[ResourceZZSkinWrite_{host_ib}_s{slot}]",
+                            "type = Buffer", "stride = 4", "format = R32_FLOAT", "",
+                        ])
+                    self._append_merged_skin_cs_sections(section, skeleton_group, skin_plan, slots)
             owned_plan = self._merged_owned_redirect_plan(skeleton_group)
             if owned_plan:
                 self._append_owned_redirect_resources(
@@ -8369,6 +8476,12 @@ class ExportZZMI(ExportUnity):
         )
         if owned_redirect:
             shader_names.append("zzmi_cb1_palette_rebase.hlsl")
+        direct_skinning = any(
+            self._merged_skin_publish_supported(self._merged_absorbed_skin_plan(host))
+            for group in self._merged_skeleton_groups()
+            if self._merged_group_redirect_plan(group) is None
+            for host in self._merged_group_absorbed_hosts(group)
+        )
         if _merged_palette_route_active():
             # 骨骼池路线：deform 之前要把池里每根 canonical 骨换算到本部件空间，
             # 少了这个着色器整条路线静默失效（palette 空 ⇒ 全塌到原点）。
@@ -8388,7 +8501,7 @@ class ExportZZMI(ExportUnity):
                 os.path.join(res_dir, shader_name),
                 shader_payload,
             )
-            if owned_redirect and shader_name == self._merged_skin_shader_filename():
+            if (owned_redirect or direct_skinning) and shader_name == self._merged_skin_shader_filename():
                 self._atomic_write_binary(
                     os.path.join(res_dir, "zzmi_merged_skin_owned_output.hlsl"),
                     b"#define ZZMI_SKIN_TYPED_OUTPUT 1\n" + shader_payload,
@@ -8645,6 +8758,7 @@ class ExportZZMI(ExportUnity):
                 texture_override_ib_section.append(f"vb1 = Resource{draw_ib}Texcoord")
 
             self._append_owned_redirect_render(texture_override_ib_section, draw_ib)
+            self._append_merged_absorbed_skin_render(texture_override_ib_section, draw_ib)
 
             texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
             if not GlobalProterties.forbid_auto_texture_ini() and texture_markup_info_list:
