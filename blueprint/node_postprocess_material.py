@@ -107,6 +107,22 @@ _EFMITTL_KEY = "EFMITTL"
 _EFMITTL_LIBRARY_FILE = os.path.join(_EFMITTL_KEY, "translucency.ini")
 _EFMITTL_MASK_PARAM = "Resource\\EFMITTL\\Mask"
 _EFMITTL_DRAW_LINE = "run = CommandList\\EFMITTL\\Draw"
+# ── EFMI 发光（EFMITTL 0.57 原生接口）────────────────────────────────
+# 主人定稿的写法：GlowMap 贴图 + Brightness/H/S/V/Interpolate/glow_mode，
+# 然后 count/first + Draw（其实就是原本 TTL 的写法，只多一段发光设置）。
+# HSV 默认 0，Brightness 默认 1。
+# 只在 use_rabbitfx_slot 为 False 时由材质转资源生成；True 走既有 FX 发光线。
+_EFMITTL_GLOW_PARAM = "Resource\\EFMITTL\\GlowMap"
+_EFMITTL_GLOW_BEGIN = "; === EFMITTL Glow ==="
+_EFMITTL_GLOW_END = "; === End EFMITTL Glow ==="
+_EFMITTL_GLOW_PARAMS = (
+    ("Brightness", "1"),
+    ("H", "0"),
+    ("S", "0"),
+    ("V", "0"),
+    ("Interpolate", "1"),
+    ("glow_mode", "0"),
+)
 # 遮罩默认读透明通道（3 = A）：库自己的默认是 0（R），我们不跟它，每次显式写 3。
 # 提取工具的透明通道贴图四个通道同值，所以 3 读到的就是那张遮罩本身。
 #
@@ -2942,6 +2958,126 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         indent = indent_match.group(1) if indent_match else ''
         lines.insert(insert_at, indent + _EFMITTL_MASK_INVERT_LINE)
 
+    @staticmethod
+    def _use_rabbitfx_slot():
+        """输出节点面板：True 走 FX 发光线，False 走 EFMI 原生 TTL 发光。"""
+        try:
+            from ..common.global_properties import GlobalProterties
+            return bool(GlobalProterties.use_rabbitfx_slot())
+        except Exception:
+            return True
+
+    def _efmi_native_glow_enabled(self):
+        return (
+            getattr(GlobalConfig, "logic_name", "") == LogicName.EFMI
+            and not self._use_rabbitfx_slot()
+        )
+
+    @staticmethod
+    def _strip_efmi_glow_blocks(lines):
+        """重导时只摘掉自己的标记块，不碰 TTL/材质参数。"""
+        kept = []
+        inside = False
+        for line in lines:
+            text = str(line).strip()
+            if text == _EFMITTL_GLOW_BEGIN:
+                inside = True
+                continue
+            if text == _EFMITTL_GLOW_END:
+                inside = False
+                continue
+            if not inside:
+                kept.append(line)
+        lines[:] = kept
+
+    @staticmethod
+    def _efmi_glow_param_lines(indent="", ref=None):
+        bs = chr(92)
+        result = [indent + _EFMITTL_GLOW_BEGIN]
+        if ref:
+            result.append("{} = ref {}".format(indent + _EFMITTL_GLOW_PARAM, ref))
+        for name, value in _EFMITTL_GLOW_PARAMS:
+            result.append("{}${}EFMITTL{}{} = {}".format(indent, bs, bs, name, value))
+        result.append(indent + _EFMITTL_GLOW_END)
+        return result
+
+    def _ensure_efmi_glow_in_section(self, lines):
+        """EFMI + use_rabbitfx_slot=False：给有 GlowMap 的块补库原生发光。
+
+        T1：块里已有 CommandList\\EFMITTL\\Draw（有 TTLMap）→ 参数插在 count 前；
+        O1：普通 draw 且没有 TTL/replay → 参数 + count/first + Draw 替换原 draw
+        （和 T1 同形，只是没有 Mask 行）。
+        重导先摘旧标记块和旧 GlowMap 引用行，保证不叠第二条。
+        """
+        self._strip_efmi_glow_blocks(lines)
+        mesh_info = [
+            (index, self.extract_mesh_name(line))
+            for index, line in enumerate(lines)
+            if self.extract_mesh_name(line)
+        ]
+        for position in range(len(mesh_info) - 1, -1, -1):
+            mesh_index, _mesh_name = mesh_info[position]
+            start = mesh_index + 1
+            end = mesh_info[position + 1][0] if position + 1 < len(mesh_info) else len(lines)
+            block = lines[start:end]
+            alias_lines = [
+                (i, str(line).strip())
+                for i, line in enumerate(block)
+                if str(line).strip().casefold().startswith(
+                    _EFMITTL_GLOW_PARAM.casefold() + " = ref "
+                )
+                and not str(line).strip().casefold().endswith("= ref null")
+            ]
+            if not alias_lines:
+                continue
+            value = alias_lines[-1][1].split("=", 1)[1].strip()
+            ref = value[4:].strip() if value.casefold().startswith("ref ") else value
+            # 旧引用行可能叠在多轮导出里；全部摘掉，统一由标记块重写一条。
+            for index, _text in reversed(alias_lines):
+                del lines[start + index]
+            end -= len(alias_lines)
+            block = lines[start:end]
+            ttl_draw_index = next(
+                (i for i, line in enumerate(block)
+                 if str(line).strip().casefold() == _EFMITTL_DRAW_LINE.casefold()),
+                None,
+            )
+            if ttl_draw_index is not None:
+                count_index = next(
+                    (i for i, line in enumerate(block)
+                     if str(line).strip().casefold().startswith("$\\efmittl\\count")),
+                    None,
+                )
+                insert_at = count_index if count_index is not None else ttl_draw_index
+                indent_match = re.match(r"^(\s*)", str(block[insert_at]))
+                indent = indent_match.group(1) if indent_match else ""
+                lines[start + insert_at:start + insert_at] = (
+                    self._efmi_glow_param_lines(indent, ref)
+                )
+                continue
+            draw_index = next(
+                (i for i, line in enumerate(block) if _EFMITTL_DRAW_RE.match(str(line))),
+                None,
+            )
+            if draw_index is None:
+                continue
+            if any("CommandListEFMIGlowFXRun" in str(line) for line in block):
+                continue
+            draw_match = _EFMITTL_DRAW_RE.match(str(block[draw_index]))
+            draw_args = self._efmi_ttl_draw_args(draw_match.group("args"))
+            if not draw_args:
+                continue
+            count, first = draw_args
+            indent_match = re.match(r"^(\s*)", str(block[draw_index]))
+            indent = indent_match.group(1) if indent_match else ""
+            bs = chr(92)
+            replacement = self._efmi_glow_param_lines(indent, ref) + [
+                "{}${}EFMITTL{}count = {}".format(indent, bs, bs, count),
+                "{}${}EFMITTL{}first = {}".format(indent, bs, bs, first),
+                indent + _EFMITTL_DRAW_LINE,
+            ]
+            lines[start + draw_index:start + draw_index + 1] = replacement
+
     def _process_efmi_ttl_sections(self, section_name, lines, all_sections,
                                    material_group_to_swapkey, swap_key_prefix,
                                    next_swap_key_num, used_swap_keys, texture_folder):
@@ -3268,8 +3404,12 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             # 贴图类型 → 资源别名。TTLMap 是「抖动半透明」专用的第二个遮罩通道，
             # 只有当前命名空间的档案声明了它（目前只有 HI3FX）才会产出：其它运行时
             # 没有这个概念，产出这条引用只会跑一个不存在的语义。
+            # EFMI + use_rabbitfx_slot=False：发光走 EFMITTL 原生接口，别名换成
+            # Resource\EFMITTL\GlowMap；不写 RabbitFX Run、也不给 GlowFX 节点留 marker。
+            efmi_native_glow = self._efmi_native_glow_enabled() and not debug_disable_fx_ttl
+            glow_alias = _EFMITTL_GLOW_PARAM if efmi_native_glow else fx_profile.glow_ref
             fxmap_texture_types = [
-                ('Glowmap', fx_profile.glow_ref),
+                ('Glowmap', glow_alias),
                 ('FXMap', fx_profile.fxmap_ref),
             ]
             if fx_profile.ttlmap_ref:
@@ -3315,8 +3455,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         object_to_diffuse_swapkey, material_group_to_swapkey,
                         swap_key_prefix, next_swap_key_num, used_swap_keys)
                     fxmap_lines.extend(generated_lines)
+                    native_glow_line = texture_type == 'Glowmap' and efmi_native_glow
                     pending = getattr(self, '_rabbitfx_pending', None)
-                    if pending is not None and texture_type in ('Glowmap', 'FXMap') and any(
+                    if (not native_glow_line) and pending is not None and texture_type in ('Glowmap', 'FXMap') and any(
                         str(line).strip().lower().startswith(param_name.lower() + ' = ref ')
                         for line in generated_lines
                     ):
@@ -3327,8 +3468,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         pending.append({'object': obj.name, 'type': texture_type,
                                         'marker': marker, 'lines': list(generated_lines)})
                     # Run 行对三种贴图类型是同一条命令列表：调用/使用方法不变，
-                    # 只是引用行多了一种贴图类型。
-                    fxmap_lines.append(fx_profile.run_line)
+                    # 只是引用行多了一种贴图类型。EFMI 原生发光不需要 RabbitFX Run。
+                    if not native_glow_line:
+                        fxmap_lines.append(fx_profile.run_line)
 
             ntemifx_lines = []
             ntemifx_texture_slots = {} if debug_disable_fx_ttl else self._collect_ntemifx_texture_slots(obj, workspace_resource_by_slot)
@@ -3360,9 +3502,10 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             new_lines_for_this_mesh.extend(ntemifx_lines)
             lines[insert_index + 1:insert_index + 1] = new_lines_for_this_mesh
             reset_lines = []
+            native_glow_only = efmi_native_glow and not generated_fxmap and not generated_ttlmap
             if generated_glowmap:
-                reset_lines.append(f"{fx_profile.glow_ref} = ref null")
-                if fx_profile.reset_neutralises_variables:
+                reset_lines.append(f"{glow_alias} = ref null")
+                if fx_profile.reset_neutralises_variables and not native_glow_only:
                     # RabbitFX/NTEMIFX 的 Run 结尾会把 $h/$s/$v/$brightness 复位，
                     # 所以「写 0 + 再 Run 一次」就是复位。
                     reset_lines.append(f"{fx_profile.param('brightness')} = 0")
@@ -3373,7 +3516,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if reset_lines:
                 # HI3FX 的 Run 不复位变量，必须用 Reset（它自己会 null 别名 + Clean），
                 # 否则 $brightness 会一直停在 0，后续绘制全黑。
-                reset_lines.append(fx_profile.reset_line or fx_profile.run_line)
+                if not native_glow_only:
+                    reset_lines.append(fx_profile.reset_line or fx_profile.run_line)
                 reset_insert_idx = self._find_mesh_block_reset_insert_index(lines, insert_index)
                 if reset_insert_idx != -1:
                     lines[reset_insert_idx:reset_insert_idx] = reset_lines
@@ -3396,6 +3540,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             next_swap_key_num = self._process_efmi_ttl_sections(
                 section_name, lines, all_sections, material_group_to_swapkey,
                 swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder)
+            if not self._use_rabbitfx_slot():
+                self._ensure_efmi_glow_in_section(lines)
 
         # 旧版把 TTL 组排在本段段尾、组内自带 `; [mesh:]` 锚点。现在改成就地替换，
         # 新产物里不会有组；这里仍跳过旧工程残留的组，免得 phase2 把组内锚点当成
