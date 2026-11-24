@@ -193,6 +193,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=False,
     ) # type: ignore
 
+    use_dhash_texture: bpy.props.BoolProperty(
+        name="dHash纹理",
+        description="按原图 dHash + 格式匹配 EFMI 贴图槽；关闭时保持固定 ps-tN 直写。",
+        default=False,
+    ) # type: ignore
+
     efmi_pass_mirror_enabled: bpy.props.BoolProperty(
         name="多pass贴图槽位镜像（修颜色偏差）",
         description="默认关（需手动开启）：开启后导出时按工作空间缓存/抓帧推导，把槽位贴图镜像到 G-buffer(t0/t1) 与前向第二层(t12等) 槽位，并注册 pass 标签——修自定义贴图只覆盖第一层、其余 pass 仍读原图导致的颜色偏差。默认关＝回到旧行为（只绑标记槽，不发射镜像赋值与 [ShaderOverride_PassMirror...] 标签段）；导入侧也不再写回 Config/PassLayouts.json。",
@@ -585,6 +591,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def use_rabbitfx_slot(cls):
         return cls._instance().use_rabbitfx_slot
+
+    @classmethod
+    def use_dhash_texture(cls):
+        return cls._instance().use_dhash_texture
 
     @classmethod
     def efmi_pass_mirror_enabled(cls):

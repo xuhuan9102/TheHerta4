@@ -4,6 +4,47 @@ from ...common.drawib_model import DrawIBModel
 from dataclasses import dataclass,field
 from ...common.global_config import GlobalConfig
 from ...common.global_properties import GlobalProterties
+try:
+    from ...common.dhash_metadata import (
+        filter_name_for,
+        filter_name_with_suffix,
+        filter_section_lines,
+        get_mark_binding_mode,
+        get_mark_dhash,
+        get_mark_format,
+        normalize_binding_mode,
+        normalize_dhash,
+        normalize_format,
+        role_for_mark_name,
+    )
+except ImportError:  # tests/ 以 fake 包骨架按文件路径加载本模块（包 __path__ 为空）时走到
+    import importlib.util as _importlib_util
+    import os as _os
+    import sys as _sys
+
+    _DHASH_METADATA_MODULE_NAME = "theherta4_dhash_metadata"
+    _dhash_metadata = _sys.modules.get(_DHASH_METADATA_MODULE_NAME)
+    if _dhash_metadata is None:
+        _dhash_metadata_spec = _importlib_util.spec_from_file_location(
+            _DHASH_METADATA_MODULE_NAME,
+            _os.path.join(
+                _os.path.dirname(_os.path.abspath(__file__)),
+                "..", "..", "common", "dhash_metadata.py",
+            ),
+        )
+        _dhash_metadata = _importlib_util.module_from_spec(_dhash_metadata_spec)
+        _sys.modules[_DHASH_METADATA_MODULE_NAME] = _dhash_metadata
+        _dhash_metadata_spec.loader.exec_module(_dhash_metadata)
+    filter_name_for = _dhash_metadata.filter_name_for
+    filter_name_with_suffix = _dhash_metadata.filter_name_with_suffix
+    filter_section_lines = _dhash_metadata.filter_section_lines
+    get_mark_binding_mode = _dhash_metadata.get_mark_binding_mode
+    get_mark_dhash = _dhash_metadata.get_mark_dhash
+    get_mark_format = _dhash_metadata.get_mark_format
+    normalize_binding_mode = _dhash_metadata.normalize_binding_mode
+    normalize_dhash = _dhash_metadata.normalize_dhash
+    normalize_format = _dhash_metadata.normalize_format
+    role_for_mark_name = _dhash_metadata.role_for_mark_name
 from ...blueprint.export_helper import BlueprintExportHelper
 
 from ...common.buffer_export_helper import BufferExportHelper
@@ -75,6 +116,10 @@ class ExportEFMI:
         # 占位绘制（下游 _collect_used_group_ids_by_lod 读到 None、段生成引用消失的
         # 网格名）。对照 zzmi（zzmi.py:_cleanup_stub_objects 的 _zzmi_stub_draw_calls）。
         self._efmi_stub_draw_calls = []
+        # dHash 贴图 filter 登记：段名 -> {name, format, dhash, role}，以及
+        # (role, format, dhash) -> 段名 的去重索引。默认关时表恒为空。
+        self._dhash_filters = {}
+        self._dhash_filter_by_definition = {}
         if GlobalProterties.import_merged_vgmap():
             try:
                 self._efmi_stub_object_names = self._ensure_stub_objects_for_missing_parts()
@@ -2750,10 +2795,114 @@ class ExportEFMI:
                 for texture_markup_info in texture_markup_info_list:
                     if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
                         continue
+                    if self._try_append_dhash_binding(section, submesh_model, texture_markup_info):
+                        continue
                     section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
                     self._efmi_append_pass_mirrors(
                         section, submesh_model, texture_markup_info.mark_slot, texture_markup_info
                     )
+
+    # ------------------------------------------------------------------
+    # dHash 贴图 filter（默认关；关闭时不产生任何新行）
+    # ------------------------------------------------------------------
+
+    def _ensure_dhash_filter_registry(self) -> dict:
+        """懒建 filter 登记表：object.__new__ 构造的测试夹具也能直接用。"""
+        if getattr(self, "_dhash_filters", None) is None:
+            self._dhash_filters = {}
+        if getattr(self, "_dhash_filter_by_definition", None) is None:
+            self._dhash_filter_by_definition = {}
+        return self._dhash_filters
+
+    def _dhash_role(self, mark_name) -> str:
+        # 映射与清洗统一在 common/dhash_metadata.py，材质侧共用同一份。
+        return role_for_mark_name(mark_name)
+
+    def _dhash_filter_name(self, submesh_model, mark) -> str:
+        """取得/登记一个 filter 段名。
+
+        同一 (role, format, dhash) 复用同一段（不同物体引用同一张原图时只发一段）；
+        同一 (token, role) 下出现不同原图时用 dhash 前 8 位加后缀消歧。
+        段名拼接统一走 common/dhash_metadata.py 的 filter_name_for。
+        """
+        role = self._dhash_role(getattr(mark, "mark_name", ""))
+        fmt = normalize_format(get_mark_format(mark))
+        dhash = normalize_dhash(get_mark_dhash(mark))
+        filters = self._ensure_dhash_filter_registry()
+        by_definition = self._dhash_filter_by_definition
+        definition_key = (role, fmt, dhash)
+        existing_name = by_definition.get(definition_key)
+        if existing_name is not None:
+            return existing_name
+
+        token = getattr(submesh_model, "unique_str", "") or ""
+        name = filter_name_for(token, role)
+        occupied = filters.get(name.lower())
+        if occupied is not None and (occupied["format"], occupied["dhash"]) != (fmt, dhash):
+            suffix = dhash[:8] or "alt"
+            name = filter_name_with_suffix(token, role, suffix)
+            index = 2
+            while True:
+                occupied = filters.get(name.lower())
+                if occupied is None:
+                    break
+                if (occupied["format"], occupied["dhash"]) == (fmt, dhash):
+                    # 不同 token 清洗后撞名且定义相同：复用已有段。
+                    by_definition[definition_key] = occupied["name"]
+                    return occupied["name"]
+                name = filter_name_with_suffix(token, role, suffix + "_" + str(index))
+                index += 1
+
+        filters[name.lower()] = {
+            "name": name,
+            "format": fmt,
+            "dhash": dhash,
+            "role": role,
+        }
+        by_definition[definition_key] = name
+        return name
+
+    def _try_append_dhash_binding(self, section, submesh_model, mark) -> bool:
+        """dHash 模式下追加 `ps-t[Filter_...] = ref Resource-...` 并登记 filter。
+
+        条件不成立（默认关 / 禁止自动贴图 / RabbitFX / binding_mode 非 filter /
+        dhash 或 format 非法）返回 False，调用方保留原来的固定槽位直写行。
+        """
+        use_dhash_texture = getattr(GlobalProterties, "use_dhash_texture", None)
+        if not callable(use_dhash_texture) or not use_dhash_texture():
+            return False
+        if GlobalProterties.forbid_auto_texture_ini():
+            return False
+        if GlobalProterties.use_rabbitfx_slot():
+            return False
+        if normalize_binding_mode(get_mark_binding_mode(mark)) != "filter":
+            return False
+        dhash = normalize_dhash(get_mark_dhash(mark))
+        fmt = normalize_format(get_mark_format(mark))
+        if not dhash or not fmt:
+            return False
+        get_resource_name = getattr(mark, "get_resource_name", None)
+        if not callable(get_resource_name):
+            return False
+        resource_name = get_resource_name()
+        if not resource_name:
+            return False
+        filter_name = self._dhash_filter_name(submesh_model, mark)
+        section.append("ps-t[" + filter_name + "] = ref " + resource_name)
+        return True
+
+    def _append_dhash_filter_sections(self, ini_builder) -> None:
+        """把登记的 filter 写成一个顶层 ResourceTexture 段（每段三行 + 空行）。"""
+        filters = self._ensure_dhash_filter_registry()
+        if not filters:
+            return
+        filter_section = M_IniSection(M_SectionType.ResourceTexture)
+        for entry in filters.values():
+            filter_section.append("[" + entry["name"] + "]")
+            for line in filter_section_lines(entry["format"], entry["dhash"]):
+                filter_section.append(line)
+            filter_section.new_line()
+        ini_builder.append_section(filter_section)
 
     def _efmi_append_pass_mirrors(self, section, submesh_model, primary_slot, texture_markup_info):
         """多 pass 槽位镜像：把贴图绑定按抓帧推导同步到其它可见 pass 的槽位。
@@ -3009,6 +3158,11 @@ class ExportEFMI:
     def generate_ini_file(self):
         ini_builder = M_IniBuilder()
 
+        # 每次生成 ini 都从空表开始：同一 ExportEFMI 允许二次导出，filter 登记
+        # 不能跨轮残留。
+        self._dhash_filters = {}
+        self._dhash_filter_by_definition = {}
+
         # EFMI 骨骼合并（Merged Skeleton）部件信息（export() 已提前收集；
         # 单独调用时兜底收集）
         self.prepare_merged_skeleton()
@@ -3240,6 +3394,8 @@ class ExportEFMI:
                     for texture_markup_info in texture_markup_info_list:
                         if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
                             continue
+                        if self._try_append_dhash_binding(texture_override_ib_section, submesh_model, texture_markup_info):
+                            continue
                         texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
 
             is_both_source_and_target = is_source_ib and is_target_ib and self.has_cross_ib
@@ -3392,6 +3548,8 @@ class ExportEFMI:
                         resource_texture_section.append("filename = Textures/" + texture_markup_info.mark_filename)
                         resource_texture_section.new_line()
             ini_builder.append_section(resource_texture_section)
+            # dHash 贴图 filter 段（顶层 ResourceTexture；默认关时登记表为空，不发射）。
+            self._append_dhash_filter_sections(ini_builder)
 
         ini_builder.append_section(resource_buffer_section)
 

@@ -2,6 +2,39 @@ import os
 from dataclasses import dataclass, field
 
 from .submesh_metadata import SubmeshMetadataResolver
+try:
+    from .dhash_metadata import normalize_binding_mode, normalize_dhash, normalize_format
+except ImportError:  # tests/ 以 fake 包骨架按文件路径加载本模块（包 __path__ 为空）时走到
+    import importlib.util as _importlib_util
+    import os as _os
+    import sys as _sys
+
+    _DHASH_METADATA_MODULE_NAME = "theherta4_dhash_metadata"
+    _dhash_metadata = _sys.modules.get(_DHASH_METADATA_MODULE_NAME)
+    if _dhash_metadata is None:
+        _dhash_metadata_spec = _importlib_util.spec_from_file_location(
+            _DHASH_METADATA_MODULE_NAME,
+            _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "dhash_metadata.py"),
+        )
+        _dhash_metadata = _importlib_util.module_from_spec(_dhash_metadata_spec)
+        _sys.modules[_DHASH_METADATA_MODULE_NAME] = _dhash_metadata
+        _dhash_metadata_spec.loader.exec_module(_dhash_metadata)
+    normalize_binding_mode = _dhash_metadata.normalize_binding_mode
+    normalize_dhash = _dhash_metadata.normalize_dhash
+    normalize_format = _dhash_metadata.normalize_format
+
+
+def _first_dict_value(raw: dict, keys: tuple):
+    for key in keys:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return ""
 
 
 @dataclass
@@ -11,6 +44,11 @@ class TextureMarkUpInfo:
     mark_hash:str = field(default="",init=False)
     mark_slot:str = field(default="",init=False)
     mark_filename:str = field(default="",init=False)
+    # dHash 贴图契约：原图内容指纹 + SRV 格式 + 绑定方式（"filter"/"slot"）。
+    # 旧工作区没有这三项时保持 ""/""/"slot"，即走原固定 ps-tN 直写路径。
+    source_dhash:str = field(default="",init=False)
+    source_format:str = field(default="",init=False)
+    binding_mode:str = field(default="slot",init=False)
 
     def get_resource_name(self):
         base_name = self.mark_filename.split(".")[0].strip()
@@ -30,6 +68,9 @@ class TextureMetadataResolver:
             getattr(texture_info, "mark_hash", ""),
             getattr(texture_info, "mark_slot", ""),
             getattr(texture_info, "mark_filename", ""),
+            getattr(texture_info, "source_dhash", ""),
+            getattr(texture_info, "source_format", ""),
+            getattr(texture_info, "binding_mode", "slot"),
         )
 
     @staticmethod
@@ -64,6 +105,15 @@ class TextureMetadataResolver:
             markup_info.mark_hash = texture_info.get("MarkHash", texture_info.get("mark_hash", ""))
             markup_info.mark_slot = texture_info.get("MarkSlot", texture_info.get("mark_slot", ""))
             markup_info.mark_filename = texture_info.get("MarkFileName", texture_info.get("mark_filename", ""))
+            markup_info.source_dhash = normalize_dhash(
+                _first_dict_value(texture_info, ("source_dhash", "dhash", "SourceDHash"))
+            )
+            markup_info.source_format = normalize_format(
+                _first_dict_value(texture_info, ("source_format", "format", "SourceFormat", "format_name"))
+            )
+            markup_info.binding_mode = normalize_binding_mode(
+                _first_dict_value(texture_info, ("binding_mode", "BindingMode"))
+            )
             normalized_texture_info_list.append(markup_info)
 
         return normalized_texture_info_list

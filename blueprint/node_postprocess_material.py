@@ -1104,11 +1104,17 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if not mark_name:
                 continue
             param_name, slot_token = normalized_slot
+            # 整个绑定字典原样保留（mark_filename / mark_slot / mark_hash /
+            # source_path / source_dhash / source_format …）：dHash 过滤绑定需要的
+            # 不只是 param_name，丢掉这些字段就没法写 match_dhash / match_format。
             slot_info = dict(binding)
             slot_info["param_name"] = param_name
             slot_info["slot_token"] = slot_token
             slot_info["mark_name"] = mark_name
             slot_info["source_path"] = source_path
+            slot_info.setdefault("mark_filename", str(binding.get("mark_filename", "") or "").strip())
+            slot_info.setdefault("mark_slot", str(binding.get("mark_slot", "") or "").strip())
+            slot_info.setdefault("mark_hash", str(binding.get("mark_hash", "") or "").strip())
             result[param_name] = slot_info
         return result
 
@@ -1807,7 +1813,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                                 texture_folder, all_sections,
                                 object_to_diffuse_swapkey, material_group_to_swapkey,
                                 swap_key_prefix, next_swap_key_num, used_swap_keys,
-                                resource_name_provider=None, alpha_line_provider=None):
+                                resource_name_provider=None, alpha_line_provider=None,
+                                slot_info=None):
         generated_lines = []
         # 细分进度：本批次要处理 len(matching_materials) 张贴图（下面每张都会进
         # ``create_resource_entry`` 上报一次），先累加进显示用的 total。
@@ -1835,6 +1842,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 resource_name_override=resource_name,
                 workspace_source_path=workspace_source_by_material.get(str(getattr(material, "name", "") or "")),
                 dedup_group=f"{getattr(obj, 'name', '') or ''}|{texture_type}|single",
+                obj=obj,
+                slot_info=slot_info,
+                binding_mode=getattr(self, "_active_binding_mode", "FIXED"),
             )
             if new_line:
                 generated_lines.append(new_line)
@@ -1886,6 +1896,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                     # 同一切换组的不同档位是刻意变体（脸妆/服装微调）：联合去重不得把它们
                     # 合并成同一张图，否则切档看起来"没反应"。
                     dedup_group=f"{getattr(obj, 'name', '') or ''}|{texture_type}|{current_swap_variable}",
+                    obj=obj,
+                    slot_info=slot_info,
+                    binding_mode=getattr(self, "_active_binding_mode", "FIXED"),
                 )
                 if new_line:
                     generated_lines.append(f"if {current_swap_variable} == {index}")
@@ -1906,9 +1919,123 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
         return generated_lines, next_swap_key_num
 
+    # ── dHash 贴图过滤（Filter）绑定 ──────────────────────────────────────────
+    # 开启 GlobalProterties.use_dhash_texture() 且目标部件 binding_mode == "DHASH"
+    # 时，不再按固定槽位写 ps-tN，而是写 ``ps-t[Filter_...] = ref Resource...``，
+    # 并在 INI 顶层注册 ``[Filter_...]`` 段（match_format + match_dhash）。角色映射、
+    # 段名、规范化与段体统一由 common/dhash_metadata.py 提供，这里不自己拼一套。
+
+    @classmethod
+    def _dhash_texture_enabled(cls):
+        """全局总开关；纯 Python 测试宿主没有 bpy 时按关闭处理（保持旧行为）。"""
+        try:
+            from ..common.global_properties import GlobalProterties
+            return bool(GlobalProterties.use_dhash_texture())
+        except Exception:
+            return False
+
+    @classmethod
+    def _dhash_filter_fields(cls, slot_info):
+        """从 slot_info 取规范化后的 ``(dhash, format)``；非法时返回空串。"""
+        if not isinstance(slot_info, dict):
+            return "", ""
+        from ..common.dhash_metadata import normalize_dhash, normalize_format
+
+        dhash = ""
+        for key in ("source_dhash", "dhash", "texture_dhash", "SourceDHash", "DHash"):
+            dhash = normalize_dhash(slot_info.get(key, ""))
+            if dhash:
+                break
+        if not dhash:
+            return "", ""
+        fmt = ""
+        for key in ("source_format", "format", "texture_format", "SourceFormat"):
+            fmt = normalize_format(slot_info.get(key, ""))
+            if fmt:
+                break
+        return (dhash, fmt) if fmt else ("", "")
+
+    @classmethod
+    def _dhash_role_for_mark_name(cls, mark_name):
+        """DiffuseMap/NormalMap/... → Filter 角色名：统一走共享函数。"""
+        from ..common.dhash_metadata import role_for_mark_name
+        return role_for_mark_name(mark_name)
+
+    @staticmethod
+    def _dhash_token_for(obj, slot_info):
+        raw = str(getattr(obj, "name", "") or "").strip()
+        if not raw and isinstance(slot_info, dict):
+            raw = str(slot_info.get("unique_str", "") or "").strip()
+        return raw
+
+    @classmethod
+    def _register_dhash_filter_section(cls, all_sections, token, role, fmt, dhash):
+        """在 all_sections 顶层注册 ``[Filter_...]``。
+
+        同一份 (format, dhash) 只落一个段：不同物体用同一张贴图时复用已注册的
+        Filter 段；同名不同数据用 dhash 前 8 位加后缀消歧，绝不覆盖已有 Filter。
+        与 ``ui/universal/efmi.py`` 的 ``_dhash_filter_name`` 同一套命名/去重口径。
+        """
+        from ..common.dhash_metadata import (
+            filter_name_for,
+            filter_name_with_suffix,
+            filter_section_lines,
+        )
+
+        wanted_lines = [str(line) for line in filter_section_lines(fmt, dhash)]
+        wanted_normalized = [line.strip() for line in wanted_lines]
+        for section_name, existing in all_sections.items():
+            text = str(section_name).strip()
+            lowered = text.lower()
+            if not (lowered.startswith("[filter_") and text.endswith("]")):
+                continue
+            if [str(line).strip() for line in existing] == wanted_normalized:
+                return text[1:-1]
+        name = filter_name_for(token, role)
+        existing = all_sections.get("[" + name + "]")
+        if existing is not None and [
+            str(line).strip() for line in existing
+        ] != wanted_normalized:
+            suffix = dhash[:8] or "alt"
+            name = filter_name_with_suffix(token, role, suffix)
+            index = 2
+            while True:
+                existing = all_sections.get("[" + name + "]")
+                if existing is None:
+                    break
+                if [str(line).strip() for line in existing] == wanted_normalized:
+                    return name
+                name = filter_name_with_suffix(
+                    token, role, suffix + "_" + str(index)
+                )
+                index += 1
+        all_sections["[" + name + "]"] = wanted_lines
+        return name
+
+    def _build_dhash_binding_line(self, obj, slot_info, binding_mode, resource_name,
+                                  all_sections):
+        """DHASH 模式返回 ``ps-t[Filter_...] = ref <resource>``，否则返回 None。"""
+        if str(binding_mode or "FIXED").strip().upper() != "DHASH":
+            return None
+        if not self._dhash_texture_enabled():
+            return None
+        dhash, fmt = self._dhash_filter_fields(slot_info)
+        if not dhash or not fmt:
+            return None
+        mark_name = slot_info.get("mark_name", "") if isinstance(slot_info, dict) else ""
+        role = self._dhash_role_for_mark_name(mark_name)
+        token = self._dhash_token_for(obj, slot_info)
+        if not role or not token:
+            return None
+        filter_name = self._register_dhash_filter_section(
+            all_sections, token, role, fmt, dhash
+        )
+        return "ps-t[{}] = ref {}".format(filter_name, resource_name)
+
     def create_resource_entry(self, material, param_name, texture_folder, all_sections,
                               resource_name_override=None, workspace_source_path=None,
-                              dedup_group=None):
+                              dedup_group=None, obj=None, slot_info=None,
+                              binding_mode=None):
         global _material_resource_cache
 
         # 细分进度：每张材质贴图开始复制/转 DDS 前先刷新状态栏文本。
@@ -1962,6 +2089,11 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         }
         if self.material_to_resource_override or desired_line not in existing_normalized:
             all_sections[resource_section_name] = [desired_line]
+        dhash_line = self._build_dhash_binding_line(
+            obj, slot_info, binding_mode, resource_name, all_sections
+        )
+        if dhash_line:
+            return dhash_line
         return "{} = {}".format(param_name, resource_name) if not param_name.lower().startswith("resource\\") else "{} = ref {}".format(param_name, resource_name)
 
     @staticmethod
@@ -2869,7 +3001,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 generated_lines, next_swap_key_num = self.generate_material_lines(
                     matching_materials, param_name, texture_type, obj, workspace_texture_folder, all_sections,
                     object_to_diffuse_swapkey, material_group_to_swapkey,
-                    swap_key_prefix, next_swap_key_num, used_swap_keys)
+                    swap_key_prefix, next_swap_key_num, used_swap_keys,
+                    slot_info=slot_info)
                 if generated_lines:
                     new_lines_for_this_mesh.extend(generated_lines)
                     generated_ps_slots.add(param_name.lower())

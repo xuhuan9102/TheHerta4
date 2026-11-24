@@ -64,7 +64,7 @@ ACTIVATION_FLAG_CANDIDATES = ("$active0", "$ntmi_active0")
 #: 贴图槽位绑定行（``ps-tN = Resource_xxx`` / ``Resource\ZZMI\Xxx = ref Resource-yyy``）。
 #: 与 ``node_postprocess_object_texture`` 的口径一致：只认这三种参数名。
 _TEXTURE_BINDING_RE = re.compile(
-    r"^\s*(?P<param>Resource\\[A-Za-z0-9_]+\\[A-Za-z0-9_]+|this|ps-t\d+)\s*=\s*"
+    r"^\s*(?P<param>Resource\\[A-Za-z0-9_]+\\[A-Za-z0-9_]+|this|ps-t(?:\[[^\]]+\]|\d+))\s*=\s*"
     r"(?:ref\s+)?(?P<resource>[A-Za-z0-9_\-.]+)\s*(?:;.*)?$",
     re.IGNORECASE,
 )
@@ -465,6 +465,19 @@ class SSMT_CustomMaterialAssignTargetItem(bpy.types.PropertyGroup):
     )
     switch_groups: bpy.props.CollectionProperty(
         type=SSMT_CustomMaterialAssignSwitchGroup
+    )
+    binding_mode: bpy.props.EnumProperty(
+        name="贴图绑定方式",
+        description=(
+            "固定槽位：沿用旧的 ps-tN = Resource... 写法。"
+            "按 dHash 匹配：写 ps-t[Filter_...] = ref ...，由 3Dmigoto 按贴图"
+            "内容哈希匹配，槽位变化不影响绑定（需要全局开启 dHash 贴图）"
+        ),
+        items=[
+            ("FIXED", "固定槽位", "沿用固定 ps-tN 槽位绑定"),
+            ("DHASH", "按 dHash 匹配", "按贴图 dHash 生成 Filter 段并绑定"),
+        ],
+        default="FIXED",
     )
 
 
@@ -2131,16 +2144,39 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                                 texture_folder, all_sections,
                                 object_to_diffuse_swapkey, material_group_to_swapkey,
                                 swap_key_prefix, next_swap_key_num, used_swap_keys,
-                                resource_name_provider=None, alpha_line_provider=None):
+                                resource_name_provider=None, alpha_line_provider=None,
+                                slot_info=None):
         """最终生成入口的防线：禁用切换组时绝不生成备用资源/INI 条件块。"""
         matching_materials = self._limit_disabled_switch_materials(matching_materials)
-        return super().generate_material_lines(
-            matching_materials, param_name, texture_type, obj,
-            texture_folder, all_sections, object_to_diffuse_swapkey,
-            material_group_to_swapkey, swap_key_prefix, next_swap_key_num,
-            used_swap_keys, resource_name_provider=resource_name_provider,
-            alpha_line_provider=alpha_line_provider,
-        )
+        # 每个物体的绑定方式只在本次生成期间生效；基类 create_resource_entry 从
+        # ``_active_binding_mode`` 取当前目标部件的 FIXED/DHASH 决策。
+        self._active_binding_mode = self._target_binding_mode_for(obj)
+        try:
+            return super().generate_material_lines(
+                matching_materials, param_name, texture_type, obj,
+                texture_folder, all_sections, object_to_diffuse_swapkey,
+                material_group_to_swapkey, swap_key_prefix, next_swap_key_num,
+                used_swap_keys, resource_name_provider=resource_name_provider,
+                alpha_line_provider=alpha_line_provider,
+                slot_info=slot_info,
+            )
+        finally:
+            self._active_binding_mode = None
+
+    def _target_binding_mode_for(self, obj):
+        """按物体名找 target_item 的 binding_mode；找不到默认 FIXED。"""
+        object_name = str(getattr(obj, "name", "") or "")
+        if not object_name:
+            return "FIXED"
+        for item in getattr(self, "target_items", []) or []:
+            target = getattr(item, "target_object", None)
+            if target is None:
+                continue
+            if str(getattr(target, "name", "") or "") != object_name:
+                continue
+            mode = str(getattr(item, "binding_mode", "FIXED") or "FIXED").strip().upper()
+            return "DHASH" if mode == "DHASH" else "FIXED"
+        return "FIXED"
 
     def _find_workspace_slot_materials(self, obj, slot_info):
         materials = super()._find_workspace_slot_materials(obj, slot_info)
@@ -2487,7 +2523,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 run_lines.append(stripped)
                 continue
             match = re.match(
-                r"^(Resource\\[^=\s]+|ps-t\d+)\s*=\s*(.+)$",
+                r"^(Resource\\[^=\s]+|ps-t(?:\[[^\]]+\]|\d+))\s*=\s*(.+)$",
                 stripped,
                 re.IGNORECASE,
             )
@@ -3311,6 +3347,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 parent.label(text="仅支持网格物体", icon="ERROR")
             else:
                 parent.label(text=f"物体: {target.name}", icon="MESH_DATA")
+                parent.prop(item, "binding_mode", text="贴图绑定")
 
         def draw_switch_controls(parent, group, group_index=1):
             header = parent.row(align=True)
