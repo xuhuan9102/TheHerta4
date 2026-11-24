@@ -33,6 +33,7 @@ class WorkspacePart:
     indices: np.ndarray
     weights: np.ndarray
     palette: dict[int, np.ndarray]
+    native_last_slot: int
 
 
 def _load_part(identity: str, source: SubmeshJson) -> WorkspacePart:
@@ -111,6 +112,7 @@ def _load_part(identity: str, source: SubmeshJson) -> WorkspacePart:
         identity, WorkSpaceHelper.parse_lod_unique_str(identity)[1].split("-", 1)[0], position, corners,
         np.concatenate(indices, axis=1), np.concatenate(weights, axis=1),
         {slot: np.asarray(samples).mean(axis=0) for slot, samples in palette.items()},
+        source.VGOffset + source.VGCount - 1,
     )
 
 
@@ -649,7 +651,12 @@ def _create_armature(context, collection, parts, workspace: Path, *, mirror_x=Fa
         heads[:, 0] *= -1
         tails[:, 0] *= -1
 
-    name = f"{collection.name} · 骨架"
+    max_slot = max(slots[-1], max(part.native_last_slot for part in parts))
+    suffix = f" · 骨架（最大编号 {max_slot}）"
+    # Keep the slot visible in Blender's 63-byte name, including a duplicate suffix.
+    label_bytes = 59 - len(suffix.encode("utf-8"))
+    label = collection.name.encode("utf-8")[:label_bytes].decode("utf-8", errors="ignore")
+    name = label + suffix
     armature = bpy.data.armatures.new(name)
     rig = bpy.data.objects.new(name, armature)
     collection.objects.link(rig)
