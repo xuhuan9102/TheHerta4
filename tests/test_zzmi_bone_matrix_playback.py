@@ -312,8 +312,9 @@ def test_layer_priority_and_parent_are_exported_per_candidate(tmp_path):
     assert ini.read_text(encoding="utf-8") == result
 
 
-def test_extended_slots_expand_only_private_palette_and_keep_native_fallback(tmp_path):
-    asset = INI.replace(
+@pytest.mark.parametrize("palette_rows", [15, 30])
+def test_extended_slots_expand_only_private_palette_and_keep_native_fallback(tmp_path, palette_rows):
+    asset = INI.replace("array = 15", f"array = {palette_rows}").replace(
         "[ResourceSSMTBoneMatrixBindBlend_95de0d39]",
         "[ResourceSSMTBoneMatrixBindBlend_95de0d39]\nfilename = Meshes/private.buf",
     )
@@ -323,6 +324,8 @@ def test_extended_slots_expand_only_private_palette_and_keep_native_fallback(tmp
     ]}
     asset = asset.replace("filename = Meshes/private.buf", "filename = Meshes/private.buf\n"
                           "; SSMT private blend layout " + json.dumps(layout))
+    if palette_rows > 15:
+        asset = asset.replace("; SSMT private blend layout", "; SSMT native bone slot count = 5\n; SSMT private blend layout")
     asset += "\n[Resource95de0d39Blend]\nfilename = Meshes/native.buf\n"
     asset += "\n[ResourceZZSkinBlend_95de0d39]\nfilename = ./Meshes/native.buf\n"
     (tmp_path / "Meshes").mkdir()
@@ -337,7 +340,7 @@ def test_extended_slots_expand_only_private_palette_and_keep_native_fallback(tmp
     written = ini.read_text(encoding="utf-8")
     native = written.split(f"[{PALETTE}]", 1)[1].split("[", 1)[0]
     resolved = written.split("[ResourceSSMTBoneMatrixRender0ResolvedPalette]", 1)[1].split("[", 1)[0]
-    assert "array = 15" in native and "array = 21" in resolved
+    assert f"array = {palette_rows}" in native and "array = 21" in resolved
     assert "data = 2 1 0 5" in written and "cs-t104 = ref ResourceSSMTBoneMatrixLayerFallback" in written
     assert written.count("\nfilename = res/SSMTBoneMatrixNativeBlend_95de0d39.buf\n") == 2
     for part in ("native", "private"):
@@ -352,7 +355,7 @@ def test_extended_slots_expand_only_private_palette_and_keep_native_fallback(tmp
 
     smaller_pool = tmp_path / "smaller-pool.ini"
     smaller_pool.write_text(
-        asset.replace("array = 15", "array = 9") + "\n[ResourceZZMergedSkeleton_G1_s1]\narray = 15\n",
+        asset.replace(f"array = {palette_rows}", "array = 9") + "\n[ResourceZZMergedSkeleton_G1_s1]\narray = 15\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="此绘制骨骼池之外"):

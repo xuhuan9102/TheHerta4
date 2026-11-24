@@ -7,6 +7,7 @@ from ..utils.format_utils import FormatUtils
 POSITION_STRIDE = 40
 BLEND_STRIDE = 32
 BLEND_LAYOUT_MARKER = "; SSMT private blend layout "
+NATIVE_SLOT_COUNT_MARKER = "; SSMT native bone slot count = "
 _POSITION_LAYOUT = (
     ("POSITION", "R32G32B32_FLOAT", 0),
     ("NORMAL", "R32G32B32_FLOAT", 12),

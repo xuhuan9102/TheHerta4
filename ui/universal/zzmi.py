@@ -6950,6 +6950,7 @@ class ExportZZMI(ExportUnity):
         from ...common.zzmi_bone_matrix_render_inputs import (
             BLEND_LAYOUT_MARKER,
             BLEND_STRIDE,
+            NATIVE_SLOT_COUNT_MARKER,
             POSITION_STRIDE,
             compatible_position,
             extra_weighted_slots,
@@ -6992,6 +6993,7 @@ class ExportZZMI(ExportUnity):
                     f"filename = {folder}/{filename}",
                 ))
                 if kind == "Blend":
+                    section.append(f"{NATIVE_SLOT_COUNT_MARKER}{native_capacity}")
                     section.append(BLEND_LAYOUT_MARKER + json.dumps(blend_layout, separators=(",", ":")))
                 section.append("")
         ini_builder.append_section(section)

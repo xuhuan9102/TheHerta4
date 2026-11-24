@@ -19,6 +19,7 @@ from .zzmi_bone_matrix_render_calibration import (
     prepare_native_blends,
     read_ground_support,
 )
+from .zzmi_bone_matrix_render_inputs import NATIVE_SLOT_COUNT_MARKER
 
 _TAG = "SSMT bone matrix"
 _BEGIN = rf"; {_TAG} begin"
@@ -38,6 +39,7 @@ _LEGACY_FALLBACK = re.compile(
 _PALETTE = r"ResourceZZ(?:MergedSkeleton|PaletteConv|RedirectPalette)_\w+"
 _MATRIX_ROWS = 3
 _RESOURCE = "ResourceSSMTBoneMatrix"
+_NATIVE_SLOT_COUNT = re.compile(r"(?m)^[ \t]*" + re.escape(NATIVE_SLOT_COUNT_MARKER) + r"([1-9]\d*)[ \t]*\r?$")
 
 
 @dataclass(frozen=True)
@@ -192,8 +194,18 @@ def _palette_capacities(text: str) -> dict[str, int]:
     return capacities
 
 
+def _native_slot_count(text: str, capacities: dict[str, int]) -> int:
+    # The allocated pool can include rows outside the native vertex-group range.
+    allocated = max(capacities.values(), default=0)
+    declared = max((int(match[1]) for match in _NATIVE_SLOT_COUNT.finditer(text)), default=allocated)
+    if declared > allocated:
+        raise ValueError("原生骨骼编号范围超过 ZZMI 合并骨骼缓冲容量")
+    return declared
+
+
 def native_palette_size(ini_path: Path) -> int:
-    return max(_palette_capacities(ini_path.read_text(encoding="utf-8-sig")).values(), default=0)
+    text = ini_path.read_text(encoding="utf-8-sig")
+    return _native_slot_count(text, _palette_capacities(text))
 
 
 def _restore_generated_draw(match):
@@ -215,7 +227,7 @@ def _configuration_text(
 ):
     text = _BLOCK.sub(_restore_generated_draw, content).rstrip("\r\n")
     capacities = _palette_capacities(text)
-    size = max(capacities.values(), default=0)
+    size = _native_slot_count(text, capacities)
     table = []
     defaults = [_BEGIN + " defaults"]
     if clip:
@@ -265,7 +277,7 @@ def _configuration_text(
             _END,
         ))
     patched = add_scoped_playback(
-        "\n".join(lines) + "\n", play, frame, clip, capacities, support_key, cb1, layers, extra_draws,
+        "\n".join(lines) + "\n", play, frame, clip, capacities, size, support_key, cb1, layers, extra_draws,
     )
     return reconcile_bone_matrix_defaults(patched), struct.pack(f"<{len(table)}I", *table)
 
@@ -273,7 +285,7 @@ def _configuration_text(
 def export_cb1_snapshot(ini_path: Path, cb1: CB1Snapshot):
     """Add scoped CB1 capture without requiring an animation clip or skin assets."""
     content = _BLOCK.sub(_restore_generated_draw, ini_path.read_text(encoding="utf-8-sig"))
-    capacity = max(_palette_capacities(content).values(), default=0)
+    capacity = _native_slot_count(content, _palette_capacities(content))
     if capacity:
         prepare_native_blends(content, ini_path.parent, capacity, None)
     text, _ = _configuration_text(content, None, None, None, cb1=cb1)
@@ -285,7 +297,7 @@ def export_clip(
     *, play_on_load: bool = False, initial_frame: int | None = None, cb1=None, rig_layers=(),
 ):
     content = _BLOCK.sub(_restore_generated_draw, ini_path.read_text(encoding="utf-8-sig"))
-    palette_size = max(_palette_capacities(content).values(), default=0)
+    palette_size = _native_slot_count(content, _palette_capacities(content))
     if not palette_size:
         raise ValueError("导出的 INI 没有可替换的 ZZMI 合并骨架槽")
     layers = pack_layers(rig_layers, palette_size, clip) if rig_layers else None

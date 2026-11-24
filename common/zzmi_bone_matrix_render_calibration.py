@@ -484,12 +484,13 @@ def _resources(bindings, assets, frame, clip, references, support_key, snapshot,
     return result
 
 
-def add_scoped_playback(text, play, frame, clip, capacities, support_key=None, cb1=None, layers=None, extra_draws=None):
+def add_scoped_playback(text, play, frame, clip, capacities, native_slots, support_key=None, cb1=None, layers=None,
+                        extra_draws=None):
     lines = text.splitlines()
     sections = _sections(lines)
     assets = _asset_inputs(lines, sections) if clip else None
     bindings = _deform_bindings(lines, sections, capacities)
-    full = clip is not None and clip.pivot is not None and clip.slots == tuple(range(max(capacities.values(), default=0)))
+    full = clip is not None and clip.pivot is not None and clip.slots == tuple(range(native_slots))
     if layers:
         full = bool(layers.coverage)
         play = layers.enabled
