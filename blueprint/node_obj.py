@@ -1168,6 +1168,7 @@ class SSMTNode_Result_Output(SSMTNodeBase):
 
         if GlobalConfig.logic_name == LogicName.EFMI:
             layout.prop(context.scene.global_properties, "use_rabbitfx_slot")
+            layout.prop(context.scene.global_properties, "use_dhash_texture")
             layout.prop(context.scene.global_properties, "efmi_pass_mirror_enabled")
 
         from .export_helper import BlueprintExportHelper

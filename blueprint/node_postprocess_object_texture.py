@@ -47,7 +47,7 @@ _MAP_SLOTS = (
 _MESH_COMMENT_RE = re.compile(r";\s*\[mesh:([^\]]+)\]", re.IGNORECASE)
 _SECTION_HEADER_RE = re.compile(r"^\[([^\]]+)\]\s*$")
 _ASSIGN_RE = re.compile(
-    r"^\s*(?P<param>Resource\\[A-Za-z0-9_]+\\[A-Za-z0-9_]+|this|ps-t\d+)\s*=\s*"
+    r"^\s*(?P<param>Resource\\[A-Za-z0-9_]+\\[A-Za-z0-9_]+|this|ps-t(?:\[[^\]]+\]|\d+))\s*=\s*"
     r"(?:ref\s+)?(?P<resource>[A-Za-z0-9_\-\.]+)\s*(?:;.*)?$",
     re.IGNORECASE,
 )
@@ -302,6 +302,7 @@ def _diffuse_resource_in_section(lines, body_indices):
 def _resource_for_map_type(lines, body_indices, suffix):
     """返回该 TextureOverride 段内引用指定地图类型（后缀，如 DiffuseMap）的资源名。"""
     suffix_lower = str(suffix or "").lower()
+    key = suffix_lower.replace("map", "")
     fallback = None
     for index in body_indices:
         match = _ASSIGN_RE.match(lines[index].strip())
@@ -310,8 +311,11 @@ def _resource_for_map_type(lines, body_indices, suffix):
         resource = match.group("resource").strip()
         if suffix_lower and resource.lower().endswith(suffix_lower):
             return resource
+        # ps-t 槽位的资源名常是 Resource_<材质名>（如 Resource_DiffuseMap_Body），
+        # 不以贴图类型结尾；按类型关键字再认一次，否则 ps-t 绑定永远收集不到旧资源。
+        if key and re.search(r"(?:^|[_-])" + re.escape(key), resource.lower()):
+            return resource
         param_lower = match.group("param").lower()
-        key = suffix_lower.replace("map", "")
         if fallback is None and key and key in param_lower:
             fallback = resource
     return fallback
@@ -343,8 +347,15 @@ def _find_resource_filename_index(lines, resource_name):
 # 匹配 TextureOverride 段里的贴图引用行，如：
 #   Resource\ZZMI\Diffuse = ref Resource-9fbf4911-11472-0-DiffuseMap
 #   Resource\EFMI\Diffuse = ref Resource-xxx-DiffuseMap   （兼容其他游戏命名空间）
+#   ps-t3 = Resource_xxx_Diffuse                         （固定槽位）
+#   ps-t[Filter_xxx_Diffuse] = ref Resource_xxx_Diffuse  （dHash Filter 绑定）
 _ASSIGN_LINE_RE = re.compile(
-    r"^(?:Resource\\(?P<ns>[A-Za-z0-9_]+)\\(?P<slot>[A-Za-z0-9_]+)|\b(?P<lhs_this>this)\b)"
+    r"^(?:"
+    r"Resource\\(?P<ns>[A-Za-z0-9_]+)\\(?P<slot>[A-Za-z0-9_]+)"
+    r"|\b(?P<lhs_this>this)\b"
+    r"|ps-t\[(?P<ps_filter>[^\]]+)\]"
+    r"|(?P<ps_index>ps-t\d+)"
+    r")"
     r"[ \t]*=[ \t]*(?:(?P<ref>ref)[ \t]+)?"
     r"(?P<target>[A-Za-z0-9_\-\.]+)[ \t]*(?P<trail>;.*)?$",
     re.IGNORECASE,
@@ -397,11 +408,34 @@ def _ensure_resource_block(lines, resource_name, filename, eol):
     lines[insert_at:insert_at] = block
 
 
+def _ps_assignment_matches_param(match, param):
+    """ps-t 引用行是否属于 ``param`` 对应的贴图槽。
+
+    Filter 绑定看段名里的角色段（``Filter_<token>_<role>[_<dhash8>[_<n>]]``），
+    跳过末尾的消歧后缀；裸 ``ps-t3`` 没有角色信息，退回按右值资源名里的贴图
+    类型判断。
+    """
+    param_key = re.sub(r"map$", "", str(param or "").strip().lower())
+    lhs_text = (match.group("ps_index") or match.group("ps_filter") or "").strip().lower()
+    if lhs_text and lhs_text == str(param or "").strip().lower():
+        return True
+    filter_name = (match.group("ps_filter") or "").strip()
+    if filter_name:
+        from ..common.dhash_metadata import role_from_filter_name
+        role = role_from_filter_name(filter_name)
+        return re.sub(r"map$", "", role.lower()) == param_key
+    target = str(match.group("target") or "").lower()
+    return bool(param_key) and param_key in target
+
+
 def _replace_assignment_ref(lines, body_indices, param, new_resource, eol):
     """把段内 ``Resource\\<ns>\\<param> = ref <旧>`` 的目标替换为 new_resource。
 
     只按槽名(param，如 Diffuse/NormalMap/LightMap/MaterialMap)匹配；命名空间(ZZMI/EFMI/
     WWMI...)不写死，原命名空间与槽名原样保留。返回改动行数。
+
+    ps-t 形态（``ps-t3`` / ``ps-t[Filter_...]``）保留左值原文，只替换右侧目标，
+    这样 dHash Filter 段名不会被改写。
     """
     param_lower = param.lower()
     count = 0
@@ -410,12 +444,22 @@ def _replace_assignment_ref(lines, body_indices, param, new_resource, eol):
         m = _ASSIGN_LINE_RE.match(line.strip())
         if not m or m.group("lhs_this"):
             continue
+        trailing = line[len(line.rstrip(" \t\r\n")):]
+        ref_prefix = "ref " if m.group("ref") else ""
+        if m.group("ps_filter") or m.group("ps_index"):
+            if not _ps_assignment_matches_param(m, param):
+                continue
+            eq_index = line.find("=")
+            lhs = line[:eq_index].rstrip(" \t")
+            trail = m.group("trail") or ""
+            comment = (" " + trail) if trail else ""
+            lines[index] = f"{lhs} = {ref_prefix}{new_resource}{comment}{trailing}"
+            count += 1
+            continue
         if m.group("slot").lower() != param_lower:
             continue
         ns = m.group("ns")
         indent = line[: len(line) - len(line.lstrip(" \t"))]
-        trailing = line[len(line.rstrip(" \t\r\n")):]
-        ref_prefix = "ref " if m.group("ref") else ""
         lines[index] = f"{indent}Resource\\{ns}\\{m.group('slot')} = {ref_prefix}{new_resource}{trailing}"
         count += 1
     return count

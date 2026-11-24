@@ -35,6 +35,7 @@ _fake_bpy = types.SimpleNamespace(
     props=types.SimpleNamespace(
         StringProperty=lambda **_kwargs: None,
         BoolProperty=lambda **_kwargs: None,
+    EnumProperty=lambda **_kwargs: None,
         IntProperty=lambda **_kwargs: None,
         CollectionProperty=lambda **_kwargs: None,
         PointerProperty=lambda **_kwargs: None,
