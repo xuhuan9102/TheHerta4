@@ -118,6 +118,15 @@ def role_for_mark_name(mark_name) -> str:
     return _sanitize_token(name, _DEFAULT_ROLE)
 
 
+def slot_dhash_fields(mark) -> dict:
+    """slot builder 共用：从标记取规范化后的三个 dHash 字段。"""
+    return {
+        "source_dhash": get_mark_dhash(mark),
+        "source_format": get_mark_format(mark),
+        "binding_mode": get_mark_binding_mode(mark),
+    }
+
+
 def role_from_filter_name(filter_name) -> str:
     """从 `Filter_<token>_<role>[_<dhash8>[_<n>]]` 取 role。
 

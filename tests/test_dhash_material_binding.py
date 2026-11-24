@@ -581,6 +581,24 @@ class CustomMaterialAssignBindingModeTests(unittest.TestCase):
 
 
 class DHashProducerWiringTests(unittest.TestCase):
+    def test_slot_dhash_fields_normalizes_good_alias(self):
+        spec = importlib.util.spec_from_file_location(
+            "dhash_meta_for_slot_test", ROOT / "common" / "dhash_metadata.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        fields = mod.slot_dhash_fields({
+            "dhash": "bad",
+            "SourceDHash": "0123456789ABCDEF",
+            "format": "bad format!",
+            "SourceFormat": "DXGI_FORMAT_BC7_UNORM_SRGB",
+            "binding_mode": "Filter",
+        })
+        self.assertEqual(fields["source_dhash"], "0123456789abcdef")
+        self.assertEqual(fields["source_format"], "BC7_UNORM_SRGB")
+        self.assertEqual(fields["binding_mode"], "filter")
+
     def test_slot_builders_carry_source_fields(self):
         root = Path(__file__).resolve().parents[1]
         for relative in (
@@ -588,9 +606,7 @@ class DHashProducerWiringTests(unittest.TestCase):
             "ui/ntmi_modimp/ntemi_importer.py",
         ):
             text = (root / relative).read_text(encoding="utf-8")
-            self.assertIn("source_dhash", text, relative)
-            self.assertIn("source_format", text, relative)
-            self.assertIn("binding_mode", text, relative)
+            self.assertIn("slot_dhash_fields", text, relative)
 
 
 if __name__ == "__main__":

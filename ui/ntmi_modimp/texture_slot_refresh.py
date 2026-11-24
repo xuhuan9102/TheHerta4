@@ -6,6 +6,7 @@ from typing import Iterable
 
 import bpy
 
+from ...common.dhash_metadata import slot_dhash_fields
 from ...common.submesh_metadata import SubmeshMetadataResolver
 from ...common.texture_metadata_helper import TextureMetadataResolver
 from ...common.workspace_helper import WorkSpaceHelper
@@ -113,10 +114,8 @@ def build_texture_slots_from_workspace_unique(workspace_unique_str: str) -> dict
             "mark_slot": mark_slot,
             "mark_hash": mark_hash,
             "mark_filename": mark_filename,
-            # dHash 契约：工作区 json 有就用，没有则 ""/""/"slot" 由消费侧降级。
-            "source_dhash": str(getattr(texture_info, "source_dhash", "") or "").strip().lower(),
-            "source_format": str(getattr(texture_info, "source_format", "") or "").strip().upper(),
-            "binding_mode": str(getattr(texture_info, "binding_mode", "slot") or "slot").strip().lower(),
+            # dHash 契约：统一由 slot_dhash_fields 逐别名 normalize。
+            **slot_dhash_fields(texture_info),
         }
     return slots
 

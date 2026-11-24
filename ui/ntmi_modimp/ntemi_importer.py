@@ -23,6 +23,8 @@ from typing import Dict, List, Optional, Tuple
 
 import bpy
 
+from ...common.dhash_metadata import slot_dhash_fields
+
 from ...common.import_scene_settings import apply_import_render_environment
 from ...common.global_properties import GlobalProterties
 from ...utils.color_attribute_utils import write_color_attribute_data
@@ -251,16 +253,8 @@ def _build_texture_slots_from_workspace(
             "mark_type": mark_type,
             "mark_name": mark_name,
             "mark_filename": mark_filename,
-            # dHash 契约：工作区 json 有就用，没有则消费侧逐条降级。
-            "source_dhash": str(
-                mark.get("dhash", mark.get("SourceDHash", "")) or ""
-            ).strip().lower(),
-            "source_format": str(
-                mark.get("format", mark.get("SourceFormat", "")) or ""
-            ).strip().upper(),
-            "binding_mode": str(
-                mark.get("binding_mode", mark.get("BindingMode", "slot")) or "slot"
-            ).strip().lower(),
+            # dHash 契约：统一由 slot_dhash_fields 逐别名 normalize。
+            **slot_dhash_fields(mark),
         }
     return slots
 
