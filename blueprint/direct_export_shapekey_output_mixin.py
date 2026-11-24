@@ -1956,17 +1956,29 @@ class DirectShapeKeyOutputMixin:
                 hash_to_vertex_count.get(hash_prefix, 0),
                 threads_per_group=16,
             )
+            if logical_hash not in native_hashes:
+                # 老路径（main 行为）：Dispatch 前把资源 ref 到 cs-u5，零拷贝。
+                if len(res_to_bind) > 1:
+                    for index, res_name in enumerate(res_to_bind, 1):
+                        block_lines.extend([
+                            f"    if $ssmt_sk_base_mesh == {index}",
+                            f"        {res_name} = ref cs-u5",
+                            "    endif",
+                        ])
+                else:
+                    block_lines.append(f"    {res_to_bind[0]} = ref cs-u5")
             block_lines.append(f"    Dispatch = {dispatch_count}, 1, 1")
-            if len(res_to_bind) > 1:
-                for index, res_name in enumerate(res_to_bind, 1):
-                    block_lines.extend([
-                        f"    if $ssmt_sk_base_mesh == {index}",
-                        f"        {res_name} = copy cs-u5",
-                        "    endif",
-                    ])
-            else:
-                block_lines.append(f"    {res_to_bind[0]} = copy cs-u5")
             if logical_hash in native_hashes:
+                # 原生表情路径：Dispatch 后把写入结果 copy 回资源（新功能需要）。
+                if len(res_to_bind) > 1:
+                    for index, res_name in enumerate(res_to_bind, 1):
+                        block_lines.extend([
+                            f"    if $ssmt_sk_base_mesh == {index}",
+                            f"        {res_name} = copy cs-u5",
+                            "    endif",
+                        ])
+                else:
+                    block_lines.append(f"    {res_to_bind[0]} = copy cs-u5")
                 for _plan, skin_input in self._merged_native_morph_carriers(logical_hash):
                     if f"[{skin_input}]" in sections:
                         block_lines.append(f"    {skin_input} = copy cs-u5")
@@ -2007,14 +2019,19 @@ class DirectShapeKeyOutputMixin:
             section_name = f"[{derive_shapekey_base_resource_name(primary_base_resource)}]"
             if section_name not in sections and section_name not in generated_section_names:
                 stride = hash_to_stride.get(hash_prefix, 40)
-                new_resource_lines.extend([
+                resource_lines = [
                     section_name,
                     "type = Buffer",
                     f"stride = {stride}",
                     f"filename = Meshes0000/{actual_file_hash}-Position.buf",
-                    f"bind_flags = {SHAPEKEY_VERTEX_BUFFER_BIND_FLAGS}",
-                    "",
-                ])
+                ]
+                if logical_hash in native_hashes:
+                    # 只有原生表情路径需要 UAV 顶点缓冲；普通形态键保持 main 产物。
+                    resource_lines.append(
+                        f"bind_flags = {SHAPEKEY_VERTEX_BUFFER_BIND_FLAGS}"
+                    )
+                resource_lines.append("")
+                new_resource_lines.extend(resource_lines)
                 generated_section_names.add(section_name)
             self._set_resource_field(
                 sections,
@@ -2235,6 +2252,9 @@ class DirectShapeKeyOutputMixin:
             sections[";; --- Generated Shape Key Meshess ---"] = new_resource_lines
 
         for logical_hash in unique_hashes:
+            # 只有原生表情路径需要 UAV 顶点缓冲；普通形态键保持 main 的产物不变。
+            if logical_hash not in native_hashes:
+                continue
             hash_prefix = self.node._extract_hash_prefix(logical_hash)
             for res_name in hash_to_base_resources.get(hash_prefix, [f"Resource_{self.node._hash_to_resource_prefix(logical_hash)}_Position"]):
                 ensure_resource_alias_section(
