@@ -6,7 +6,24 @@ from typing import Iterable
 
 import bpy
 
-from ...common.dhash_metadata import slot_dhash_fields
+try:
+    from ...common.dhash_metadata import slot_dhash_fields
+except ImportError:  # tests/ 以 fake 包骨架按文件路径加载本模块时走到
+    import importlib.util as _importlib_util
+    import sys as _sys
+
+    _dhash_name = "theherta4_dhash_metadata"
+    _dhash_mod = _sys.modules.get(_dhash_name)
+    if _dhash_mod is None:
+        _dhash_spec = _importlib_util.spec_from_file_location(
+            _dhash_name,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "common", "dhash_metadata.py"),
+        )
+        _dhash_mod = _importlib_util.module_from_spec(_dhash_spec)
+        _sys.modules[_dhash_name] = _dhash_mod
+        _dhash_spec.loader.exec_module(_dhash_mod)
+    slot_dhash_fields = _dhash_mod.slot_dhash_fields
+
 from ...common.submesh_metadata import SubmeshMetadataResolver
 from ...common.texture_metadata_helper import TextureMetadataResolver
 from ...common.workspace_helper import WorkSpaceHelper
