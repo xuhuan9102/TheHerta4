@@ -93,6 +93,23 @@ def test_sparse_clip_is_private_to_the_exact_render_ib(tmp_path):
     assert ini.read_text(encoding="utf-8") == result
 
 
+def test_private_skinning_follows_own_ib_merged_skin_output():
+    skin_output = "ResourceZZSkinOut_95de0d39_s1"
+    source = INI.replace(
+        "ib = ResourceTriangles",
+        "ib = ResourceTriangles\n"
+        "if @vb0 != 0 && @vb0 == @ResourceZZRedirectSO_G0_s1\n"
+        f"    vb0 = ref {skin_output}\nendif",
+    ) + f"\n[{skin_output}]\narray = 3\n"
+    result, _ = playback._configuration_text(source, "$switch", "$frame", clip())
+
+    render = result.split("[TextureOverride_Render]", 1)[1].split("[TextureOverride_OtherCostume]", 1)[0]
+    assert f"if $zz_ms_seen_01 > 0 && @vb0 === @{skin_output}" in render
+    assert render.index(f"vb0 = ref {skin_output}") < render.index("run = CommandListSSMTBoneMatrixSkin0")
+    assert render.splitlines().count("drawindexed = 3, 0, 0") == 1
+    assert "vb0 = ref ResourceSSMTBoneMatrixRenderOriginalVB" in render
+
+
 def test_playback_defaults_share_names_with_an_animation_driver():
     content = playback._configuration_text(INI, "$switch", "$pose_frame", clip())[0]
     driver_block = "[Constants]\nglobal persist $pose_frame = 1\n"

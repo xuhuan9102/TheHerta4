@@ -3580,9 +3580,9 @@ class _ZZMIGroup3RedirectFixture:
         return carrier_map, target_map, unredirected
 
     def _group3_exporter(self, merged_vertex_count=18776, target_real_vertices=0,
-                         target_registered=False, cross_ib=()):
+                         target_registered=False, cross_ib=(), extra_bones=()):
         """构造用户实测场景（合并网格挂最早 draw 的 b20f90ea）的 exporter。"""
-        self._register_obj("LOD0.b20f90ea-19182-0", [79, 88, 105, 229, 248])
+        self._register_obj("LOD0.b20f90ea-19182-0", [79, 88, 105, 229, 248, *extra_bones])
         if target_registered:
             self._register_obj("LOD0.a23aa8a3-42759-0", [79, 80])
             target_exported_vertices = target_real_vertices
@@ -3651,6 +3651,22 @@ class ZZSIMergedMeshRedirectTests(_ZZMIGroup3RedirectFixture, unittest.TestCase)
         # 已自动重定向 -> 不再报警
         out = self._capture_stdout(lambda: exporter._warn_merged_mesh_timing(unredirected))
         self.assertEqual(out, "")
+
+    def test_redirect_keeps_carrier_with_custom_bone_weights_on_own_ib(self):
+        exporter, _models = self._group3_exporter(extra_bones=(251,))
+        bone_matrix = types.SimpleNamespace(
+            bl_idname="SSMTNode_PostProcess_BoneMatrix", mute=False, armature=object(),
+        )
+        exporter.blueprint_model.postprocess_nodes = [bone_matrix]
+
+        carrier_map, target_map, _unredirected = self._build_and_apply_plan(exporter)
+
+        self.assertEqual(carrier_map, {})
+        self.assertEqual(target_map, {})
+
+        bone_matrix.mute = True
+        carrier_map, _, _ = self._build_and_apply_plan(exporter)
+        self.assertEqual(carrier_map["b20f90ea"]["target"], "a23aa8a3")
 
     def test_merged_on_last_pass_no_redirect(self):
         """合并网格已挂在组内最后一个 deform draw（a23aa8a3，draw 20）：无需重定向。"""

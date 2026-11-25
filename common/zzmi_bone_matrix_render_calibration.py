@@ -310,12 +310,14 @@ def bind_native_blends(text, replacements):
     return "\n".join(lines) + "\n"
 
 
-def _instance_guard(bindings, binding, source="@vb0"):
+def _instance_guard(bindings, binding, source="@vb0", render_inputs=None):
+    render_inputs = render_inputs or {}
+    matched = {item.slot: "@" + render_inputs.get(item.slot, item.resource + "SO") for item in bindings}
     unique = "".join(
-        f" && ({other.seen} == 0 || {source} !== @{other.resource}SO)"
+        f" && ({other.seen} == 0 || {source} !== {matched[other.slot]})"
         for other in bindings if other is not binding
     )
-    return f"{binding.seen} > 0 && {source} === @{binding.resource}SO{unique}"
+    return f"{binding.seen} > 0 && {source} === {matched[binding.slot]}{unique}"
 
 
 def bone_draw_palettes(sections, lines):
@@ -344,14 +346,14 @@ def _restore_cb1():
     )
 
 
-def _snapshot_draw(draw, bindings, snapshot, site):
+def _snapshot_draw(draw, bindings, snapshot, site, render_inputs):
     indent = draw[:len(draw) - len(draw.lstrip())]
     command = draw.strip()
     lines = [f"; {_TAG} begin draw|{command}", "if @vb0 != 0"]
     if bindings:
         for index, binding in enumerate(bindings):
             branch = "if" if index == 0 else "elif"
-            lines.append(f"    {branch} {_instance_guard(bindings, binding)}")
+            lines.append(f"    {branch} {_instance_guard(bindings, binding, render_inputs=render_inputs)}")
             lines.extend(f"        {line}" for line in snapshot.draw(site, binding.index))
         lines.append("    endif")
     else:
@@ -361,7 +363,7 @@ def _snapshot_draw(draw, bindings, snapshot, site):
 
 
 def _render_draw(draw, bindings, play, references, texcoord, snapshot, site, layers, physics, preview,
-                 physics_indices):
+                 physics_indices, render_inputs):
     indent = draw[:len(draw) - len(draw.lstrip())]
     command = draw.strip()
     skin_enabled = f"{play} != 0"
@@ -372,7 +374,7 @@ def _render_draw(draw, bindings, play, references, texcoord, snapshot, site, lay
     for index, binding in enumerate(bindings):
         resource = binding.resource
         branch = "if" if index == 0 else "elif"
-        lines.append(f"    {branch} {_instance_guard(bindings, binding)}")
+        lines.append(f"    {branch} {_instance_guard(bindings, binding, render_inputs=render_inputs)}")
         if snapshot:
             lines.extend(f"        {line}" for line in snapshot.draw(site, binding.index))
         if layers:
@@ -414,7 +416,7 @@ def _render_draw(draw, bindings, play, references, texcoord, snapshot, site, lay
         for index, binding in enumerate(preview):
             branch = "if" if index == 0 else "elif"
             lines.extend((
-                f"    {branch} {_instance_guard(bindings, binding, '@' + _ORIGINAL_VB)}",
+                f"    {branch} {_instance_guard(bindings, binding, '@' + _ORIGINAL_VB, render_inputs)}",
                 f"        run = CommandListSSMTBonePhysicsPreview{binding.index}",
             ))
         lines.extend(("    endif", "endif"))
@@ -432,6 +434,24 @@ def _render_draw(draw, bindings, play, references, texcoord, snapshot, site, lay
         lines.extend(_restore_cb1())
     lines.append(f"; {_TAG} end")
     return [indent + line for line in lines]
+
+
+def _merged_skin_render_inputs(area, bindings, resources):
+    """Identify the per-IB merged skin output already bound at this draw."""
+    slot_by_output = {
+        f"resourcezzskinout_{binding.ib}_s{binding.slot}{binding.lod}": binding.slot
+        for binding in bindings
+    }
+    inputs = {}
+    for line in area:
+        if not _OVERRIDE_POSITION.match(line):
+            continue
+        match = _POSITION_INPUT.fullmatch(line)
+        name = match[1].casefold() if match else ""
+        if name not in slot_by_output or name not in resources:
+            return None
+        inputs[slot_by_output[name]] = match[1]
+    return inputs
 
 
 def _scoped_render_draws(lines, sections, bindings, assets):
@@ -456,7 +476,8 @@ def _scoped_render_draws(lines, sections, bindings, assets):
             continue
         if not any(_INDEX_COUNT.fullmatch(line) for line in area):
             continue
-        if assets is not None and any(_OVERRIDE_POSITION.match(line) for line in area):
+        render_inputs = _merged_skin_render_inputs(area, candidates, resources)
+        if assets is not None and render_inputs is None:
             continue
         draw_sites = [index for index in range(start + 1, end) if index in draw_ranges or _DRAW.match(lines[index])]
         if not draw_sites:
@@ -466,7 +487,7 @@ def _scoped_render_draws(lines, sections, bindings, assets):
         uv = f"Resource{ib}Texcoord"
         if uv.casefold() not in resources or any(_OVERRIDE_TEXCOORD.match(line) for line in area):
             uv = None
-        sites.update((index, (candidates, uv)) for index in draw_sites)
+        sites.update((index, (candidates, uv, render_inputs)) for index in draw_sites)
     return sites, render_skips
 
 
@@ -698,7 +719,7 @@ def add_scoped_playback(text, play, frame, clip, capacities, native_slots, suppo
         full = bool(layers.coverage)
         play = layers.enabled
     sites, render_skips = _scoped_render_draws(lines, sections, bindings, assets)
-    used = {binding.index for candidates, _ in sites.values() for binding in candidates}
+    used = {binding.index for candidates, _, _ in sites.values() for binding in candidates}
     chosen = [binding for binding in bindings if binding.index in used]
     extra_draws = extra_draws or {}
     unsupported = set(extra_draws) - {(binding.ib, binding.lod) for binding in chosen}
@@ -749,14 +770,14 @@ def add_scoped_playback(text, play, frame, clip, capacities, native_slots, suppo
                 "1" if (candidates[0].ib, candidates[0].lod) in extra_draws else play,
                 references, texcoord, snapshot, site, layers, physics,
                 [binding for binding in candidates if binding.index in preview_indices],
-                physics_indices,
+                physics_indices, render_inputs,
             )
-            for site, (index, (candidates, texcoord)) in enumerate(sites.items())
+            for site, (index, (candidates, texcoord, render_inputs)) in enumerate(sites.items())
         }
     else:
         replacements = {
-            index: _snapshot_draw(lines[index], candidates, snapshot, site)
-            for site, (index, (candidates, _)) in enumerate(sites.items())
+            index: _snapshot_draw(lines[index], candidates, snapshot, site, render_inputs)
+            for site, (index, (candidates, _, render_inputs)) in enumerate(sites.items())
         }
     for index in render_skips:
         insertions[index] = [f"; {_TAG} begin skip original draw", "handling = skip", f"; {_TAG} end"]

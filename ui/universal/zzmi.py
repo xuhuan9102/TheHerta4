@@ -7143,6 +7143,12 @@ class ExportZZMI(ExportUnity):
             component["draw_ib"]: component_id
             for component_id, component in enumerate(self.merged_skeleton_components)
         }
+        native_capacity = None
+        if self._has_bone_matrix_playback(require_rig=True):
+            native_capacity = max(
+                (int(c["vg_offset"]) + int(c["vg_count"]) for c in self.merged_skeleton_components),
+                default=0,
+            )
 
         for skeleton_group, components in groups.items():
             legal: set[int] = set()
@@ -7177,6 +7183,7 @@ class ExportZZMI(ExportUnity):
             target_first_index = target_first_indices[0] if target_first_indices else 0
 
             carriers: list[dict] = []
+            private_skin_carriers = []
             for component in components:
                 referenced = self._collect_drawib_referenced_bone_ids(component["draw_ib"])
                 own = set((component.get("vg_map") or {}).values())
@@ -7206,12 +7213,22 @@ class ExportZZMI(ExportUnity):
                         merged_vertices += self._submesh_exported_vertex_count(submesh_model)
                 if merged_vertices <= 0:
                     continue
+                if native_capacity is not None and any(slot >= native_capacity for slot in referenced):
+                    private_skin_carriers.append(component["draw_ib"])
                 carriers.append({
                     "draw_ib": component["draw_ib"],
                     "vertex_count": merged_vertices,
                 })
 
             if not carriers:
+                continue
+            if private_skin_carriers:
+                # A packed RedirectSO draw and the private skin output have different
+                # vertex bases. Keep the group on the per-IB path from the outset.
+                print(
+                    f"[ZZMI骨骼合并] DrawIB {', '.join(private_skin_carriers)} 使用新增骨骼，"
+                    f"骨架组 G{skeleton_group} 使用各 DrawIB 自身的蒙皮绘制。"
+                )
                 continue
 
             # 重放锚点布局的选择（用户 2026-09-16 拍板）：
