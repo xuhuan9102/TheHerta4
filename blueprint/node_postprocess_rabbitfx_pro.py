@@ -88,7 +88,9 @@ except ImportError:  # pragma: no cover
 
 NODE_IDNAME = 'SSMTNode_PostProcess_RabbitFXPro'
 GLOWFX_NODE_IDNAME = 'SSMTNode_PostProcess_GlowFX'
+TTL_NODE_IDNAME = 'SSMTNode_PostProcess_TTL'
 POSTPROCESS_NODE_IDNAMES = (NODE_IDNAME, GLOWFX_NODE_IDNAME)
+TARGET_NODE_IDNAMES = (*POSTPROCESS_NODE_IDNAMES, TTL_NODE_IDNAME)
 MATERIAL_NODE_IDNAME = 'SSMTNode_PostProcess_CustomMaterialAssign'
 LEGACY_MATERIAL_NODE_IDNAME = 'SSMTNode_PostProcess_Material'
 
@@ -122,6 +124,8 @@ _MARKER_RE = re.compile(
 # 呼吸灯计数变量统一前缀，清理上一轮生成时按前缀整块删除。
 _VAR_PREFIX = "$rfxpro_"
 _VAR_IF_RE = re.compile(r"^if\s+\$rfxpro_", re.IGNORECASE)
+_GLOW_CONTROL_NAMES = ("h", "s", "v", "brightness", "interpolate")
+_BREATH_CONTROL_NAMES = ("fps", "step", "h", "s", "v", "brightness_min", "brightness_max", "interpolate")
 
 _MESH_LINE_RE = re.compile(r"^\s*\[mesh:(?P<name>.+?)\]\s*$", re.IGNORECASE)
 _IF_LINE_RE = re.compile(r"^if\s+", re.IGNORECASE)
@@ -523,6 +527,30 @@ def _collect_existing_refs(lines, start, end, profile):
     return glow_ref, fxmap_ref, run_index
 
 
+def _glow_binding_brightness_indices(lines, binding_index, parameter, start, end):
+    """Find numeric brightness assignments paired with a material's GlowMap binding."""
+    indent = _leading_whitespace(lines[binding_index])
+    for index in (binding_index - 1, binding_index + 1):
+        if start <= index < end and _leading_whitespace(lines[index]) == indent:
+            name, _, value = lines[index].split(";", 1)[0].partition("=")
+            if name.strip().casefold() == parameter.casefold() and re.fullmatch(
+                r"[+-]?\d+(?:\.\d+)?", value.strip()
+            ):
+                yield index
+
+
+def _remove_material_glow_brightness(lines, profile, start, end):
+    parameter = profile.param("brightness")
+    remove = set()
+    for index in range(start, end):
+        binding = profile.glow_ref_re.match(lines[index].split(";", 1)[0].strip())
+        if binding and binding.group("name").strip().casefold() != "null":
+            remove.update(_glow_binding_brightness_indices(lines, index, parameter, start, end))
+    for index in sorted(remove, reverse=True):
+        del lines[index]
+    return len(remove)
+
+
 def _format_number(value):
     """整数写整数、浮点保留有效位，用于呼吸灯里的算式。"""
     try:
@@ -546,6 +574,29 @@ def _format_float(value):
     return text
 
 
+def _glow_control_defaults(node):
+    return {name: _format_float(getattr(node, f"glow_{name}")) for name in _GLOW_CONTROL_NAMES}
+
+
+def _breath_control_defaults(node):
+    return {f"breath_{name}": _format_number(getattr(node, f"breath_{name}"))
+            for name in _BREATH_CONTROL_NAMES}
+
+
+def _node_control_label(node):
+    return " ".join((getattr(node, "label", "") or getattr(node, "name", "")).split())
+
+
+def _referenced_controls(prefix, lines):
+    pattern = re.compile(rf"{re.escape(prefix)}([a-z0-9_]+)")
+    return {name for line in lines if prefix in line for name in pattern.findall(line)}
+
+
+def _raw_var_tag(node):
+    tag = re.sub(r"[^0-9a-zA-Z_]", "_", str(getattr(node, "buffer_tag", "") or ""))
+    return tag.strip("_").lower() or "0"
+
+
 def build_breath_parameter_lines(
     param,
     *,
@@ -564,8 +615,9 @@ def build_breath_parameter_lines(
     interpolate,
     tick_count=1,
     smooth_combo=False,
+    setting_ref=None,
 ):
-    """共享的呼吸灯参数行生成器：RabbitFXPro 与 GlowFX 都只调这一份。
+    """为贴图后处理节点生成呼吸灯参数行。
 
     ``param`` 是命名空间参数名生成器（``param('h')`` → ``\\RabbitFX\\h`` / ``\\GlowFX\\H``）；
     ``var_prefix`` 是计数器变量前缀（``$rfxpro_`` / ``$glowfx_``）。其余入参一致时，
@@ -574,60 +626,70 @@ def build_breath_parameter_lines(
     frame = f"{var_prefix}{tag}_frame"
     valve = f"{var_prefix}{tag}_valve"
     glow = f"{var_prefix}{tag}_glow"
+    ticks = max(1, int(tick_count))
     fps = int(fps)
-    step_text = _format_number(float(step) / max(1, int(tick_count)))
+
+    def setting(name, value):
+        return setting_ref(f"breath_{name}") if setting_ref else _format_number(value)
+
+    period = setting("fps", fps)
+    step_text = setting("step", step)
+    if ticks > 1:
+        step_text = f"{step_text} / {ticks}" if setting_ref else _format_number(float(step) / ticks)
+    hue_scale = f"360.0 / {period}" if setting_ref else _format_number(360.0 / fps)
     lines = [
         breath_begin,
         f"{frame} = {frame} + {step_text}",
-        f"if {frame} >= {fps}",
-        f"    {frame} = {frame} - {fps}",
+        f"if {frame} >= {period}",
+        f"    {frame} = {frame} - {period}",
         f"    {valve} = 1 - {valve}",
         "endif",
         f"if {valve} == 0",
         f"    {glow} = {frame}",
         "else",
-        f"    {glow} = {fps} - {frame}",
+        f"    {glow} = {period} - {frame}",
         "endif",
     ]
-    bmin = _format_number(brightness_min)
-    bmax = f"({brightness_max})" if isinstance(brightness_max, str) else _format_number(brightness_max)
+    bmin = setting("brightness_min", brightness_min)
+    bmax = f"({brightness_max})" if isinstance(brightness_max, str) else setting("brightness_max", brightness_max)
     if mode == 'SINGLE':
         lines.extend(
             [
-                f"{param('h')} = {_format_number(h)}",
-                f"{param('s')} = {_format_number(s)}",
-                f"{param('v')} = {_format_number(v)}",
-                f"{param('brightness')} = {bmin} + ({bmax} - {bmin}) * {glow} / {fps}",
+                f"{param('h')} = {setting('h', h)}",
+                f"{param('s')} = {setting('s', s)}",
+                f"{param('v')} = {setting('v', v)}",
+                f"{param('brightness')} = {bmin} + ({bmax} - {bmin}) * {glow} / {period}",
             ]
         )
     elif mode == 'RAINBOW':
         lines.extend(
             [
-                f"{param('h')} = {glow} * {_format_number(360.0 / fps)}",
-                f"{param('s')} = {_format_number(s)}",
-                f"{param('v')} = {_format_number(v)}",
+                f"{param('h')} = {glow} * {hue_scale}",
+                f"{param('s')} = {setting('s', s)}",
+                f"{param('v')} = {setting('v', v)}",
                 f"{param('brightness')} = {bmax}",
             ]
         )
     else:  # COMBO
         lines.extend(
             [
-                f"{param('h')} = {glow} * {_format_number(360.0 / fps)}",
-                f"{param('s')} = {_format_number(s)}",
-                f"{param('v')} = {_format_number(v)}",
+                f"{param('h')} = {glow} * {hue_scale}",
+                f"{param('s')} = {setting('s', s)}",
+                f"{param('v')} = {setting('v', v)}",
             ]
         )
         brightness = param('brightness')
         if smooth_combo:
             lines.extend([
-                f"{brightness} = {glow} / {fps}",
+                f"{brightness} = {glow} / {period}",
                 f"{brightness} = {bmin} + ({bmax} - {bmin}) * "
                 f"{brightness} * {brightness} * (3 - 2 * {brightness})",
             ])
         else:
-            lines.append(f"{brightness} = {glow} * {_format_number(float(brightness_max) / fps)}")
+            scale = f"{bmax} / {period}" if setting_ref else _format_number(float(brightness_max) / fps)
+            lines.append(f"{brightness} = {glow} * {scale}")
     lines.extend(
-        [f"{param('interpolate')} = {_format_number(interpolate)}", breath_end]
+        [f"{param('interpolate')} = {setting('interpolate', interpolate)}", breath_end]
     )
     return lines
 
@@ -735,12 +797,13 @@ def _preview_tree_key(node):
 
 
 def _preview_owner_nodes(node):
-    """返回预览物体到所属 RabbitFX Pro 节点的映射。"""
+    """返回同一组发光节点的预览物体与所属节点。"""
     tree = getattr(node, "id_data", None)
+    node_types = _target_owner_node_types(node)
     candidates = [
         candidate
         for candidate in (getattr(tree, "nodes", None) or [])
-        if getattr(candidate, "bl_idname", "") in POSTPROCESS_NODE_IDNAMES
+        if getattr(candidate, "bl_idname", "") in node_types
     ]
     if not candidates:
         candidates = [node]
@@ -1144,7 +1207,7 @@ class RabbitFXProTargetItem(bpy.types.PropertyGroup):
 
     target_object: bpy.props.PointerProperty(
         name="目标物体",
-        description="注入 RabbitFX 参数的物体；其发光/裁切贴图由「材质转资源(pro)」提供",
+        description="应用后处理参数的物体，贴图由「材质转资源pro」提供",
         type=bpy.types.Object,
         poll=_mesh_object_poll,
     )
@@ -1154,8 +1217,8 @@ class RabbitFXProTargetItem(bpy.types.PropertyGroup):
         default=False,
     )
     has_fx: bpy.props.BoolProperty(
-        name="有 FX 贴图",
-        description="扫描结果：该物体的材质里存在 FXMap 前缀贴图（同步/颜色偏移会用它的绑定）",
+        name="有遮罩贴图",
+        description="扫描结果：该物体有当前节点支持的遮罩贴图",
         default=False,
     )
 
@@ -1390,6 +1453,9 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         # 列表要放下「物体选择器 + 图标 + 移除」，默认 300 太窄。
         self.width = 380
 
+    def copy(self, source):
+        self.buffer_tag = uuid.uuid4().hex[:8]
+
     # ──────────────────────────── UI ────────────────────────────
 
     def draw_buttons(self, context, layout):
@@ -1400,6 +1466,9 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         layout.separator()
         layout.label(text=self.fx_profile_label, icon='INFO')
         layout.prop(self, "enable_reset")
+        self._draw_preview(layout)
+
+    def _draw_preview(self, layout):
         row = layout.row(align=True)
         row.prop(self, "preview_use_color", text="")
         colors = row.row(align=True)
@@ -1483,7 +1552,7 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         col.prop(self, "breath_interpolate", slider=True)
 
         if self._breathing() and not self.enable_glow:
-            layout.label(text="需开启「发光贴图参数」才会执行 Run", icon='ERROR')
+            layout.label(text="呼吸灯需要启用发光贴图参数", icon='ERROR')
 
     def _draw_fx_block(self, layout):
         """FX 贴图参数（父级）：FX 贴图本身由材质转资源生成，这里只加同步与偏移。"""
@@ -1561,6 +1630,7 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             layout.label(text="FX 贴图 R 通道作为偏移遮罩", icon='INFO')
 
     def _draw_targets(self, layout):
+        texture_label = "TTL" if self.bl_idname == TTL_NODE_IDNAME else "FX"
         row = layout.row(align=True)
         row.prop(
             self,
@@ -1581,12 +1651,14 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
 
         if _find_material_node_in_tree(self) is None:
             layout.label(
-                text="本蓝图里没有「材质转资源」节点：发光/FX 贴图绑定由它生成",
+                text=f"本蓝图里没有「材质转资源」节点：发光/{texture_label} 贴图绑定由它生成",
                 icon='ERROR',
             )
 
         if not self.target_items:
-            layout.label(text="点扫描按钮从材质转资源收集 FX 物体", icon='INFO')
+            layout.label(text=f"点扫描按钮从材质转资源收集 {texture_label} 物体", icon='INFO')
+            if self.bl_idname == TTL_NODE_IDNAME:
+                layout.operator("ssmt.rabbitfx_pro_add", icon='ADD').node_name = self.name
             return
 
         list_row = layout.row(align=True)
@@ -1743,11 +1815,13 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             print(f"[RabbitFXPro] W-Engine 源 {sync_source.name}: 未找到可注入的绘制段")
         if self.enable_sync and self.fx_profile.supports_sync and changed:
             changed |= self._ensure_buffer_resource(sections, buffer_name)
-        if changed and self.enable_glow and self._breathing():
-            changed |= self._ensure_breath_constants(sections)
 
         if not changed:
             return
+
+        used_controls = self._write_control_constants(sections)
+        if "frame" in used_controls:
+            self._ensure_breath_constants(sections)
 
         with open(ini_file, 'w', encoding='utf-8') as handle:
             if preserved_driver:
@@ -1826,6 +1900,15 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
                     glow, fxmap, record['object'], buffer_name,
                     breath_tick_count=breath_tick_count,
                 )
+                if has_glow:
+                    material_start = next(
+                        (i + 1 for i in range(marker_index - 1, -1, -1)
+                         if profile.run_line_re.match(block[i].strip())),
+                        0,
+                    )
+                    marker_index -= _remove_material_glow_brightness(
+                        block, profile, material_start, marker_index,
+                    )
                 colorshift = self._build_colorshift_lines(fxmap, record['object']) if fxmap else []
                 if colorshift and sum(match is not None for match in refs) > 1:
                     colorshift = []
@@ -2044,6 +2127,12 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         # 前被执行（块内 run 排在 draw 之后就是实机 bug 的成因）。
         run_limit = draw_index if draw_index >= 0 else len(block)
         run_position = _profile_run_between(block, anchor, run_limit, profile)
+        if wrote_glow and _remove_material_glow_brightness(
+            block, profile, 0, run_position if run_position is not None else run_limit,
+        ):
+            anchor, draw_index = _unit_anchor(block, 0, len(block), profile)
+            run_limit = draw_index if draw_index >= 0 else len(block)
+            run_position = _profile_run_between(block, anchor, run_limit, profile)
         if param_lines and run_position is None:
             param_lines = [*param_lines, profile.run_line]
         # ColorShift 必须在 Run 之后（Run 结尾会把 ResourceFXMap 清空）。
@@ -2114,21 +2203,17 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
 
     def _build_static_glow_lines(self):
         param = self.fx_profile.param
-        return [
-            f"{param('h')} = {_format_float(self.glow_h)}",
-            f"{param('s')} = {_format_float(self.glow_s)}",
-            f"{param('v')} = {_format_float(self.glow_v)}",
-            f"{param('brightness')} = {_format_float(self.glow_brightness)}",
-            f"{param('interpolate')} = {_format_float(self.glow_interpolate)}",
-        ]
+        prefix = self._control_prefix()
+        return [f"{param(name)} = {prefix}{name}" for name in _GLOW_CONTROL_NAMES]
 
     def _build_breath_lines(self, breath_tick_count=1):
+        tag = self._var_tag()
         return build_breath_parameter_lines(
             self.fx_profile.param,
             var_prefix=_VAR_PREFIX,
             breath_begin=_BREATH_BEGIN,
             breath_end=_BREATH_END,
-            tag=self._var_tag(),
+            tag=tag,
             fps=self.breath_fps,
             step=self.breath_step,
             mode=self.breath_mode,
@@ -2139,12 +2224,14 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             brightness_max=self.breath_brightness_max,
             interpolate=self.breath_interpolate,
             tick_count=breath_tick_count,
+            setting_ref=lambda name: f"{_VAR_PREFIX}{tag}_{name}",
         )
 
     def _build_sync_lines(self, buffer_name):
-        lines = [f"$\\rabbitfx\\blendmode = {int(self.sync_blendmode)}"]
+        prefix = self._control_prefix()
+        lines = [rf"$\rabbitfx\blendmode = {prefix}blendmode"]
         if self.sync_brightness_only:
-            lines.append("$\\rabbitfx\\syncbrightnessonly = 1")
+            lines.append(rf"$\rabbitfx\syncbrightnessonly = {prefix}syncbrightnessonly")
         if self.buffer_mode == 'RWBUFFER':
             lines.append(f"ps-u4 = {buffer_name}")
         else:
@@ -2166,12 +2253,11 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             print(f"[RabbitFXPro] {object_label}: 没有 FXMap 绑定，跳过 ColorShift")
             return []
         param = profile.param
+        prefix = self._control_prefix()
         return [
             _CS_BEGIN,
             f"{profile.fxmap_ref} = ref {fxmap_ref}",
-            f"{param('h')} = {_format_float(self.cs_h)}",
-            f"{param('s')} = {_format_float(self.cs_s)}",
-            f"{param('v')} = {_format_float(self.cs_v)}",
+            *(f"{param(channel)} = {prefix}cs_{channel}" for channel in "hsv"),
             COLOR_SHIFT_LINE,
             _CS_END,
         ]
@@ -2291,6 +2377,37 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             sections[section_name] = []
         return True
 
+    def _control_prefix(self):
+        return f"{_VAR_PREFIX}{self._var_tag()}_"
+
+    def _write_control_constants(self, sections):
+        tag = self._var_tag()
+        prefix = f"{_VAR_PREFIX}{tag}_"
+        used = _referenced_controls(prefix, (
+            line for name, lines in sections.items()
+            if name.casefold() != "[constants]"
+            for line in lines
+        ))
+        begin = f"; === RabbitFXPro Controls {tag} ==="
+        end = f"; === End RabbitFXPro Controls {tag} ==="
+        constants = sections.get("[Constants]")
+        position = len(constants or ())
+        if constants is not None and begin in constants and end in constants:
+            position = constants.index(begin)
+            del constants[position:constants.index(end, position) + 1]
+        values = _breath_control_defaults(self) if self._breathing() else _glow_control_defaults(self)
+        values.update({
+            "blendmode": int(self.sync_blendmode),
+            "syncbrightnessonly": int(self.sync_brightness_only),
+            **{f"cs_{channel}": _format_float(getattr(self, f"cs_{channel}")) for channel in "hsv"},
+        })
+        declarations = [f"global {prefix}{name} = {value}" for name, value in values.items() if name in used]
+        if declarations:
+            sections.setdefault("[Constants]", [])[position:position] = [
+                begin, f"; {_node_control_label(self)}", *declarations, end,
+            ]
+        return used
+
     def _ensure_breath_constants(self, sections):
         tag = self._var_tag()
         wanted = [
@@ -2307,8 +2424,25 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
         return True
 
     def _var_tag(self):
-        tag = re.sub(r"[^0-9a-zA-Z_]", "_", str(self.buffer_tag or "")).strip("_")
-        return tag or "0"
+        tag = _raw_var_tag(self)
+        nodes = getattr(getattr(self, "id_data", None), "nodes", ()) or ()
+        tags = {
+            node.name: _raw_var_tag(node)
+            for node in nodes
+            if getattr(node, "bl_idname", "") == self.bl_idname
+        }
+        duplicates = sorted(name for name, candidate in tags.items() if candidate == tag)
+        if len(duplicates) < 2 or self.name not in duplicates[1:]:
+            return tag
+        reserved = set(tags.values())
+        suffix = 2
+        for name in duplicates[1:]:
+            while f"{tag}_{suffix}" in reserved:
+                suffix += 1
+            if name == self.name:
+                return f"{tag}_{suffix}"
+            suffix += 1
+        return tag
 
     # ──────────────────── 校验 ────────────────────
 
@@ -2328,14 +2462,21 @@ class SSMTNode_PostProcess_RabbitFXPro(SSMTNode_PostProcess_Base):
             )
 
 
+def _target_owner_node_types(node):
+    if getattr(node, "bl_idname", "") == TTL_NODE_IDNAME:
+        return (TTL_NODE_IDNAME,)
+    return POSTPROCESS_NODE_IDNAMES
+
+
 def _objects_used_by_other_nodes(node, obj):
-    """同一蓝图里其它 RabbitFXPro 节点是否也在管这个物体。"""
+    """查找同一蓝图里使用同类发光参数的其它节点。"""
     tree = getattr(node, "id_data", None)
     if tree is None or obj is None:
         return ""
     owners = []
+    node_types = _target_owner_node_types(node)
     for other in getattr(tree, "nodes", []) or []:
-        if other == node or getattr(other, "bl_idname", "") not in POSTPROCESS_NODE_IDNAMES:
+        if other == node or getattr(other, "bl_idname", "") not in node_types:
             continue
         if any(item.target_object == obj for item in getattr(other, "target_items", []) or []):
             owners.append(other.name)
@@ -2348,7 +2489,7 @@ def _objects_used_by_other_nodes(node, obj):
 
 def _active_pro_node(context):
     node = getattr(context, "active_node", None)
-    if node is not None and getattr(node, "bl_idname", "") in POSTPROCESS_NODE_IDNAMES:
+    if node is not None and getattr(node, "bl_idname", "") in TARGET_NODE_IDNAMES:
         return node
     return None
 
@@ -2369,7 +2510,7 @@ def _node_by_name(context, node_name):
     nodes = getattr(tree, "nodes", None) if tree is not None else None
     if nodes is not None and node_name:
         found = nodes.get(node_name)
-        if found is not None and getattr(found, "bl_idname", "") in POSTPROCESS_NODE_IDNAMES:
+        if found is not None and getattr(found, "bl_idname", "") in TARGET_NODE_IDNAMES:
             return found
     return _active_pro_node(context)
 
@@ -2380,7 +2521,7 @@ def _resolve_node(operator, context):
     if node is None:
         operator.report(
             {"WARNING"},
-            "没找到 RabbitFX/Glow FX 后处理节点（请直接点节点面板上的按钮）",
+            "没找到贴图后处理节点（请直接点节点面板上的按钮）",
         )
     return node
 
@@ -2420,11 +2561,8 @@ def _selected_mesh_objects(context):
 
 class SSMT_OT_RabbitFXProScan(bpy.types.Operator):
     bl_idname = "ssmt.rabbitfx_pro_scan"
-    bl_label = "扫描 FX 贴图物体"
-    bl_description = (
-        "从「材质转资源(pro)」的部件范围里收集所有使用 Glowmap 发光贴图 / FXMap "
-        "裁切贴图的物体，填充到本节点的物体列表"
-    )
+    bl_label = "扫描贴图物体"
+    bl_description = "从「材质转资源pro」的部件范围收集使用发光贴图或遮罩贴图的物体"
     bl_options = {"REGISTER", "UNDO", "INTERNAL"}
 
     node_name: bpy.props.StringProperty()
@@ -2439,9 +2577,11 @@ class SSMT_OT_RabbitFXProScan(bpy.types.Operator):
             self.report({"WARNING"}, f"未从{source_label}找到任何部件")
             return {"CANCELLED"}
 
+        probe = getattr(node, "_probe_target_textures", _probe_fx_textures)
+        texture_label = "TTL" if node.bl_idname == TTL_NODE_IDNAME else "FX"
         found = []
         for obj in candidates:
-            has_glow, has_fx = _probe_fx_textures(obj)
+            has_glow, has_fx = probe(obj)
             if has_glow or has_fx:
                 found.append((obj, has_glow, has_fx))
 
@@ -2457,8 +2597,8 @@ class SSMT_OT_RabbitFXProScan(bpy.types.Operator):
         fx_count = sum(1 for _o, _g, has_fx in found if has_fx)
         self.report(
             {"INFO"},
-            f"从{source_label}扫描到 {len(found)} 个 FX 物体"
-            f"（发光贴图 {glow_count} / FX 贴图 {fx_count}）",
+            f"从{source_label}扫描到 {len(found)} 个 {texture_label} 物体"
+            f"（发光贴图 {glow_count} / {texture_label} 贴图 {fx_count}）",
         )
         return {"FINISHED"}
 
@@ -2558,6 +2698,7 @@ class SSMT_OT_RabbitFXProAddSelected(bpy.types.Operator):
             self.report({"WARNING"}, "没有选中任何网格物体：请先在 3D 视口或大纲里选中物体")
             return {"CANCELLED"}
 
+        probe = getattr(node, "_probe_target_textures", _probe_fx_textures)
         existing = {item.target_object for item in node.target_items if item.target_object}
         added = 0
         for obj in selected:
@@ -2565,7 +2706,7 @@ class SSMT_OT_RabbitFXProAddSelected(bpy.types.Operator):
                 continue
             item = node.target_items.add()
             item.target_object = obj
-            item.has_glow, item.has_fx = _probe_fx_textures(obj)
+            item.has_glow, item.has_fx = probe(obj)
             existing.add(obj)
             added += 1
 

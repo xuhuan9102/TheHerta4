@@ -420,28 +420,6 @@ class SSMTNode_PostProcess_GlowFX(
         if getattr(self, "effect_switch_enabled", False):
             self.effect_switch_variable = ""
 
-    def _var_tag(self):
-        tag = super()._var_tag().lower()
-        nodes = getattr(getattr(self, "id_data", None), "nodes", ())
-        tags_by_name = {
-            node.name: _RabbitFXProPanelMixin._var_tag(node).lower()
-            for node in nodes
-            if getattr(node, "bl_idname", "") == NODE_IDNAME
-        }
-        matching_names = sorted(name for name, value in tags_by_name.items() if value == tag)
-        if self.name not in matching_names or self.name == matching_names[0]:
-            return tag
-
-        # Saved copies can share a tag. Assign stable suffixes without editing the tree.
-        reserved_tags = set(tags_by_name.values())
-        suffix = 2
-        for name in matching_names[1:]:
-            while f"{tag}_{suffix}" in reserved_tags:
-                suffix += 1
-            if name == self.name:
-                return f"{tag}_{suffix}"
-            suffix += 1
-
     @property
     def fx_profile_label(self):
         return "GlowFX 专用内核（随 Mod 加载）"

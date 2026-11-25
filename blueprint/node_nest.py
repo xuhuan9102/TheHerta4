@@ -38,6 +38,7 @@ class SSMTNode_Blueprint_Nest(SSMTNodeBase):
         'SSMTNode_PostProcess_CustomMaterialAssign': '材质转资源pro',
         'SSMTNode_PostProcess_Glow': 'RabbitFX贴图后处理',
         'SSMTNode_PostProcess_RabbitFXPro': 'RabbitFX贴图后处理pro',
+        'SSMTNode_PostProcess_TTL': 'TTL 贴图后处理',
         'SSMTNode_PostProcess_GlowFX': 'Glow FX着色器',
         'SSMTNode_PostProcess_DiffuseSwitch': '贴图切换 V5.1',
         'SSMTNode_PostProcess_SwapPanel': '物体切换面板（兼容）',

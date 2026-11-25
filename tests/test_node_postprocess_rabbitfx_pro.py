@@ -757,8 +757,10 @@ class RabbitFXProTests(unittest.TestCase):
                     'lines': [r'Resource\RabbitFX\Glowmap = ref Resource_Glow']}]
         self.assertTrue(node._apply_material_records(sections, records, [obj], 'buffer'))
         text = '\n'.join(lines)
-        self.assertLess(text.index(r'$\RabbitFX\brightness = 5'), text.index(r'$\RabbitFX\brightness = 8.0'))
-        self.assertLess(text.index(r'$\RabbitFX\brightness = 8.0'), text.index(r'run = CommandList\RabbitFX\Run'))
+        brightness = text.index(r'$\RabbitFX\brightness = $rfxpro_abcd1234_brightness')
+        self.assertNotIn(r'$\RabbitFX\brightness = 5', text)
+        self.assertLess(text.index(r'Resource\RabbitFX\Glowmap = ref Resource_Glow'), brightness)
+        self.assertLess(brightness, text.index(r'run = CommandList\RabbitFX\Run'))
         untouched = list(lines)
         self.assertFalse(node._apply_material_records(sections, records, [_fake_object('another')], 'buffer'))
         self.assertEqual(lines, untouched)
@@ -969,11 +971,12 @@ class RabbitFXProTests(unittest.TestCase):
         content = _read_ini(self.ini_path)
 
         self.assertIn(pro._PARAM_BEGIN, content)
-        self.assertIn("$\\RabbitFX\\H = 0.0", content)
-        self.assertIn("$\\RabbitFX\\S = 0.0", content)
-        self.assertIn("$\\RabbitFX\\V = 0.0", content)
-        self.assertIn("$\\RabbitFX\\brightness = 8.0", content)
-        self.assertIn("$\\RabbitFX\\interpolate = 1.0", content)
+        for name, default in (("H", "0.0"), ("S", "0.0"), ("V", "0.0"),
+                              ("brightness", "8.0"), ("interpolate", "1.0")):
+            variable = f"$rfxpro_abcd1234_{name.lower()}"
+            self.assertIn(rf"$\RabbitFX\{name} = {variable}", content)
+            self.assertEqual(content.count(f"global {variable} = {default}\n"), 1)
+        self.assertNotIn(r"$\RabbitFX\brightness = 5", content)
         # 参数必须在 run 之前，否则 Run 会先按材质转资源的旧值执行。
         self.assertLess(
             content.index(pro._PARAM_BEGIN),
@@ -1089,8 +1092,9 @@ class RabbitFXProTests(unittest.TestCase):
         self.assertLess(run_index, content.index("run = CommandList\\RabbitFX\\ColorShift"))
         self.assertLess(
             content.index("run = CommandList\\RabbitFX\\Run"),
-            content.index("$\\RabbitFX\\H = -105.0"),
+            content.index(r"$\RabbitFX\H = $rfxpro_abcd1234_cs_h"),
         )
+        self.assertIn("global $rfxpro_abcd1234_cs_h = -105.0", content)
 
     def test_draw_buttons_nests_breath_under_glow(self):
         """层级：发光贴图参数（启用勾）→ 呼吸灯（启用勾）；收起父级时子级不画。"""
@@ -1185,11 +1189,17 @@ class RabbitFXProTests(unittest.TestCase):
         content = _read_ini(self.ini_path)
 
         self.assertIn(pro._BREATH_BEGIN, content)
-        self.assertIn("$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + 0.3", content)
-        self.assertIn("if $rfxpro_abcd1234_frame >= 200", content)
+        self.assertIn("$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + $rfxpro_abcd1234_breath_step", content)
+        self.assertIn("if $rfxpro_abcd1234_frame >= $rfxpro_abcd1234_breath_fps", content)
         self.assertIn(
-            "$\\RabbitFX\\brightness = 1 + (8 - 1) * $rfxpro_abcd1234_glow / 200", content
+            r"$\RabbitFX\brightness = $rfxpro_abcd1234_breath_brightness_min + "
+            "($rfxpro_abcd1234_breath_brightness_max - $rfxpro_abcd1234_breath_brightness_min)"
+            " * $rfxpro_abcd1234_glow / $rfxpro_abcd1234_breath_fps", content
         )
+        self.assertIn("global $rfxpro_abcd1234_breath_step = 0.3", content)
+        self.assertIn("global $rfxpro_abcd1234_breath_fps = 200", content)
+        self.assertIn("global $rfxpro_abcd1234_breath_brightness_min = 1", content)
+        self.assertIn("global $rfxpro_abcd1234_breath_brightness_max = 8", content)
         self.assertIn("global persist $rfxpro_abcd1234_frame = 0", content)
         self.assertIn("global $rfxpro_abcd1234_valve = 0", content)
         self.assertIn("global $rfxpro_abcd1234_glow = 0", content)
@@ -1239,11 +1249,11 @@ class RabbitFXProTests(unittest.TestCase):
         content = '\n'.join(lines)
 
         self.assertEqual(
-            content.count("$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + 0.15"),
+            content.count("$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + $rfxpro_abcd1234_breath_step / 2"),
             2,
         )
         self.assertNotIn(
-            "$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + 0.3",
+            "$rfxpro_abcd1234_frame = $rfxpro_abcd1234_frame + $rfxpro_abcd1234_breath_step\n",
             content,
         )
 
@@ -1273,7 +1283,8 @@ class RabbitFXProTests(unittest.TestCase):
         node.execute_postprocess(self.export_dir)
         content = _read_ini(self.ini_path)
 
-        self.assertIn("$\\RabbitFX\\brightness = 8.0", content)
+        self.assertIn(r"$\RabbitFX\brightness = $rfxpro_abcd1234_brightness", content)
+        self.assertIn("global $rfxpro_abcd1234_brightness = 8.0", content)
         self.assertNotIn(pro._BREATH_BEGIN, content)
         self.assertNotIn("global persist $rfxpro_", content)
 
@@ -1302,7 +1313,8 @@ class RabbitFXProTests(unittest.TestCase):
             "ResourceRabbitFXPro_abcd1234_FXBuffer = copy Resource\\RabbitFX\\FXBuffer",
             content,
         )
-        self.assertIn("$\\rabbitfx\\blendmode = 1", content)
+        self.assertIn(r"$\rabbitfx\blendmode = $rfxpro_abcd1234_blendmode", content)
+        self.assertIn("global $rfxpro_abcd1234_blendmode = 1", content)
         self.assertIn(
             "Resource\\RabbitFX\\SetFXBuffer = ref ResourceRabbitFXPro_abcd1234_FXBuffer",
             content,
@@ -1367,11 +1379,19 @@ class RabbitFXProTests(unittest.TestCase):
         second.execute_postprocess(self.export_dir)
         content = _read_ini(self.ini_path)
 
-        glow_section, fxmap_section = content.split(f"[{SECOND_SECTION}]", 1)
-        self.assertIn("$\\RabbitFX\\brightness = 20.0", glow_section)
-        self.assertNotIn("$\\RabbitFX\\brightness = 3.0", glow_section)
-        self.assertIn("$\\RabbitFX\\brightness = 3.0", fxmap_section)
-        self.assertNotIn("$\\RabbitFX\\brightness = 20.0", fxmap_section)
+        draws, constants = content.split("[Constants]", 1)
+        glow_section, fxmap_section = draws.split(f"[{SECOND_SECTION}]", 1)
+        self.assertIn(r"$\RabbitFX\brightness = $rfxpro_node0001_brightness", glow_section)
+        self.assertNotIn("$rfxpro_node0002_", glow_section)
+        self.assertIn(r"$\RabbitFX\brightness = $rfxpro_node0002_brightness", fxmap_section)
+        self.assertNotIn("$rfxpro_node0001_", fxmap_section)
+        self.assertIn("global $rfxpro_node0001_brightness = 20.0", constants)
+        self.assertIn("global $rfxpro_node0002_brightness = 3.0", constants)
+        first.glow_brightness = 25.0
+        first.execute_postprocess(self.export_dir)
+        updated = _read_ini(self.ini_path)
+        self.assertEqual(updated, content.replace("$rfxpro_node0001_brightness = 20.0",
+                                                  "$rfxpro_node0001_brightness = 25.0"))
 
     # ──────────────── 与其它后处理节点的兼容性 ────────────────
 
@@ -1445,7 +1465,7 @@ class RabbitFXProTests(unittest.TestCase):
         content = _read_ini(self.ini_path)
 
         self.assertIn(pro._PARAM_BEGIN, content)
-        self.assertIn("$\\RabbitFX\\brightness = 8.0", content)
+        self.assertIn(r"$\RabbitFX\brightness = $rfxpro_abcd1234_brightness", content)
 
     def test_ntemifx_namespace_is_left_untouched(self):
         """NTEMI 逻辑用的是 NTEMIFX 命名空间，本节点不该动它。"""
@@ -1579,11 +1599,8 @@ class RabbitFXProTests(unittest.TestCase):
         content = _read_ini(self.ini_path)
 
         self.assertIn(pro._PARAM_BEGIN, content)
-        self.assertIn("$\\HI3FX\\h = 0.0", content)
-        self.assertIn("$\\HI3FX\\s = 0.0", content)
-        self.assertIn("$\\HI3FX\\v = 0.0", content)
-        self.assertIn("$\\HI3FX\\brightness = 8.0", content)
-        self.assertIn("$\\HI3FX\\interpolate = 1.0", content)
+        for name in ("h", "s", "v", "brightness", "interpolate"):
+            self.assertIn(rf"$\HI3FX\{name} = $rfxpro_abcd1234_{name}", content)
         self.assertNotIn("$\\RabbitFX\\H", content)
         self.assertNotIn("$\\RabbitFX\\brightness", content)
         # 参数必须排在 HI3FX 的 Run 之前。
@@ -1682,8 +1699,8 @@ class RabbitFXProTests(unittest.TestCase):
 
         self.assertIn(pro._BREATH_BEGIN, content)
         self.assertIn("$\\HI3FX\\h = ", content)
-        self.assertIn("$\\HI3FX\\s = 0", content)
-        self.assertIn("$\\HI3FX\\brightness = 8", content)
+        self.assertIn(r"$\HI3FX\s = $rfxpro_abcd1234_breath_s", content)
+        self.assertIn(r"$\HI3FX\brightness = $rfxpro_abcd1234_breath_brightness_max", content)
         self.assertNotIn("$\\RabbitFX\\H", content)
 
     def test_himi_breathing_combo_mode_has_no_rabbitfx_leak(self):
@@ -1890,7 +1907,8 @@ class RabbitFXProTests(unittest.TestCase):
 
         near_index = content.index(f"[mesh:{SHARED_IB_NEAR}]")
         self.assertEqual(content.count(pro._PARAM_BEGIN), 2)
-        self.assertEqual(content.count("$\\RabbitFX\\brightness = 8.0"), 2)
+        self.assertEqual(content.count(r"$\RabbitFX\brightness = $rfxpro_abcd1234_brightness"), 2)
+        self.assertEqual(content.count("global $rfxpro_abcd1234_brightness = 8.0"), 1)
         self.assertEqual(content[:near_index].count(pro._PARAM_BEGIN), 1)
         self.assertEqual(content[near_index:].count(pro._PARAM_BEGIN), 1)
 
