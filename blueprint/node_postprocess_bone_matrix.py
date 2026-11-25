@@ -28,6 +28,11 @@ from ..common.zzmi_bone_matrix_playback import (
 )
 from ..common.zzmi_bone_matrix_snapshot import DEFAULT_CB1_KEY, DEFAULT_CB1_VARIABLE, hotkey_value
 from .export_helper import BlueprintExportHelper
+from .node_bone_physics import (
+    CLASSES as PHYSICS_CLASSES, SSMT_BonePhysicsBody, SSMT_BonePhysicsLink,
+    build_bone_physics, draw_physics, physics_controls,
+)
+from . import node_bone_physics_viewport as physics_viewport
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 from .node_postprocess_comment_cleanup import SSMTNode_PostProcess_CommentCleanup
 
@@ -319,6 +324,53 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
     cb1_key: bpy.props.StringProperty(
         name="定身快捷键", description="可填写 Ctrl+Alt+B 等组合键，留空时通过变量控制", default=DEFAULT_CB1_KEY,
     )
+    physics_bodies: bpy.props.CollectionProperty(type=SSMT_BonePhysicsBody)
+    physics_links: bpy.props.CollectionProperty(type=SSMT_BonePhysicsLink)
+    physics_link_index: bpy.props.IntProperty(default=0, min=0)
+    physics_index: bpy.props.IntProperty(default=0, min=0)
+    physics_viewport_shapes: bpy.props.BoolProperty(name="显示 Blender 胶囊", default=True,
+                                                    update=physics_viewport.update_guide_visibility)
+    physics_edit_capsules: bpy.props.BoolProperty(
+        name="编辑胶囊尺寸", default=False, update=physics_viewport.update_guide_visibility,
+        description="在物体模式选中胶囊并缩放，实时预览和导出读取该尺寸",
+    )
+    physics_var: bpy.props.StringProperty(name="物理开关变量", default="$bone_physics_enabled")
+    physics_debug_var: bpy.props.StringProperty(name="显示开关变量", default="$bone_physics_debug")
+    physics_key: bpy.props.StringProperty(name="物理快捷键", default="Ctrl+Alt+P")
+    physics_debug_key: bpy.props.StringProperty(name="显示快捷键", default="Ctrl+Alt+O")
+    physics_reset_key: bpy.props.StringProperty(name="重置快捷键", default="Ctrl+Alt+I")
+    physics_on_load: bpy.props.BoolProperty(name="默认开启物理", default=True)
+    physics_debug_on_load: bpy.props.BoolProperty(name="默认显示胶囊", default=False)
+    physics_force: bpy.props.FloatProperty(name="排斥强度", default=8.0, min=0, max=1000.0)
+    physics_gravity: bpy.props.FloatProperty(name="重力倍率", default=1.0, min=0, max=4.0)
+    physics_use_substeps: bpy.props.BoolProperty(
+        name="按物理频率分步", default=True,
+        description="关闭时按当前帧的实际时长和固定步数计算",
+    )
+    physics_frame_steps: bpy.props.IntProperty(
+        name="每帧固定步数", default=1, min=1, max=8,
+        description="将每帧的实际时长均分为指定次数的物理计算",
+    )
+    physics_adaptive_substeps: bpy.props.BoolProperty(
+        name="移动时按帧求解", default=False,
+        description="移动或快速转向时每帧推进一次，停稳后恢复物理子步",
+    )
+    physics_step_hz: bpy.props.IntProperty(
+        name="物理频率（Hz）", default=120, min=60, max=360,
+        description="每秒计算的固定物理子步数",
+    )
+    physics_max_substeps: bpy.props.IntProperty(
+        name="每帧最多子步", default=8, min=2, max=16,
+        description="低帧率时一帧可补算的物理子步上限",
+    )
+    physics_joint_iterations: bpy.props.IntProperty(
+        name="关节迭代次数", default=4, min=1, max=12,
+        description="一次关节求解中校正整条骨骼链的次数",
+    )
+    physics_joints_per_frame: bpy.props.BoolProperty(
+        name="关节按帧求解", default=False,
+        description="开启后，在一帧的最后一个碰撞子步结束时求解关节",
+    )
 
     def _list_controls(self, row, target):
         tools = row.column(align=True)
@@ -369,6 +421,13 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
         snapshot.label(text="定身（CB1 快照）")
         snapshot.prop(self, "cb1_variable")
         snapshot.prop(self, "cb1_key")
+        draw_physics(self, layout)
+
+    def _physics_reserved_variables(self):
+        controls = self._layer_controls() if self.rigs else [
+            (variable_name(self.play_variable), variable_name(self.frame_variable)),
+        ]
+        return [variable_name(self.cb1_variable), *(name for control in controls for name in control[:2])]
 
     def _rig_configuration(self, scene):
         configs = []
@@ -434,6 +493,8 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
         if GlobalConfig.logic_name != LogicName.ZZMI:
             raise ValueError("骨骼矩阵控制需要 ZZMI 导出")
         if _editing_rig(self) is None:
+            if self.physics_bodies:
+                raise ValueError("骨骼物理需要先选择一套骨架")
             snapshot_settings(self.cb1_variable, self.cb1_key)
             return
         if self.frame_start > self.frame_end:
@@ -446,6 +507,8 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
                 raise ValueError("播放开关和播放变量必须使用不同的变量名")
             snapshot_settings(self.cb1_variable, self.cb1_key, self.play_variable, self.frame_variable)
         self._rig_configuration(bpy.context.scene)
+        if self.physics_bodies:
+            physics_controls(self, self._physics_reserved_variables())
 
     def execute_postprocess(self, mod_export_path):
         self.validate_export_configuration()
@@ -469,7 +532,7 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
             node.bl_idname == "SSMTNode_PostProcess_DragInteraction"
             for node in BlueprintExportHelper._collect_postprocess_nodes(output_tree)
         )
-        if self.rigs or has_drag or any(slot >= native_capacity for clip in clips for slot in clip.slots):
+        if self.rigs or has_drag or self.physics_bodies or any(slot >= native_capacity for clip in clips for slot in clip.slots):
             slots = tuple(sorted({slot for clip in clips for slot in clip.slots}))
             reference = next((clip for clip in clips if clip.pivot is not None and clip.anchor < native_capacity), clips[0])
             manual_parents = tuple(sorted({parent for _, _, _, parents in rigs for parent in parents}))
@@ -487,9 +550,22 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
                     ],
                 )
             ]
+            physics = None
+            if self.physics_bodies:
+                scene = bpy.context.scene
+                previous = scene.frame_current, scene.frame_subframe
+                try:
+                    scene.frame_set(self.frame_start)
+                    physics = build_bone_physics(
+                        self, scene, rigs, max(native_capacity, slots[-1] + 1), _mirror_x,
+                        self._physics_reserved_variables(),
+                    )
+                finally:
+                    scene.frame_set(previous[0], subframe=previous[1])
             export_clip(
                 expected, None, None, clip, rig_layers=layers,
                 cb1=snapshot_settings(self.cb1_variable, self.cb1_key),
+                physics=physics,
             )
             return
         _, hierarchy, source_hierarchy, manual_parents = rigs[0]
@@ -502,6 +578,7 @@ class SSMTNode_PostProcess_BoneMatrix(SSMTNode_PostProcess_Base):
 
 
 _CLASSES = (
+    *PHYSICS_CLASSES,
     SSMT_BoneMatrixParentLink, SSMT_BoneMatrixRig, SSMT_UL_BoneMatrixRigs, SSMT_UL_BoneMatrixParents,
     SSMT_OT_BoneMatrixListEdit, SSMTNode_PostProcess_BoneMatrix,
 )
@@ -510,8 +587,10 @@ _CLASSES = (
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
+    physics_viewport.register()
 
 
 def unregister():
+    physics_viewport.unregister()
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)

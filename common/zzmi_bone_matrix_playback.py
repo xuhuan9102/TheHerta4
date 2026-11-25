@@ -20,6 +20,7 @@ from .zzmi_bone_matrix_render_calibration import (
     read_ground_support,
 )
 from .zzmi_bone_matrix_render_inputs import NATIVE_SLOT_COUNT_MARKER
+from .zzmi_bone_physics import PREVIEW_PIXEL_SHADER, PREVIEW_SHADER, SHADER as PHYSICS_SHADER, solver_shader_source
 
 _TAG = "SSMT bone matrix"
 _BEGIN = rf"; {_TAG} begin"
@@ -214,16 +215,17 @@ def _restore_generated_draw(match):
     if original:
         indent = header[:len(header) - len(header.lstrip())]
         return indent + original + "\n"
-    original_blend = header.partition(f"{_BEGIN} blend|")[2]
-    if original_blend:
-        return original_blend + "\n"
+    for target in ("blend", "hash"):
+        original = header.partition(f"{_BEGIN} {target}|")[2]
+        if original:
+            return original + "\n"
     return ""
 
 
 def _configuration_text(
     content: str, play: str | None, frame: str | None, clip: BoneMatrixClip | None,
     *, play_on_load: bool = False, initial_frame: int | None = None, support_key=None, cb1=None, layers=None,
-    extra_draws=None,
+    extra_draws=None, physics=None, unaffected_physics_draws=(),
 ):
     text = _BLOCK.sub(_restore_generated_draw, content).rstrip("\r\n")
     capacities = _palette_capacities(text)
@@ -254,6 +256,8 @@ def _configuration_text(
         raise ValueError("需要设置骨架或 CB1 定身控制")
     if cb1:
         defaults.extend((_DEFAULT_MARKER, f"global {cb1.variable} = 0"))
+    if physics:
+        defaults.extend(physics.constants(_DEFAULT_MARKER))
     defaults.append(_END)
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -277,7 +281,8 @@ def _configuration_text(
             _END,
         ))
     patched = add_scoped_playback(
-        "\n".join(lines) + "\n", play, frame, clip, capacities, size, support_key, cb1, layers, extra_draws,
+        "\n".join(lines) + "\n", play, frame, clip, capacities, size, support_key, cb1, layers, extra_draws, physics,
+        unaffected_physics_draws,
     )
     return reconcile_bone_matrix_defaults(patched), struct.pack(f"<{len(table)}I", *table)
 
@@ -294,20 +299,25 @@ def export_cb1_snapshot(ini_path: Path, cb1: CB1Snapshot):
 
 def export_clip(
     ini_path: Path, play: str, frame: str, clip: BoneMatrixClip,
-    *, play_on_load: bool = False, initial_frame: int | None = None, cb1=None, rig_layers=(),
+    *, play_on_load: bool = False, initial_frame: int | None = None, cb1=None, rig_layers=(), physics=None,
 ):
     content = _BLOCK.sub(_restore_generated_draw, ini_path.read_text(encoding="utf-8-sig"))
     palette_size = _native_slot_count(content, _palette_capacities(content))
     if not palette_size:
         raise ValueError("导出的 INI 没有可替换的 ZZMI 合并骨架槽")
     layers = pack_layers(rig_layers, palette_size, clip) if rig_layers else None
+    if physics and (not layers or len(physics.followers) != layers.capacity):
+        raise ValueError("刚体骨骼表需要与导出的分层骨骼矩阵对应")
     support_key, support = (None, b"")
     if clip.pivot is not None and clip.slots[:palette_size] == tuple(range(palette_size)):
         support_key, support = read_ground_support(content, ini_path.parent, clip.anchor, layers)
-    native_blends, extra_draws, fallback_assets = prepare_native_blends(content, ini_path.parent, palette_size, layers)
+    native_blends, extra_draws, fallback_assets, unaffected = prepare_native_blends(
+        content, ini_path.parent, palette_size, layers, physics,
+    )
     text, slot_map = _configuration_text(
         content, play, frame, clip, play_on_load=play_on_load,
         initial_frame=initial_frame, support_key=support_key, cb1=cb1, layers=layers, extra_draws=extra_draws,
+        physics=physics, unaffected_physics_draws=unaffected,
     )
     if native_blends:
         text = bind_native_blends(text, native_blends)
@@ -326,11 +336,16 @@ def export_clip(
     ]
     assets.extend(layers.assets if layers else (("SSMTBoneMatrixFrames.buf", clip.matrices),))
     assets.extend(fallback_assets)
+    if physics:
+        physics_assets = physics.assets()
+        assets.extend(physics_assets)
+        assets.append((PHYSICS_SHADER, solver_shader_source((toolset / PHYSICS_SHADER).read_bytes(), physics_assets)))
+        assets.extend((name, (toolset / name).read_bytes()) for name in (PREVIEW_SHADER, PREVIEW_PIXEL_SHADER))
     if clip.pivot is not None and f"cs = res/{RENDER_SHADER}" in text:
         assets.extend((
             (RENDER_SHADER, (toolset / RENDER_SHADER).read_bytes()),
             ("SSMTBoneMatrixBindPivot.buf", struct.pack("<4f", *clip.pivot, 1.0)),
-            ("SSMTBoneMatrixReferenceBasis.buf", bytes(5 * 16)),
+            ("SSMTBoneMatrixReferenceBasis.buf", bytes(6 * 16)),
             ("SSMTBoneMatrixWorldInit.buf", bytes(4 * 16)),
         ))
         if support:

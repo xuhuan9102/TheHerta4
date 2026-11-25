@@ -786,6 +786,10 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
         default="", options={'HIDDEN', 'SKIP_SAVE'},
     )  # type: ignore
 
+    bone_physics_preview_node_name: bpy.props.StringProperty(
+        default="", options={'HIDDEN', 'SKIP_SAVE'},
+    )  # type: ignore
+
     direct_export_only: bpy.props.BoolProperty(
         name="直出导出",
         description="忽略 NTMI ModImp 输出节点，只跑直出（形态键 / 多文件）流程",
@@ -865,18 +869,32 @@ class SSMTGenerateModBlueprint(_BackgroundExportMixin, bpy.types.Operator):
 
     def _start_background_export(self, context, tree):
         """存快照 → 起后台实例 → 挂 modal 轮询；确认弹窗与直接启动共用这一段。"""
+        preview = None
+        preview_name = getattr(self, "bone_physics_preview_node_name", "")
+        if preview_name:
+            preview = tree.nodes.get(preview_name)
+            if getattr(preview, "bl_idname", "") != "SSMTNode_PostProcess_BoneMatrix" or not preview.physics_bodies:
+                self.report({'ERROR'}, "未找到可导出的骨骼物理预览节点")
+                return {'CANCELLED'}
         # 立即反馈：会话启动里要先把工程存成 480MB 快照（数秒）再起子进程，
         # 这段时间主进程没有任何进度文本 —— 先写状态栏，避免"点了导出十几秒没反应"。
         push_progress_header("后台导出：正在保存工程快照…", context)
         # 后台导出入口：主进程侧先清掉上一次残留的 ini 段登记（worker 进程内另有一次清理）。
         _clear_export_section_registry()
+        previous_preview = None
         try:
+            if preview:
+                previous_preview = preview.physics_on_load, preview.physics_debug_on_load
+                preview.physics_on_load = preview.physics_debug_on_load = True
             session = self._create_background_session(tree)
             started = session.start()
         except Exception as error:
             clear_progress_header(context)
             self.report({'ERROR'}, f"后台导出启动失败: {error}")
             return {'CANCELLED'}
+        finally:
+            if previous_preview is not None:
+                preview.physics_on_load, preview.physics_debug_on_load = previous_preview
 
         if not started:
             clear_progress_header(context)

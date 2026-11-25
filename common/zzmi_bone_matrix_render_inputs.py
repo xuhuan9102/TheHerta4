@@ -69,10 +69,14 @@ def normalized_blend(payload: bytes, layout: dict | None) -> bytes | None:
     return packed.tobytes()
 
 
-def extra_weighted_slots(packed, native_capacity):
+def weighted_slots(packed, minimum=0):
     rows = np.frombuffer(packed, dtype=[("weights", "<f4", 4), ("slots", "<u4", 4)])
-    slots = rows["slots"][(rows["weights"] > 0) & (rows["slots"] >= native_capacity)]
+    slots = rows["slots"][(rows["weights"] > 0) & (rows["slots"] >= minimum)]
     return {int(slot) for slot in np.unique(slots)}
+
+
+def extra_weighted_slots(packed, native_capacity):
+    return weighted_slots(packed, native_capacity)
 
 
 def remap_blend_indices(payload, layout, native_capacity, fallback):
