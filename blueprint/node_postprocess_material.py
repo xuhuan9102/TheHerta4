@@ -63,6 +63,17 @@ def _is_dhash_run_line(line):
 _DHASH_FILTER_BINDING_RE = re.compile(
     r"^(ps-t\[(Filter_[^\]]+)\])\s*=\s*(\S.*)$", re.IGNORECASE
 )
+_EFMI_COMPONENT_DRAW_SECTION_RE = re.compile(
+    r"^\[(?:CommandList_Draw_|TextureOverride_)(?:LOD\d+[._])?"
+    r"[0-9a-f]{8}[-_]\d+[-_]\d+\]$",
+    re.IGNORECASE,
+)
+_EFMI_DEFAULT_TEXTURE_REF_RE = re.compile(r"^ref\s+Resource-", re.IGNORECASE)
+_DHASH_OBJECT_NUMBER_RE = re.compile(r"^\d{3,}(?:_|$)")
+_EXPORT_MESH_SUFFIX_RE = re.compile(
+    r"_(?:vgtest(?:_unassigned)?_copy|copy(?:_temp)?|temp|chain\d+|dup\d+|bpe\d*)$",
+    re.IGNORECASE,
+)
 # 旧版把 TTL 写成段尾一整组，靠这两个标记在重导出时整组摘掉。现在是就地替换，
 # 标记只剩兼容用途：老工程文件里残留的组仍由 _strip_ttl_groups 摘走。
 _TTL_GROUP_MARKER = "; [SSMT-TTL] {}"
@@ -766,32 +777,13 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         return match.group(1) if match else None
 
     def _strip_all_suffixes(self, name):
-        stripped_names = []
-        current = name
-        max_iterations = 20
-        iteration = 0
-        
-        suffix_patterns = [
-            r'_copy$',
-            r'_chain\d+$',
-            r'_dup\d+$',
-        ]
-        
-        while iteration < max_iterations:
-            changed = False
-            for pattern in suffix_patterns:
-                new_name = re.sub(pattern, '', current)
-                if new_name != current:
-                    if new_name not in stripped_names:
-                        stripped_names.append(new_name)
-                    current = new_name
-                    changed = True
-                    break
-            if not changed:
-                break
-            iteration += 1
-        
-        return stripped_names
+        """逐层剥离导出后缀，保留物体名中的 .001 等编号。"""
+        candidates = []
+        while match := _EXPORT_MESH_SUFFIX_RE.search(name):
+            name = name[:match.start()]
+            if name:
+                candidates.append(name)
+        return candidates
 
     def find_object_by_mesh_name(self, mesh_name, object_filter=None):
         # Names/mappings and scene objects stay fixed during this INI pass.
@@ -3877,56 +3869,51 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             lines.insert(snapshot_at, "run = " + _RUN_BEFORE_DRAW)
         return len(edits)
 
-    def _rewrite_block_to_per_draw_groups(self, lines, draw_units):
-        """把「块顶堆 Filter 绑定 + 块级 run 对」重写成逐绘制组。
-
-        只在块内每一笔 draw 都有自己独立的 ``ps-t[Filter_`` 时调用：先删块顶
-        共享 Filter 绑定和旧 run 行，再按 ``; [mesh:...]`` 单元重新插入。
-        """
+    def _rewrite_block_to_per_draw_groups(self, section_name, lines, draw_units):
+        """按部件的默认绑定和物体自己的绑定生成逐绘制组。"""
         try:
             first_unit_start = min(int(unit.get("start", 0)) for unit in draw_units)
         except (AttributeError, TypeError, ValueError):
             return 0
-
-        # 块顶共享绑定：先把能按 ``Filter_<物体token>_`` 对上的 Filter 分给
-        # 各自的 ``; [mesh:...]`` 单元，再删块顶剩余 Filter；数字槽只删
-        # “该块每笔自己又生成了一份”的槽，避免误删公共默认绑定。
-        def _mesh_token(mesh_name):
-            # Blender 复制后缀 `.001` / `.002` 与导出的 `_copy` 尾巴都要剥掉：
-            # 三笔 `.001_copy/.002_copy/.003_copy` 共用同一个源物体 token。
-            text = re.sub(r"\.\d+(?=_copy$|$)", "", str(mesh_name or ""))
-            text = text.replace("_copy", "")
-            text = re.sub(r"[^a-z0-9_]+", "_", text.lower())
-            return text.strip("_")
 
         unit_token_to_meshes = {}
         for unit in draw_units:
             mesh = str(unit.get("mesh", "") or "")
             if not mesh:
                 continue
-            token = _mesh_token(mesh)
+            source_names = self._strip_all_suffixes(mesh)
+            source_name = source_names[-1] if source_names else mesh
+            token = re.sub(r"[^a-z0-9_]+", "_", source_name.lower()).strip("_")
             if not token:
                 continue
-            unit_token_to_meshes.setdefault(token, []).append(mesh)
+            unit_token_to_meshes.setdefault(token, set()).add(mesh)
 
+        efmi_component_section = (
+            GlobalConfig.logic_name == LogicName.EFMI
+            and _EFMI_COMPONENT_DRAW_SECTION_RE.fullmatch(section_name)
+        )
+        component_filters = []
         top_filters_by_mesh = {}
         top_filter_indices = []
         for index in range(0, max(0, first_unit_start)):
             stripped = str(lines[index] or "").strip()
-            if "ps-t[Filter_" not in stripped:
+            binding = _DHASH_FILTER_BINDING_RE.fullmatch(stripped)
+            if not binding:
                 continue
             top_filter_indices.append(index)
-            name_match = re.search(r"ps-t\[([^\]]+)\]", stripped, re.IGNORECASE)
-            filter_name = (
-                re.sub(r"[^a-z0-9_]+", "_", name_match.group(1).lower())
-                if name_match else ""
-            )
+
+            # EFMI 的段首原图绑定属于本段全部绘制；共享 Filter 名可能来自其它部件。
+            if efmi_component_section and _EFMI_DEFAULT_TEXTURE_REF_RE.match(binding.group(3)):
+                component_filters.append(stripped)
+                continue
+
+            filter_token = binding.group(2).lower().removeprefix("filter_")
+            # Filter 名把 Body.001 编码成 Body_001，Body 不能匹配这个编号物体。
             matched_tokens = [
                 token for token in unit_token_to_meshes
-                if token
-                and (
-                    filter_name == "filter_" + token
-                    or filter_name.startswith("filter_" + token + "_")
+                if filter_token == token or (
+                    filter_token.startswith(token + "_")
+                    and not _DHASH_OBJECT_NUMBER_RE.match(filter_token[len(token) + 1:])
                 )
             ]
             if len(matched_tokens) != 1:
@@ -3939,9 +3926,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             for mesh in unit_token_to_meshes[matched_tokens[0]]:
                 top_filters_by_mesh.setdefault(mesh, []).append(stripped)
 
-        # 同一个源物体的多个复制（.001/.002/.003）会共用同一组 Filter，
-        # 因此分派后的行数可以大于块顶原条数；这里只校验每条都至少分到一次。
-        assigned_unique = {
+        assigned_unique = set(component_filters) | {
             line for items in top_filters_by_mesh.values() for line in items
         }
         original_unique = {
@@ -3985,7 +3970,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if not unit["draw_lines"]:
                 continue
             insert_at = unit["start"] + 1
-            lines[insert_at:insert_at] = top_filters_by_mesh.get(unit["mesh"], ())
+            lines[insert_at:insert_at] = [
+                *component_filters, *top_filters_by_mesh.get(unit["mesh"], ())
+            ]
 
         self._dedupe_filter_bindings(lines)
         units = self._iter_draw_units(lines)
@@ -4105,12 +4092,12 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
                 if (every_draw_has_filter or has_top_filters) and len(all_draw_units) == len(draw_units):
                     section_inserted += self._rewrite_block_to_per_draw_groups(
-                        lines, [unit for unit, _start, _end in draw_units]
+                        section_name, lines, [unit for unit, _start, _end in draw_units]
                     )
                 elif not any(_is_dhash_run_line(line) for line in lines):
                     section_inserted += self._add_snapshot_restore_for_units(lines, units)
 
-            # 兜底：目标部件判定可能因 `_copy/.001` 名称、全局分配或材质名匹配
+            # 兜底：目标部件判定可能因导出后缀、全局分配或材质名匹配
             # 失败而漏掉单元；只要段里实际已有 `ps-t[Filter_`，就按所有绘制
             # 单元补 run。否则实机会出现“绑定有了、run 一条没有”。
             if section_inserted == 0:
@@ -4126,7 +4113,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                     )
                     if fallback_top:
                         section_inserted += self._rewrite_block_to_per_draw_groups(
-                            lines, fallback_units
+                            section_name, lines, fallback_units
                         )
                     else:
                         section_inserted += self._add_snapshot_restore_for_units(

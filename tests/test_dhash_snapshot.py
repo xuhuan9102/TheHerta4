@@ -26,6 +26,7 @@ import types
 import unittest
 from collections import OrderedDict
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -608,31 +609,28 @@ class MaterialPerDrawRestoreTests(unittest.TestCase):
             _material_node()._apply_snapshot_restore_to_sections(sections)
         self.assertIn("无法精确分派", str(ctx.exception))
 
-    def test_copies_share_source_token_get_own_groups(self):
-        """.001/.002/.003_copy 共用源物体 token，每笔各拿一组 Filter。"""
+    def test_component_defaults_apply_to_distinct_numbered_meshes(self):
         lines = [
-            "hash = aaaa",
+            "hash = 28847e3b",
             "handling = skip",
             "run = CommandList\\EFMIv1\\OverrideTextures",
             "ib = Resource_Body_Index",
         ]
         for role in ("Diffuse", "Light", "Normal"):
             lines.append(
-                "ps-t[Filter_LOD0_aaaa_1_0_Part1_{}] = ResourceTexture_{}_Body".format(
-                    role, role
-                )
+                f"ps-t[Filter_LOD0_28847e3b_78186_0_{role}] = ref Resource-28847e3b-78186-0-{role}Map"
             )
         for suffix in ("001", "002", "003"):
             lines.append(
-                "; [mesh:LOD0.aaaa-1-0.Part1.{}_copy] [vertex_count:12]".format(suffix)
+                f"; [mesh:LOD0.28847e3b-78186-0.Body.{suffix}_copy] [vertex_count:12]"
             )
             lines.append("drawindexedinstanced = 12,1,0,0,0")
             lines.append("")
         lines.append("run = RestoreInitialTextures")
-        sections = OrderedDict([("[TextureOverride_Body]", lines)])
-        inserted = _material_node()._apply_snapshot_restore_to_sections(sections)
+        sections = OrderedDict([("[TextureOverride_LOD0.28847e3b_78186_0]", lines)])
+        with patch.object(_mat_node.GlobalConfig, "logic_name", "EFMI"):
+            inserted = _material_node()._apply_snapshot_restore_to_sections(sections)
         self.assertEqual(inserted, 3)
-        lines = sections["[TextureOverride_Body]"]
         self.assertEqual(len(_filter_indices(lines)), 9)
         self.assertEqual(len(_run_indices(lines)), 6)
         starts = [
@@ -644,6 +642,65 @@ class MaterialPerDrawRestoreTests(unittest.TestCase):
             group = lines[start:end]
             self.assertEqual(len(_filter_indices(group)), 3)
             self.assertEqual(len(_run_indices(group)), 2)
+
+    def test_lod1_component_filters_cover_both_renamed_chain_draws(self):
+        bindings = [
+            "ps-t[Filter_LOD1_293cb5fa_1911_0_Diffuse] = ref Resource-293cb5fa-1911-0-DiffuseMap",
+            "ps-t[Filter_LOD0_047d6e11_3978_0_Normal] = ref Resource-293cb5fa-1911-0-NormalMap",
+        ]
+        meshes = [
+            "; [mesh:LOD1.293cb5fa-1911-0.原部件 脖子_chain1_copy] [vertex_count:12]",
+            "; [mesh:LOD1.293cb5fa-1911-0.Body_chain1_copy] [vertex_count:12]",
+        ]
+        draw = "drawindexedinstanced = 12,1,0,0,0"
+        restore = "run = RestoreInitialTextures"
+        lines = [
+            r"run = CommandList\EFMIv1\OverrideTextures", *bindings,
+            meshes[0], draw, meshes[1], draw, restore,
+        ]
+        sections = OrderedDict([("[CommandList_Draw_LOD1.293cb5fa_1911_0]", lines)])
+        node = _material_node()
+        node._unit_is_named_target = lambda _mesh_name: False
+        with patch.object(_mat_node.GlobalConfig, "logic_name", "EFMI"):
+            self.assertEqual(node._apply_snapshot_restore_to_sections(sections), 2)
+        self.assertEqual(lines[1:], [
+            meshes[0], restore, *bindings, draw, restore,
+            meshes[1], restore, *bindings, draw, restore,
+        ])
+
+    def test_object_filters_keep_blender_numbers_after_stripping_runtime_suffixes(self):
+        bindings = [
+            "ps-t[Filter_LOD1_293cb5fa_1911_0_Body_Diffuse] = ResourceTexture_Body",
+            "ps-t[Filter_LOD1_293cb5fa_1911_0_Body_001_Diffuse] = ResourceTexture_Body_001",
+            "ps-t[Filter_LOD1_293cb5fa_1911_0_Body_002_Diffuse] = ResourceTexture_Body_002",
+            "ps-t[Filter_LOD1_293cb5fa_1911_0_Body_003_Diffuse] = ResourceTexture_Body_003",
+        ]
+        meshes = [
+            "; [mesh:LOD1.293cb5fa-1911-0.Body_BPE2_temp]",
+            "; [mesh:LOD1.293cb5fa-1911-0.Body.001_chain1_dup2_vgtest_unassigned_copy]",
+            "; [mesh:LOD1.293cb5fa-1911-0.Body.002_copy_temp]",
+            "; [mesh:LOD1.293cb5fa-1911-0.Body.003_vgtest_copy]",
+        ]
+        draw = "drawindexedinstanced = 12,1,0,0,0"
+        restore = "run = RestoreInitialTextures"
+        lines = [*bindings, *(line for mesh in meshes for line in (mesh, draw))]
+        sections = OrderedDict([("[CommandList_Draw_LOD1.293cb5fa_1911_0]", lines)])
+        with patch.object(_mat_node.GlobalConfig, "logic_name", "EFMI"):
+            self.assertEqual(_material_node()._apply_snapshot_restore_to_sections(sections), 4)
+        self.assertEqual(lines, [
+            line for mesh, binding in zip(meshes, bindings)
+            for line in (mesh, restore, binding, draw, restore)
+        ])
+
+    def test_numbered_filter_does_not_match_the_base_object(self):
+        lines = [
+            "ps-t[Filter_LOD1_293cb5fa_1911_0_Body_001_Diffuse] = ResourceTexture_Body_001",
+            "; [mesh:LOD1.293cb5fa-1911-0.Body_copy]",
+            "drawindexedinstanced = 12,1,0,0,0",
+        ]
+        sections = OrderedDict([("[CommandList_Draw_LOD1.293cb5fa_1911_0]", lines)])
+        with self.assertRaisesRegex(ValueError, "匹配 0 个物体"):
+            _material_node()._apply_snapshot_restore_to_sections(sections)
 
     def test_duplicate_efmi_and_material_filters_keep_material_only(self):
         """同名的 EFMI 和材质绑定只保留材质行。"""
@@ -695,11 +752,12 @@ class MaterialPerDrawRestoreTests(unittest.TestCase):
             first_mesh, material, glow_draw,
             second_mesh, material, second_draw, restore,
         ]
-        sections = OrderedDict([("[CommandList_Draw_Test]", lines)])
+        sections = OrderedDict([("[CommandList_Draw_LOD0.28847e3b_78186_0]", lines)])
         node = _material_node()
         node._unit_is_named_target = lambda _mesh_name: False
 
-        self.assertEqual(node._apply_snapshot_restore_to_sections(sections), 2)
+        with patch.object(_mat_node.GlobalConfig, "logic_name", "EFMI"):
+            self.assertEqual(node._apply_snapshot_restore_to_sections(sections), 2)
         self.assertEqual(lines, [
             snapshot,
             first_mesh, restore, material, glow_draw, restore,
