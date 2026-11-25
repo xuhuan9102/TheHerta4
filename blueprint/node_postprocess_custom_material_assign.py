@@ -3960,6 +3960,10 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 _MATERIAL_PURE_TEXTURE_SET_TEXTURES_ZZMI,
             )
         if logic_name == LogicName.EFMI:
+            if SSMTNode_PostProcess_MaterialBase._efmi_texture_slot_namespace() == "EFMITTL":
+                from .fx_namespace import EFMITTL_SET_TEXTURES, EFMITTL_TEXTURE_SLOTS
+
+                return EFMITTL_TEXTURE_SLOTS, EFMITTL_SET_TEXTURES
             return (
                 _MATERIAL_PURE_TEXTURE_SLOTS_EFMI,
                 _MATERIAL_PURE_TEXTURE_SET_TEXTURES_EFMI,

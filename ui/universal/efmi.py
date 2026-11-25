@@ -81,29 +81,8 @@ def _section_registry_context(draw_ib):
     return _section_registry.draw_ib_context(draw_ib)
 
 
-# dHash 贴图快照/还原：块首/块尾两条 run 名由主人指定；当前两句都叫
-# RestoreInitialTextures，两个常量分开，未来只改一处即可。
-_RUN_BEFORE_DRAW = "RestoreInitialTextures"
-_RUN_AFTER_DRAW = "RestoreInitialTextures"
-# 段名对应的 3Dmigoto 内置小写命令（只在对应 run 名出现时发段）。
-_DHASH_RUN_BUILTIN = {
-    "SnapshotInitialTextures": "snapshotoriginaltextures",
-    "RestoreInitialTextures": "restoreoriginaltextures",
-}
-
-
-def _dhash_run_section_lines():
-    """按实际出现的 run 名生成顶层命令列表定义（去重、保持首次出现顺序）。"""
-    names = []
-    for name in (_RUN_BEFORE_DRAW, _RUN_AFTER_DRAW):
-        if name not in names:
-            names.append(name)
-    lines = []
-    for name in names:
-        lines.append("[" + name + "]")
-        lines.append("run = " + _DHASH_RUN_BUILTIN[name])
-        lines.append("")
-    return lines
+_DHASH_SNAPSHOT_LINE = "run = SnapshotInitialTextures"
+_DHASH_RESTORE_LINE = "run = RestoreInitialTextures"
 
 # 与框架 cfg_ms_max_lod_level_count 一致；LodRemaps 每组件 4 个 LOD 槽位。
 _EFMI_MAX_LOD_LEVEL_COUNT = 4
@@ -2764,12 +2743,7 @@ class ExportEFMI:
 
 
     def _append_submesh_draw_bindings(self, section, submesh_model, drawib_model):
-        """子网格绘制绑定：OverrideTextures + ib/vb 缓冲绑定 + 贴图槽位绑定。
-
-        骨骼合并模式下作为 CommandList_Draw_<部件前缀> 的回调主体（运行时逐实例
-        MergedSkeleton_Apply 换绑合并骨架后调用）。非合并模式的 TextureOverrideIB
-        段内仍保留一份内联实现（输出内容相同），未收敛以隔离回归风险。
-        """
+        """为合并骨架回调绑定缓冲和贴图。"""
         section.append("run = CommandList\\EFMIv1\\OverrideTextures")
 
         ib_resource_name = "Resource_" + submesh_model.unique_str.replace("-","_") + "_Index"
@@ -2783,48 +2757,46 @@ class ExportEFMI:
         unique_str = submesh_model.unique_str
         section.append("vb3 = Resource_" + unique_str.replace('-', '_') + "_Position")
 
-        if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None:
-            texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
-            if GlobalProterties.use_rabbitfx_slot():
-                for texture_markup_info in texture_markup_info_list:
-                    if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
-                        continue
-                    if texture_markup_info.mark_name == "DiffuseMap":
-                        section.append("Resource\\RabbitFx\\Diffuse = ref " + texture_markup_info.get_resource_name())
-                    elif texture_markup_info.mark_name == "LightMap":
-                        section.append("Resource\\RabbitFx\\LightMap = ref " + texture_markup_info.get_resource_name())
-                    elif texture_markup_info.mark_name == "NormalMap":
-                        section.append("Resource\\RabbitFx\\NormalMap = ref " + texture_markup_info.get_resource_name())
+        self._append_submesh_texture_bindings(section, submesh_model, drawib_model, mirror_passes=True)
 
-                section.append("run = CommandList\\RabbitFx\\SetTextures")
+    @staticmethod
+    def _texture_slot_namespace():
+        select_namespace = getattr(GlobalProterties, "efmi_texture_slot_namespace", None)
+        if select_namespace is not None:
+            return select_namespace()
+        return "RabbitFx" if GlobalProterties.use_rabbitfx_slot() else ""
 
-                for texture_markup_info in texture_markup_info_list:
-                    if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
-                        continue
-                    if texture_markup_info.mark_name in ["DiffuseMap", "LightMap", "NormalMap"]:
-                        pass
-                    else:
-                        slot = texture_markup_info.mark_slot
-                        if slot and not slot.lower().startswith("ps-t"):
-                            num_match = re.search(r'\d+', slot)
-                            if num_match:
-                                slot = "ps-t" + num_match.group()
-                            else:
-                                slot = "ps-t" + slot
-                        section.append(slot + " = " + texture_markup_info.get_resource_name())
-                        self._efmi_append_pass_mirrors(
-                            section, submesh_model, slot, texture_markup_info
-                        )
-            else:
-                for texture_markup_info in texture_markup_info_list:
-                    if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
-                        continue
-                    if self._try_append_dhash_binding(section, submesh_model, texture_markup_info):
-                        continue
-                    section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
-                    self._efmi_append_pass_mirrors(
-                        section, submesh_model, texture_markup_info.mark_slot, texture_markup_info
-                    )
+    def _append_submesh_texture_bindings(self, section, submesh_model, drawib_model, *, mirror_passes=False):
+        if GlobalProterties.forbid_auto_texture_ini() or drawib_model is None:
+            return
+        marks = [
+            mark for mark in drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+            if M_IniHelper.is_slot_binding_mark_type(getattr(mark, "mark_type", ""))
+        ]
+        namespace = self._texture_slot_namespace()
+        named_slots = {}
+        if namespace:
+            from ...blueprint.fx_namespace import efmi_texture_slots
+
+            named_slots = efmi_texture_slots(namespace)
+            named_marks = [mark for mark in marks if mark.mark_name in named_slots]
+            for mark in named_marks:
+                section.append(f"{named_slots[mark.mark_name]} = ref {mark.get_resource_name()}")
+            if named_marks or namespace == "RabbitFx":
+                section.append(f"run = CommandList\\{namespace}\\SetTextures")
+
+        for mark in marks:
+            if mark.mark_name in named_slots:
+                continue
+            if not namespace and self._try_append_dhash_binding(section, submesh_model, mark):
+                continue
+            slot = mark.mark_slot
+            if namespace and slot and not slot.lower().startswith("ps-t"):
+                num_match = re.search(r"\d+", slot)
+                slot = "ps-t" + (num_match.group() if num_match else slot)
+            section.append(f"{slot} = {mark.get_resource_name()}")
+            if mirror_passes:
+                self._efmi_append_pass_mirrors(section, submesh_model, slot, mark)
 
     # ------------------------------------------------------------------
     # dHash 贴图 filter（默认关；关闭时不产生任何新行）
@@ -2897,7 +2869,7 @@ class ExportEFMI:
             return False
         if GlobalProterties.forbid_auto_texture_ini():
             return False
-        if GlobalProterties.use_rabbitfx_slot():
+        if self._texture_slot_namespace():
             return False
         if normalize_binding_mode(get_mark_binding_mode(mark)) != "filter":
             return False
@@ -2916,21 +2888,13 @@ class ExportEFMI:
         return True
 
     @staticmethod
-    def _append_snapshot_restore_for_filter_block(lines, block_start, draw_end) -> bool:
-        """给一个含 ``ps-t[Filter_...]`` 的绘制块补块首/块尾两条 run。
+    def _append_snapshot_restore_for_filter_block(
+        lines, block_start, draw_end, *, merged_callback=False
+    ) -> bool:
+        """在修改贴图前保存原始槽位，绘制后恢复。
 
-        只认块内实际出现的 ``ps-t[Filter_``：开关关闭时调用方走固定槽位，
-        块里没有 Filter 行，本方法自然零改动。``lines`` 兼容
-        ``M_IniSection``（真实导出）与普通 ``list``（单测）。
-
-        插入位置：
-        * 块首：``handling = skip`` 之后（非合并 TextureOverride），
-          没有 ``handling`` 的合并 Draw CommandList 则紧跟块头；
-        * 块尾：``draw_end`` 之前最后一个非空行之后（绘制调用之后）。
-
-        当前两句 run 名都由 ``_RUN_BEFORE_DRAW`` / ``_RUN_AFTER_DRAW`` 决定
-        （主人指定两句都叫 RestoreInitialTextures）；块首已存在同名 run 行时
-        视为已补过，不重复插入。返回是否插入了新行。
+        EFMI 核心在合并骨架回调之前保存了快照，回调可直接恢复该快照。
+        独立 TextureOverride 在自身的贴图写入前保存快照。
         """
         if hasattr(lines, "SectionLineList"):
             line_list = lines.SectionLineList
@@ -2958,7 +2922,7 @@ class ExportEFMI:
                 snapshot_at = block_start + offset + 1
                 break
 
-        before_line = "run = " + _RUN_BEFORE_DRAW
+        before_line = _DHASH_RESTORE_LINE if merged_callback else _DHASH_SNAPSHOT_LINE
         if snapshot_at < len(line_list) and str(line_list[snapshot_at] or "").strip() == before_line:
             return False
 
@@ -2969,17 +2933,9 @@ class ExportEFMI:
         if restore_at <= snapshot_at:
             return False
 
-        line_list.insert(restore_at, "run = " + _RUN_AFTER_DRAW)
+        line_list.insert(restore_at, _DHASH_RESTORE_LINE)
         line_list.insert(snapshot_at, before_line)
         return True
-
-    def _append_dhash_snapshot_sections(self, ini_builder) -> None:
-        """顶层发 ``[RestoreInitialTextures]`` 等命令列表定义（有 Filter 才发）。"""
-        if not self._ensure_dhash_filter_registry():
-            return
-        section = M_IniSection(M_SectionType.CommandList)
-        section.extend(_dhash_run_section_lines())
-        ini_builder.append_section(section)
 
     def _append_dhash_filter_sections(self, ini_builder) -> None:
         """把登记的 filter 写成一个顶层 ResourceTexture 段（每段三行 + 空行）。"""
@@ -3408,6 +3364,7 @@ class ExportEFMI:
                     merged_command_lists,
                     merged_block_start,
                     len(merged_command_lists.SectionLineList),
+                    merged_callback=True,
                 )
                 merged_command_lists.new_line()
                 continue
@@ -3458,42 +3415,7 @@ class ExportEFMI:
             unique_str = submesh_model.unique_str
             texture_override_ib_section.append("vb3 = Resource_" + unique_str.replace('-', '_') + "_Position")
 
-            if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None:
-                texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
-                if GlobalProterties.use_rabbitfx_slot():
-                    for texture_markup_info in texture_markup_info_list:
-                        if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
-                            continue
-                        if texture_markup_info.mark_name == "DiffuseMap":
-                            texture_override_ib_section.append("Resource\\RabbitFx\\Diffuse = ref " + texture_markup_info.get_resource_name())
-                        elif texture_markup_info.mark_name == "LightMap":
-                            texture_override_ib_section.append("Resource\\RabbitFx\\LightMap = ref " + texture_markup_info.get_resource_name())
-                        elif texture_markup_info.mark_name == "NormalMap":
-                            texture_override_ib_section.append("Resource\\RabbitFx\\NormalMap = ref " + texture_markup_info.get_resource_name())
-                    
-                    texture_override_ib_section.append("run = CommandList\\RabbitFx\\SetTextures")
-                    
-                    for texture_markup_info in texture_markup_info_list:
-                        if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
-                            continue
-                        if texture_markup_info.mark_name in ["DiffuseMap", "LightMap", "NormalMap"]:
-                            pass
-                        else:
-                            slot = texture_markup_info.mark_slot
-                            if slot and not slot.lower().startswith("ps-t"):
-                                num_match = re.search(r'\d+', slot)
-                                if num_match:
-                                    slot = "ps-t" + num_match.group()
-                                else:
-                                    slot = "ps-t" + slot
-                            texture_override_ib_section.append(slot + " = " + texture_markup_info.get_resource_name())
-                else:
-                    for texture_markup_info in texture_markup_info_list:
-                        if not M_IniHelper.is_slot_binding_mark_type(getattr(texture_markup_info, "mark_type", "")):
-                            continue
-                        if self._try_append_dhash_binding(texture_override_ib_section, submesh_model, texture_markup_info):
-                            continue
-                        texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+            self._append_submesh_texture_bindings(texture_override_ib_section, submesh_model, drawib_model)
 
             is_both_source_and_target = is_source_ib and is_target_ib and self.has_cross_ib
 
@@ -3653,8 +3575,6 @@ class ExportEFMI:
             ini_builder.append_section(resource_texture_section)
             # dHash 贴图 filter 段（顶层 ResourceTexture；默认关时登记表为空，不发射）。
             self._append_dhash_filter_sections(ini_builder)
-            # 快照/还原命令列表定义：当前只发 [RestoreInitialTextures]。
-            self._append_dhash_snapshot_sections(ini_builder)
 
         ini_builder.append_section(resource_buffer_section)
 

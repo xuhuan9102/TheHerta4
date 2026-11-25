@@ -73,6 +73,7 @@ class _FakeGlobalProterties:
     use_dhash = False
     forbid_auto = False
     rabbitfx = False
+    efmittl = False
 
     @classmethod
     def use_dhash_texture(cls):
@@ -86,6 +87,12 @@ class _FakeGlobalProterties:
     def use_rabbitfx_slot(cls):
         return cls.rabbitfx
 
+    @classmethod
+    def efmi_texture_slot_namespace(cls):
+        if cls.efmittl:
+            return "EFMITTL"
+        return "RabbitFx" if cls.rabbitfx else ""
+
 
 _install_module(f"{PKG}.common.global_properties", GlobalProterties=_FakeGlobalProterties)
 _install_module(
@@ -93,7 +100,10 @@ _install_module(
     GlobalKeyCountHelper=types.SimpleNamespace(generated_mod_number=0),
 )
 _install_module(f"{PKG}.common.submesh_metadata", SubmeshMetadataResolver=object)
-_install_module(f"{PKG}.common.m_ini_helper", M_IniHelper=types.SimpleNamespace())
+_install_module(
+    f"{PKG}.common.m_ini_helper",
+    M_IniHelper=types.SimpleNamespace(is_slot_binding_mark_type=lambda mark: mark == "Slot"),
+)
 _install_module(f"{PKG}.common.m_ini_helper_gui", M_IniHelperGUI=types.SimpleNamespace())
 _install_module(f"{PKG}.blueprint.model", BluePrintModel=object)
 _install_module(f"{PKG}.common.submesh_model", SubMeshModel=object)
@@ -121,6 +131,8 @@ M_IniBuilder = _real_ini_builder.M_IniBuilder
 M_IniSection = _real_ini_builder.M_IniSection
 M_SectionType = _real_ini_builder.M_SectionType
 
+_load_real(f"{PKG}.common.logic_name", "common/logic_name.py")
+_load_real(f"{PKG}.blueprint.fx_namespace", "blueprint/fx_namespace.py")
 _efmi = _load_real(f"{PKG}.ui.universal.efmi", "ui/universal/efmi.py")
 ExportEFMI = _efmi.ExportEFMI
 
@@ -176,12 +188,7 @@ def run_export_path(exporter):
     binding_section = M_IniSection(M_SectionType.TextureOverrideIB)
     for drawib_model in exporter.drawib_model_list:
         for submesh_model in drawib_model.submesh_model_list:
-            for mark in drawib_model.get_submesh_texture_markup_info_list(submesh_model):
-                if getattr(mark, "mark_type", "") != "Slot":
-                    continue
-                if exporter._try_append_dhash_binding(binding_section, submesh_model, mark):
-                    continue
-                binding_section.append(mark.mark_slot + " = " + mark.get_resource_name())
+            exporter._append_submesh_texture_bindings(binding_section, submesh_model, drawib_model)
     builder = M_IniBuilder()
     builder.append_section(binding_section)
     exporter._append_dhash_filter_sections(builder)
@@ -218,9 +225,46 @@ class TestDHashTextureFilters(unittest.TestCase):
         _FakeGlobalProterties.use_dhash = False
         _FakeGlobalProterties.forbid_auto = False
         _FakeGlobalProterties.rabbitfx = False
+        _FakeGlobalProterties.efmittl = False
 
     def tearDown(self):
         self.setUp()
+
+    def test_efmittl_uses_semantic_slots_and_keeps_dhash_as_a_fallback(self):
+        _FakeGlobalProterties.efmittl = True
+        _FakeGlobalProterties.use_dhash = True
+        submesh = _FakeSubmesh("aaaa-6-0")
+        marks = [
+            make_mark(role, "0123456789abcdef", "BC7_UNORM", "filter", slot)
+            for role, slot in (
+                ("DiffuseMap", "ps-t3"), ("LightMap", "ps-t5"), ("NormalMap", "ps-t7"),
+                ("HighLightMap", "t9"),
+            )
+        ]
+        exporter = make_exporter([(submesh, marks)])
+        binding_section, builder = run_export_path(exporter)
+        self.assertEqual(binding_section.SectionLineList, [
+            r"Resource\EFMITTL\Diffuse = ref Resource-aaaa-6-0-DiffuseMap",
+            r"Resource\EFMITTL\LightMap = ref Resource-aaaa-6-0-LightMap",
+            r"Resource\EFMITTL\NormalMap = ref Resource-aaaa-6-0-NormalMap",
+            r"run = CommandList\EFMITTL\SetTextures",
+            "ps-t9 = Resource-aaaa-6-0-HighLightMap",
+        ])
+        self.assertEqual(filter_headers(builder), [])
+
+        _FakeGlobalProterties.efmittl = False
+        _FakeGlobalProterties.rabbitfx = True
+        rabbitfx_section, rabbitfx_builder = run_export_path(exporter)
+        self.assertEqual(
+            rabbitfx_section.SectionLineList,
+            [line.replace("EFMITTL", "RabbitFx") for line in binding_section.SectionLineList],
+        )
+        self.assertEqual(filter_headers(rabbitfx_builder), [])
+
+        _FakeGlobalProterties.rabbitfx = False
+        fallback_section, fallback_builder = run_export_path(exporter)
+        self.assertEqual(len(filter_bindings(fallback_section)), 4)
+        self.assertEqual(len(filter_headers(fallback_builder)), 4)
 
     # 1. 默认关：两行固定槽位原样，零 Filter 段 -------------------------------
     def test_default_off_keeps_fixed_slot_bindings_and_emits_no_filter(self):
@@ -496,7 +540,7 @@ class DHashReviewFixTests(unittest.TestCase):
     def test_generate_ini_file_wires_dhash_helpers(self):
         import inspect
         source = inspect.getsource(ExportEFMI.generate_ini_file)
-        self.assertIn("_try_append_dhash_binding(", source)
+        self.assertIn("_append_submesh_texture_bindings(", source)
         self.assertIn("_append_dhash_filter_sections(ini_builder)", source)
 
     def test_filter_section_is_top_level_resource_texture(self):

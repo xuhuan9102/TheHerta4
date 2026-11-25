@@ -85,12 +85,19 @@ _install_module(
     GlobalConfig=types.SimpleNamespace(logic_name="HTMI"),
 )
 _rabbitfx_slot_state = {"value": True}
+_efmittl_slot_state = {"value": False}
 _install_module(
     f"{PKG}.common.global_properties",
     GlobalProterties=type(
         "_FakeGlobalProterties",
         (),
-        {"use_rabbitfx_slot": staticmethod(lambda: _rabbitfx_slot_state["value"])},
+        {
+            "use_rabbitfx_slot": staticmethod(lambda: _rabbitfx_slot_state["value"]),
+            "efmi_texture_slot_namespace": staticmethod(
+                lambda: "EFMITTL" if _efmittl_slot_state["value"]
+                else "RabbitFx" if _rabbitfx_slot_state["value"] else ""
+            ),
+        },
     ),
 )
 _install_module(
@@ -274,6 +281,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         node_postprocess_material.clear_name_mapping_cache()
         _prefix_cache_state["props"] = {}
         _rabbitfx_slot_state["value"] = True
+        _efmittl_slot_state["value"] = False
         logic_name = "ZZMI" if self._testMethodName.startswith("test_ttl_") else "HTMI"
         sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = logic_name
 
@@ -2823,7 +2831,7 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertNotIn(r"CommandList\EFMITTL\Draw", result)
             self.assertNotIn(r"Resource\EFMITTL\Mask", result)
 
-    def _make_efmi_ttl_fixture(self, temp_dir, draw_args, glow=False):
+    def _make_efmi_ttl_fixture(self, temp_dir, draw_args, glow_names=()):
         """造一个 EFMI 合并绘制回调段（带 TTLMap 材质的物体），返回段与段名。"""
         diffuse_path = os.path.join(temp_dir, "diffuse.png")
         with open(diffuse_path, "wb") as file_obj:
@@ -2832,11 +2840,11 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         with open(ttl_path, "wb") as file_obj:
             file_obj.write(b"ttl")
         materials = [("DiffuseMap_Body", diffuse_path), ("TTLMap_Body", ttl_path)]
-        if glow:
-            glow_path = os.path.join(temp_dir, "glow.png")
+        for index, name in enumerate(glow_names):
+            glow_path = os.path.join(temp_dir, f"glow{index}.png")
             with open(glow_path, "wb") as file_obj:
-                file_obj.write(b"glow")
-            materials.append(("Glowmap_Body", glow_path))
+                file_obj.write(f"glow{index}".encode())
+            materials.append((name, glow_path))
         object_name = "LOD0.drawhash-12-56.Body"
         obj = _FakeObject(
             object_name,
@@ -3193,19 +3201,20 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
 
 
     def test_efmi_native_glow_t1_before_draw(self):
-        """EFMI + use_rabbitfx_slot=False + TTLMap：GlowMap 与参数写在 Draw 之前。"""
+        """EFMITTL 槽位开启时，GlowMap 与参数写在 Draw 之前。"""
         BS = chr(92)
         _rabbitfx_slot_state["value"] = False
+        _efmittl_slot_state["value"] = True
         with tempfile.TemporaryDirectory() as temp_dir:
             sections, section_name = self._make_efmi_ttl_fixture(
-                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow=True)
+                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow_names=("Glowmap_Body",))
             sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "EFMI"
             _run_process(_ttl_node(), sections, section_name)
             body = "\n".join(str(line) for line in sections[section_name])
 
         self.assertIn(f"Resource{BS}EFMITTL{BS}GlowMap = ref Resource_Glowmap_Body", body)
         for line in (
-            f"${BS}EFMITTL{BS}Brightness = 1",
+            f"${BS}EFMITTL{BS}brightness = 1",
             f"${BS}EFMITTL{BS}H = 0",
             f"${BS}EFMITTL{BS}S = 0",
             f"${BS}EFMITTL{BS}V = 0",
@@ -3214,30 +3223,71 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         ):
             self.assertIn(line, body)
         self.assertLess(
-            body.index(f"${BS}EFMITTL{BS}glow_mode"),
+            body.index(f"${BS}EFMITTL{BS}brightness"),
             body.index(f"run = CommandList{BS}EFMITTL{BS}Draw"),
         )
         self.assertEqual(body.count(f"Resource{BS}EFMITTL{BS}GlowMap = ref Resource"), 1)
 
     def test_efmi_native_glow_fx_on_keeps_fx_alias(self):
-        """use_rabbitfx_slot=True：保留 RabbitFX Glowmap，不写 EFMITTL GlowMap。"""
-        BS = chr(92)
+        """RabbitFX 发光绑定显式写入指定亮度或默认亮度。"""
         _rabbitfx_slot_state["value"] = True
+        for material_name, brightness in (("GlowMap_3_Body", "3"), ("GlowMap_Body", "1")):
+            with self.subTest(material_name=material_name), tempfile.TemporaryDirectory() as temp_dir:
+                sections, section_name = self._make_efmi_ttl_fixture(
+                    temp_dir,
+                    "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE",
+                    glow_names=(material_name,),
+                )
+                _run_process(_ttl_node(), sections, section_name)
+                lines = sections[section_name]
+                binding = rf"Resource\RabbitFX\Glowmap = ref Resource_{material_name}"
+                self.assertIn(binding, lines)
+                self.assertEqual(lines[lines.index(binding) - 1], rf"$\RabbitFX\brightness = {brightness}")
+                self.assertLess(lines.index(binding), lines.index(r"run = CommandList\RabbitFX\Run"))
+                self.assertFalse(any(r"Resource\EFMITTL\GlowMap" in line for line in lines))
+                self.assertFalse(any(r"$\EFMITTL\brightness" in line for line in lines))
+
+    def test_efmi_native_glow_keeps_brightness_and_texture_in_each_switch_branch(self):
+        _rabbitfx_slot_state["value"] = False
+        _efmittl_slot_state["value"] = True
         with tempfile.TemporaryDirectory() as temp_dir:
             sections, section_name = self._make_efmi_ttl_fixture(
-                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow=True)
-            sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "EFMI"
-            _run_process(_ttl_node(), sections, section_name)
-            body = "\n".join(str(line) for line in sections[section_name])
+                temp_dir,
+                "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE",
+                glow_names=("GlowMap_2.5_Body", "GlowMap_0_Body", "GlowMap_Default"),
+            )
+            node = _ttl_node()
+            for _ in range(2):
+                _run_process(node, sections, section_name)
+            lines = sections[section_name]
 
-        self.assertIn(f"Resource{BS}RabbitFX{BS}Glowmap = ref Resource_Glowmap_Body", body)
-        self.assertNotIn(f"Resource{BS}EFMITTL{BS}GlowMap", body)
-        self.assertNotIn(f"${BS}EFMITTL{BS}Brightness", body)
+        begin = lines.index("; === EFMITTL Glow ===")
+        end = lines.index("; === End EFMITTL Glow ===")
+        branches = {}
+        for index in range(begin + 1, end):
+            if not lines[index].strip().startswith("if "):
+                continue
+            brightness, binding, closing = [line.strip() for line in lines[index + 1:index + 4]]
+            self.assertTrue(brightness.startswith(r"$\EFMITTL\brightness = "))
+            self.assertTrue(binding.startswith(r"Resource\EFMITTL\GlowMap = ref "))
+            self.assertEqual(closing, "endif")
+            branches[binding.rsplit(" ", 1)[-1]] = brightness.split("=", 1)[1].strip()
+        self.assertEqual(branches, {
+            "Resource_GlowMap_2.5_Body": "2.5",
+            "Resource_GlowMap_0_Body": "0",
+            "Resource_GlowMap_Default": "1",
+        })
+        self.assertEqual(lines.count("; === EFMITTL Glow ==="), 1)
+        self.assertEqual(sum(line.strip().startswith("if ") for line in lines[begin:end]), 3)
+        self.assertEqual(sum(line.strip() == "endif" for line in lines[begin:end]), 3)
+        self.assertLess(end, lines.index(r"run = CommandList\EFMITTL\Draw"))
+        self.assertFalse(any(r"$\RabbitFX\brightness" in line for line in lines))
 
     def test_efmi_native_glow_o1_setglow_before_draw(self):
         """无 TTLMap 的普通 EFMI 物体：参数 + count/first + Draw 替换原 draw。"""
         BS = chr(92)
         _rabbitfx_slot_state["value"] = False
+        _efmittl_slot_state["value"] = True
         with tempfile.TemporaryDirectory() as temp_dir:
             glow_path = _write_png(temp_dir, "glow.png")
             mesh_name = "LOD0.drawhash-12-56.Body"
@@ -3268,9 +3318,10 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
         """连导两次只留一个标记块。"""
         BS = chr(92)
         _rabbitfx_slot_state["value"] = False
+        _efmittl_slot_state["value"] = True
         with tempfile.TemporaryDirectory() as temp_dir:
             sections, section_name = self._make_efmi_ttl_fixture(
-                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow=True)
+                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow_names=("Glowmap_Body",))
             sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "EFMI"
             _run_process(_ttl_node(), sections, section_name)
             _run_process(_ttl_node(), sections, section_name)
@@ -3283,16 +3334,71 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
     def test_efmi_native_glow_skipped_when_debug_off(self):
         """debug_disable_fx_ttl=True：不写任何 EFMITTL 发光行。"""
         _rabbitfx_slot_state["value"] = False
+        _efmittl_slot_state["value"] = True
         with tempfile.TemporaryDirectory() as temp_dir:
             sections, section_name = self._make_efmi_ttl_fixture(
-                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow=True)
+                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow_names=("Glowmap_Body",))
             sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "EFMI"
             node = _ttl_node(debug_disable_fx_ttl=True)
             _run_process(node, sections, section_name)
             body = "\n".join(str(line) for line in sections[section_name])
 
         self.assertNotIn("EFMITTL\\GlowMap", body)
-        self.assertNotIn("EFMITTL\\Brightness", body)
+        self.assertNotIn("EFMITTL\\brightness", body)
+
+    def test_efmi_glow_requires_a_named_slot_style(self):
+        _rabbitfx_slot_state["value"] = False
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sections, section_name = self._make_efmi_ttl_fixture(
+                temp_dir, "12,INSTANCE_COUNT,34,0,FIRST_INSTANCE", glow_names=("GlowMap_Body",),
+            )
+            _run_process(_ttl_node(), sections, section_name)
+            body = "\n".join(sections[section_name])
+        self.assertNotIn(r"Resource\RabbitFX\Glowmap", body)
+        self.assertNotIn(r"Resource\EFMITTL\GlowMap", body)
+        self.assertIn(r"Resource\EFMITTL\Mask", body)
+
+    def test_efmittl_slot_materials_rebind_semantic_aliases_before_draw(self):
+        _rabbitfx_slot_state["value"] = False
+        _efmittl_slot_state["value"] = True
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "LOD0.241deac5-12-56.Body"
+            obj = _FakeObject(
+                mesh_name,
+                {"ps-t3": {"mark_name": "DiffuseMap", "mark_slot": "ps-t3"}},
+                [(name, _write_png(temp_dir, f"{name}.png")) for name in (
+                    "DiffuseMap_Body", "LightMap_Body", "NormalMap_Body"
+                )],
+            )
+            _fake_bpy.data.objects[obj.name] = obj
+            sys.modules[f"{PKG}.common.global_config"].GlobalConfig.logic_name = "EFMI"
+            section_name = "[CommandList_Draw_LOD0.241deac5_12_56]"
+            command = r"run = CommandList\EFMITTL\SetTextures"
+            draw = "drawindexedinstanced = 12,INSTANCE_COUNT,34,0,FIRST_INSTANCE"
+            sections = OrderedDict([
+                (section_name, [
+                    r"Resource\EFMITTL\Diffuse = ref Resource-241deac5-12-56-DiffuseMap",
+                    r"Resource\EFMITTL\NormalMap = ref Resource_NormalMap_Original",
+                    command,
+                    f"; [mesh:{mesh_name}]",
+                    draw,
+                ]),
+                ("_config_path", temp_dir),
+            ])
+            node = _ttl_node()
+            _run_process(node, sections, section_name)
+            _run_process(node, sections, section_name)
+            body = sections[section_name]
+            bindings = body[body.index(f"; [mesh:{mesh_name}]") + 1:body.index(draw)]
+
+        self.assertEqual(set(bindings), {
+            r"Resource\EFMITTL\Diffuse = ref Resource_DiffuseMap_Body",
+            r"Resource\EFMITTL\LightMap = ref Resource_LightMap_Body",
+            r"Resource\EFMITTL\NormalMap = ref Resource_NormalMap_Body",
+            command,
+        })
+        self.assertEqual(bindings.count(command), 1)
+        self.assertEqual(bindings[-1], command)
 
 
 class MaterialProExportTests(unittest.TestCase):

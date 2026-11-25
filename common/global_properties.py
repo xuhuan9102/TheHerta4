@@ -15,6 +15,16 @@ def _update_export_cache_toggle(self, context):
         return
     set_export_cache_enabled(self.enable_preprocess_cache)
 
+
+def _update_rabbitfx_slot(self, context):
+    if self.use_rabbitfx_slot and self.use_efmittl_slot:
+        self.use_efmittl_slot = False
+
+
+def _update_efmittl_slot(self, context):
+    if self.use_efmittl_slot and self.use_rabbitfx_slot:
+        self.use_rabbitfx_slot = False
+
 # 「顶点去重精度控制」面板的 8 个类型复选框，与下面 deduplicate_* 开关一一对应。
 # 全勾＝面板默认；导出时默认走历史的全字段去重键（见 utils/export_utils.py）。
 DEDUPLICATE_ELEMENT_TYPES: tuple[str, ...] = (
@@ -191,11 +201,19 @@ class GlobalProterties(bpy.types.PropertyGroup):
         name="使用RabbitFX槽位风格",
         description="勾选后，使用RabbitFX槽位风格生成贴图相关ini部分",
         default=False,
+        update=_update_rabbitfx_slot,
+    ) # type: ignore
+
+    use_efmittl_slot: bpy.props.BoolProperty(
+        name="使用TTL槽位风格",
+        description="通过 EFMITTL 的 SetTextures 绑定颜色、光照和法线贴图，并使用 EFMITTL 发光",
+        default=False,
+        update=_update_efmittl_slot,
     ) # type: ignore
 
     use_dhash_texture: bpy.props.BoolProperty(
         name="dHash纹理",
-        description="按原图 dHash + 格式匹配 EFMI 贴图槽；关闭时保持固定 ps-tN 直写。",
+        description="FX 和 TTL 槽位都关闭时，按原图 dHash 与格式匹配贴图槽",
         default=False,
     ) # type: ignore
 
@@ -557,6 +575,16 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def use_rabbitfx_slot(cls):
         return cls._instance().use_rabbitfx_slot
+
+    @classmethod
+    def use_efmittl_slot(cls):
+        return cls._bool_attr("use_efmittl_slot", False)
+
+    @classmethod
+    def efmi_texture_slot_namespace(cls):
+        if cls.use_efmittl_slot():
+            return "EFMITTL"
+        return "RabbitFx" if cls.use_rabbitfx_slot() else ""
 
     @classmethod
     def use_dhash_texture(cls):

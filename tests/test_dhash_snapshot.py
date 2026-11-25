@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
-"""dHash 导出 RestoreInitialTextures 单测（最终口径：两句都叫 Restore）。
+"""EFMI dHash 贴图快照、恢复和逐绘制绑定测试。
 
 覆盖：
-1. EFMI 原始导出：含 ``ps-t[Filter_`` 的块，块首/块尾各一条
-   ``run = RestoreInitialTextures``；中间顺序 OverrideTextures < ib/vb <
-   3 条 Filter < ``; [mesh:`` < draw；关：0 条且文本 SHA 不变。
-2. 顶层命令列表定义：有 Filter 时只发 ``[RestoreInitialTextures]`` +
-   ``run = restoreoriginaltextures``；不发 Snapshot 段。
+1. 独立绘制在写贴图前保存快照，合并绘制复用 EFMI 核心快照。
+2. 关闭 dHash 时绘制块不增加快照或恢复命令。
 3. 材质转资源之后：N 笔 draw → N 组，绑定在各自 ``; [mesh:`` 下，块顶不留
    Filter 共享绑定；旧“块级一对 + 块顶堆绑定”形态被替换。
 4. 逐条格式分派：match_format 取源格式（含 _SRGB），缺 dhash 的条目独立
@@ -181,7 +178,6 @@ _efmi = _load_real(
 )
 
 M_IniSection = _efmi_ini.M_IniSection
-M_IniBuilder = _efmi_ini.M_IniBuilder
 M_SectionType = _efmi_ini.M_SectionType
 TextureMarkUpInfo = _efmi_tmh.TextureMarkUpInfo
 ExportEFMI = _efmi.ExportEFMI
@@ -334,7 +330,8 @@ class EfmiBlockLevelRestoreTests(unittest.TestCase):
         return section.SectionLineList, inserted
 
     def _assert_block_order(self, lines):
-        runs = _run_indices(lines)
+        snapshot, = _run_indices(lines, "SnapshotInitialTextures")
+        restore, = _run_indices(lines)
         filters = _filter_indices(lines)
         override = lines.index("run = CommandList\\EFMIv1\\OverrideTextures")
         mesh = next(
@@ -344,18 +341,16 @@ class EfmiBlockLevelRestoreTests(unittest.TestCase):
             index for index, line in enumerate(lines)
             if str(line).strip().startswith("drawindexed")
         )
-        self.assertEqual(len(runs), 2)
         self.assertEqual(len(filters), 3)
-        self.assertLess(runs[0], override)
+        self.assertLess(snapshot, override)
         self.assertLess(override, filters[0])
         self.assertLess(filters[-1], mesh)
         self.assertLess(mesh, draw)
-        self.assertLess(draw, runs[1])
+        self.assertLess(draw, restore)
         # 块首在 handling = skip 之后，块尾在 draw 之后。
-        self.assertEqual(runs[0], lines.index("handling = skip") + 1)
-        self.assertGreater(runs[1], draw)
+        self.assertEqual(snapshot, lines.index("handling = skip") + 1)
 
-    def test_enabled_block_gets_restore_at_head_and_tail_in_order(self):
+    def test_standalone_block_snapshots_before_texture_bindings(self):
         _EfmiGlobalProterties.use_dhash = True
         lines, inserted = self._override_block(
             [
@@ -386,7 +381,7 @@ class EfmiBlockLevelRestoreTests(unittest.TestCase):
         section.append("drawindexedinstanced = 12,1,0,0,0")
         before = _text_sha(section.SectionLineList)
         inserted = exporter._append_snapshot_restore_for_filter_block(
-            section, block_start, len(section.SectionLineList)
+            section, block_start, len(section.SectionLineList),
         )
         self.assertFalse(inserted)
         self.assertEqual(_run_indices(section.SectionLineList), [])
@@ -406,7 +401,7 @@ class EfmiBlockLevelRestoreTests(unittest.TestCase):
         section.append("; [mesh:LOD0.aaaa-6-0.Part1] [vertex_count:12]")
         section.append("drawindexedinstanced = 12,1,0,0,0")
         inserted = exporter._append_snapshot_restore_for_filter_block(
-            section, block_start, len(section.SectionLineList)
+            section, block_start, len(section.SectionLineList), merged_callback=True,
         )
         self.assertTrue(inserted)
         lines = section.SectionLineList
@@ -414,39 +409,13 @@ class EfmiBlockLevelRestoreTests(unittest.TestCase):
         self.assertEqual(lines[1], "run = RestoreInitialTextures")
         self.assertEqual(lines[-1], "run = RestoreInitialTextures")
 
-    def test_restore_command_list_section_definition(self):
-        exporter = object.__new__(ExportEFMI)
-        exporter._dhash_filters = {
-            "filter_x": {
-                "name": "Filter_X",
-                "format": "BC7_UNORM",
-                "dhash": "0123456789abcdef",
-                "role": "Diffuse",
-            }
-        }
-        exporter._dhash_filter_by_definition = {}
-        builder = M_IniBuilder()
-        exporter._append_dhash_snapshot_sections(builder)
-        self.assertEqual(len(builder.ini_section_list), 1)
-        lines = builder.ini_section_list[0].SectionLineList
-        self.assertEqual(lines[0], "[RestoreInitialTextures]")
-        self.assertEqual(lines[1], "run = restoreoriginaltextures")
-        self.assertNotIn("[SnapshotInitialTextures]", lines)
-
-    def test_restore_section_not_emitted_without_filter(self):
-        exporter = object.__new__(ExportEFMI)
-        exporter._dhash_filters = {}
-        exporter._dhash_filter_by_definition = {}
-        builder = M_IniBuilder()
-        exporter._append_dhash_snapshot_sections(builder)
-        self.assertEqual(builder.ini_section_list, [])
-
-    def test_generate_ini_file_wires_block_helper_and_definition(self):
+    def test_generate_ini_file_wires_block_helper_for_both_paths(self):
         source = inspect.getsource(ExportEFMI.generate_ini_file)
         self.assertEqual(
             source.count("_append_snapshot_restore_for_filter_block("), 2
         )
-        self.assertIn("_append_dhash_snapshot_sections(ini_builder)", source)
+        self.assertIn("merged_callback=True", source)
+        self.assertNotIn("_append_dhash_snapshot_sections", source)
 
 
 # ---------------------------------------------------------------------------
@@ -821,22 +790,44 @@ class MaterialPerDrawRestoreTests(unittest.TestCase):
         self.assertEqual(_text_sha(sections["[TextureOverride_Body]"]), before_sha)
         self.assertEqual(_run_indices(sections["[TextureOverride_Body]"]), [])
 
-    def test_restore_section_added_once_when_absent(self):
+    def test_native_restore_needs_no_section_definition(self):
         sections = _fresh_material_sections(1)
         _material_node()._apply_snapshot_restore_to_sections(sections)
-        self.assertIn("[RestoreInitialTextures]", sections)
-        self.assertEqual(
-            sections["[RestoreInitialTextures]"], ["run = restoreoriginaltextures"]
-        )
+        self.assertNotIn("[RestoreInitialTextures]", sections)
         self.assertNotIn("[SnapshotInitialTextures]", sections)
 
-    def test_existing_restore_section_is_not_duplicated(self):
+    def test_legacy_restore_section_is_removed_and_markers_are_preserved(self):
         sections = _fresh_material_sections(1)
-        sections["[RestoreInitialTextures]"] = ["run = restoreoriginaltextures"]
+        sections["[RestoreInitialTextures]"] = ["run = restoreoriginaltextures", ";MARK:ResourceBuffer"]
         _material_node()._apply_snapshot_restore_to_sections(sections)
-        self.assertEqual(
-            sections["[RestoreInitialTextures]"], ["run = restoreoriginaltextures"]
-        )
+        self.assertNotIn("[RestoreInitialTextures]", sections)
+        self.assertIn(";MARK:ResourceBuffer", sections["[TextureOverride_Body]"])
+
+    def test_standalone_efmi_mixed_binding_reapplies_fixed_defaults_after_each_restore(self):
+        diffuse = "ps-t[Filter_LOD0_28847e3b_78186_0_Diffuse] = ref Resource-28847e3b-78186-0-DiffuseMap"
+        light = "ps-t17 = Resource-28847e3b-78186-0-LightMap"
+        local_light = "ps-t17 = ResourceTexture_LightMap_Body"
+        first = "; [mesh:LOD0.28847e3b-78186-0.Body_copy]"
+        second = "; [mesh:LOD0.28847e3b-78186-0.Body.001_copy]"
+        draw = "drawindexedinstanced = 12,1,0,0,0"
+        restore = "run = RestoreInitialTextures"
+        snapshot = "run = SnapshotInitialTextures"
+        lines = [
+            "hash = 28847e3b", "handling = skip", restore, light, diffuse,
+            first, local_light, draw, second, draw, restore,
+        ]
+        sections = OrderedDict([("[TextureOverride_LOD0.28847e3b_78186_0]", lines)])
+        with patch.object(_mat_node.GlobalConfig, "logic_name", "EFMI"):
+            node = _material_node()
+            self.assertEqual(node._apply_snapshot_restore_to_sections(sections), 2)
+            expected = [
+                snapshot, "hash = 28847e3b", "handling = skip",
+                first, restore, light, diffuse, local_light, draw, restore,
+                second, restore, light, diffuse, draw, restore,
+            ]
+            self.assertEqual(lines, expected)
+            node._apply_snapshot_restore_to_sections(sections)
+            self.assertEqual(lines, expected)
 
     def test_execute_postprocess_wires_wrapper_before_serialize(self):
         method = MaterialBase.execute_postprocess

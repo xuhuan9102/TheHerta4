@@ -266,16 +266,13 @@ class EmitSideSourceTests(unittest.TestCase):
             cls.code = handle.read()
 
     def test_mirror_hook_in_submesh_draw_bindings(self):
-        """_append_submesh_draw_bindings 必须在槽位赋值后调用镜像钩子。"""
         start = self.code.index("def _append_submesh_draw_bindings")
-        end = self.code.index("def prepare_merged_skeleton")
-        body = self.code[start:end]
-        # 两个赋值分支（RabbitFX 非 D/L/N 与常规）都必须挂镜像钩子
-        self.assertGreaterEqual(body.count("_efmi_append_pass_mirrors("), 2)
-        # 钩子在常规分支的槽位赋值行之后（append 槽位赋值 → 追加镜像块）
-        assign_pos = body.index('section.append(texture_markup_info.mark_slot + " = "')
-        hook_pos = body.index("_efmi_append_pass_mirrors(", assign_pos)
-        self.assertLess(assign_pos, hook_pos)
+        texture_start = self.code.index("def _append_submesh_texture_bindings", start)
+        end = self.code.index("def _ensure_dhash_filter_registry", texture_start)
+        self.assertIn("mirror_passes=True", self.code[start:texture_start])
+        binding = self.code[texture_start:end]
+        assign_pos = binding.index('section.append(f"{slot} = {mark.get_resource_name()}")')
+        self.assertGreater(binding.index("self._efmi_append_pass_mirrors("), assign_pos)
 
     def test_tag_sections_appended_once(self):
         """角色标签注册段在 generate_ini_file 末尾发射一次。"""
@@ -425,7 +422,7 @@ class ToggleSwitchSourceTests(unittest.TestCase):
     def test_node_shows_toggle_for_efmi(self):
         """Generate Mod 节点在 EFMI 逻辑名下展示本开关。"""
         self.assertIn(
-            'layout.prop(context.scene.global_properties, "efmi_pass_mirror_enabled")',
+            'layout.prop(props, "efmi_pass_mirror_enabled")',
             self.node_code,
         )
 

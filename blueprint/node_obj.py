@@ -1167,9 +1167,13 @@ class SSMTNode_Result_Output(SSMTNodeBase):
             layout.prop(context.scene.global_properties, "gimi_use_orfix")
 
         if GlobalConfig.logic_name == LogicName.EFMI:
-            layout.prop(context.scene.global_properties, "use_rabbitfx_slot")
-            layout.prop(context.scene.global_properties, "use_dhash_texture")
-            layout.prop(context.scene.global_properties, "efmi_pass_mirror_enabled")
+            props = context.scene.global_properties
+            layout.prop(props, "use_rabbitfx_slot")
+            layout.prop(props, "use_efmittl_slot")
+            dhash_row = layout.row()
+            dhash_row.enabled = not (props.use_rabbitfx_slot or props.use_efmittl_slot)
+            dhash_row.prop(props, "use_dhash_texture")
+            layout.prop(props, "efmi_pass_mirror_enabled")
 
         from .export_helper import BlueprintExportHelper
         has_mod_panel_node = BlueprintExportHelper.has_mod_panel_node(tree=self.id_data)

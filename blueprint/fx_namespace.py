@@ -182,6 +182,23 @@ HI3FX = FXNamespaceProfile(
 
 ALL_PROFILES = (RABBITFX, NTEMIFX, HI3FX)
 
+_EFMI_TEXTURE_SLOT_ROLES = {
+    "DiffuseMap": "Diffuse",
+    "LightMap": "LightMap",
+    "NormalMap": "NormalMap",
+}
+
+
+def efmi_texture_slots(namespace):
+    return {
+        mark: f"Resource\\{namespace}\\{slot}"
+        for mark, slot in _EFMI_TEXTURE_SLOT_ROLES.items()
+    }
+
+
+EFMITTL_TEXTURE_SLOTS = efmi_texture_slots("EFMITTL")
+EFMITTL_SET_TEXTURES = r"run = CommandList\EFMITTL\SetTextures"
+
 
 def profile_for_logic(logic_name):
     """按游戏执行逻辑取 FX 命名空间档案；未知逻辑退回 RabbitFX。"""

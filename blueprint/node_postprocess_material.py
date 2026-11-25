@@ -35,34 +35,17 @@ _reverse_name_mapping_cache = {}
 _rabbitfx_outputs = {}
 # 资源缓存按“材质内容签名”去重，避免同一套贴图被重复复制/重复生成 Resource。
 _material_resource_cache = {}
-# dHash 贴图快照/还原：块首/块尾两条 run 名由主人指定；当前两句都叫
-# RestoreInitialTextures，两个常量分开，未来只改一处即可。
-_RUN_BEFORE_DRAW = "RestoreInitialTextures"
-_RUN_AFTER_DRAW = "RestoreInitialTextures"
-# 段名对应的 3Dmigoto 内置小写命令（只在对应 run 名出现时发段）。
-_DHASH_RUN_BUILTIN = {
-    "SnapshotInitialTextures": "snapshotoriginaltextures",
-    "RestoreInitialTextures": "restoreoriginaltextures",
+_DHASH_SNAPSHOT_LINE = "run = SnapshotInitialTextures"
+_DHASH_RESTORE_LINE = "run = RestoreInitialTextures"
+_LEGACY_DHASH_SECTIONS = {
+    "[snapshotinitialtextures]": "run = snapshotoriginaltextures",
+    "[restoreinitialtextures]": "run = restoreoriginaltextures",
 }
-
-
-def _dhash_run_names():
-    """实际用到的 run 名（去重、保持首次出现顺序）。"""
-    names = []
-    for name in (_RUN_BEFORE_DRAW, _RUN_AFTER_DRAW):
-        if name not in names:
-            names.append(name)
-    return names
-
-
-def _is_dhash_run_line(line):
-    stripped = str(line or "").strip()
-    return stripped in tuple("run = " + name for name in _dhash_run_names())
-
 
 _DHASH_FILTER_BINDING_RE = re.compile(
     r"^(ps-t\[(Filter_[^\]]+)\])\s*=\s*(\S.*)$", re.IGNORECASE
 )
+_FIXED_PS_BINDING_RE = re.compile(r"^(ps-t\d+)\s*=", re.IGNORECASE)
 _EFMI_COMPONENT_DRAW_SECTION_RE = re.compile(
     r"^\[(?:CommandList_Draw_|TextureOverride_)(?:LOD\d+[._])?"
     r"[0-9a-f]{8}[-_]\d+[-_]\d+\]$",
@@ -119,21 +102,21 @@ _EFMITTL_LIBRARY_FILE = os.path.join(_EFMITTL_KEY, "translucency.ini")
 _EFMITTL_MASK_PARAM = "Resource\\EFMITTL\\Mask"
 _EFMITTL_DRAW_LINE = "run = CommandList\\EFMITTL\\Draw"
 # ── EFMI 发光（EFMITTL 0.57 原生接口）────────────────────────────────
-# 主人定稿的写法：GlowMap 贴图 + Brightness/H/S/V/Interpolate/glow_mode，
-# 然后 count/first + Draw（其实就是原本 TTL 的写法，只多一段发光设置）。
-# HSV 默认 0，Brightness 默认 1。
-# 只在 use_rabbitfx_slot 为 False 时由材质转资源生成；True 走既有 FX 发光线。
+_GLOW_BRIGHTNESS_RE = re.compile(r"^GlowMap_(\d+(?:\.\d+)?)_", re.IGNORECASE)
 _EFMITTL_GLOW_PARAM = "Resource\\EFMITTL\\GlowMap"
+_EFMITTL_GLOW_BRIGHTNESS = "$\\EFMITTL\\brightness"
 _EFMITTL_GLOW_BEGIN = "; === EFMITTL Glow ==="
 _EFMITTL_GLOW_END = "; === End EFMITTL Glow ==="
 _EFMITTL_GLOW_PARAMS = (
-    ("Brightness", "1"),
     ("H", "0"),
     ("S", "0"),
     ("V", "0"),
     ("Interpolate", "1"),
     ("glow_mode", "0"),
 )
+_EFMITTL_SLOT_ROLES = {
+    alias.casefold(): role for role, alias in fx_namespace.EFMITTL_TEXTURE_SLOTS.items()
+}
 # 遮罩默认读透明通道（3 = A）：库自己的默认是 0（R），我们不跟它，每次显式写 3。
 # 提取工具的透明通道贴图四个通道同值，所以 3 读到的就是那张遮罩本身。
 #
@@ -1422,7 +1405,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if resource_match:
                 param_name = resource_match.group(1).strip()
                 resource_name = resource_match.group(2).strip()
-                texture_type = self.extract_texture_type_from_resource(resource_name)
+                texture_type = _EFMITTL_SLOT_ROLES.get(param_name.casefold())
+                if texture_type is None:
+                    texture_type = self.extract_texture_type_from_resource(resource_name)
                 if texture_type:
                     mapping[param_name] = texture_type
         return mapping
@@ -1468,6 +1453,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             is_supported_param = (
                 param_lower.startswith("ps-t")
                 or param_lower.startswith("resource\\zzmi\\")
+                or param_lower in _EFMITTL_SLOT_ROLES
                 or _starts_with_fx_resource_prefix(param_lower)
             )
             if not is_supported_param:
@@ -1866,6 +1852,17 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             number += 1
         return swap_key_prefix, number
 
+    @staticmethod
+    def _glow_brightness_line(material_name, param_name):
+        match = _GLOW_BRIGHTNESS_RE.match(material_name)
+        if param_name.casefold() == _EFMITTL_GLOW_PARAM.casefold():
+            variable = _EFMITTL_GLOW_BRIGHTNESS
+        elif match or GlobalConfig.logic_name == LogicName.EFMI:
+            variable = fx_namespace.current_profile().param("brightness")
+        else:
+            return ""
+        return f"{variable} = {match[1] if match else '1'}"
+
     def generate_material_lines(self, matching_materials, param_name, texture_type, obj,
                                 texture_folder, all_sections,
                                 object_to_diffuse_swapkey, material_group_to_swapkey,
@@ -1876,20 +1873,12 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         # 细分进度：本批次要处理 len(matching_materials) 张贴图（下面每张都会进
         # ``create_resource_entry`` 上报一次），先累加进显示用的 total。
         self._plan_texture_progress(len(matching_materials or []))
-        # 发光亮度写在当前逻辑对应的 FX 命名空间变量上：
-        # RabbitFX/NTEMIFX 是大写 $…\brightness 同名字段，HI3FX 同样叫 brightness
-        # （但它是 IniParams row230.w，语义一致）。
-        brightness_param_name = fx_namespace.current_profile().param("brightness")
+        is_glow = texture_type.casefold() == "glowmap"
         # 材质名 → 工作空间里该材质原贴图的路径：导出格式照抄这份原贴图的 DDS 头。
         workspace_source_by_material = self._workspace_source_paths_for_materials(obj)
 
         if len(matching_materials) == 1:
             material = matching_materials[0]
-            if texture_type == 'Glowmap':
-                match = re.search(r'^Glowmap_(\d+)_', material.name, re.IGNORECASE)
-                if match:
-                    generated_lines.append(f"{brightness_param_name} = {match.group(1)}")
-
             resource_name = resource_name_provider(material, 0) if resource_name_provider else None
             new_line = self.create_resource_entry(
                 material,
@@ -1904,6 +1893,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 binding_mode=getattr(self, "_active_binding_mode", "FIXED"),
             )
             if new_line:
+                if is_glow and (brightness_line := self._glow_brightness_line(material.name, param_name)):
+                    generated_lines.append(brightness_line)
                 generated_lines.append(new_line)
 
         elif len(matching_materials) > 1:
@@ -1959,10 +1950,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 )
                 if new_line:
                     generated_lines.append(f"if {current_swap_variable} == {index}")
-                    if texture_type == 'Glowmap':
-                        match = re.search(r'^Glowmap_(\d+)_', material.name, re.IGNORECASE)
-                        if match:
-                            generated_lines.append(f"    {brightness_param_name} = {match.group(1)}")
+                    if is_glow and (brightness_line := self._glow_brightness_line(material.name, param_name)):
+                        generated_lines.append("    " + brightness_line)
                     generated_lines.append(f"    {new_line}")
                     # 逐张 alpha 必须写在各自的切档分支里，和贴图引用同一个 if：参数在
                     # Draw 前最后一次赋值生效，写到块级只会让后一个分支的值覆盖前一个
@@ -1987,6 +1976,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         """全局总开关；纯 Python 测试宿主没有 bpy 时按关闭处理（保持旧行为）。"""
         try:
             from ..common.global_properties import GlobalProterties
+            if GlobalConfig.logic_name == LogicName.EFMI and cls._efmi_texture_slot_namespace():
+                return False
             return bool(GlobalProterties.use_dhash_texture())
         except Exception:
             return False
@@ -2246,9 +2237,12 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             "run = CommandList\\NTEMIFX\\Run",
             "run = CommandList\\HI3FX\\Run",
             "run = CommandList\\HI3FX\\Reset",
+            fx_namespace.EFMITTL_SET_TEXTURES,
         }
+        param_name = stripped.partition("=")[0].strip().casefold()
         return (
             stripped in generated_exact
+            or param_name in _EFMITTL_SLOT_ROLES
             or stripped.startswith(generated_prefixes)
             or "材质切换" in stripped
         )
@@ -2951,19 +2945,15 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         lines.insert(insert_at, indent + _EFMITTL_MASK_INVERT_LINE)
 
     @staticmethod
-    def _use_rabbitfx_slot():
-        """输出节点面板：True 走 FX 发光线，False 走 EFMI 原生 TTL 发光。"""
+    def _efmi_texture_slot_namespace():
         try:
             from ..common.global_properties import GlobalProterties
-            return bool(GlobalProterties.use_rabbitfx_slot())
-        except Exception:
-            return True
-
-    def _efmi_native_glow_enabled(self):
-        return (
-            getattr(GlobalConfig, "logic_name", "") == LogicName.EFMI
-            and not self._use_rabbitfx_slot()
-        )
+            select_namespace = getattr(GlobalProterties, "efmi_texture_slot_namespace", None)
+            if select_namespace is not None:
+                return select_namespace()
+            return "RabbitFx" if GlobalProterties.use_rabbitfx_slot() else ""
+        except (ImportError, AttributeError):
+            return ""
 
     @staticmethod
     def _strip_efmi_glow_blocks(lines):
@@ -2982,26 +2972,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 kept.append(line)
         lines[:] = kept
 
-    @staticmethod
-    def _efmi_glow_param_lines(indent="", ref=None):
-        bs = chr(92)
-        result = [indent + _EFMITTL_GLOW_BEGIN]
-        if ref:
-            result.append("{} = ref {}".format(indent + _EFMITTL_GLOW_PARAM, ref))
-        for name, value in _EFMITTL_GLOW_PARAMS:
-            result.append("{}${}EFMITTL{}{} = {}".format(indent, bs, bs, name, value))
-        result.append(indent + _EFMITTL_GLOW_END)
-        return result
-
     def _ensure_efmi_glow_in_section(self, lines):
-        """EFMI + use_rabbitfx_slot=False：给有 GlowMap 的块补库原生发光。
-
-        T1：块里已有 CommandList\\EFMITTL\\Draw（有 TTLMap）→ 参数插在 count 前；
-        O1：普通 draw 且没有 TTL/replay → 参数 + count/first + Draw 替换原 draw
-        （和 T1 同形，只是没有 Mask 行）。
-        重导先摘旧标记块和旧 GlowMap 引用行，保证不叠第二条。
-        """
-        self._strip_efmi_glow_blocks(lines)
+        """把发光设置和切换分支一起放到当前网格的 EFMITTL 绘制前。"""
         mesh_info = [
             (index, self.extract_mesh_name(line))
             for index, line in enumerate(lines)
@@ -3012,23 +2984,14 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             start = mesh_index + 1
             end = mesh_info[position + 1][0] if position + 1 < len(mesh_info) else len(lines)
             block = lines[start:end]
-            alias_lines = [
-                (i, str(line).strip())
-                for i, line in enumerate(block)
-                if str(line).strip().casefold().startswith(
-                    _EFMITTL_GLOW_PARAM.casefold() + " = ref "
-                )
-                and not str(line).strip().casefold().endswith("= ref null")
-            ]
-            if not alias_lines:
+            try:
+                glow_start = block.index(_EFMITTL_GLOW_BEGIN)
+                glow_end = block.index(_EFMITTL_GLOW_END, glow_start + 1) + 1
+            except ValueError:
                 continue
-            value = alias_lines[-1][1].split("=", 1)[1].strip()
-            ref = value[4:].strip() if value.casefold().startswith("ref ") else value
-            # 旧引用行可能叠在多轮导出里；全部摘掉，统一由标记块重写一条。
-            for index, _text in reversed(alias_lines):
-                del lines[start + index]
-            end -= len(alias_lines)
-            block = lines[start:end]
+            glow_lines = block[glow_start:glow_end]
+            del lines[start + glow_start:start + glow_end]
+            del block[glow_start:glow_end]
             ttl_draw_index = next(
                 (i for i, line in enumerate(block)
                  if str(line).strip().casefold() == _EFMITTL_DRAW_LINE.casefold()),
@@ -3041,11 +3004,10 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                     None,
                 )
                 insert_at = count_index if count_index is not None else ttl_draw_index
-                indent_match = re.match(r"^(\s*)", str(block[insert_at]))
-                indent = indent_match.group(1) if indent_match else ""
-                lines[start + insert_at:start + insert_at] = (
-                    self._efmi_glow_param_lines(indent, ref)
-                )
+                indent = re.match(r"\s*", str(block[insert_at]))[0]
+                lines[start + insert_at:start + insert_at] = [
+                    indent + line if line else line for line in glow_lines
+                ]
                 continue
             draw_index = next(
                 (i for i, line in enumerate(block) if _EFMITTL_DRAW_RE.match(str(line))),
@@ -3060,15 +3022,15 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if not draw_args:
                 continue
             count, first = draw_args
-            indent_match = re.match(r"^(\s*)", str(block[draw_index]))
-            indent = indent_match.group(1) if indent_match else ""
-            bs = chr(92)
-            replacement = self._efmi_glow_param_lines(indent, ref) + [
-                "{}${}EFMITTL{}count = {}".format(indent, bs, bs, count),
-                "{}${}EFMITTL{}first = {}".format(indent, bs, bs, first),
-                indent + _EFMITTL_DRAW_LINE,
+            indent = draw_match.group("indent")
+            replacement = glow_lines + [
+                f"$\\EFMITTL\\count = {count}",
+                f"$\\EFMITTL\\first = {first}",
+                _EFMITTL_DRAW_LINE,
             ]
-            lines[start + draw_index:start + draw_index + 1] = replacement
+            lines[start + draw_index:start + draw_index + 1] = [
+                indent + line if line else line for line in replacement
+            ]
 
     def _process_efmi_ttl_sections(self, section_name, lines, all_sections,
                                    material_group_to_swapkey, swap_key_prefix,
@@ -3105,7 +3067,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             ttl_materials = self.find_matching_materials(obj, "TTLMap")
             if not ttl_materials:
                 continue
-            if self.find_matching_materials(obj, "FXMap"):
+            if self._efmi_texture_slot_namespace() == "RabbitFx" and self.find_matching_materials(obj, "FXMap"):
                 # 与 ZZMI 同一条规矩：一个物体不能同时走 FX 与半透明。
                 _LOG.warning(f"      EFMI TTL: 跳过 '{mesh_name}'（同一物体不能同时启用 FX 与 TTL）")
                 continue
@@ -3208,6 +3170,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                                           used_swap_keys=None, transparency_sections_to_add=None):
         from ..utils.log_utils import LOG as _LOG
         debug_disable_fx_ttl = bool(getattr(self, "debug_disable_fx_ttl", False))
+        is_efmi = GlobalConfig.logic_name == LogicName.EFMI
+        efmi_slot_namespace = self._efmi_texture_slot_namespace() if is_efmi else ""
+        efmi_native_glow = efmi_slot_namespace == "EFMITTL" and not debug_disable_fx_ttl
         # 本次导出用哪一套 FX 命名空间：HIMI → HI3FX，NTEMI → NTEMIFX，其余 → RabbitFX。
         fx_profile = fx_namespace.profile_for_logic(getattr(GlobalConfig, "logic_name", ""))
         if material_group_to_swapkey is None or material_group_to_swapkey is Ellipsis:
@@ -3237,7 +3202,19 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         if section_mesh_name and section_obj is None:
             return next_swap_key_num
 
+        if is_efmi:
+            self._strip_efmi_glow_blocks(lines)
+
         ini_mapping = self.build_mapping_for_section(lines)
+        ttl_aliases = {}
+        if efmi_slot_namespace == "EFMITTL" or (
+            is_efmi and any(param.casefold() in _EFMITTL_SLOT_ROLES for param in ini_mapping)
+        ):
+            ttl_aliases = {
+                role.casefold(): param for role, param in fx_namespace.EFMITTL_TEXTURE_SLOTS.items()
+            }
+            for role, param in fx_namespace.EFMITTL_TEXTURE_SLOTS.items():
+                ini_mapping.setdefault(param, role)
         material_candidate_filter = lambda candidate: self._object_has_matching_materials(candidate, ini_mapping)
         preserved_ps_slots = set()
         workspace_slots = OrderedDict()
@@ -3284,6 +3261,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 texture_type = str(slot_info.get("mark_name", "") or "").strip()
                 if not texture_type or texture_type == "FXMap":
                     continue
+                param_name = ttl_aliases.get(texture_type.casefold(), param_name)
+                if ttl_aliases and param_name.lower() in generated_ps_slots:
+                    continue
                 if not diffuse_workspace_slot and texture_type == "DiffuseMap":
                     diffuse_workspace_slot = str(param_name or "").strip().lower()
                 matching_materials = self._find_workspace_slot_materials(obj, slot_info)
@@ -3325,13 +3305,15 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             # 段里真正出现过哪几套 FX 命名空间（决定要不要补 SetTextures，
             # 以及补哪一套的——各运行时的 SetTextures 不是同一个命令列表）。
             fx_profiles_in_section = []
-            if is_pst_style or is_zzmi_style or is_fx_style:
-                for param_name, texture_type in ini_mapping.items():
+            if is_pst_style or is_zzmi_style or is_fx_style or ttl_aliases:
+                for source_param, texture_type in ini_mapping.items():
+                    param_name = ttl_aliases.get(texture_type.casefold(), source_param)
+                    is_ttl_param = param_name.casefold() in _EFMITTL_SLOT_ROLES
                     is_zzmi_param = param_name.lower().startswith("resource\\zzmi\\")
                     fx_param_profile = _fx_profile_for_param(param_name)
                     is_fx_param = fx_param_profile is not None
 
-                    if not is_zzmi_param and not is_fx_param and not param_name.lower().startswith("ps-t"):
+                    if not is_ttl_param and not is_zzmi_param and not is_fx_param and not param_name.lower().startswith("ps-t"):
                         continue
                     if texture_type == "FXMap" and param_name.lower().startswith("ps-t"):
                         continue
@@ -3348,7 +3330,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         resource_name_provider = None
                         if param_name.lower().startswith("ps-t"):
                             resource_name_provider = lambda material, index: self._ps_texture_material_resource_name(material)
-                        fallback_slot_info = self._collect_modimp_texture_slots(obj).get(param_name)
+                        fallback_slot_info = self._collect_modimp_texture_slots(obj).get(source_param)
                         generated_lines, next_swap_key_num = self.generate_material_lines(
                             matching_materials, param_name, texture_type, obj, texture_folder, all_sections,
                             object_to_diffuse_swapkey, material_group_to_swapkey,
@@ -3356,14 +3338,15 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                             resource_name_provider=resource_name_provider,
                             slot_info=fallback_slot_info)
                         new_lines_for_this_mesh.extend(generated_lines)
-                        if param_name.lower().startswith("ps-t"):
+                        if is_ttl_param or param_name.lower().startswith("ps-t"):
                             generated_ps_slots.add(param_name.lower())
 
             slot_materials = self._collect_ps_texture_slot_materials(obj)
             for param_name, slot_info in slot_materials.items():
+                texture_type = slot_info["texture_type"]
+                param_name = ttl_aliases.get(texture_type.casefold(), param_name)
                 if param_name.lower() in generated_ps_slots:
                     continue
-                texture_type = slot_info["texture_type"]
                 matching_materials = list(slot_info["materials"].values())
                 if not matching_materials:
                     continue
@@ -3396,9 +3379,6 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             # 贴图类型 → 资源别名。TTLMap 是「抖动半透明」专用的第二个遮罩通道，
             # 只有当前命名空间的档案声明了它（目前只有 HI3FX）才会产出：其它运行时
             # 没有这个概念，产出这条引用只会跑一个不存在的语义。
-            # EFMI + use_rabbitfx_slot=False：发光走 EFMITTL 原生接口，别名换成
-            # Resource\EFMITTL\GlowMap；不写 RabbitFX Run、也不给 GlowFX 节点留 marker。
-            efmi_native_glow = self._efmi_native_glow_enabled() and not debug_disable_fx_ttl
             glow_alias = _EFMITTL_GLOW_PARAM if efmi_native_glow else fx_profile.glow_ref
             fxmap_texture_types = [
                 ('Glowmap', glow_alias),
@@ -3407,6 +3387,10 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if fx_profile.ttlmap_ref:
                 fxmap_texture_types.append(('TTLMap', fx_profile.ttlmap_ref))
             for texture_type, param_name in fxmap_texture_types:
+                if is_efmi and efmi_slot_namespace != "RabbitFx" and not (
+                    texture_type == "Glowmap" and efmi_native_glow
+                ):
+                    continue
                 if debug_disable_fx_ttl and texture_type in ('FXMap', 'TTLMap'):
                     continue
                 matching_materials = self.find_matching_materials(obj, texture_type)
@@ -3446,13 +3430,22 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         matching_materials, param_name, texture_type, obj, texture_folder, all_sections,
                         object_to_diffuse_swapkey, material_group_to_swapkey,
                         swap_key_prefix, next_swap_key_num, used_swap_keys)
-                    fxmap_lines.extend(generated_lines)
                     native_glow_line = texture_type == 'Glowmap' and efmi_native_glow
-                    pending = getattr(self, '_rabbitfx_pending', None)
-                    if (not native_glow_line) and pending is not None and texture_type in ('Glowmap', 'FXMap') and any(
+                    has_texture_ref = any(
                         str(line).strip().lower().startswith(param_name.lower() + ' = ref ')
                         for line in generated_lines
-                    ):
+                    )
+                    if native_glow_line and has_texture_ref:
+                        fxmap_lines.extend([
+                            _EFMITTL_GLOW_BEGIN,
+                            *generated_lines,
+                            *(f"$\\EFMITTL\\{name} = {value}" for name, value in _EFMITTL_GLOW_PARAMS),
+                            _EFMITTL_GLOW_END,
+                        ])
+                    else:
+                        fxmap_lines.extend(generated_lines)
+                    pending = getattr(self, '_rabbitfx_pending', None)
+                    if not native_glow_line and pending is not None and texture_type in ('Glowmap', 'FXMap') and has_texture_ref:
                         marker = '; MaterialRabbitFX ' + hashlib.sha1(
                             f'{obj.name}:{texture_type}:{len(pending)}'.encode('utf-8')
                         ).hexdigest()
@@ -3490,14 +3483,18 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             for fx_param_profile in fx_profiles_in_section:
                 if fx_param_profile.set_textures_line:
                     new_lines_for_this_mesh.append(fx_param_profile.set_textures_line)
+            if ttl_aliases and any(
+                line.partition("=")[0].strip().casefold() in _EFMITTL_SLOT_ROLES
+                for line in new_lines_for_this_mesh
+            ):
+                new_lines_for_this_mesh.append(fx_namespace.EFMITTL_SET_TEXTURES)
             new_lines_for_this_mesh.extend(fxmap_lines)
             new_lines_for_this_mesh.extend(ntemifx_lines)
             lines[insert_index + 1:insert_index + 1] = new_lines_for_this_mesh
             reset_lines = []
-            native_glow_only = efmi_native_glow and not generated_fxmap and not generated_ttlmap
-            if generated_glowmap:
+            if generated_glowmap and not efmi_native_glow:
                 reset_lines.append(f"{glow_alias} = ref null")
-                if fx_profile.reset_neutralises_variables and not native_glow_only:
+                if fx_profile.reset_neutralises_variables:
                     # RabbitFX/NTEMIFX 的 Run 结尾会把 $h/$s/$v/$brightness 复位，
                     # 所以「写 0 + 再 Run 一次」就是复位。
                     reset_lines.append(f"{fx_profile.param('brightness')} = 0")
@@ -3508,8 +3505,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             if reset_lines:
                 # HI3FX 的 Run 不复位变量，必须用 Reset（它自己会 null 别名 + Clean），
                 # 否则 $brightness 会一直停在 0，后续绘制全黑。
-                if not native_glow_only:
-                    reset_lines.append(fx_profile.reset_line or fx_profile.run_line)
+                reset_lines.append(fx_profile.reset_line or fx_profile.run_line)
                 reset_insert_idx = self._find_mesh_block_reset_insert_index(lines, insert_index)
                 if reset_insert_idx != -1:
                     lines[reset_insert_idx:reset_insert_idx] = reset_lines
@@ -3532,7 +3528,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             next_swap_key_num = self._process_efmi_ttl_sections(
                 section_name, lines, all_sections, material_group_to_swapkey,
                 swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder)
-            if not self._use_rabbitfx_slot():
+            if efmi_native_glow:
                 self._ensure_efmi_glow_in_section(lines)
 
         # 旧版把 TTL 组排在本段段尾、组内自带 `; [mesh:]` 锚点。现在改成就地替换，
@@ -3815,12 +3811,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         return list(ini_scope.iter_draw_units(lines))
 
     @staticmethod
-    def _add_snapshot_restore_for_units(lines, units):
-        """逐绘制单元补「块首 run → 该笔自己的 Filter → draw → 块尾 run」。
-
-        从后往前插，避免行号漂移；没有 ``ps-t[Filter_`` 或已有同名 run 行的
-        单元跳过。返回插入组数。
-        """
+    def _add_snapshot_restore_for_units(lines, units, *, restore_fixed_slots=False):
+        """用原始贴图快照隔离各笔绘制的临时绑定。"""
         edits = []
         claimed_filters = set()
         for unit in units:
@@ -3849,11 +3841,15 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 if index not in claimed_filters
                 and "ps-t[Filter_" in str(lines[index] or "")
             ]
-            if not filter_lines:
+            fixed_lines = [
+                index for index in range(start, end)
+                if _FIXED_PS_BINDING_RE.match(str(lines[index]).strip())
+            ]
+            if not filter_lines and not (restore_fixed_slots and fixed_lines):
                 continue
-            if any(_is_dhash_run_line(lines[index]) for index in range(start, end)):
+            if any(str(lines[index]).strip() == _DHASH_RESTORE_LINE for index in range(start, end)):
                 continue
-            snapshot_at = filter_lines[0]
+            snapshot_at = min(filter_lines + fixed_lines)
             restore_at = max(draw_lines) + 1
             if restore_at <= snapshot_at:
                 continue
@@ -3865,8 +3861,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             edits.append((snapshot_at, restore_at))
 
         for snapshot_at, restore_at in reversed(edits):
-            lines.insert(restore_at, "run = " + _RUN_AFTER_DRAW)
-            lines.insert(snapshot_at, "run = " + _RUN_BEFORE_DRAW)
+            lines.insert(restore_at, _DHASH_RESTORE_LINE)
+            lines.insert(snapshot_at, _DHASH_RESTORE_LINE)
         return len(edits)
 
     def _rewrite_block_to_per_draw_groups(self, section_name, lines, draw_units):
@@ -3944,23 +3940,28 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             start = int(unit.get("start", 0))
             end = int(unit.get("end", 0))
             for index in range(max(0, start), min(len(lines), end)):
-                match = re.match(
-                    r"^(ps-t\d+)\s*=", str(lines[index] or "").strip(), re.IGNORECASE
-                )
+                match = _FIXED_PS_BINDING_RE.match(str(lines[index] or "").strip())
                 if match:
                     unit_numeric_slots.add(match.group(1).lower())
 
         top_bindings = list(top_filter_indices)
+        component_fixed_slots = []
         for index in range(0, max(0, first_unit_start)):
             stripped = str(lines[index] or "").strip()
-            match = re.match(r"^(ps-t\d+)\s*=", stripped, re.IGNORECASE)
-            if match and match.group(1).lower() in unit_numeric_slots:
+            match = _FIXED_PS_BINDING_RE.match(stripped)
+            if not match:
+                continue
+            if efmi_component_section:
+                # 每次恢复会重置固定槽位，下一笔绘制要重新绑定部件默认贴图。
+                component_fixed_slots.append(stripped)
+                top_bindings.append(index)
+            elif match.group(1).lower() in unit_numeric_slots:
                 top_bindings.append(index)
         for index in sorted(set(top_bindings), reverse=True):
             del lines[index]
 
         lines[:] = [
-            line for line in lines if not _is_dhash_run_line(line)
+            line for line in lines if str(line).strip() != _DHASH_RESTORE_LINE
         ]
 
         # 删完块顶行后行号已漂移，按 mesh 重新取单元，再把各自绑定插到
@@ -3971,24 +3972,33 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 continue
             insert_at = unit["start"] + 1
             lines[insert_at:insert_at] = [
-                *component_filters, *top_filters_by_mesh.get(unit["mesh"], ())
+                *component_fixed_slots, *component_filters,
+                *top_filters_by_mesh.get(unit["mesh"], ()),
             ]
 
         self._dedupe_filter_bindings(lines)
         units = self._iter_draw_units(lines)
-        return self._add_snapshot_restore_for_units(lines, units)
+        return self._add_snapshot_restore_for_units(
+            lines, units, restore_fixed_slots=bool(efmi_component_section)
+        )
 
     @staticmethod
-    def _ensure_dhash_run_sections(sections):
-        """缺哪个 run 段就补哪个；EFMI 导出已发过时保持原样。"""
-        added = 0
-        for name in _dhash_run_names():
-            key = "[" + name + "]"
-            if key in sections:
+    def _remove_legacy_dhash_sections(sections):
+        """清理旧导出的伪命令段，保留段间导出标记。"""
+        previous_lines = None
+        for name, lines in list(sections.items()):
+            if not isinstance(lines, list):
                 continue
-            sections[key] = ["run = " + _DHASH_RUN_BUILTIN[name]]
-            added += 1
-        return added
+            legacy_command = _LEGACY_DHASH_SECTIONS.get(name.casefold())
+            if legacy_command:
+                comments = [line for line in lines if line.strip().startswith((";", "//"))]
+                commands = [line.strip().casefold() for line in lines if line.strip() and line not in comments]
+                if commands == [legacy_command] and (previous_lines is not None or not comments):
+                    if previous_lines is not None:
+                        previous_lines.extend(comments)
+                    del sections[name]
+                    continue
+            previous_lines = lines
 
     @staticmethod
     def _dedupe_filter_bindings(lines):
@@ -4035,6 +4045,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         """
         if not self._dhash_texture_enabled():
             return 0
+        self._remove_legacy_dhash_sections(sections)
         inserted = 0
         section_names = list(self._material_target_section_names(sections))
         # 材质转资源真实输出也可能落在 `[CommandList_Draw_*]` 等非
@@ -4094,7 +4105,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                     section_inserted += self._rewrite_block_to_per_draw_groups(
                         section_name, lines, [unit for unit, _start, _end in draw_units]
                     )
-                elif not any(_is_dhash_run_line(line) for line in lines):
+                elif not any(str(line).strip() == _DHASH_RESTORE_LINE for line in lines):
                     section_inserted += self._add_snapshot_restore_for_units(lines, units)
 
             # 兜底：目标部件判定可能因导出后缀、全局分配或材质名匹配
@@ -4121,8 +4132,15 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                         )
             inserted += section_inserted
 
-        if inserted:
-            self._ensure_dhash_run_sections(sections)
+            if GlobalConfig.logic_name == LogicName.EFMI and section_name.casefold().startswith("[textureoverride_"):
+                first_texture = next((
+                    index for index, line in enumerate(lines)
+                    if _DHASH_FILTER_BINDING_RE.match(line.strip()) or _FIXED_PS_BINDING_RE.match(line.strip())
+                ), len(lines))
+                if first_texture < len(lines) and _DHASH_SNAPSHOT_LINE not in (
+                    line.strip() for line in lines[:first_texture]
+                ):
+                    lines.insert(0, _DHASH_SNAPSHOT_LINE)
         return inserted
 
     @_material_lookup_scope
