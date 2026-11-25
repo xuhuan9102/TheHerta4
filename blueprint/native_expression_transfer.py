@@ -13,9 +13,11 @@ THREADS_PER_GROUP = 64
 
 
 class TransferMesh(NamedTuple):
-    override: str
+    position_override: str
     position_resource: str
     position_file: str
+    blend_override: str
+    blend_resource: str
     exported_basis: np.ndarray
     source_vertices: np.ndarray
     native_basis: np.ndarray
@@ -42,15 +44,16 @@ def match_native_vertex_order(exported, parts, texcoords=None):
         indices[export_ib] = source_ib
         if np.any(indices[export_ib] != source_ib):
             return None
-    if len(exported) != len(native) or np.any(indices < 0) or len(np.unique(indices)) != len(native):
+    if np.any(indices < 0) or np.any(indices >= len(native)):
         return None
     if not np.array_equal(exported, native[indices]):
         if texcoords is None:
             return None
         native_texcoords, exported_texcoords = texcoords
         if (
-            native_texcoords.shape != exported_texcoords.shape
+            native_texcoords.shape[1:] != exported_texcoords.shape[1:]
             or len(native_texcoords) != len(native)
+            or len(exported_texcoords) != len(exported)
             or not np.allclose(native_texcoords[indices], exported_texcoords, rtol=0, atol=1e-7)
         ):
             return None
@@ -84,7 +87,7 @@ def _value(sections, section, key):
     return ""
 
 
-def _read_texcoords(source, identity, exported_path, vertex_count):
+def _read_texcoords(source, identity, exported_path, native_vertex_count, exported_vertex_count):
     # Blender's UV round trip can differ in the last float bits. Only use this
     # tolerant identity check for workspaces with a verified float32 layout.
     with (source / f"{identity}.json").open(encoding="utf-8-sig") as file:
@@ -97,8 +100,8 @@ def _read_texcoords(source, identity, exported_path, vertex_count):
         elements = entry.get("D3D11ElementList", ())
         if elements and all(element.get("Format") in supported_formats for element in elements):
             return (
-                np.fromfile(source / native_path, dtype="<f4").reshape(vertex_count, -1),
-                np.fromfile(exported_path, dtype="<f4").reshape(vertex_count, -1),
+                np.fromfile(source / native_path, dtype="<f4").reshape(native_vertex_count, -1),
+                np.fromfile(exported_path, dtype="<f4").reshape(exported_vertex_count, -1),
             )
     return None
 
@@ -115,6 +118,21 @@ def read_transfer_mesh(sections, output, draw_hash, workspace_folder, game_type_
         return None
     position_override, position_resource = position_overrides[0]
     if not position_resource or not _value(sections, position_override, "hash"):
+        return None
+    blend_overrides = [
+        section
+        for section in sections
+        if section.startswith(f"[TextureOverride_VB_{draw_hash}_")
+        and section.endswith("_Blend]")
+    ]
+    if len(blend_overrides) != 1 or not _value(sections, blend_overrides[0], "hash"):
+        return None
+    blend_override = blend_overrides[0]
+    blend_resource = (
+        _value(sections, blend_override, "vb2")
+        or _value(sections, position_override, "vb2")
+    )
+    if not blend_resource:
         return None
     resource = f"[{position_resource}]"
     filename = _value(sections, resource, "filename")
@@ -151,11 +169,25 @@ def read_transfer_mesh(sections, output, draw_hash, workspace_folder, game_type_
         texcoord_resource = position_resource.removesuffix("Position") + "Texcoord"
         texcoord_file = _value(sections, f"[{texcoord_resource}]", "filename")
         if texcoord_file:
-            texcoords = _read_texcoords(*first_source, output / texcoord_file, len(exported))
+            texcoords = _read_texcoords(
+                *first_source,
+                output / texcoord_file,
+                len(parts[0][0]),
+                len(exported),
+            )
             mapping = match_native_vertex_order(exported, parts, texcoords)
     if mapping is None:
         return None
-    return TransferMesh(position_override, position_resource, filename, exported, mapping, parts[0][0])
+    return TransferMesh(
+        position_override,
+        position_resource,
+        filename,
+        blend_override,
+        blend_resource,
+        exported,
+        mapping,
+        parts[0][0],
+    )
 
 
 def matches_imported_shape_keys(exported, mapping, expected_by_name, hash_slots, overrides):
@@ -165,8 +197,15 @@ def matches_imported_shape_keys(exported, mapping, expected_by_name, hash_slots,
     for slot, shapes in hash_slots.items():
         for name, objects in shapes.items():
             source_delta = expected_by_name[name]
-            dense = np.zeros((len(exported), 3), dtype="<f4")
-            np.add.at(dense, source_delta.vertex_ids, source_delta.deltas[:, :3])
+            vertex_ids = source_delta.vertex_ids
+            # Native ids index the game pool, which can be larger than a subset export.
+            dense_size = max(
+                len(exported),
+                int(vertex_ids.max()) + 1 if vertex_ids.size else 0,
+                int(mapping.max()) + 1 if mapping.size else 0,
+            )
+            dense = np.zeros((dense_size, 3), dtype="<f4")
+            np.add.at(dense, vertex_ids, source_delta.deltas[:, :3])
             covered = np.zeros(len(exported), dtype=bool)
             for obj in objects:
                 record = overrides.get(slot, {}).get(obj, {})
@@ -198,18 +237,26 @@ def write_transfer_buffers(output, draw_hash, mesh, mapping_file):
 
 def render_transfer_sections(draw_hash, mesh, mapping_file):
     stem = f"ZZMINativeExpression_{draw_hash}"
-    current, source_map, basis, native_basis = (f"Resource{stem}_{part}" for part in ("Current", "Map", "Basis", "NativeBasis"))
+    current, source_map, static_position, native_basis, adjusted = (
+        f"Resource{stem}_{part}"
+        for part in ("Current", "Map", "StaticPosition", "NativeBasis", "AdjustedPosition")
+    )
     shader = f"CustomShader{stem}"
     sections = {}
     sections[f"[{current}]"] = ["type = StructuredBuffer", f"stride = {POSITION_STRIDE}", "bind_flags = shader_resource"]
     sections[f"[{source_map}]"] = ["type = StructuredBuffer", "stride = 4", f"filename = {mapping_file}"]
-    sections[f"[{basis}]"] = [
-        "type = Buffer", f"stride = {POSITION_STRIDE}", f"filename = {mesh.position_file}",
-        "bind_flags = unordered_access vertex_buffer",
+    sections[f"[{static_position}]"] = [
+        "type = StructuredBuffer", f"stride = {POSITION_STRIDE}",
+        f"filename = {mesh.position_file}",
     ]
     sections[f"[{native_basis}]"] = [
         "type = StructuredBuffer", f"stride = {POSITION_STRIDE}",
         f"filename = {_native_basis_filename(draw_hash, mapping_file)}",
+    ]
+    sections[f"[{adjusted}]"] = [
+        "type = Buffer", f"stride = {POSITION_STRIDE}",
+        f"array = {len(mesh.source_vertices)}",
+        "bind_flags = unordered_access vertex_buffer",
     ]
     sections[f"[{shader}]"] = [
         f"cs = ./res/{SHADER_NAME}",
@@ -217,12 +264,15 @@ def render_transfer_sections(draw_hash, mesh, mapping_file):
         f"cs-t105 = {current}",
         f"cs-t106 = {native_basis}",
         f"cs-t107 = {source_map}",
-        f"cs-u5 = copy {basis}",
+        f"cs-t108 = {static_position}",
+        f"cs-u5 = copy {adjusted}",
         f"Dispatch = {(len(mesh.source_vertices) + THREADS_PER_GROUP - 1) // THREADS_PER_GROUP}, 1, 1",
-        f"{mesh.position_resource} = copy cs-u5",
+        f"{adjusted} = copy cs-u5",
+        f"vb0 = {adjusted}",
         "cs-t105 = null",
         "cs-t106 = null",
         "cs-t107 = null",
+        "cs-t108 = null",
         "cs-u5 = null",
     ]
 
@@ -230,9 +280,61 @@ def render_transfer_sections(draw_hash, mesh, mapping_file):
 
 
 def install_transfer_sections(sections, draw_hash, mesh, mapping_file):
-    position_override, position_resource, *_ = mesh
     run_command, resources = render_transfer_sections(draw_hash, mesh, mapping_file)
-    lines = sections[position_override]
-    binding = next(index for index, line in enumerate(lines) if line.strip() == f"vb0 = {position_resource}")
-    lines.insert(binding, run_command)
+    vertex_count = len(mesh.source_vertices)
+    native_vertex_count = len(mesh.native_basis)
+    # Blend stays bound for final indexed draws; VertexCount isolates the preskin stream.
+    match_vertex_count = f"match_vertex_count = {native_vertex_count}"
+    generated_lines = {
+        run_command,
+        f"vb2 = {mesh.blend_resource}",
+        f"vb0 = {mesh.position_resource}",
+        match_vertex_count,
+        "handling = skip",
+        f"draw = {vertex_count}, 0",
+    }
+    position_lines = sections[mesh.position_override]
+    position_lines[:] = [line for line in position_lines if line.strip() not in generated_lines]
+
+    blend_lines = sections[mesh.blend_override]
+    blend_lines[:] = [
+        line for line in blend_lines
+        if line.strip() not in {
+            run_command,
+            f"vb2 = {mesh.blend_resource}",
+            match_vertex_count,
+            "handling = skip",
+            f"draw = {vertex_count}, 0",
+        }
+    ]
+    insert_at = next(
+        (index + 1 for index, line in enumerate(blend_lines) if line.strip().startswith("hash = ")),
+        len(blend_lines),
+    )
+    blend_lines[insert_at:insert_at] = [
+        match_vertex_count,
+        run_command,
+        f"vb2 = {mesh.blend_resource}",
+        "handling = skip",
+        f"draw = {vertex_count}, 0",
+    ]
     sections.update(resources)
+    return resources
+
+
+def replace_builder_section(block, header, has_header, section_lines):
+    """Replace one builder section without disturbing its neighboring sections."""
+    lines = block.SectionLineList
+    if has_header:
+        start = lines.index(header) + 1
+    else:
+        start = 0
+    end = next(
+        (
+            index
+            for index in range(start, len(lines))
+            if lines[index].strip().startswith("[")
+        ),
+        len(lines),
+    )
+    lines[start:end] = list(section_lines)

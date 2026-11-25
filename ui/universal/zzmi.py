@@ -9106,13 +9106,14 @@ class ExportZZMI(ExportUnity):
             with open(os.path.join(toolset, transfer.SHADER_NAME), encoding="utf-8") as file:
                 safe_write.write_text_if_changed(shader, file.read())
 
-            run_command, generated = transfer.render_transfer_sections(model.draw_ib, mesh, mapping_file)
-            owner, has_header = owners[mesh.override]
-            lines = owner.SectionLineList
-            start = lines.index(mesh.override) + 1 if has_header else 0
-            binding = f"vb0 = {mesh.position_resource}"
-            binding_index = next(index for index in range(start, len(lines)) if lines[index].strip() == binding)
-            lines.insert(binding_index, run_command)
+            generated = transfer.install_transfer_sections(
+                sections, model.draw_ib, mesh, mapping_file
+            )
+            for header in (mesh.position_override, mesh.blend_override):
+                owner, has_header = owners[header]
+                transfer.replace_builder_section(
+                    owner, header, has_header, sections[header]
+                )
 
             with _section_registry_context(model.draw_ib):
                 for header, body in generated.items():
