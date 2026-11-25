@@ -794,20 +794,13 @@ class DirectShapeKeyOutputMixin:
         for group_index in sorted(sequence_groups):
             members = []
             for var in sequence_groups[group_index]:
-                freq_index = var_to_freq.get(var)
-                if freq_index is None:
-                    continue
+                # A missing local key occupies its original frame with zero delta.
+                freq_index = var_to_freq.get(var, -1)
                 members.append(freq_index)
-                assigned.add(freq_index)
-            # 该组完全不属于本网格（例：尿道组只在上半身网格里）——跳过，不是错误。
-            # 必须先判空再校验，否则 expected 非零而 members 为空会被误判成「跨网格」，
-            # 导致整个帧表被放弃。
-            if not members:
+                if freq_index >= 0:
+                    assigned.add(freq_index)
+            if all(freq_index < 0 for freq_index in members):
                 continue
-            # 时间轴一致性：ini 侧进度是 `$Freq_GroupN * N - idx`（N = 该组在本次导出
-            # 变量里的完整成员数）。若本网格只命中其中一部分（分组跨网格、或组内有被
-            # 屏蔽/未导出的键），`t * M` 便不再等价于 `t * N`，序列姿态会整体错位且无
-            # 报错。这里直接放弃帧表、回退旧模型。
             expected = int((group_totals or {}).get(group_index, 0) or 0)
             if expected and len(members) != expected:
                 return None

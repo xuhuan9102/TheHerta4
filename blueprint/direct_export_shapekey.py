@@ -599,8 +599,7 @@ class DirectShapeKeyGenerator(
                 if not frame_plan:
                     raise ShapeKeyDirectExportError(
                         f"{logical_hash}: 无法生成帧表分组计划。\n"
-                        "常见原因：某分组只有部分形态键属于本网格（时间轴会错位）、"
-                        "组内形态键缺少对应的强度变量、或分组数超过上限。"
+                        "请检查形态键强度变量、序列成员数量和分组数上限。"
                     )
 
             channel_plan = self._delta_channel_plan(

@@ -143,16 +143,14 @@ class FrameTablePlanTests(unittest.TestCase):
         )
         self.assertEqual([{"group": None, "progress": "$Freq_a", "members": [0]}], plan["groups"])
 
-    def test_partial_group_match_abandons_frame_table(self):
-        # 命中 2 个但 ini 侧该组有 3 个成员 → `t * M` 与 `t * N` 不再等价，回退旧模型。
-        self.assertIsNone(
-            _plan(
-                ["a", "b", "c"],
-                _params("a", "b", "c"),
-                {0: ["Freq_a", "Freq_b"]},
-                {0: 3},
-            )
+    def test_partial_group_match_preserves_missing_member_position(self):
+        plan = _plan(
+            ["a", "c"],
+            _params("a", "b", "c"),
+            {0: ["Freq_a", "Freq_b", "Freq_c"]},
+            {0: 3},
         )
+        self.assertEqual([0, -1, 1], plan["groups"][0]["members"])
 
     def test_group_without_known_total_is_accepted(self):
         plan = _plan(
