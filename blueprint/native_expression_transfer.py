@@ -281,6 +281,24 @@ def render_transfer_sections(draw_hash, mesh, mapping_file):
 
 def install_transfer_sections(sections, draw_hash, mesh, mapping_file):
     run_command, resources = render_transfer_sections(draw_hash, mesh, mapping_file)
+    position_lines = sections[mesh.position_override]
+    position_binding = f"vb0 = {mesh.position_resource}"
+    palette_prefix = f"ResourceZZPalette_{draw_hash}_s"
+    if any(line.lstrip().startswith(palette_prefix) for line in position_lines):
+        # The merged deform already owns the draw and captures this input per instance.
+        adjusted_binding = f"vb0 = ResourceZZMINativeExpression_{draw_hash}_AdjustedPosition"
+        if not any(line.strip() == run_command for line in position_lines):
+            index = next(i for i, line in enumerate(position_lines) if line.strip() == position_binding)
+            line = position_lines[index]
+            indent = line[:len(line) - len(line.lstrip())]
+            position_lines.insert(index, indent + run_command)
+        position_lines[:] = [
+            line.replace(position_binding, adjusted_binding) if line.strip() == position_binding else line
+            for line in position_lines
+        ]
+        sections.update(resources)
+        return resources
+
     vertex_count = len(mesh.source_vertices)
     native_vertex_count = len(mesh.native_basis)
     # Blend stays bound for final indexed draws; VertexCount isolates the preskin stream.
@@ -288,12 +306,11 @@ def install_transfer_sections(sections, draw_hash, mesh, mapping_file):
     generated_lines = {
         run_command,
         f"vb2 = {mesh.blend_resource}",
-        f"vb0 = {mesh.position_resource}",
+        position_binding,
         match_vertex_count,
         "handling = skip",
         f"draw = {vertex_count}, 0",
     }
-    position_lines = sections[mesh.position_override]
     position_lines[:] = [line for line in position_lines if line.strip() not in generated_lines]
 
     blend_lines = sections[mesh.blend_override]

@@ -28,15 +28,15 @@ void main(uint3 thread : SV_DispatchThreadID)
     if (row >= SourceVertex.Length || row >= ExportedPosition.Length)
         return;
 
-    uint source = SourceVertex[row];
-    if (source >= NativePosition.Length || source >= NativeBasis.Length)
-        return;
-
     VertexAttributes edited = StaticPosition[row];
-    VertexAttributes basis = NativeBasis[source];
-    VertexAttributes animated = NativePosition[source];
-    edited.position = transferDelta(edited.position, basis.position, animated.position);
-    edited.normal = transferDelta(edited.normal, basis.normal, animated.normal);
-    edited.tangent.xyz = transferDelta(edited.tangent.xyz, basis.tangent.xyz, animated.tangent.xyz);
+    uint source = SourceVertex[row];
+    if (source < NativePosition.Length && source < NativeBasis.Length)
+    {
+        VertexAttributes basis = NativeBasis[source];
+        VertexAttributes animated = NativePosition[source];
+        edited.position = transferDelta(edited.position, basis.position, animated.position);
+        edited.normal = transferDelta(edited.normal, basis.normal, animated.normal);
+        edited.tangent.xyz = transferDelta(edited.tangent.xyz, basis.tangent.xyz, animated.tangent.xyz);
+    }
     ExportedPosition[row] = edited;
 }
