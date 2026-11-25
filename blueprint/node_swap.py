@@ -7,12 +7,14 @@ from dataclasses import dataclass
 import bpy
 
 from ..common.object_prefix_helper import ObjectPrefixHelper
+from ..common.text_width_utils import DEFAULT_NODE_PADDING
 from .node_base import SSMTNodeBase
 from .variable_registry import ensure_object_swap_variable_name, mark_variable_name_used, normalize_variable_name
 
 _swap_preview_hidden_state = None
 _swap_preview_session_owner = None
 _is_button_context_menu_hooked = False
+_HOTKEY_PICKER_WIDTH = 72.0
 
 
 @dataclass
@@ -50,6 +52,8 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
     bl_idname = "SSMTNode_ObjectSwap"
     bl_label = "物体切换"
     bl_icon = "SHADERFX"
+    bl_width_min = 320
+    bl_width_default = 320
 
     def _ensure_initial_visible_variable_name(self, context=None):
         if getattr(self, "custom_var_initialized", False):
@@ -79,7 +83,12 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
             mark_variable_name_used(normalized, context=context)
             self.custom_var_initialized = True
         ensure_object_swap_variable_name(self, context=context)
-        self.update_node_width([self.comment, self.hotkey, self.custom_var_name, self.assigned_variable_name])
+        self.width = max(
+            self.calculate_text_width(self.comment),
+            self.calculate_text_width(self.custom_var_name),
+            self.calculate_text_width(self.assigned_variable_name),
+            self.calculate_text_width(self.hotkey, padding=DEFAULT_NODE_PADDING + _HOTKEY_PICKER_WIDTH),
+        )
 
     comment: bpy.props.StringProperty(
         name="备注",
@@ -179,7 +188,6 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
         self._ensure_initial_visible_variable_name(context=context)
         self.outputs.new("SSMTSocketObject", "Output")
         self._update_input_sockets()
-        self.width = 320
 
     def copy(self, node):
         self.assigned_variable_name = ""
@@ -239,7 +247,7 @@ class SSMTNode_ObjectSwap(SSMTNodeBase):
         layout.prop(self, "custom_var_name", text="变量名")
         if not str(self.custom_var_name or "").strip() and str(self.assigned_variable_name or "").strip():
             layout.label(text=f"预分配变量: ${self.assigned_variable_name}", icon="INFO")
-        row = layout.row(align=True)
+        row = layout.split(factor=1.0 - _HOTKEY_PICKER_WIDTH / self.width, align=True)
         row.prop(self, "hotkey", text="按键")
         op = row.operator("ssmt.key_picker", text="选键", icon='KEYINGSET')
         op.node_name = self.name

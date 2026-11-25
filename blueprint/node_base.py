@@ -123,6 +123,8 @@ _NODE_COLOR_ANIM_DRIVER = (0.17, 0.60, 0.51)
 
 
 class SSMTNodeBase(Node):
+    bl_width_max = 4096
+
     @classmethod
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
