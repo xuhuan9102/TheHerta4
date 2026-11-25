@@ -237,9 +237,9 @@ def write_transfer_buffers(output, draw_hash, mesh, mapping_file):
 
 def render_transfer_sections(draw_hash, mesh, mapping_file):
     stem = f"ZZMINativeExpression_{draw_hash}"
-    current, source_map, static_position, native_basis, adjusted = (
+    current, source_map, static_position, native_basis, output, adjusted = (
         f"Resource{stem}_{part}"
-        for part in ("Current", "Map", "StaticPosition", "NativeBasis", "AdjustedPosition")
+        for part in ("Current", "Map", "StaticPosition", "NativeBasis", "TransferOutput", "AdjustedPosition")
     )
     shader = f"CustomShader{stem}"
     sections = {}
@@ -256,8 +256,10 @@ def render_transfer_sections(draw_hash, mesh, mapping_file):
     sections[f"[{adjusted}]"] = [
         "type = Buffer", f"stride = {POSITION_STRIDE}",
         f"array = {len(mesh.source_vertices)}",
-        "bind_flags = unordered_access vertex_buffer",
+        "bind_flags = unordered_access vertex_buffer", "misc_flags = none",
     ]
+    # The UAV sees scalar floats while the vertex buffer keeps its 40-byte stride.
+    sections[f"[{output}]"] = ["type = Buffer", "stride = 4", "format = R32_FLOAT"]
     sections[f"[{shader}]"] = [
         f"cs = ./res/{SHADER_NAME}",
         f"{current} = copy vb0",
@@ -265,15 +267,15 @@ def render_transfer_sections(draw_hash, mesh, mapping_file):
         f"cs-t106 = {native_basis}",
         f"cs-t107 = {source_map}",
         f"cs-t108 = {static_position}",
-        f"cs-u5 = copy {adjusted}",
+        f"{output} = ref {adjusted}",
+        f"cs-u5 = ref {output}",
         f"Dispatch = {(len(mesh.source_vertices) + THREADS_PER_GROUP - 1) // THREADS_PER_GROUP}, 1, 1",
-        f"{adjusted} = copy cs-u5",
+        "cs-u5 = null",
         f"vb0 = {adjusted}",
         "cs-t105 = null",
         "cs-t106 = null",
         "cs-t107 = null",
         "cs-t108 = null",
-        "cs-u5 = null",
     ]
 
     return f"run = {shader}", sections
@@ -282,27 +284,44 @@ def render_transfer_sections(draw_hash, mesh, mapping_file):
 def install_transfer_sections(sections, draw_hash, mesh, mapping_file):
     run_command, resources = render_transfer_sections(draw_hash, mesh, mapping_file)
     position_lines = sections[mesh.position_override]
+    blend_lines = sections[mesh.blend_override]
     position_binding = f"vb0 = {mesh.position_resource}"
+    vertex_count = len(mesh.source_vertices)
+    match_vertex_count = f"match_vertex_count = {len(mesh.native_basis)}"
     palette_prefix = f"ResourceZZPalette_{draw_hash}_s"
+    if (
+        any(line.lstrip().startswith(palette_prefix) for line in blend_lines)
+        and any(line.strip() == run_command for line in blend_lines)
+    ):
+        sections.update(resources)
+        return resources
     if any(line.lstrip().startswith(palette_prefix) for line in position_lines):
-        # The merged deform already owns the draw and captures this input per instance.
+        # The game can rotate its animated Position buffer between poses. Move
+        # the complete deform block so per-instance capture and redraw stay together.
         adjusted_binding = f"vb0 = ResourceZZMINativeExpression_{draw_hash}_AdjustedPosition"
-        if not any(line.strip() == run_command for line in position_lines):
-            index = next(i for i, line in enumerate(position_lines) if line.strip() == position_binding)
-            line = position_lines[index]
-            indent = line[:len(line) - len(line.lstrip())]
-            position_lines.insert(index, indent + run_command)
-        position_lines[:] = [
-            line.replace(position_binding, adjusted_binding) if line.strip() == position_binding else line
-            for line in position_lines
-        ]
+        moved_lines = []
+        retained_lines = []
+        transfer_scheduled = any(line.strip() == run_command for line in position_lines)
+        for line in position_lines:
+            stripped = line.strip()
+            if stripped.startswith(("hash = ", ";MARK:")):
+                retained_lines.append(line)
+            elif stripped == position_binding:
+                indent = line[:len(line) - len(line.lstrip())]
+                if not transfer_scheduled:
+                    moved_lines.append(indent + run_command)
+                    transfer_scheduled = True
+                moved_lines.append(indent + adjusted_binding)
+            else:
+                moved_lines.append(line)
+        position_lines[:] = retained_lines
+        hash_index = next(i for i, line in enumerate(blend_lines) if line.strip().startswith("hash = "))
+        blend_lines.insert(hash_index + 1, match_vertex_count)
+        blend_lines[hash_index + 2:hash_index + 2] = moved_lines
         sections.update(resources)
         return resources
 
-    vertex_count = len(mesh.source_vertices)
-    native_vertex_count = len(mesh.native_basis)
     # Blend stays bound for final indexed draws; VertexCount isolates the preskin stream.
-    match_vertex_count = f"match_vertex_count = {native_vertex_count}"
     generated_lines = {
         run_command,
         f"vb2 = {mesh.blend_resource}",
@@ -313,7 +332,6 @@ def install_transfer_sections(sections, draw_hash, mesh, mapping_file):
     }
     position_lines[:] = [line for line in position_lines if line.strip() not in generated_lines]
 
-    blend_lines = sections[mesh.blend_override]
     blend_lines[:] = [
         line for line in blend_lines
         if line.strip() not in {

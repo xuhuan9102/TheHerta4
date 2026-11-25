@@ -105,11 +105,11 @@ class NativeExpressionTransferTests(unittest.TestCase):
         shader = sections["[CustomShaderZZMINativeExpression_feed1234]"]
         self.assertIn("cs-t106 = ResourceZZMINativeExpression_feed1234_NativeBasis", shader)
         self.assertIn("cs-t108 = ResourceZZMINativeExpression_feed1234_StaticPosition", shader)
-        self.assertIn("cs-u5 = copy ResourceZZMINativeExpression_feed1234_AdjustedPosition", shader)
+        self.assertIn("cs-u5 = ref ResourceZZMINativeExpression_feed1234_TransferOutput", shader)
         self.assertIn("vb0 = ResourceZZMINativeExpression_feed1234_AdjustedPosition", shader)
         self.assertNotIn("ResourceTestPosition = copy cs-u5", shader)
 
-    def test_dispatch_result_is_written_back_before_binding_vertex_buffer(self):
+    def test_dispatch_writes_directly_to_the_vertex_buffer_through_a_typed_view(self):
         mesh = transfer.TransferMesh(
             "[TextureOverride_Test_Position]", "ResourceTestPosition", "Meshes/Position.buf",
             "[TextureOverride_Test_Blend]", "ResourceTestBlend",
@@ -118,13 +118,68 @@ class NativeExpressionTransferTests(unittest.TestCase):
         _, sections = transfer.render_transfer_sections("feed1234", mesh, "Meshes/Map.buf")
         shader = sections["[CustomShaderZZMINativeExpression_feed1234]"]
         dispatch_index = shader.index("Dispatch = 1, 1, 1")
-        writeback_index = shader.index(
-            "ResourceZZMINativeExpression_feed1234_AdjustedPosition = copy cs-u5"
+        alias_index = shader.index(
+            "ResourceZZMINativeExpression_feed1234_TransferOutput = ref ResourceZZMINativeExpression_feed1234_AdjustedPosition"
         )
+        uav_index = shader.index("cs-u5 = ref ResourceZZMINativeExpression_feed1234_TransferOutput")
+        unbind_index = shader.index("cs-u5 = null")
         bind_index = shader.index("vb0 = ResourceZZMINativeExpression_feed1234_AdjustedPosition")
-        self.assertLess(dispatch_index, writeback_index)
-        self.assertLess(writeback_index, bind_index)
+        self.assertLess(alias_index, uav_index)
+        self.assertLess(uav_index, dispatch_index)
+        self.assertLess(dispatch_index, unbind_index)
+        self.assertLess(unbind_index, bind_index)
+        typed_view = sections["[ResourceZZMINativeExpression_feed1234_TransferOutput]"]
+        vertex = sections["[ResourceZZMINativeExpression_feed1234_AdjustedPosition]"]
+        self.assertEqual(typed_view, ["type = Buffer", "stride = 4", "format = R32_FLOAT"])
+        self.assertIn("stride = 40", vertex)
+        self.assertIn("bind_flags = unordered_access vertex_buffer", vertex)
+        self.assertIn("misc_flags = none", vertex)
+        self.assertNotIn("ResourceZZMINativeExpression_feed1234_AdjustedPosition = copy cs-u5", shader)
         self.assertNotIn("ResourceTestPosition = copy cs-u5", shader)
+
+    def test_merged_deform_and_transfer_share_the_stable_blend_anchor(self):
+        position = "[TextureOverride_VB_feed1234_head_Position]"
+        blend = "[TextureOverride_VB_feed1234_head_Blend]"
+        merged_draw = [
+            "if $occurrence == 1",
+            "    ResourceZZPalette_feed1234_s1 = copy vs-t0 unless_null",
+            "endif",
+            "run = CustomShaderAttach",
+            "handling = skip",
+            "vb0 = ResourceTestPosition",
+            "draw = 5, 0",
+        ]
+        sections = {
+            position: [
+                "hash = a123bcde",
+                "vb2 = ResourceTestBlend",
+                "vb0 = ResourceTestPosition",
+                *merged_draw,
+            ],
+            blend: ["hash = b234cdef"],
+            "[TextureOverride_LOD0.feed1234]": ["hash = feed1234", "drawindexed = 6, 0, 0"],
+        }
+        mesh = transfer.TransferMesh(
+            position, "ResourceTestPosition", "Meshes/Position.buf", blend, "ResourceTestBlend",
+            np.zeros((5, 10)), np.array([0, 1, 2, 0, 1], dtype="<u4"), np.ones((3, 10)),
+        )
+
+        transfer.install_transfer_sections(sections, "feed1234", mesh, "Meshes/Map.buf")
+        transfer.install_transfer_sections(sections, "feed1234", mesh, "Meshes/Map.buf")
+
+        self.assertEqual(sections[position], ["hash = a123bcde"])
+        self.assertEqual(sections[blend], [
+            "hash = b234cdef",
+            "match_vertex_count = 3",
+            "vb2 = ResourceTestBlend",
+            "run = CustomShaderZZMINativeExpression_feed1234",
+            "vb0 = ResourceZZMINativeExpression_feed1234_AdjustedPosition",
+            *[line.replace("vb0 = ResourceTestPosition", "vb0 = ResourceZZMINativeExpression_feed1234_AdjustedPosition")
+              for line in merged_draw],
+        ])
+        self.assertEqual(sections["[TextureOverride_LOD0.feed1234]"], [
+            "hash = feed1234", "drawindexed = 6, 0, 0",
+        ])
 
     def test_transfer_uses_blend_anchor_and_leaves_static_position_untouched(self):
         position_override = "[TextureOverride_VB_feed1234_head_Position]"
