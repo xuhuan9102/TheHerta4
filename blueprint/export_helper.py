@@ -1559,11 +1559,9 @@ class BlueprintExportHelper:
 
         collect_from_tree(tree)
 
-        if any(node.bl_idname == "SSMTNode_PostProcess_BoneMatrix" for node in ordered_chain):
-            from .deform_chain import order_bone_matrix_nodes
+        from .deform_chain import order_postprocess_nodes
 
-            return order_bone_matrix_nodes(ordered_chain)
-        return ordered_chain
+        return order_postprocess_nodes(ordered_chain)
 
     @staticmethod
     def _is_node_connected_to_output(tree, node) -> bool:

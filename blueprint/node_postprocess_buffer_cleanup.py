@@ -20,24 +20,20 @@ class SSMTNode_PostProcess_BufferCleanup(SSMTNode_PostProcess_Base):
         filename_pattern = re.compile(r'^\s*filename\s*=\s*(.+)', re.IGNORECASE)
         for ini_file in glob.glob(os.path.join(config_path, '**', '*.ini'), recursive=True):
             try:
-                with open(ini_file, 'r', encoding='utf-8') as f:
+                with open(ini_file, 'r', encoding='utf-8-sig') as f:
                     for line in f:
                         match = filename_pattern.match(line)
                         if match:
                             filename = match.group(1).strip()
                             if os.path.splitext(filename)[1].lower() != '.buf':
                                 continue
-                            referenced_files.add(
-                                os.path.normcase(
-                                    os.path.abspath(
-                                        os.path.normpath(
-                                            os.path.join(config_path, filename.replace('/', os.sep))
-                                        )
-                                    )
-                                )
-                            )
-            except Exception as e:
+                            for base in (os.path.dirname(ini_file), config_path):
+                                referenced_files.add(os.path.normcase(os.path.abspath(
+                                    os.path.join(base, filename.replace('/', os.sep))
+                                )))
+            except (OSError, UnicodeError) as e:
                 print(f"读取INI文件失败 {ini_file}: {e}")
+                return None
         disk_buf_files = glob.glob(os.path.join(config_path, '**', '*.buf'), recursive=True)
         return [
             buf_file
@@ -51,6 +47,9 @@ class SSMTNode_PostProcess_BufferCleanup(SSMTNode_PostProcess_Base):
         print("正在扫描未引用的.buf文件...")
         files_to_delete = self._find_unused_buffers(mod_export_path)
 
+        if files_to_delete is None:
+            print("配置表引用未能完整读取，已取消缓冲区清理。")
+            return
         if not files_to_delete:
             print("未找到任何未被引用的.buf文件。")
             return

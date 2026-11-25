@@ -77,6 +77,9 @@ class DirectShapeKeyGenerator(
                 continue
             if mesh is None:
                 continue
+            if f"[{mesh.position_resource}_mf]" in sections:
+                # The regular morph bridge consumes the multi-file vertex output.
+                continue
 
             # Submeshes can share one Position buffer. Check the whole batch before
             # replacing its animation path, keeping authored keys on the existing path.

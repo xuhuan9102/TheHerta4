@@ -192,15 +192,15 @@ def validate_postprocess_node_constraints(nodes) -> None:
     if cleanup_nodes and cleanup_nodes[0] is not active_nodes[-1]:
         raise ValueError("缓冲区清理节点必须是后处理链最后执行的节点，避免提前删除后续节点所需文件")
 
-    # 文本追加节点没有输出口，结构上只能是链尾；这里再确认它确实是最后执行的
-    # 节点——否则说明它被接在了链中间（后面的节点永远拿不到输出），必须拦下来。
+    # 文本先写入末尾的 INI 段，缓冲区清理随后扫描完整的引用。
     text_append_nodes = [
         node for node in active_nodes
         if getattr(node, "bl_idname", "") == "SSMTNode_PostProcess_TextAppend"
     ]
-    if text_append_nodes and text_append_nodes[0] is not active_nodes[-1]:
+    text_tail_index = -2 if cleanup_nodes else -1
+    if text_append_nodes and text_append_nodes[0] is not active_nodes[text_tail_index]:
         raise ValueError(
-            "文本追加节点必须位于后处理链最后（它没有输出口，后面不能再接其它节点）"
+            "文本追加节点必须是最后一个写入配置表的节点，缓冲区清理随后执行"
         )
 
     # 物体切换面板的「附加模式」复用形态键滑块面板的坐标系与交互状态
@@ -640,10 +640,9 @@ class BluePrintModel:
         self._collect_postprocess_nodes(output_node)
         self._collect_special_nodes(tree)
         self._collect_nested_postprocess_nodes()
-        if any(node.bl_idname == "SSMTNode_PostProcess_BoneMatrix" for node in self.postprocess_nodes):
-            from .deform_chain import order_bone_matrix_nodes
+        from .deform_chain import order_postprocess_nodes
 
-            self.postprocess_nodes = order_bone_matrix_nodes(self.postprocess_nodes)
+        self.postprocess_nodes = order_postprocess_nodes(self.postprocess_nodes)
         validate_postprocess_node_constraints(self.postprocess_nodes)
 
         if self.FORWARD_PARSE_MODE:

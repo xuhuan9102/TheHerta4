@@ -61,6 +61,9 @@ _BONE_MATRIX_ORDER = {
     "SSMTNode_PostProcess_FluidProbe": 6,
 }
 
+TEXT_APPEND_NODE = "SSMTNode_PostProcess_TextAppend"
+BUFFER_CLEANUP_NODE = "SSMTNode_PostProcess_BufferCleanup"
+
 
 def order_bone_matrix_nodes(nodes):
     """Order the nodes that share a ZZMI draw while keeping other nodes in place."""
@@ -73,6 +76,16 @@ def order_bone_matrix_nodes(nodes):
     for i, node in zip(edits, ordered):
         result[i] = node
     return result
+
+
+def order_postprocess_nodes(nodes):
+    ordered = order_bone_matrix_nodes(nodes)
+    active_types = {node.bl_idname for node in ordered if not getattr(node, "mute", False)}
+    if {TEXT_APPEND_NODE, BUFFER_CLEANUP_NODE} <= active_types:
+        # Cleanup needs the filename references introduced by the terminal text node.
+        order = {TEXT_APPEND_NODE: 1, BUFFER_CLEANUP_NODE: 2}
+        return sorted(ordered, key=lambda node: order.get(node.bl_idname, 0))
+    return ordered
 
 
 # ---- 小工具 ------------------------------------------------------------------
