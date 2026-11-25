@@ -8,6 +8,7 @@ struct VertexAttributes
 StructuredBuffer<VertexAttributes> NativePosition : register(t105);
 StructuredBuffer<VertexAttributes> NativeBasis : register(t106);
 StructuredBuffer<uint> SourceVertex : register(t107);
+StructuredBuffer<VertexAttributes> StaticPosition : register(t108);
 RWStructuredBuffer<VertexAttributes> ExportedPosition : register(u5);
 
 float3 transferDelta(float3 edited, float3 basis, float3 animated)
@@ -31,7 +32,7 @@ void main(uint3 thread : SV_DispatchThreadID)
     if (source >= NativePosition.Length || source >= NativeBasis.Length)
         return;
 
-    VertexAttributes edited = ExportedPosition[row];
+    VertexAttributes edited = StaticPosition[row];
     VertexAttributes basis = NativeBasis[source];
     VertexAttributes animated = NativePosition[source];
     edited.position = transferDelta(edited.position, basis.position, animated.position);
