@@ -184,3 +184,29 @@ class NativeExpressionTransferTests(unittest.TestCase):
         blend = sections[blend_override]
         self.assertIn("match_vertex_count = 3", blend)
         self.assertIn("draw = 5, 0", blend)
+
+    def test_subset_export_accepts_native_ids_beyond_exported_rows(self):
+        exported = np.zeros((3, 10), dtype="<f4")
+        mapping = np.array([4, 2, 0], dtype="<u4")
+        deltas = SimpleNamespace(
+            vertex_ids=np.array([4], dtype="<u4"),
+            deltas=np.array([[0.25, 0, 0, 0, 0, 0, 0, 0, 0]], dtype="<f4"),
+        )
+        slots = {1: {"Deform 0": ["mesh"]}}
+        sampled = exported.copy()
+        sampled[0, 0] = 0.25
+        record = {"export_indices": [0, 1, 2], "position_bytes": sampled.tobytes()}
+        args = (exported, mapping, {"Deform 0": deltas}, slots, {1: {"mesh": record}})
+        self.assertTrue(transfer.matches_imported_shape_keys(*args))
+
+    def test_subset_export_sizes_dense_by_mapping_when_native_ids_differ(self):
+        exported = np.zeros((3, 10), dtype="<f4")
+        mapping = np.array([7, 2, 0], dtype="<u4")
+        deltas = SimpleNamespace(
+            vertex_ids=np.array([4], dtype="<u4"),
+            deltas=np.array([[0.25, 0, 0, 0, 0, 0, 0, 0, 0]], dtype="<f4"),
+        )
+        slots = {1: {"Deform 0": ["mesh"]}}
+        record = {"export_indices": [0, 1, 2], "position_bytes": exported.tobytes()}
+        args = (exported, mapping, {"Deform 0": deltas}, slots, {1: {"mesh": record}})
+        self.assertTrue(transfer.matches_imported_shape_keys(*args))

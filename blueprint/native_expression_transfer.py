@@ -197,8 +197,15 @@ def matches_imported_shape_keys(exported, mapping, expected_by_name, hash_slots,
     for slot, shapes in hash_slots.items():
         for name, objects in shapes.items():
             source_delta = expected_by_name[name]
-            dense = np.zeros((len(exported), 3), dtype="<f4")
-            np.add.at(dense, source_delta.vertex_ids, source_delta.deltas[:, :3])
+            vertex_ids = source_delta.vertex_ids
+            # Native ids index the game pool, which can be larger than a subset export.
+            dense_size = max(
+                len(exported),
+                int(vertex_ids.max()) + 1 if vertex_ids.size else 0,
+                int(mapping.max()) + 1 if mapping.size else 0,
+            )
+            dense = np.zeros((dense_size, 3), dtype="<f4")
+            np.add.at(dense, vertex_ids, source_delta.deltas[:, :3])
             covered = np.zeros(len(exported), dtype=bool)
             for obj in objects:
                 record = overrides.get(slot, {}).get(obj, {})
