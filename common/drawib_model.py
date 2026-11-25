@@ -132,12 +132,7 @@ class DrawIBModel:
                     continue
                 self.match_first_index_partname_dict[normalized_first_index] = submesh_metadata.part_name or submesh_model.unique_str
             self.vshash_list = list(self.import_json_dict.get("VSHashList", []))
-            self.submesh_texturemarkinfolist_dict = TextureMetadataResolver.load_submesh_texture_markup_info_from_all_submeshes(
-                draw_ib_model=self,
-            )
-            self.partname_texturemarkinfolist_dict = TextureMetadataResolver.load_texture_markup_info_from_all_submeshes(
-                draw_ib_model=self,
-            )
+            self.reload_texture_markup_info()
             self.vertex_limit_hash = self.import_json_dict.get("VertexLimitVB", "")
             self.original_vertex_count = self.import_json_dict.get("OriginalVertexCount", 0)
             print(
@@ -359,6 +354,14 @@ class DrawIBModel:
             return "IB_" + self.draw_ib + "_" + self.draw_ib_alias + "_Component" + part_name
 
         return ""
+
+    def reload_texture_markup_info(self):
+        self.submesh_texturemarkinfolist_dict = TextureMetadataResolver.load_submesh_texture_markup_info_from_all_submeshes(
+            draw_ib_model=self,
+        )
+        self.partname_texturemarkinfolist_dict = TextureMetadataResolver.load_texture_markup_info_from_all_submeshes(
+            draw_ib_model=self,
+        )
 
     def get_submesh_texture_markup_info_list(self, submesh_model: SubMeshModel) -> list:
         texture_markup_info_list = self.submesh_texturemarkinfolist_dict.get(submesh_model.unique_str, None)

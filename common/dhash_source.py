@@ -1,16 +1,10 @@
-"""从 FrameAnalysis ``log.txt`` 回填贴图 dHash 的纯函数与工作空间落盘。
-
-本模块不 import bpy，也不依赖 GlobalConfig：导入 hook、CLI 与单测共用同一套
-解析/配对/写回逻辑。导出侧读的是 SubmeshJson 的 ``TextureMarkUpInfoList``
-条目（``source_dhash`` / ``source_format`` / ``binding_mode``），因此
-``--apply`` 与导入 hook 必须把三个字段写回 JSON；``Config/TextureDHashCache.json``
-只是便于诊断的 sidecar。
-"""
+"""通过工作空间登记的 FrameAnalysis 给部件贴图标记回填 dHash。"""
 
 import json
 import os
 import re
 import tempfile
+from pathlib import Path
 
 try:
     from .dhash_metadata import (
@@ -52,6 +46,7 @@ _HASH8_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{8}(?![0-9a-f])", re.IGNORECASE)
 _DDS_PAIR_RE = re.compile(
     r"^[0-9a-f]{8}_[0-9a-f]{8}-.+\.dds$", re.IGNORECASE
 )
+_LOD_NAME_RE = re.compile(r"LOD\d+", re.IGNORECASE)
 _CONTAMINATION_MARK = "hash_contamination="
 
 #: UpdateSubresource/Region 的占位 dhash；即使某行没打 hash_contamination，
@@ -242,7 +237,11 @@ def apply_to_marks(marks, mapping: dict) -> tuple[int, int, int]:
             if entry.get("contaminated") or not dhash:
                 saw_unusable = True
                 continue
-            resolved = (dhash, resolve_format(filename))
+            fmt = resolve_format(filename) or get_mark_format(mark)
+            if not fmt:
+                saw_unusable = True
+                continue
+            resolved = (dhash, fmt)
             break
 
         if resolved is not None:
@@ -260,57 +259,36 @@ def apply_to_marks(marks, mapping: dict) -> tuple[int, int, int]:
     return matched, contaminated, missing
 
 
-def _iter_workspace_json_files(workspace_root: str) -> list[str]:
-    """遍历 ``LOD*/*/TYPE_*/*.json``；没有 LOD 前缀时兼容旧扁平布局。"""
-    root = os.path.abspath(str(workspace_root or ""))
-    if not os.path.isdir(root):
-        return []
+def _workspace_json_entries(workspace_root: str):
+    """枚举子网格 JSON，同时保留所属工作空间分区与 LOD。"""
+    root = Path(workspace_root)
+
+    def entries(scope):
+        yield from ((path, scope, "") for path in sorted(scope.glob("*/TYPE_*/*.json")))
+        for folder in sorted(scope.iterdir()):
+            if folder.is_dir() and _LOD_NAME_RE.fullmatch(folder.name):
+                yield from (
+                    (path, scope, folder.name.upper())
+                    for path in sorted(folder.glob("*/TYPE_*/*.json"))
+                )
 
     try:
-        root_entries = sorted(os.scandir(root), key=lambda entry: entry.name)
+        direct = list(entries(root))
+        if direct:
+            yield from direct
+            return
+        for partition in sorted(root.iterdir()):
+            if partition.is_dir() and (partition / "Config.json").is_file():
+                yield from entries(partition)
     except OSError:
-        return []
-
-    lod_dirs = [
-        entry
-        for entry in root_entries
-        if entry.is_dir() and re.fullmatch(r"LOD\d+", entry.name, re.IGNORECASE)
-    ]
-    bases = lod_dirs or [
-        entry for entry in root_entries if entry.is_dir() and not entry.name.startswith(".")
-    ]
-
-    found = []
-    for base in bases:
-        try:
-            sub_dirs = sorted(os.scandir(base.path), key=lambda entry: entry.name)
-        except OSError:
-            continue
-        for sub_dir in sub_dirs:
-            if not sub_dir.is_dir():
-                continue
-            try:
-                type_dirs = sorted(os.scandir(sub_dir.path), key=lambda entry: entry.name)
-            except OSError:
-                continue
-            for type_dir in type_dirs:
-                if not type_dir.is_dir() or not type_dir.name.upper().startswith("TYPE_"):
-                    continue
-                try:
-                    files = sorted(os.scandir(type_dir.path), key=lambda entry: entry.name)
-                except OSError:
-                    continue
-                for file_entry in files:
-                    if file_entry.is_file() and file_entry.name.lower().endswith(".json"):
-                        found.append(file_entry.path)
-    return sorted(set(found))
+        return
 
 
 def workspace_marks(workspace_root: str) -> tuple[list, list[str]]:
     """返回工作空间里所有 ``TextureMarkUpInfoList`` 的 mark（dict）与 JSON 路径。"""
     marks: list = []
     paths: list[str] = []
-    for json_path in _iter_workspace_json_files(workspace_root):
+    for json_path, _scope, _lod in _workspace_json_entries(workspace_root):
         try:
             payload = _load_json(json_path)
         except (OSError, ValueError):
@@ -323,7 +301,7 @@ def workspace_marks(workspace_root: str) -> tuple[list, list[str]]:
         dict_marks = [mark for mark in raw_marks if isinstance(mark, dict)]
         if not dict_marks:
             continue
-        paths.append(json_path)
+        paths.append(str(json_path))
         marks.extend(dict_marks)
     return marks, paths
 
@@ -347,26 +325,62 @@ def _frameanalysis_candidates(workspace_root: str) -> list[str]:
     return candidate_paths
 
 
-def frameanalysis_dir_from_workspace(workspace_root: str) -> str:
-    """读工作空间登记的抓帧目录；目录不存在/没登记返回空串。"""
+def _recorded_frameanalysis_dir(config_path, workspace_root):
+    try:
+        payload = _load_json(config_path)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    folder = str(
+        payload.get("frameAnalysisFolderPath")
+        or payload.get("FrameAnalysisPath")
+        or payload.get("frame_analysis_folder_path")
+        or ""
+    ).strip()
+    return os.path.normpath(os.path.join(workspace_root, folder)) if folder else ""
+
+
+def _lod_frameanalysis_dirs(workspace_root):
+    config = Path(workspace_root) / "Config"
+    try:
+        payload = _load_json(config / "WorkPageTabs.json")
+    except (OSError, ValueError):
+        return {}
+    tabs = payload.get("tabs") if isinstance(payload, dict) else None
+    if not isinstance(tabs, list):
+        return {}
+    paths = {}
+    for tab in tabs:
+        if not isinstance(tab, dict):
+            continue
+        name = str(tab.get("name", "")).strip().upper()
+        tab_id = str(tab.get("id", "")).strip()
+        if not _LOD_NAME_RE.fullmatch(name) or not tab_id:
+            continue
+        path = _recorded_frameanalysis_dir(config / "Tabs" / (tab_id + ".json"), workspace_root)
+        if path:
+            paths[name] = path
+    return paths
+
+
+def frameanalysis_dir_from_workspace(workspace_root: str, lod_name: str = "") -> str:
+    """优先选当前 LOD 的日志，其次选工作空间登记的通用日志。"""
+    lod_name = str(lod_name or "").strip().upper()
+    lod_paths = _lod_frameanalysis_dirs(workspace_root)
+    lod_path = lod_paths.get(lod_name, "")
+    if lod_path and os.path.isfile(os.path.join(lod_path, "log.txt")):
+        return lod_path
+    # 工作空间全局记录可能是当前活动工作页，避免借用已知属于其它 LOD 的抓帧。
+    other_lod_paths = {
+        os.path.normcase(path) for lod, path in lod_paths.items() if lod_name and lod != lod_name
+    }
     for config_path in _frameanalysis_candidates(workspace_root):
-        if not os.path.isfile(config_path):
-            continue
-        try:
-            payload = _load_json(config_path)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        raw_value = (
-            payload.get("frameAnalysisFolderPath")
-            or payload.get("FrameAnalysisPath")
-            or payload.get("frame_analysis_folder_path")
-            or ""
-        )
-        folder = str(raw_value or "").strip()
-        if folder and os.path.isdir(folder):
-            return os.path.normpath(folder)
+        folder = _recorded_frameanalysis_dir(config_path, workspace_root)
+        if folder and os.path.normcase(folder) not in other_lod_paths and os.path.isfile(
+            os.path.join(folder, "log.txt")
+        ):
+            return folder
     return ""
 
 
@@ -383,12 +397,28 @@ def _mark_field(mark, names) -> str:
     return ""
 
 
-def _write_dhash_cache(workspace_root: str, marks, frameanalysis_dir: str) -> str:
-    """写 ``Config/TextureDHashCache.json``（sidecar，仅供诊断）。"""
+def _cache_entry_for_mark(mark):
+    dhash, fmt = get_mark_dhash(mark), get_mark_format(mark)
+    if dhash and fmt:
+        return {"dhash": dhash, "format": fmt, "binding_mode": get_mark_binding_mode(mark), "provider": "log"}
+    return None
+
+
+def _cache_key(workspace_root, json_path, mark):
+    filenames = _mark_filename_candidates(mark)
+    if not filenames:
+        return ""
+    part_path = os.path.relpath(json_path, workspace_root).replace("\\", "/")
+    mark_hash = _mark_field(mark, ("MarkHash", "mark_hash"))
+    return f"{part_path}|{_basename(filenames[0])}|{mark_hash}".casefold()
+
+
+def _write_dhash_cache(cache_path, marks, frameanalysis_dir, scoped_entries):
+    """保留旧的文件名索引，按子网格路径与原图身份保存可恢复的缓存。"""
     entries = {}
     for mark in marks or []:
-        dhash = get_mark_dhash(mark)
-        if not dhash:
+        entry = _cache_entry_for_mark(mark)
+        if entry is None:
             continue
         filename = _mark_field(mark, ("MarkFileName", "mark_filename"))
         if not filename:
@@ -396,22 +426,40 @@ def _write_dhash_cache(workspace_root: str, marks, frameanalysis_dir: str) -> st
             filename = _basename(candidates[0]) if candidates else ""
         if not filename:
             continue
-        entries[filename] = {
-            "dhash": dhash,
-            "format": get_mark_format(mark),
-            "binding_mode": "filter",
-            "provider": "log",
-        }
+        entries[filename] = entry
 
-    cache_path = os.path.join(os.path.abspath(workspace_root), "Config", "TextureDHashCache.json")
     _atomic_write_json(
         cache_path,
         {
             "frameanalysisFolderPath": str(frameanalysis_dir or ""),
             "entries": entries,
+            "scopedEntries": scoped_entries,
         },
     )
-    return cache_path
+
+
+def _read_scoped_dhash_cache(cache_path):
+    try:
+        payload = _load_json(cache_path)
+    except (OSError, ValueError):
+        return {}
+    entries = payload.get("scopedEntries") if isinstance(payload, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _restore_cached_marks(workspace_root, json_path, marks, scoped_entries):
+    restored = 0
+    for mark in marks:
+        if _cache_entry_for_mark(mark) is not None:
+            continue
+        entry = scoped_entries.get(_cache_key(workspace_root, json_path, mark))
+        if not isinstance(entry, dict):
+            continue
+        dhash, fmt = get_mark_dhash(entry), get_mark_format(entry)
+        if dhash and fmt:
+            mark.update(source_dhash=dhash, source_format=fmt, binding_mode=get_mark_binding_mode(entry))
+            restored += 1
+    return restored
 
 
 def _mark_signature(marks) -> tuple:
@@ -432,75 +480,83 @@ def _mark_signature(marks) -> tuple:
     return tuple(signature)
 
 
-def _apply_to_json_file(json_path: str, mapping: dict) -> bool:
-    try:
-        payload = _load_json(json_path)
-    except (OSError, ValueError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    raw_marks = payload.get("TextureMarkUpInfoList")
-    if not isinstance(raw_marks, list):
-        return False
-    before = _mark_signature(raw_marks)
-    apply_to_marks(raw_marks, mapping)
-    if before == _mark_signature(raw_marks):
-        return False
-    _atomic_write_json(json_path, payload)
-    return True
-
-
 def apply_workspace_dhash(
     workspace_root: str,
     frameanalysis_dir: str = None,
     write_cache: bool = True,
     write_back: bool = True,
+    *,
+    create_empty_cache: bool = False,
 ) -> int:
-    """找抓帧目录 → 解析 log → 回填工作空间；返回干净写入的 mark 数（无 log 返回 0）。
-
-    ``write_back=True`` 时把 ``source_dhash`` / ``source_format`` /
-    ``binding_mode="filter"`` 写回对应 SubmeshJson 的
-    ``TextureMarkUpInfoList`` 条目（保留原有键），并可选写诊断缓存。
-    找不到 log 或目录时静默返回 0，不抛异常。
-    """
+    """优先用当前抓帧更新贴图缓存，抓帧缺项时保留部件的已有标记。"""
     root = os.path.abspath(str(workspace_root or ""))
     if not os.path.isdir(root):
         return 0
 
-    dump_dir = str(frameanalysis_dir or "").strip()
-    if not dump_dir:
-        dump_dir = frameanalysis_dir_from_workspace(root)
-    if not dump_dir:
-        return 0
-    log_path = os.path.join(dump_dir, "log.txt")
-    if not os.path.isfile(log_path):
-        return 0
-
-    try:
-        mapping = parse_frame_analysis_log(log_path)
-    except OSError:
-        return 0
-
-    try:
-        marks, json_paths = workspace_marks(root)
-    except OSError:
-        return 0
-
-    matched, contaminated, _missing = apply_to_marks(marks, mapping)
-    usable = matched - contaminated
-    if usable == 0 and not marks:
-        return 0
-
-    if write_back:
-        for json_path in json_paths:
-            try:
-                _apply_to_json_file(json_path, mapping)
-            except Exception as exc:  # 单个 JSON 写失败不阻断导入
-                print("[dHash] 写回失败（跳过）: " + json_path + "，原因: " + str(exc))
-
-    if write_cache:
+    root_path = Path(root)
+    cache_path = os.path.join(root, "Config", "TextureDHashCache.json")
+    previous_cache = _read_scoped_dhash_cache(cache_path)
+    scoped_entries = dict(previous_cache)
+    explicit_dir = str(frameanalysis_dir or "").strip()
+    source_dirs = {}
+    log_mappings = {}
+    cached_marks = []
+    used_dirs = set()
+    usable = 0
+    for json_path, workspace_scope, lod in _workspace_json_entries(root):
         try:
-            _write_dhash_cache(root, marks, dump_dir)
+            payload = _load_json(json_path)
+        except (OSError, ValueError):
+            continue
+        marks = payload.get("TextureMarkUpInfoList") if isinstance(payload, dict) else None
+        if not isinstance(marks, list):
+            continue
+        candidates = [mark for mark in marks if isinstance(mark, dict)]
+        if write_cache:
+            cached_marks.extend(candidates)
+        if not candidates:
+            continue
+        scope = (workspace_scope, lod)
+        if scope not in source_dirs:
+            source_dirs[scope] = (
+                explicit_dir
+                or frameanalysis_dir_from_workspace(workspace_scope, lod)
+                or (frameanalysis_dir_from_workspace(root, lod) if workspace_scope != root_path else "")
+            )
+        dump_dir = source_dirs[scope]
+        if dump_dir and dump_dir not in log_mappings:
+            try:
+                log_mappings[dump_dir] = parse_frame_analysis_log(os.path.join(dump_dir, "log.txt"))
+            except OSError:
+                log_mappings[dump_dir] = None
+        mapping = log_mappings.get(dump_dir)
+        before = _mark_signature(candidates)
+        matched = contaminated = 0
+        if mapping is not None:
+            used_dirs.add(dump_dir)
+            matched, contaminated, _missing = apply_to_marks(candidates, mapping)
+        restored = _restore_cached_marks(root, json_path, candidates, previous_cache)
+        if write_back and before != _mark_signature(candidates):
+            try:
+                _atomic_write_json(json_path, payload)
+            except OSError as exc:
+                print(f"[dHash] 写回失败: {json_path}，原因: {exc}")
+                continue
+        usable += matched - contaminated + restored
+        if write_cache:
+            for mark in candidates:
+                key = _cache_key(root, json_path, mark)
+                entry = _cache_entry_for_mark(mark)
+                if key and entry:
+                    scoped_entries[key] = entry
+
+    if write_cache and (
+        scoped_entries != previous_cache
+        or (not os.path.isfile(cache_path) and (used_dirs or create_empty_cache))
+    ):
+        try:
+            cache_source = next(iter(used_dirs)) if len(used_dirs) == 1 else ""
+            _write_dhash_cache(cache_path, cached_marks, cache_source, scoped_entries)
         except Exception as exc:
             print("[dHash] 诊断缓存写入失败（跳过）: " + str(exc))
 

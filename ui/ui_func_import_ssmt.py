@@ -61,19 +61,14 @@ def _extract_gametype_name(import_folder_path: str) -> str:
 
 
 def _apply_workspace_dhash_after_import() -> int:
-    """导入后把 FrameAnalysis log.txt 的 dHash 落进工作空间。
-
-    导出侧读的是 SubmeshJson 的 ``TextureMarkUpInfoList``，所以这一步必须
-    写回 JSON，不能只写 ``Config/TextureDHashCache.json``。找不到抓帧目录、
-    log 或任何可配对标记时静默跳过，绝不能阻断导入。
-    """
+    """从抓帧更新部件标记，创建工作空间的 dHash 缓存记录。"""
     try:
         from ..common.dhash_source import apply_workspace_dhash
 
         workspace_root = str(GlobalConfig.path_workspace_folder() or "").strip()
         if not workspace_root:
             return 0
-        matched = apply_workspace_dhash(workspace_root)
+        matched = apply_workspace_dhash(workspace_root, create_empty_cache=True)
         if matched:
             print(f"[dHash] 工作空间贴图 dHash 已回填: {matched} 个标记写入")
         return matched
@@ -984,8 +979,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
     yield 89, "整理网格和顶点组"
     save_import_json_path = os.path.join(GlobalConfig.path_workspace_folder(), "Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict, filepath=save_import_json_path)
-    # 工作空间已解析、SubmeshJson 已就绪：把 FrameAnalysis 的 dHash 写回
-    # TextureMarkUpInfoList，供导出侧 filter 绑定读取；缺 log 时静默跳过。
+    # SubmeshJson 就绪后更新工作区贴图缓存，供导出侧 Filter 绑定读取。
     _apply_workspace_dhash_after_import()
 
     if GlobalProterties.enable_non_mirror_workflow():
@@ -1478,7 +1472,7 @@ def _iter_workspace_import_ntemi(self, context, workspace_collection):
     yield 80, "整理网格和顶点组"
     save_import_json_path = os.path.join(workspace_root, "Import.json")
     JsonUtils.SaveToFile(json_dict=foldername_gametypename_dict, filepath=save_import_json_path)
-    # NTEMI 分支同样在 SubmeshJson 就绪后回填一次；缺 log 静默跳过。
+    # NTEMI 分支同样在 SubmeshJson 就绪后更新贴图缓存。
     _apply_workspace_dhash_after_import()
 
     if GlobalProterties.enable_non_mirror_workflow():

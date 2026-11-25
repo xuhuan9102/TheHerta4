@@ -284,6 +284,77 @@ class WorkspaceWriteBackTests(unittest.TestCase):
             self.assertEqual(apply_workspace_dhash(str(root)), 0)
             self.assertFalse((root / "Config" / "TextureDHashCache.json").exists())
 
+    def test_import_initializes_cache_and_later_capture_recreates_it_at_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self._make_workspace(base)
+            log = base / "dump" / "log.txt"
+            log.unlink()
+            cache = root / "Config" / "TextureDHashCache.json"
+            self.assertEqual(apply_workspace_dhash(str(root), create_empty_cache=True), 0)
+            self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["entries"], {})
+
+            cache.unlink()
+            _write_log(base / "dump", [f"0: view=... hash=abcdef12 dhash={CLEAN_DHASH}"])
+            self.assertEqual(apply_workspace_dhash(str(root)), 1)
+            self.assertTrue(cache.is_file())
+            log.unlink()
+            self.assertEqual(apply_workspace_dhash(str(root)), 0)
+            _, paths = workspace_marks(str(root))
+            submesh_path = Path(paths[0])
+            payload = json.loads(submesh_path.read_text(encoding="utf-8"))
+            mark = payload["TextureMarkUpInfoList"][0]
+            for field in ("source_dhash", "source_format", "binding_mode"):
+                del mark[field]
+            _write_json(submesh_path, payload)
+            self.assertEqual(apply_workspace_dhash(str(root)), 1)
+            marks, _ = workspace_marks(str(root))
+        self.assertEqual(marks[0]["source_dhash"], CLEAN_DHASH)
+        self.assertNotIn("source_dhash", marks[1])
+
+    def test_lod_logs_take_priority_over_reusable_cache_and_active_tab_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self._make_workspace(base)
+            lod0_json = root / "LOD0" / "abc-1-0" / "TYPE_GPU_P12" / "abc-1-0.json"
+            lod1_json = root / "LOD1" / "abc-1-0" / "TYPE_GPU_P12" / "abc-1-0.json"
+            payload = json.loads(lod0_json.read_text(encoding="utf-8"))
+            payload["TextureMarkUpInfoList"][0].update(
+                source_dhash=OTHER_DHASH, source_format="BC7_UNORM_SRGB", binding_mode="filter",
+            )
+            _write_json(lod0_json, payload)
+            _write_json(lod1_json, payload)
+
+            lod0_dump = base / "dump"
+            lod1_dump = base / "dump-lod1"
+            _write_json(root / "Config" / "WorkPageTabs.json", {
+                "tabs": [{"id": "ws-tab-0", "name": "LOD0"}, {"id": "ws-tab-1", "name": "LOD1"}]
+            })
+            for tab, dump in (("ws-tab-0", lod0_dump), ("ws-tab-1", lod1_dump)):
+                _write_json(root / "Config" / "Tabs" / f"{tab}.json", {"frameAnalysisFolderPath": str(dump)})
+            _write_json(root / "Config" / "FrameAnalysisPath.json", {
+                "frameAnalysisFolderPath": str(lod0_dump),
+            })
+
+            def dhash_at(path):
+                return json.loads(path.read_text(encoding="utf-8"))["TextureMarkUpInfoList"][0]["source_dhash"]
+
+            self.assertEqual(apply_workspace_dhash(str(root)), 1)
+            self.assertEqual(dhash_at(lod0_json), CLEAN_DHASH)
+            self.assertEqual(dhash_at(lod1_json), OTHER_DHASH)
+
+            new_lod1_dhash = "1122334455667788"
+            lod1_log = _write_log(lod1_dump, [f"0: view=... hash=abcdef12 dhash={new_lod1_dhash}"])
+            self.assertEqual(apply_workspace_dhash(str(root)), 2)
+            self.assertEqual(dhash_at(lod0_json), CLEAN_DHASH)
+            self.assertEqual(dhash_at(lod1_json), new_lod1_dhash)
+            cache_path = root / "Config" / "TextureDHashCache.json"
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(cache["scopedEntries"]), 2)
+            lod1_log.unlink()
+            self.assertEqual(apply_workspace_dhash(str(root)), 1)
+            self.assertEqual(dhash_at(lod1_json), new_lod1_dhash)
+
     def test_texture_stats_counts_deduped_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"

@@ -19,10 +19,13 @@
 """
 
 import importlib.util
+import json
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +118,7 @@ _install_module(f"{PKG}.ui.universal.export_helper", ExportHelper=types.SimpleNa
 
 # ---- 真实产品模块（顺序：dhash_metadata → texture_metadata_helper → m_ini_builder → efmi）----
 _dhash = _load_real(f"{PKG}.common.dhash_metadata", "common/dhash_metadata.py")
+_load_real(f"{PKG}.common.dhash_source", "common/dhash_source.py")
 normalize_dhash = _dhash.normalize_dhash
 normalize_format = _dhash.normalize_format
 normalize_binding_mode = _dhash.normalize_binding_mode
@@ -229,6 +233,59 @@ class TestDHashTextureFilters(unittest.TestCase):
 
     def tearDown(self):
         self.setUp()
+
+    def test_export_captures_late_log_and_reuses_persisted_mark_after_its_removal(self):
+        _FakeGlobalProterties.use_dhash = True
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dump = root / "capture"
+            dump.mkdir()
+            config = root / "Config"
+            config.mkdir()
+            (config / "FrameAnalysisPath.json").write_text(json.dumps({
+                "frameAnalysisFolderPath": str(dump),
+            }), encoding="utf-8")
+            json_path = root / "LOD1" / "aaaa-6-0" / "TYPE_GPU_P12" / "aaaa-6-0.json"
+            json_path.parent.mkdir(parents=True)
+            json_path.write_text(json.dumps({"TextureMarkUpInfoList": [{
+                "MarkName": "DiffuseMap",
+                "MarkType": "Slot",
+                "MarkSlot": "ps-t3",
+                "MarkFileName": "aaaa-6-0-DiffuseMap.dds",
+                "MarkDedupedFileName": "abcdef12_99999999-BC7_UNORM_SRGB.dds",
+            }]}), encoding="utf-8")
+
+            def read_marks():
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+                return TextureMetadataResolver.normalize_texture_markup_info_list(payload["TextureMarkUpInfoList"])
+
+            submesh = _FakeSubmesh("LOD1.aaaa-6-0")
+            marks = read_marks()
+            exporter = make_exporter([(submesh, marks)])
+
+            def reload_texture_markup_info():
+                marks[:] = read_marks()
+
+            exporter.drawib_model_list[0].reload_texture_markup_info = reload_texture_markup_info
+            with patch.object(_efmi.GlobalConfig, "path_workspace_folder", return_value=str(root), create=True):
+                exporter._refresh_texture_dhashes_from_capture()
+                binding_section, _ = run_export_path(exporter)
+                self.assertEqual(binding_section.SectionLineList, ["ps-t3 = Resource-aaaa-6-0-DiffuseMap"])
+
+                capture_log = dump / "log.txt"
+                capture_log.write_text("0: view=... hash=abcdef12 dhash=0123456789abcdef\n", encoding="utf-8")
+                exporter._refresh_texture_dhashes_from_capture()
+                binding_section, builder = run_export_path(exporter)
+                self.assertEqual(len(filter_bindings(binding_section)), 1)
+                self.assertEqual(filter_line_value(builder, "match_dhash"), ["0123456789abcdef"])
+                self.assertTrue((config / "TextureDHashCache.json").is_file())
+
+                capture_log.unlink()
+                later_export = make_exporter([(submesh, read_marks())])
+                later_export._refresh_texture_dhashes_from_capture()
+                binding_section, builder = run_export_path(later_export)
+                self.assertEqual(len(filter_bindings(binding_section)), 1)
+                self.assertEqual(filter_line_value(builder, "match_dhash"), ["0123456789abcdef"])
 
     def test_efmittl_uses_semantic_slots_and_keeps_dhash_as_a_fallback(self):
         _FakeGlobalProterties.efmittl = True
@@ -540,6 +597,7 @@ class DHashReviewFixTests(unittest.TestCase):
     def test_generate_ini_file_wires_dhash_helpers(self):
         import inspect
         source = inspect.getsource(ExportEFMI.generate_ini_file)
+        self.assertIn("_refresh_texture_dhashes_from_capture()", source)
         self.assertIn("_append_submesh_texture_bindings(", source)
         self.assertIn("_append_dhash_filter_sections(ini_builder)", source)
 

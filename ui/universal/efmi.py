@@ -2858,18 +2858,34 @@ class ExportEFMI:
         by_definition[definition_key] = name
         return name
 
-    def _try_append_dhash_binding(self, section, submesh_model, mark) -> bool:
-        """dHash 模式下追加 `ps-t[Filter_...] = ref Resource-...` 并登记 filter。
-
-        条件不成立（默认关 / 禁止自动贴图 / RabbitFX / binding_mode 非 filter /
-        dhash 或 format 非法）返回 False，调用方保留原来的固定槽位直写行。
-        """
+    def _dhash_texture_bindings_enabled(self):
         use_dhash_texture = getattr(GlobalProterties, "use_dhash_texture", None)
-        if not callable(use_dhash_texture) or not use_dhash_texture():
-            return False
-        if GlobalProterties.forbid_auto_texture_ini():
-            return False
-        if self._texture_slot_namespace():
+        return (
+            callable(use_dhash_texture)
+            and use_dhash_texture()
+            and not GlobalProterties.forbid_auto_texture_ini()
+            and not self._texture_slot_namespace()
+        )
+
+    def _refresh_texture_dhashes_from_capture(self):
+        if not self._dhash_texture_bindings_enabled() or not self.drawib_model_list:
+            return
+        workspace_resolver = getattr(GlobalConfig, "path_workspace_folder", None)
+        workspace_root = workspace_resolver() if callable(workspace_resolver) else ""
+        if not workspace_root or not os.path.isdir(workspace_root):
+            return
+
+        from ...common.dhash_source import apply_workspace_dhash
+
+        matched = apply_workspace_dhash(workspace_root)
+        if matched:
+            for drawib_model in self.drawib_model_list:
+                drawib_model.reload_texture_markup_info()
+            print(f"[EFMI dHash] 导出时从抓帧匹配 {matched} 个贴图标记，已更新工作区缓存")
+
+    def _try_append_dhash_binding(self, section, submesh_model, mark) -> bool:
+        """标记具有可用 dHash 和格式时生成 Filter 绑定。"""
+        if not self._dhash_texture_bindings_enabled():
             return False
         if normalize_binding_mode(get_mark_binding_mode(mark)) != "filter":
             return False
@@ -3208,6 +3224,7 @@ class ExportEFMI:
         # 不能跨轮残留。
         self._dhash_filters = {}
         self._dhash_filter_by_definition = {}
+        self._refresh_texture_dhashes_from_capture()
 
         # EFMI 骨骼合并（Merged Skeleton）部件信息（export() 已提前收集；
         # 单独调用时兜底收集）
