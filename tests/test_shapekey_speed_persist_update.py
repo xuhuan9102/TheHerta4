@@ -77,6 +77,10 @@ def _load_real_common_module(alias):
 # 节点模块顶层会 from ..common.shapekey_weight_range import ...（形态键权重放开
 # 0..1 那笔加的），假包必须把这个真实模块挂上，否则收集期直接 ModuleNotFoundError。
 _load_real_common_module(f"{PKG}.common.shapekey_weight_range")
+_install_module(
+    f"{PKG}.common.key_type",
+    one_shot_key_type=lambda: "press",
+)
 
 _module_path = Path(__file__).resolve().parents[1] / "blueprint" / "node_postprocess_shapekey_ext.py"
 _spec = importlib.util.spec_from_file_location(

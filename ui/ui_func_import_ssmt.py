@@ -60,6 +60,33 @@ def _extract_gametype_name(import_folder_path: str) -> str:
     return normalized[index + len(marker):].strip("/").strip()
 
 
+def _gametype_folder_has_blend(
+    import_folder_path: str,
+    submesh_folder_name: str,
+) -> bool:
+    json_path = os.path.join(import_folder_path, submesh_folder_name + ".json")
+    if not os.path.isfile(json_path):
+        return False
+    json_dict = JsonUtils.LoadFromFile(json_path)
+    category_map = json_dict.get("CategoryDrawCategoryMap", {})
+    return isinstance(category_map, dict) and "Blend" in category_map
+
+
+def _ordered_workspace_import_folderpath_list(
+    submesh_folder_path: str,
+    submesh_folder_name: str,
+) -> list[str]:
+    folder_paths = WorkSpaceHelper.get_ordered_gpu_cpu_import_folderpath_list(
+        submesh_folder_path
+    )
+    if GlobalConfig.logic_name != getattr(LogicName, "APMI", "APMI"):
+        return folder_paths
+    return sorted(
+        folder_paths,
+        key=lambda path: not _gametype_folder_has_blend(path, submesh_folder_name),
+    )
+
+
 def _apply_workspace_dhash_after_import() -> int:
     """从抓帧更新部件标记，创建工作空间的 dHash 缓存记录。"""
     try:
@@ -903,15 +930,15 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
             metadata_paths = {}
             try:
                 workspace = GlobalConfig.path_workspace_folder()
-                selection_file = os.path.join(workspace, "Import.json")
-                selection = JsonUtils.LoadFromFile(selection_file) if os.path.isfile(selection_file) else {}
                 for target in import_targets:
                     key = target["import_key"]
-                    folders = WorkSpaceHelper.get_ordered_gpu_cpu_import_folderpath_list(target["submesh_folder_path"])
+                    folders = _ordered_workspace_import_folderpath_list(
+                        target["submesh_folder_path"],
+                        target["submesh_folder_name"],
+                    )
                     if not folders:
                         raise ValueError(f"{key} 缺少 GameType 目录。")
-                    selected = selection.get(key)
-                    folder = next((path for path in folders if _extract_gametype_name(path) == selected), folders[0])
+                    folder = folders[0]
                     metadata_paths[key] = os.path.join(folder, target["submesh_folder_name"] + ".json")
                 capture = APMICapture(capture_folder(workspace))
                 apmi_skeletons = build_skeletons(capture, metadata_paths.items(), workspace)
@@ -932,8 +959,9 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
         submesh_folder_name = target["submesh_folder_name"]
         print("Import FolderName: " + target["import_key"])
 
-        final_import_folder_path_list = WorkSpaceHelper.get_ordered_gpu_cpu_import_folderpath_list(
+        final_import_folder_path_list = _ordered_workspace_import_folderpath_list(
             target["submesh_folder_path"],
+            target["submesh_folder_name"],
         )
         apmi_skeleton = apmi_skeletons.get(target["import_key"])
         if apmi_skeleton:

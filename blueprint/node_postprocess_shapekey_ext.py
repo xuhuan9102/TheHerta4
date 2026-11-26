@@ -33,6 +33,12 @@ except ImportError:
     PIL_AVAILABLE = False
 
 
+def _one_shot_key_type():
+    from ..common.key_type import one_shot_key_type
+
+    return one_shot_key_type()
+
+
 class ShapeKeyPlayGroupItem(bpy.types.PropertyGroup):
     shape_key_name: bpy.props.StringProperty(
         name="形态键名称",
@@ -3243,11 +3249,11 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         ] + reset_lines
         other_sections["[Key放大-ZoomIn]"] = [
             f"condition = $help == 1 && $ui_active == 1", f"key = {zoom_in_key}",
-            "type = press", "run = CommandListZoomIn"
+            f"type = {_one_shot_key_type()}", "run = CommandListZoomIn"
         ]
         other_sections["[Key缩小-ZoomOut]"] = [
             f"condition = $help == 1 && $ui_active == 1", f"key = {zoom_out_key}",
-            "type = press", "run = CommandListZoomOut"
+            f"type = {_one_shot_key_type()}", "run = CommandListZoomOut"
         ]
         other_sections["[Key鼠标拖动-MouseDrag]"] = [
             f"condition = $help == 1 && $ui_active == 1", f"key = {drag_key}",
@@ -3257,7 +3263,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
         auto_play_key_lines = []
         if not self.auto_play_key_global:
             auto_play_key_lines.append("condition = $help == 1 && $ui_active == 1")
-        auto_play_key_lines.extend([f"key = {auto_play_key}", "type = press", f"run = CommandListToggleAutoPlay_{ns}"])
+        auto_play_key_lines.extend([f"key = {auto_play_key}", f"type = {_one_shot_key_type()}", f"run = CommandListToggleAutoPlay_{ns}"])
         if freq_params_temp:
             other_sections[f"[KeyToggleAutoPlay_{ns}]"] = auto_play_key_lines
 
@@ -4114,7 +4120,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             sections[key_section] = []
             if condition: sections[key_section].append(condition.rstrip())
             sections[key_section].append(f"key = {auto_play_key}")
-            sections[key_section].append("type = press")
+            sections[key_section].append(f"type = {_one_shot_key_type()}")
             toggle_lines = [f"$auto_play_enabled_group{g} = 1 - $auto_play_enabled_group{g}" for g in all_groups]
             sections[key_section].append(f"run = CommandListToggleAutoPlay_{ns}")
             cmd_section = f"[CommandListToggleAutoPlay_{ns}]"

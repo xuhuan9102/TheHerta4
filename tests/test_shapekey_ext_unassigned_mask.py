@@ -76,6 +76,10 @@ def _load_real_common_module(alias):
 
 
 _load_real_common_module(f"{PKG}.common.shapekey_weight_range")
+_install_module(
+    f"{PKG}.common.key_type",
+    one_shot_key_type=lambda: "press",
+)
 
 _spec = importlib.util.spec_from_file_location(
     f"{PKG}.blueprint.node_postprocess_shapekey_ext", _module_path
@@ -538,6 +542,19 @@ x100 = $Freq_xianzhi
         self.assertNotIn("$Freq_xianzhi", self._live_text(text))
         self.assertIn("本次新增 3 行", self._log.text)
         self.assertIn("已处理 1 个: ['Freq_xianzhi']", self._log.text)
+
+    def test_apmi_refresh_uses_activate_key_type(self):
+        key_type_module = sys.modules[f"{PKG}.common.key_type"]
+        with mock.patch.object(
+            key_type_module,
+            "one_shot_key_type",
+            return_value="activate",
+        ):
+            text = self._refresh()
+
+        self.assertIn("[KeyToggleAutoPlay_itest]", text)
+        self.assertIn("type = activate", text)
+        self.assertNotIn("type = press", text)
 
     def test_repeated_refresh_is_idempotent_and_keeps_zero_line(self):
         first = self._refresh()
