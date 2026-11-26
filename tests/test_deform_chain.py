@@ -206,6 +206,33 @@ class FinalizeDeformChainTests(unittest.TestCase):
         )
         self.assertIn("if $active0 == 1\n    run = CustomShader_shape_Anim\nendif", present)
 
+    def test_native_weight_reset_follows_guarded_direct_animation_after_finalize(self):
+        native_block = [
+            "; --- SSMT DIRECT SHAPEKEY PRESENT BEGIN ---",
+            "if $active0 == 1",
+            "    run = CustomShaderShapeKeyWeightSync_face",
+            "    run = CustomShader_face_Anim",
+            "endif",
+            "; --- SSMT DIRECT SHAPEKEY PRESENT END ---",
+        ]
+        reset = "run = CustomShaderZZMINativeMorphClear_face"
+        for misplaced in (False, True):
+            with self.subTest(misplaced=misplaced):
+                present = list(native_block)
+                if misplaced:
+                    present[:0] = [deform_chain.CHAIN_BEGIN, f"    {reset}", deform_chain.CHAIN_END]
+                else:
+                    present.insert(-1, reset)
+                sections = {"[Present]": present}
+                deform_chain.finalize_deform_chain(sections)
+                lines = [line.strip() for line in sections["[Present]"]]
+                self.assertLess(lines.index("run = CustomShaderShapeKeyWeightSync_face"), lines.index(reset))
+                self.assertLess(lines.index("run = CustomShader_face_Anim"), lines.index(reset))
+                self.assertEqual(lines.count(reset), 1)
+                finalized = sections["[Present]"].copy()
+                deform_chain.finalize_deform_chain(sections)
+                self.assertEqual(sections["[Present]"], finalized)
+
     def test_unrelated_post_custom_shader_is_preserved(self):
         sections = self._build()
         sections["[Constants]"].append("post run = CustomShader_ResetResources")

@@ -49,6 +49,7 @@ _MF_REF_RE = re.compile(r"^\s*(\S+)_mf\s*=\s*ref\s+cs-u5\s*$")
 _REF_RE = re.compile(r"^\s*(\S+)\s*=\s*ref\s+cs-u5\s*$")
 _POST_RUN_RE = re.compile(r"^\s*post\s+run\s*=\s*(CustomShader_\S+)\s*$")
 _DIRECT_SHAPEKEY_PRESENT_BEGIN = "; --- SSMT DIRECT SHAPEKEY PRESENT BEGIN ---"
+_DIRECT_SHAPEKEY_PRESENT_END = "; --- SSMT DIRECT SHAPEKEY PRESENT END ---"
 
 _BONE_MATRIX_ORDER = {
     "SSMTNode_PostProcess_MultiFile": 0,
@@ -329,6 +330,17 @@ def finalize_deform_chain(sections):
             if stripped in (CHAIN_BEGIN, CHAIN_END):
                 index += 1
                 continue
+            if stripped == _DIRECT_SHAPEKEY_PRESENT_BEGIN:
+                end = next((
+                    i for i in range(index + 1, len(present_lines))
+                    if _strip_line(present_lines[i]) == _DIRECT_SHAPEKEY_PRESENT_END
+                ), None)
+                if end is not None:
+                    # Direct export orders weight sync, animation and the
+                    # native weight reset as one block.
+                    rest_lines.extend(present_lines[index:end + 1])
+                    index = end + 1
+                    continue
             classified = classify_chain_run(line)
             if classified:
                 chain_entries.append((classified[0], classified[1], stripped))
@@ -370,12 +382,17 @@ def finalize_deform_chain(sections):
 
         rest_lines = _trimmed(rest_lines)
         new_present = list(rest_lines)
-        if unique_entries:
+        early_runs = [text for rank, _, text in unique_entries if rank != RANK_NATIVE_MORPH_CLEAR]
+        # Older exports can already have resets outside the guarded shape
+        # block. Place those after its consumers, including guarded ones.
+        existing = {_strip_line(line) for line in rest_lines}
+        native_resets = [
+            text for rank, _, text in unique_entries
+            if rank == RANK_NATIVE_MORPH_CLEAR and text not in existing
+        ]
+        if early_runs:
             chain_block = [CHAIN_BEGIN]
-            for _rank, _key, text in unique_entries:
-                run_body = text[text.index("run"):].strip() if "run" in text else text
-                # text 已是 ``run = CustomShader_...`` 形态（stripped）
-                chain_block.append(f"{_INDENT}{run_body}")
+            chain_block.extend(f"{_INDENT}{text}" for text in early_runs)
             chain_block.append(CHAIN_END)
 
             insert_at = _find_guarded_shapekey_insert_index(new_present)
@@ -388,6 +405,10 @@ def finalize_deform_chain(sections):
             if after:
                 new_present.append("")
                 new_present.extend(after)
+        if native_resets:
+            if new_present:
+                new_present.append("")
+            new_present.extend([CHAIN_BEGIN, *(f"{_INDENT}{text}" for text in native_resets), CHAIN_END])
         sections[PRESENT_SECTION] = new_present
 
     # 2) CustomShader 段扫描：多文件锚定迁移(_1→_0)+输出双写、统计 mf 资源
