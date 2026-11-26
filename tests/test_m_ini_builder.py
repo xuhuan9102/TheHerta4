@@ -60,6 +60,20 @@ class MIniBuilderTests(unittest.TestCase):
             )
             self.assertEqual(list(destination.parent.glob(".mod.ini.*.tmp")), [])
 
+    def test_compact_mode_keeps_sections_and_authored_comments(self):
+        builder = M_IniBuilder(compact=True)
+        section = M_IniSection(M_SectionType.ResourceBuffer)
+        section.extend(["[ResourceSaved]", "", "", "[ResourceNext]", "; authored boundary", "stride = 40"])
+        builder.append_section(section)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "mod.ini"
+            builder.save_to_file(str(path))
+            payload = path.read_text(encoding="utf-8")
+
+        self.assertNotIn(";MARK:ResourceBuffer", payload)
+        self.assertIn("[ResourceSaved]\n\n[ResourceNext]\n; authored boundary\nstride = 40", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

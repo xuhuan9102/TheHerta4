@@ -120,9 +120,10 @@ class M_IniSection:
 
 
 class M_IniBuilder:
-    def __init__(self):
+    def __init__(self, *, compact=False):
         self.line_list = []
         self.ini_section_list:list[M_IniSection] = []
+        self.compact = compact
 
         # 用于控制是否是第一次出现这个名字的Section
         self.ini_section_name_set:set = set()
@@ -139,7 +140,7 @@ class M_IniBuilder:
         for ini_section in self.ini_section_list:
             if ini_section.SectionType == ini_section_type:
                 section_name_exists = ini_section.SectionName in self.ini_section_name_set
-                if not section_name_exists:
+                if not section_name_exists and not self.compact:
                     self.line_list.append("\n;MARK:" + ini_section_type + "\n")
 
                 # SectionName不为空的时候才会自动补SectionName，否则由用户控制
@@ -337,6 +338,16 @@ class M_IniBuilder:
 
         self.__append_section_line(M_SectionType.ShaderReplace)
 
+        if self.compact:
+            lines = []
+            for line in self.line_list:
+                if line.lstrip().startswith("[") and lines and lines[-1].strip():
+                    lines.append("\n")
+                if line.strip() or (lines and lines[-1].strip()):
+                    lines.append(line)
+            while lines and not lines[-1].strip():
+                lines.pop()
+            self.line_list = lines
 
         # Add tools credit.
         
