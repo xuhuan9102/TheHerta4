@@ -22,7 +22,41 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def audit(root, *, compile_shaders=False):
+def _audit_proxy(root, sections, section_commands, require, component, group, vertex_count):
+    prefix = f"{component}_G{group}_"
+    if prefix + "ProxyTrack" not in sections and prefix + "ProxyRows" not in sections:
+        return {}
+    rows = np.fromfile(root / require(prefix + "ProxyRows", format="R32_UINT")["filename"], "<u4")
+    if not len(rows) or rows.max() >= vertex_count or len(np.unique(rows)) != len(rows):
+        raise ValueError(f"Invalid proxy display rows: {prefix}")
+    track = np.fromfile(root / require(prefix + "ProxyTrack", format="R32G32B32A32_FLOAT")["filename"], "<f4")
+    entries = len(rows) * 16
+    samples, remainder = divmod(len(track), entries)
+    if remainder or samples < 2:
+        raise ValueError(f"Invalid proxy track size: {prefix}")
+    track = track.reshape(samples, len(rows), 4, 4)
+    skin_weights = track[:, :, 3]
+    if (not np.isfinite(track[:, :, :2]).all() or not np.isfinite(skin_weights).all()
+            or np.any(skin_weights < 0) or not np.allclose(skin_weights.sum(axis=2), 1, atol=2e-5)):
+        raise ValueError(f"Invalid proxy track coordinates or weights: {prefix}")
+    bones = track[:, :, 2].view("<u4")
+    count = min(int(require(f"{component}_SkinPalette_s{slot}")["array"]) for slot in (1, 2)) // 3
+    if np.any(bones >= count):
+        raise ValueError(f"Proxy track uses bones outside the skin palette: {prefix}")
+    component_suffix = component.removeprefix("ResourceSSMTCloth_")
+    for slot in (1, 2):
+        apply = f"CustomShaderSSMTClothG{group}Apply_s{slot}_{component_suffix}"
+        fields = require(apply, dispatch=f"{(len(rows) + 127) // 128}, 1, 1")
+        bindings = {f"cs-t28 = ref {prefix}ProxyRows", f"cs-t29 = ref {prefix}ProxyTrack"}
+        if not bindings.issubset(section_commands[apply]):
+            raise ValueError(f"Proxy track shader missing input binding: {apply}")
+        shader = (root / fields["cs"]).read_text("utf-8")
+        if not re.search(rf"(?m)^#define PROXY_SAMPLES {samples}\s*$", shader):
+            raise ValueError(f"Proxy track sample count disagrees with its shader: {prefix}")
+    return {"proxy_rows": len(rows), "proxy_samples": samples}
+
+
+def audit(root, *, compile_shaders=False, cloth_only=False):
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError(f"Mod directory does not exist: {root}")
@@ -33,16 +67,19 @@ def audit(root, *, compile_shaders=False):
     files = 0
     for ini in sorted(inis):
         current = None
-        for raw in ini.read_text("utf-8-sig").splitlines():
+        text = ini.read_text("utf-8-sig")
+        if cloth_only and not re.search(r"(?m)^\[(?:Resource|CustomShader)SSMTCloth", text):
+            continue
+        for raw in text.splitlines():
             line = raw.strip()
             if line.startswith(";"):
                 continue
             if re.fullmatch(r"\[.+\]", line):
                 current = line[1:-1]
-                if current in sections:
+                if current in sections and current.casefold() not in {"constants", "present"}:
                     raise ValueError(f"Duplicate INI section: {current}")
-                sections[current] = {}
-                section_commands[current] = []
+                sections.setdefault(current, {})
+                section_commands.setdefault(current, [])
                 continue
             if current is None or "=" not in line:
                 continue
@@ -51,6 +88,8 @@ def audit(root, *, compile_shaders=False):
             commands.append(line)
             section_commands[current].append(line)
             if key.lower() not in ("filename", "cs") or value.lower() == "null":
+                continue
+            if cloth_only and not re.match(r"(?:Resource|CustomShader)(?:SSMTCloth|Drag)", current):
                 continue
             path = Path(value.strip('"'))
             path = path if path.is_absolute() else ini.parent / path
@@ -150,7 +189,8 @@ def audit(root, *, compile_shaders=False):
                 require(prefix + f"ShortsBinding_s{slot}", array=p*17, format="R32G32B32A32_FLOAT")
             for tag in ("Particles", "Weights"):
                 require(prefix + f"{tag}_s{slot}", array=p, stride=32, type="RWStructuredBuffer")
-        garments.append(dict(group=int(group), particles=p, vertices=v, shorts=sliding))
+        proxy = _audit_proxy(root, sections, section_commands, require, component, group, v)
+        garments.append(dict(group=int(group), particles=p, vertices=v, shorts=sliding, **proxy))
         if component in components:
             continue
         components.add(component)
@@ -196,10 +236,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mod", type=Path)
     parser.add_argument("--compile", action="store_true", dest="compile_shaders")
+    parser.add_argument("--cloth-only", action="store_true", help="Check cloth and drag paths in the host INI")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     try:
-        result = audit(args.mod, compile_shaders=args.compile_shaders)
+        result = audit(args.mod, compile_shaders=args.compile_shaders, cloth_only=args.cloth_only)
     except (ValueError, OSError, KeyError, RuntimeError) as error:
         result = dict(passed=False, error=str(error))
     text = json.dumps(result, ensure_ascii=False, indent=2)

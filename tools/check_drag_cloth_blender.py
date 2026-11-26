@@ -38,6 +38,9 @@ try:
     item.zone_object = zone
     item.expanded = True
     assert zone.ssmt_drag_zone.cloth_direction == "AUTO"
+    assert zone.ssmt_drag_zone.cloth_wear_enabled is True
+    assert zone.ssmt_drag_zone.cloth_proxy_enabled is False
+    assert zone.ssmt_drag_zone.cloth_limb_slide is False
     zone.ssmt_drag_zone.cloth_direction = "POSITIVE"
     labels = []
     properties = []
@@ -101,12 +104,23 @@ try:
         "cloth_fold_spacing",
         "cloth_up_axis",
         "cloth_min_span_ratio",
+        "cloth_wear_enabled",
+        "cloth_proxy_enabled",
+        "cloth_limb_slide",
         "cloth_direction",
     ):
         assert name in properties, name
     for name in ("cloth_collection", "cloth_collider_collection"):
         assert name not in node.bl_rna.properties
     assert not any("未完善" in text for text in labels)
+    zone.ssmt_drag_zone.cloth_wear_enabled = False
+    properties.clear()
+    node.draw_buttons(bpy.context, Layout())
+    assert "cloth_wear_enabled" in properties
+    assert "collision_override" in properties
+    assert "cloth_path_start" not in properties
+    assert not node._cloth_export_enabled()
+    zone.ssmt_drag_zone.cloth_wear_enabled = True
     # Exercise the actual editable viewport handles and distance driver.
     mesh = bpy.data.meshes.new("Path test cylinder")
     vertices = [

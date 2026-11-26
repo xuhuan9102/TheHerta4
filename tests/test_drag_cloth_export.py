@@ -49,6 +49,16 @@ class ClothExportAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Manifest hash mismatch"):
                 audit(root)
 
+    def test_cloth_audit_allows_other_postprocessors_to_manage_textures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ini, _ = self.export(root)
+            with ini.open("a", encoding="utf-8") as handle:
+                handle.write("\n[Constants]\n\n[ResourceOtherTexture]\nfilename = Textures/removed.dds\n")
+            self.assertTrue(audit(root, cloth_only=True)["passed"])
+            with self.assertRaisesRegex(ValueError, "Missing filename file"):
+                audit(root)
+
     def test_copying_the_write_alias_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
