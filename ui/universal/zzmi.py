@@ -2258,6 +2258,64 @@ class ExportZZMI(ExportUnity):
             return False
         return max_numeric_id >= expected
 
+    def _zzmi_native_palette_capacity(self, drawib_model, submesh_model, source_cache):
+        """Read the bound palette size from the SSMT4 extraction sidecar."""
+        identity = getattr(submesh_model, "workspace_unique_str", "") or submesh_model.unique_str
+        json_path = self._zzmi_workspace_part_json_path(identity)
+        if json_path is None:
+            return 0
+        source_log = Path(json_path).parents[2] / "ZZMISkeletonSource" / "log.txt"
+        if not source_log.is_file():
+            return 0
+
+        from ...common.zzmi_skeleton import ZZMIDeformResolver, ZZMILogParser
+
+        if source_log not in source_cache:
+            parser = ZZMILogParser(str(source_log))
+            source_cache[source_log] = ZZMIDeformResolver(parser)
+        resolver = source_cache[source_log]
+        draw_ib = str(drawib_model.draw_ib)
+        draw_index, deform_pass, _ = resolver.resolve(
+            position_hash=drawib_model.category_hash_dict.get("Position", ""),
+            vertex_limit_hash=drawib_model.vertex_limit_hash,
+            render_draw_indices=resolver.parser.get_render_draw_indices_for_ib(draw_ib),
+            expected_draw_ib=draw_ib,
+        )
+        if deform_pass is None:
+            return 0
+        palette = resolver.parser.get_deduped_path(f"{draw_index}-vs-t0={deform_pass['palette_hash']}")
+        if not palette:
+            return 0
+        try:
+            capacity, remainder = divmod(os.path.getsize(palette), 48)
+        except OSError:
+            return 0
+        return capacity if remainder == 0 else 0
+
+    def _check_weights_without_vgmap(self) -> None:
+        source_cache = {}
+        problems = []
+        for drawib_model in self.drawib_model_list:
+            if not getattr(drawib_model.d3d11GameType, "GPU_PreSkinning", False):
+                continue
+            submeshes = drawib_model.submesh_model_list
+            if not submeshes or any(int(getattr(mesh, "vg_count", 0) or 0) > 0 for mesh in submeshes):
+                continue
+            capacity = self._zzmi_native_palette_capacity(drawib_model, submeshes[0], source_cache)
+            if not capacity:
+                continue
+            draw_ib = str(drawib_model.draw_ib)
+            highest_slot = max(self._collect_drawib_referenced_bone_ids(draw_ib), default=-1)
+            if highest_slot >= capacity:
+                problems.append(f"{draw_ib} 使用骨槽 {highest_slot}，原生骨槽为 0–{capacity - 1}")
+        if problems:
+            raise Fatal(
+                "ZZMI 导出中止：工作空间缺少对应的融合骨骼数据（VGMap/VGCount），"
+                "网格的有效权重超出了游戏原生骨骼表。\n"
+                + "\n".join(problems)
+                + "\n请恢复与当前网格编号一致的融合骨骼数据后重新导出。"
+            )
+
     def _enforce_merged_skeleton_contract(self) -> dict:
         """B1：按合并骨架契约判定「继续 / 中止」，**必须在任何写盘之前调用**。
 
@@ -2281,6 +2339,7 @@ class ExportZZMI(ExportUnity):
             evaluate_merged_skeleton_contract,
         )
 
+        self._check_weights_without_vgmap()
         stats = getattr(self, "_zzmi_merged_contract_stats", None)
         if not stats:
             # 兜底：尚未扫描过（例如直接调用本方法）时自行扫描一次。
@@ -2902,6 +2961,89 @@ class ExportZZMI(ExportUnity):
         """骨骼池路线总开关（与 `_merged_cross_group_enabled` 互斥）。"""
         return _merged_palette_route_active()
 
+    def _prepare_direct_draw_palettes(self):
+        """Plan live donor-to-owner conversions without renumbering the workspace VGMap."""
+        self._zzmi_direct_draw_palettes = {}
+        if not self.merged_skeleton_components or not self._merged_palette_enabled():
+            return
+        profile = _merged_palette_profile()
+        if profile is None:
+            return
+        from ...common.zzmi_cross_group_palette import (
+            ZZMICrossGroupPaletteError,
+            direct_draw_palette_tables,
+            merged_components,
+        )
+
+        components = self.merged_skeleton_components
+        known = {entry["ib_hash"] for entry in merged_components(profile)}
+        capacity = max(
+            int(profile.get("pool_bones") or 0),
+            max(entry["vg_offset"] + entry["vg_count"] for entry in components),
+        )
+        samples = {}
+        models = {str(model.draw_ib): model for model in self.drawib_model_list}
+        for owner in components:
+            draw_ib = owner["draw_ib"]
+            used = self._collect_drawib_referenced_bone_ids(draw_ib)
+            donors = [
+                entry for entry in components
+                if entry["draw_ib"] != draw_ib
+                and entry["skeleton_group"] == owner["skeleton_group"]
+                and any(entry["vg_offset"] <= slot < entry["vg_offset"] + entry["vg_count"] for slot in used)
+            ]
+            if draw_ib in known:
+                donors = [entry for entry in donors if entry["draw_ib"] not in known]
+            if not donors:
+                continue
+            for entry in (owner, *donors):
+                ib = entry["draw_ib"]
+                if ib not in samples:
+                    samples[ib] = self._read_draw_palette_sample(models[ib], entry["vg_count"])
+            try:
+                tables = direct_draw_palette_tables(profile, owner, donors, samples, capacity)
+            except ZZMICrossGroupPaletteError as error:
+                raise Fatal(f"ZZMI 合并蒙皮空间换算失败：{error}") from error
+            if tables is not None:
+                self._zzmi_direct_draw_palettes[draw_ib] = tables
+
+    def _read_draw_palette_sample(self, drawib_model, count):
+        import numpy
+
+        from ...common.zzmi_skeleton import ZZMIBoneMapBuilder
+
+        for mesh in drawib_model.submesh_model_list:
+            identity = getattr(mesh, "workspace_unique_str", "") or mesh.unique_str
+            path = self._zzmi_workspace_part_json_path(identity)
+            if not path:
+                continue
+            record = JsonUtils.LoadFromFile(path)
+            frame = record.get("FrameAnalysisLogSignature")
+            cb1_name = record.get("ObjectCB1FileName")
+            palette_name = record.get("BoneMatrixFileName")
+            if not frame or not cb1_name or not palette_name or not record.get("ObjectCB1CacheValid"):
+                continue
+            cache = Path(path).parent.parent / "ModImpRuntime"
+            transform = ZZMIBoneMapBuilder.parse_object_transform(
+                str(cache / cb1_name), record.get("ObjectCB1FirstConstant", 0)
+            )
+            if transform is None:
+                continue
+            try:
+                palette = ZZMIBoneMapBuilder.load_palette(str(cache / palette_name))
+            except (OSError, ValueError):
+                continue
+            if len(palette) >= count:
+                # CB1 is stored with translation in its last row. Palette multiplication uses columns.
+                return frame, numpy.asarray(transform, dtype=numpy.float64).reshape(4, 4).T, palette
+        return None
+
+    def _has_draw_palette_conversion(self, draw_ib):
+        return (
+            draw_ib in getattr(self, "_zzmi_direct_draw_palettes", {})
+            or draw_ib.lower() in _merged_palette_conv_indices_by_ib()
+        )
+
     def _merged_deform_palette_name(
         self, ib_key, skeleton_group: int, slot: int
     ) -> str:
@@ -2909,7 +3051,7 @@ class ExportZZMI(ExportUnity):
         draw_ib = str(ib_key)
         if (
             self._merged_palette_enabled()
-            and draw_ib.lower() in _merged_palette_conv_indices_by_ib()
+            and self._has_draw_palette_conversion(draw_ib)
         ):
             component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
             if component_id is not None:
@@ -5804,8 +5946,7 @@ class ExportZZMI(ExportUnity):
         """
         if not self._merged_palette_enabled():
             return []
-        conv_indices = _merged_palette_conv_indices_by_ib()
-        if not conv_indices:
+        if not (_merged_palette_conv_indices_by_ib() or getattr(self, "_zzmi_direct_draw_palettes", {})):
             return []
         candidates: list[int] = [int(component_id)]
         # ②：重放绑的是 SO 所属空间（so_owner），target 只有占位几何时它们不同 ——
@@ -5828,8 +5969,8 @@ class ExportZZMI(ExportUnity):
                 candidates.append(int(host["component_id"]))
         ordered: list[int] = []
         for candidate in candidates:
-            candidate_ib = self.merged_skeleton_components[candidate]["draw_ib"].lower()
-            if candidate_ib in conv_indices and candidate not in ordered:
+            candidate_ib = self.merged_skeleton_components[candidate]["draw_ib"]
+            if self._has_draw_palette_conversion(candidate_ib) and candidate not in ordered:
                 ordered.append(candidate)
         return ordered
 
@@ -7975,6 +8116,21 @@ class ExportZZMI(ExportUnity):
                         ),
                     )
 
+        direct_palettes = getattr(self, "_zzmi_direct_draw_palettes", {})
+        for draw_ib, (table, params) in sorted(direct_palettes.items()):
+            for kind, values in (("Components", table), ("Params", params)):
+                filename = f"zz_draw_palette_{draw_ib}_{kind.lower()}.buf"
+                section.extend([
+                    f"[ResourceZZDrawPalette{kind}_{draw_ib}]",
+                    "type = Buffer",
+                    "format = R32G32B32A32_UINT",
+                    f"filename = Meshes/{filename}",
+                    "",
+                ])
+                self._atomic_write_binary(
+                    os.path.join(mod_meshes_dir, filename), _struct.pack(f"<{len(values)}I", *values)
+                )
+
         # 跨组：每骨架组一份「对象→世界 cb1」捕获资源（**拆分绘制**用）。
         # 合并网格按来源拆成多次绘制时，每次绘制要绑**该来源自己**的对象变换，而
         # `vs-cb1` 由游戏逐 draw 上传（464 B，前 16 float = 3×4 对象→世界矩阵），在
@@ -8190,8 +8346,9 @@ class ExportZZMI(ExportUnity):
                 )
                 section.append(f"Dispatch = {dispatch_count}, 1, 1")
                 section.append("cs-u0 = null")
-                conv_index = conv_indices.get(component["draw_ib"].lower())
-                if conv_index is not None:
+                draw_ib = component["draw_ib"]
+                conv_index = conv_indices.get(draw_ib.lower())
+                if draw_ib in direct_palettes or conv_index is not None:
                     # 池（骨架缓冲）是混合空间，deform 直接读会把别人的骨骼按错误
                     # 的空间蒙皮；这一段用锚点链把每根异物骨骼搬到本部件空间，
                     # 输出缓冲按 canonical 槽位索引 —— 与 vg_map 天生对齐，网格
@@ -8218,10 +8375,12 @@ class ExportZZMI(ExportUnity):
                             int(component["skeleton_group"]), slot
                         )
                     )
-                    section.append("cs-t1 = ref ResourceZZMSComponents")
-                    section.append(
-                        f"cs-t2 = ref ResourceZZCgParams_C{conv_index}"
-                    )
+                    if draw_ib in direct_palettes:
+                        section.append(f"cs-t1 = ref ResourceZZDrawPaletteComponents_{draw_ib}")
+                        section.append(f"cs-t2 = ref ResourceZZDrawPaletteParams_{draw_ib}")
+                    else:
+                        section.append("cs-t1 = ref ResourceZZMSComponents")
+                        section.append(f"cs-t2 = ref ResourceZZCgParams_C{conv_index}")
                     section.append(f"cs-u0 = ref {conv_name}")
                     section.append(
                         "Dispatch = "
@@ -9155,6 +9314,7 @@ class ExportZZMI(ExportUnity):
             self._collect_merged_skeleton_components()
         )
         self._enforce_merged_skeleton_contract()
+        self._prepare_direct_draw_palettes()
 
         TimerUtils.start_stage("缓冲文件生成")
         # 后台导出的状态栏细分文本：基础导出（写 .buf 资源）是本次导出里最长的

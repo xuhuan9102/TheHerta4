@@ -5661,6 +5661,44 @@ class ZZMIMergedContractWiringTests(unittest.TestCase):
         self.assertEqual(type(raised).__name__, "Fatal")
         self.assertIn("确实", str(raised))
 
+    def test_missing_vgmap_rejects_weights_outside_native_palette_before_writing(self):
+        model = self._model_with_object(["146"])
+        submesh = model.submesh_model_list[0]
+        submesh.vg_count = 0
+        submesh.vg_map = {}
+        obj = _fake_bpy_data.objects.get(submesh.unique_str)
+        obj.data = types.SimpleNamespace(vertices=[types.SimpleNamespace(groups=[
+            types.SimpleNamespace(group=0, weight=1.0),
+        ])])
+
+        for merged_vgmap in (False, True):
+            with self.subTest(merged_vgmap=merged_vgmap):
+                exporter = self._exporter([model], merged_vgmap=merged_vgmap)
+                with mock.patch.object(exporter, "_zzmi_native_palette_capacity", return_value=16, create=True):
+                    _, write_reached, raised, _ = self._run_export_impl(exporter)
+                self.assertIsInstance(raised, _zzmi_module.Fatal)
+                self.assertIn("146", str(raised))
+                self.assertIn(model.draw_ib, str(raised))
+                self.assertFalse(write_reached)
+                self.assertEqual(os.listdir(self._tmp_dir), [])
+
+    def test_missing_vgmap_accepts_locally_weighted_vertices_with_unused_global_group(self):
+        model = self._model_with_object(["15", "146"])
+        submesh = model.submesh_model_list[0]
+        submesh.vg_count = 0
+        submesh.vg_map = {}
+        obj = _fake_bpy_data.objects.get(submesh.unique_str)
+        obj.data = types.SimpleNamespace(vertices=[types.SimpleNamespace(groups=[
+            types.SimpleNamespace(group=0, weight=1.0),
+            types.SimpleNamespace(group=1, weight=0.0),
+        ])])
+        exporter = self._exporter([model], merged_vgmap=False)
+        with mock.patch.object(exporter, "_zzmi_native_palette_capacity", return_value=16, create=True):
+            _, write_reached, raised, _ = self._run_export_impl(exporter)
+
+        self.assertTrue(write_reached)
+        self.assertIsInstance(raised, _StopExportSentinel)
+
     # ---- 3) error 场景 B：有数据但全部被拒 ⇒ 写盘前中止 + 列出原因 --------
     def test_error_all_parts_rejected_lists_reasons_and_aborts(self):
         exporter = self._exporter(

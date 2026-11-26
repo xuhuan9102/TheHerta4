@@ -611,7 +611,14 @@ def reference_palette(profile: dict, pool: numpy.ndarray, component_id: int) -> 
 # 提取期定锚
 # ---------------------------------------------------------------------------
 
-def find_world_matches(world_a: numpy.ndarray, world_b: numpy.ndarray) -> tuple[list, int]:
+def find_world_matches(
+    world_a: numpy.ndarray,
+    world_b: numpy.ndarray,
+    *,
+    rotation_tolerance=MATCH_ROTATION_TOLERANCE,
+    translation_tolerance=MATCH_TRANSLATION_TOLERANCE,
+    relative_translation_tolerance=MATCH_TRANSLATION_RELATIVE_TOLERANCE,
+) -> tuple[list, int]:
     """两个部件在世界空间里一致的骨骼。
 
     返回 ``(互唯一骨对, 全部命中数)``。一骨对是互唯一的，当且仅当两边都没有第二个
@@ -626,11 +633,11 @@ def find_world_matches(world_a: numpy.ndarray, world_b: numpy.ndarray) -> tuple[
         numpy.abs(rows_a[:, :, 3]).max(axis=1)[:, None],
         numpy.abs(rows_b[:, :, 3]).max(axis=1)[None],
     )
-    tolerance = MATCH_TRANSLATION_TOLERANCE + MATCH_TRANSLATION_RELATIVE_TOLERANCE * magnitude
+    tolerance = translation_tolerance + relative_translation_tolerance * magnitude
     nonzero_a = numpy.abs(rows_a).max(axis=(1, 2)) > 0
     nonzero_b = numpy.abs(rows_b).max(axis=(1, 2)) > 0
     matches = (
-        (rotation_error < MATCH_ROTATION_TOLERANCE)
+        (rotation_error < rotation_tolerance)
         & (translation_error < tolerance)
         & nonzero_a[:, None] & nonzero_b[None]
     )
@@ -641,6 +648,62 @@ def find_world_matches(world_a: numpy.ndarray, world_b: numpy.ndarray) -> tuple[
         if row_counts[i] == 1 and column_counts[j] == 1
     ]
     return unique_pairs, int(matches.sum())
+
+
+def direct_draw_palette_tables(profile, owner, donors, samples, capacity):
+    """Build the existing palette shader's tables for an owner that borrows additional bones.
+
+    Samples carry a common frame signature, a column-vector object-to-world matrix,
+    and the original local palette. Only anchor indices are sent to the shader.
+    """
+    owner_ib = owner["draw_ib"]
+    existing = merged_components(profile)
+    indices = {entry["ib_hash"]: i for i, entry in enumerate(existing)}
+    owner_index = indices.get(owner_ib)
+    if owner_index is None:
+        owner_index = 0
+        rows = [owner["vg_offset"], owner["vg_count"], owner_index, 1, 0, 0, 0, 0]
+        known = {owner_ib}
+    else:
+        rows = runtime_component_table(profile)
+        known = set(indices)
+
+    original_size = len(rows)
+    owner_sample = samples.get(owner_ib)
+    for donor in donors:
+        donor_ib = donor["draw_ib"]
+        if donor_ib in known:
+            continue
+        donor_sample = samples.get(donor_ib)
+        if not owner_sample or not donor_sample or owner_sample[0] != donor_sample[0]:
+            raise ZZMICrossGroupPaletteError(f"{owner_ib} ← {donor_ib} 缺少同帧骨骼和对象矩阵缓存")
+        _, owner_object, owner_palette = owner_sample
+        _, donor_object, donor_palette = donor_sample
+        if numpy.array_equal(owner_object, donor_object):
+            continue
+
+        owner_world = owner_object @ _affine_of(owner_palette[:owner["vg_count"]])
+        donor_world = donor_object @ _affine_of(donor_palette[:donor["vg_count"]])
+        anchors, _ = find_world_matches(
+            owner_world, donor_world, rotation_tolerance=2e-4,
+            translation_tolerance=2e-4, relative_translation_tolerance=0,
+        )
+        valid = [
+            (a, b) for a, b in anchors
+            if abs(numpy.linalg.det(owner_world[a, :3, :3])) > 1e-6
+            and abs(numpy.linalg.det(donor_world[b, :3, :3])) > 1e-6
+        ]
+        if not valid:
+            raise ZZMICrossGroupPaletteError(f"{owner_ib} ← {donor_ib} 找不到可用于空间换算的共同骨骼")
+        a, b = min(valid, key=lambda pair: numpy.max(numpy.abs(owner_world[pair[0]] - donor_world[pair[1]])))
+        rows.extend((
+            donor["vg_offset"], donor["vg_count"], owner_index, 1,
+            owner["vg_offset"] + a, donor["vg_offset"] + b, 0, 0,
+        ))
+
+    if len(rows) == original_size:
+        return None
+    return rows, (owner_index, len(rows) // 8, capacity, 0)
 
 
 def _affine_of(palette) -> numpy.ndarray:

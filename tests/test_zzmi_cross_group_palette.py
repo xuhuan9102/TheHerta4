@@ -74,6 +74,32 @@ def _world(palette, object_matrix):
     return numpy.einsum("ij,bjk->bik", object_matrix, _affine44(palette))
 
 
+def test_draw_palette_uses_live_anchors_for_donor_slots():
+    owner = {"draw_ib": "029c1f5a", "vg_offset": 2, "vg_count": 3}
+    donor = {"draw_ib": "8c2fc05e", "vg_offset": 5, "vg_count": 3}
+    separate = _conversion()
+    body_rows = _skeleton(3)
+    donor_rows = (numpy.linalg.inv(separate) @ _affine44(body_rows))[:, :3]
+    samples = {
+        owner["draw_ib"]: ("same-frame", numpy.eye(4), body_rows),
+        donor["draw_ib"]: ("same-frame", separate, donor_rows),
+    }
+
+    rows, params = cgp.direct_draw_palette_tables({"components": []}, owner, [donor], samples, 8)
+
+    assert params == (0, 2, 8, 0)
+    assert rows[:8] == [2, 3, 0, 1, 0, 0, 0, 0]
+    assert rows[8:12] == [5, 3, 0, 1]
+    parent_slot, donor_slot = rows[12:14]
+    assert parent_slot - 2 == donor_slot - 5
+
+    live_conversion = _conversion((0.2, 0.8, -0.5), angle=0.2)
+    live_rows = _skeleton(3, seed=8)
+    live_donor_rows = numpy.linalg.inv(live_conversion) @ _affine44(live_rows)
+    recovered = _affine44(live_rows)[parent_slot - 2] @ numpy.linalg.inv(live_donor_rows[donor_slot - 5])
+    numpy.testing.assert_allclose(recovered @ live_donor_rows, _affine44(live_rows), atol=1e-7)
+
+
 class FindWorldMatchesTest(unittest.TestCase):
     def test_shared_bones_are_matched_and_converted(self):
         shared = _skeleton(6)
