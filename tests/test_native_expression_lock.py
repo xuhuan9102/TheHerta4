@@ -1,54 +1,42 @@
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
-
 from blueprint import native_expression_lock as lock
 from blueprint.native_morph_driver import NativeMorphKey
 
 
-def test_channel_settings_use_zero_for_native_and_nonzero_for_manual_strength():
-    channels = lock.parse_channels("2, 15")
-    assert channels == (2, 15)
-    assert lock.parse_channels("") == ()
-    with pytest.raises(ValueError):
-        lock.parse_channels("127")
-    assert lock.assignment_lines("$Freq_Deform_15", 1) == [
-        "y100 = 0",
-        "if $Freq_Deform_15 > 4",
-        "    y100 = 20",
-        "elif $Freq_Deform_15 < -4",
-        "    y100 = 12",
-        "elif $Freq_Deform_15 != 0",
-        "    y100 = 16 + $Freq_Deform_15",
-        "endif",
-    ]
-
-
-def test_transfer_builds_lookup_and_deltas_for_only_the_selected_native_channels():
-    keys = [NativeMorphKey("0123456789abcdef", "12345678", "87654321", 4, 2, i) for i in (2, 9, 15)]
+def test_transfer_builds_sparse_deltas_for_all_mapped_native_channels():
+    keys = [NativeMorphKey("0123456789abcdef", "12345678", "87654321", 4, 2, i) for i in (15, 9, 2, 19)]
     attributes = {
-        f"Deform {i}": SimpleNamespace(vertex_ids=np.array([1, 1]), deltas=np.full((2, 9), i, np.float32))
-        for i in (2, 9, 15)
+        f"Deform {index}": SimpleNamespace(vertex_ids=np.array(ids), deltas=np.full((2, 9), index, np.float32))
+        for index, ids in ((2, [1, 1]), (9, [1, 2]), (15, [2, 2]), (21, [0, 0]))
     }
-    indices, plan, payload = lock.prepare_transfer_bridge("8b067f99", (2, 15), keys, attributes, 3, set())
-    assert indices == (2, 15)
-    assert [entry.shape_key_slot for entry in plan.entries] == [0, 1]
-    rows = np.frombuffer(payload, dtype="<f4").reshape(2, 3, 9)
-    np.testing.assert_array_equal(rows[:, 1], np.array([[4] * 9, [30] * 9]))
-    assert np.count_nonzero(rows[:, [0, 2]]) == 0
+    indices, plan, payload, offsets = lock.prepare_transfer_bridge("8b067f99", keys, attributes, 4, set())
+    assert indices == (2, 9, 15)
+    assert [entry.shape_key_slot for entry in plan.entries] == [0, 1, 2]
+    np.testing.assert_array_equal(np.frombuffer(offsets, dtype="<u4"), [0, 0, 2, 4, 4])
+    rows = np.frombuffer(payload, dtype=lock.DELTA_DTYPE)
+    np.testing.assert_array_equal(rows["slot"], [0, 1, 1, 2])
+    np.testing.assert_array_equal(rows["delta"], np.repeat([[4], [9], [9], [30]], 9, axis=1))
 
 
-def test_lock_correction_runs_before_vertex_transfer():
+def test_transfer_dispatches_correction_only_when_manual_control_is_active():
     shader = "CustomShaderZZMINativeExpression_8b067f99"
-    hook = "[TextureOverride_VB_8b067f99_face_Blend]"
-    sections = {hook: [f"run = {shader}"], f"[{shader}]": ["cs = ./res/old.hlsl", "Dispatch = 55, 1, 1"]}
+    base = ["cs = ./res/old.hlsl", "Dispatch = 55, 1, 1"]
+    sections = {f"[{shader}]": base.copy()}
 
-    lock.render_transfer_locks(sections, "8b067f99", ("$Freq_Deform_2", "$CustomBlink"), "Meshes0000/a.buf")
+    lock.render_transfer_locks(sections, "8b067f99", ("$Freq_Deform_2", "$CustomBlink"),
+                               "Meshes0000/deltas.buf", "Meshes0000/offsets.buf")
 
-    assert sections[hook] == [f"run = {shader}_PrepareLocks", f"run = {shader}"]
-    assert sections[f"[{shader}]"][1:3] == [
+    assert sections["[CommandListZZMINativeExpression_8b067f99]"] == [
+        "if $ssmt_native_expression_override_8b067f99 != 0",
+        f"    run = {shader}_PrepareLocks", f"    run = {shader}_Locked",
+        "else", f"    run = {shader}", "endif",
+    ]
+    assert sections[f"[{shader}]"] == base
+    assert sections[f"[{shader}_Locked]"][1:4] == [
         "cs-t109 = ResourceZZMINativeExpression_8b067f99_LockCorrection",
         "cs-t110 = ResourceZZMINativeExpression_8b067f99_LockDelta",
+        "cs-t111 = ResourceZZMINativeExpression_8b067f99_LockOffsets",
     ]
-    assert "    y100 = 16 + $CustomBlink" in sections[f"[{shader}_PrepareLocks]"]
+    assert "y100 = $CustomBlink" in sections[f"[{shader}_PrepareLocks]"]

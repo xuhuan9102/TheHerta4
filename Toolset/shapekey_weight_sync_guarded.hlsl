@@ -1,6 +1,6 @@
 // shapekey_weight_sync_guarded.hlsl
 //
-// Native ZZMI weights are preserved unless their packed parameter encodes a lock.
+// Keep captured native ZZMI weights where the exported strength is zero.
 
 #define SHAPEKEY_WEIGHT_SYNC_BASE 100
 #define SHAPEKEY_WEIGHT_MIN (-4.0)
@@ -37,15 +37,13 @@ void main(uint3 threadID : SV_DispatchThreadID)
     }
 
     float raw = IniParams[SHAPEKEY_WEIGHT_SYNC_BASE + (i >> 2)][i & 3];
-    if (IsNativeMorphSlot(i))
-    {
-        if (!(raw >= 12.0 && raw <= 20.0))
-            return;
-        raw -= 16.0;
-    }
     if (isnan(raw))
     {
         raw = 0.0;
+    }
+    if (raw == 0.0 && IsNativeMorphSlot(i))
+    {
+        return;
     }
     ShapeKeyWeight[i] = clamp(raw, SHAPEKEY_WEIGHT_MIN, SHAPEKEY_WEIGHT_MAX);
 }

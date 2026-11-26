@@ -96,13 +96,14 @@ def _params(*names):
     return {name: f"$Freq_{name}" for name in names}
 
 
-def _plan(unique_names, freq_params, sequence_groups, group_totals=None, max_groups=8):
+def _plan(unique_names, freq_params, sequence_groups, group_totals=None, max_groups=8, native_slots=()):
     return module.DirectShapeKeyOutputMixin._build_frame_table_plan(
         _PlanOwner(max_groups),
         unique_names,
         freq_params,
         sequence_groups,
         group_totals,
+        native_slots,
     )
 
 
@@ -152,6 +153,21 @@ class FrameTablePlanTests(unittest.TestCase):
         )
         self.assertEqual([0, -1, 1], plan["groups"][0]["members"])
 
+    def test_native_face_uses_its_weight_instead_of_sequence_progress(self):
+        plan = _plan(
+            ["blink", "authored"], _params("blink", "authored"),
+            {0: ["Freq_blink", "Freq_authored"]}, {0: 2}, native_slots={0},
+        )
+        sequence, native = plan["groups"]
+        self.assertEqual(sequence["members"], [-1, 1])
+        self.assertEqual(native["members"], [0])
+        self.assertEqual(native["native_weight_slot"], 0)
+        owner = types.SimpleNamespace(node=types.SimpleNamespace(WEIGHT_BUFFER_REGISTER=102))
+        definitions = module.DirectShapeKeyOutputMixin._build_frame_table_defines(
+            owner, 2, [dict(native, map_register=52, offset=0, union_size=3, key_count=1)], 3,
+        )
+        self.assertIn("#define GROUP0_PROGRESS ShapeKeyWeight[0] // $Freq_blink", definitions)
+
     def test_group_without_known_total_is_accepted(self):
         plan = _plan(
             ["a", "b"],
@@ -174,6 +190,13 @@ class FrameTablePlanTests(unittest.TestCase):
         names = ["a", "b", "c"]
         self.assertIsNotNone(_plan(names, _params(*names), {}, max_groups=3))
         self.assertIsNone(_plan(names, _params(*names), {}, max_groups=2))
+
+    def test_independent_native_weights_can_exceed_a_previously_valid_frame_group_limit(self):
+        names = ["blink", "mouth", "authored"]
+        sequence_groups = {1: ["Freq_blink", "Freq_mouth", "Freq_authored"]}
+        params = _params(*names)
+        self.assertIsNotNone(_plan(names, params, sequence_groups, max_groups=2))
+        self.assertIsNone(_plan(names, params, sequence_groups, max_groups=2, native_slots={0, 1}))
 
     def test_empty_key_set_abandons_frame_table(self):
         self.assertIsNone(_plan([], {}, {}))

@@ -165,9 +165,8 @@ def _sections():
 def _run_update(sections, drag_drive_resource=None, frame_table_meta_map=None,
                 target_ini_file="mod.ini", logical_hashes=("d942b3a7-39828-0",),
                 frame_shader_sources=None, shape_names=("shape_a", "shape_b"),
-                native_morph_plans=None, transfer_locks=None, lock_channels=""):
+                native_morph_plans=None, transfer_locks=None):
     harness = _Harness()
-    harness.node.native_expression_lock_channels = lock_channels
     harness._native_expression_locks = transfer_locks or {}
     harness._update_ini_sections(
         sections,
@@ -221,23 +220,44 @@ class ShapeKeyPresentSignatureWiringTests(unittest.TestCase):
         for _ in range(2):
             _run_update(
                 sections, shape_names=("Deform 2", "Deform 3", "authored"),
-                native_morph_plans=plans, transfer_locks=transfers, lock_channels="2, 15",
+                native_morph_plans=plans, transfer_locks=transfers,
             )
 
         constants = sections["[Constants]"]
         self.assertEqual(constants.count("global persist $Freq_Deform_1 = 0.0"), 1)
         self.assertIn("global persist $Freq_Deform_15 = 0.25", constants)
         sync = "\n".join(sections[f"[CustomShaderShapeKeyWeightSync_{edited}]"])
-        self.assertIn("x100 = 16 + $Freq_Deform_2", sync)
-        self.assertIn("y100 = 0", sync)
-        self.assertNotIn("y100 = $Freq_Deform_3", sync)
+        self.assertIn("x100 = $Freq_Deform_2", sync)
+        self.assertIn("y100 = $Freq_Deform_3", sync)
         self.assertIn("z100 = $Freq_authored", sync)
-        present = sections["[Present]"]
+        gate = f"$ssmt_native_expression_override_{stock}"
+        self.assertEqual(constants.count(f"global {gate} = 0"), 1)
+        present = [line.strip() for line in sections["[Present]"]]
         for logical_hash in (edited, stock):
             self.assertEqual(present.count(f"run = {module.native_morph.custom_shader_clear_name(logical_hash)}"), 1)
+        self.assertIn(f"post {gate} = $Freq_Deform_1 != 0", present)
+        self.assertIn(f"run = CustomShaderShapeKeyWeightSync_{edited}", present)
+        self.assertNotIn("if $Freq_Deform_2 != 0 || $Freq_Deform_3 != 0", present)
+        self.assertIn(f"    if {gate} != 0", sections["[CommandListZZMINativeMorphCaptureGeneric]"])
         self.assertIn(f"[CustomShaderZZMINativeMorphCapture_{stock}]", sections)
         self.assertIn(f"[CustomShaderZZMINativeMorphCapture_{edited.replace('-', '_')}]", sections)
         self.assertEqual(sum(name.startswith("[TextureOverrideZZMINativeMorphSource_") for name in sections), 1)
+
+    def test_native_only_face_skips_manual_sync_but_still_animates_when_zero(self):
+        edited = "d942b3a7-39828-0"
+        key = module.native_morph.NativeMorphKey
+        plans = module.native_morph.build_native_morph_plans(
+            {edited: [key("0123456789abcdef", "12345678", "87654321", 4, 2, 2)]},
+            {edited: {2: 0}},
+        )
+        sections = _sections()
+        _run_update(sections, shape_names=("Deform 2",), native_morph_plans=plans)
+
+        present = [line.strip() for line in sections["[Present]"]]
+        start = present.index("if $Freq_Deform_2 != 0")
+        self.assertEqual(present[start + 1:start + 4], [
+            f"run = CustomShaderShapeKeyWeightSync_{edited}", "endif", f"run = CustomShader_{edited}_Anim",
+        ])
 
     def test_frame_table_inputs_use_compatible_shader_resource_references(self):
         sections = _sections()

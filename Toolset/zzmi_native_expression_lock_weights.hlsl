@@ -11,9 +11,9 @@ void main(uint3 thread : SV_DispatchThreadID)
     if (slot >= count)
         return;
 
-    float encoded = IniParams[100 + (slot >> 2)][slot & 3];
-    if (encoded >= 12.0 && encoded <= 20.0)
-        WeightCorrection[slot] = (encoded - 16.0) - NativeWeight[slot];
+    float strength = IniParams[100 + (slot >> 2)][slot & 3];
+    if (strength != 0.0 && !isnan(strength))
+        WeightCorrection[slot] = clamp(strength, -4.0, 4.0) - NativeWeight[slot];
     else
         WeightCorrection[slot] = 0.0;
 }

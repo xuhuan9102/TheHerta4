@@ -172,7 +172,7 @@ class NativeExpressionTransferTests(unittest.TestCase):
             "hash = b234cdef",
             "match_vertex_count = 3",
             "vb2 = ResourceTestBlend",
-            "run = CustomShaderZZMINativeExpression_feed1234",
+            "run = CommandListZZMINativeExpression_feed1234",
             "vb0 = ResourceZZMINativeExpression_feed1234_AdjustedPosition",
             *[line.replace("vb0 = ResourceTestPosition", "vb0 = ResourceZZMINativeExpression_feed1234_AdjustedPosition")
               for line in merged_draw],
@@ -206,7 +206,7 @@ class NativeExpressionTransferTests(unittest.TestCase):
         self.assertEqual(sections[blend_override], [
             "hash = stable456",
             "match_vertex_count = 3",
-            "run = CustomShaderZZMINativeExpression_feed1234",
+            "run = CommandListZZMINativeExpression_feed1234",
             "vb2 = ResourceTestBlend",
             "handling = skip",
             "draw = 3, 0",

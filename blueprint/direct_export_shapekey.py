@@ -53,7 +53,6 @@ class DirectShapeKeyGenerator(
 
         if not LogicName.is_zzmi_family(GlobalConfig.logic_name):
             return set()
-        lock_indices = locks.parse_channels(getattr(self.node, "native_expression_lock_channels", ""))
 
         grouped_hashes = {}
         for logical_hash in processed_hashes:
@@ -100,30 +99,33 @@ class DirectShapeKeyGenerator(
             shader = Path(shader_source_path).with_name(transfer.SHADER_NAME)
             write_text_if_changed(Path(dest_res_dir) / transfer.SHADER_NAME, shader.read_text(encoding="utf-8"))
             transfer.install_transfer_sections(sections, draw_hash, mesh, f"Meshes0000/{filename}")
-            if lock_indices:
-                lock = locks.prepare_transfer_bridge(
-                    draw_hash, lock_indices, native_keys, attributes.by_name, len(mesh.native_basis),
-                    native_morph.collect_reserved_filter_indices(sections), self._native_expression_source_filters,
+            lock = locks.prepare_transfer_bridge(
+                draw_hash, native_keys, attributes.by_name, len(mesh.native_basis),
+                native_morph.collect_reserved_filter_indices(sections), self._native_expression_source_filters,
+            )
+            if lock:
+                indices, plan, deltas, offsets = lock
+                self._native_expression_source_filters.update(plan.source_filters)
+                delta_path = f"Meshes0000/{draw_hash}-NativeExpressionLockDelta.buf"
+                offsets_path = f"Meshes0000/{draw_hash}-NativeExpressionLockOffsets.buf"
+                lookup_path = f"Meshes0000/{draw_hash}-NativeExpressionLockLookup.buf"
+                write_bytes_if_changed_atomic(Path(self.mod_export_path) / delta_path, deltas)
+                write_bytes_if_changed_atomic(Path(self.mod_export_path) / offsets_path, offsets)
+                write_bytes_if_changed_atomic(Path(self.mod_export_path) / lookup_path, plan.lookup_buffer)
+                variables = {
+                    f"Deform {index}": self.node.get_shape_key_export_variable_name(f"Deform {index}")
+                    for index in indices
+                }
+                weights = locks.render_transfer_locks(
+                    sections, draw_hash, tuple(variables.values()), delta_path, offsets_path,
                 )
-                if lock:
-                    indices, plan, deltas = lock
-                    self._native_expression_source_filters.update(plan.source_filters)
-                    delta_path = f"Meshes0000/{draw_hash}-NativeExpressionLockDelta.buf"
-                    lookup_path = f"Meshes0000/{draw_hash}-NativeExpressionLockLookup.buf"
-                    write_bytes_if_changed_atomic(Path(self.mod_export_path) / delta_path, deltas)
-                    write_bytes_if_changed_atomic(Path(self.mod_export_path) / lookup_path, plan.lookup_buffer)
-                    variables = {
-                        f"Deform {index}": self.node.get_shape_key_export_variable_name(f"Deform {index}")
-                        for index in indices
-                    }
-                    weights = locks.render_transfer_locks(sections, draw_hash, tuple(variables.values()), delta_path)
-                    self._native_expression_locks[draw_hash] = (variables, plan, weights, lookup_path)
-                    write_text_if_changed(
-                        Path(dest_res_dir) / locks.TRANSFER_SHADER,
-                        "#define SSMT_NATIVE_EXPRESSION_LOCKS\n" + shader.read_text(encoding="utf-8"),
-                    )
-                    for name in (locks.WEIGHT_SHADER, native_morph.CAPTURE_SHADER_NAME, native_morph.CLEAR_SHADER_NAME):
-                        write_text_if_changed(Path(dest_res_dir) / name, shader.with_name(name).read_text(encoding="utf-8"))
+                self._native_expression_locks[draw_hash] = (variables, plan, weights, lookup_path)
+                write_text_if_changed(
+                    Path(dest_res_dir) / locks.TRANSFER_SHADER,
+                    "#define SSMT_NATIVE_EXPRESSION_LOCKS\n" + shader.read_text(encoding="utf-8"),
+                )
+                for name in (locks.WEIGHT_SHADER, native_morph.CAPTURE_SHADER_NAME, native_morph.CLEAR_SHADER_NAME):
+                    write_text_if_changed(Path(dest_res_dir) / name, shader.with_name(name).read_text(encoding="utf-8"))
             transferred.update(logical_hashes)
             LOG.info(f"ZZMI: 原生表情顶点重映射已启用 {draw_hash}，顶点数={len(mesh.source_vertices)}")
         return transferred
@@ -247,9 +249,6 @@ class DirectShapeKeyGenerator(
         return related_names
 
     def generate(self, frame_cache=None):
-        from . import native_expression_lock as locks
-
-        locks.parse_channels(getattr(self.node, "native_expression_lock_channels", ""))
         self._native_expression_locks = {}
         self._native_expression_source_filters = {}
         stage_start = perf_counter()
@@ -607,14 +606,26 @@ class DirectShapeKeyGenerator(
             )
             unique_hashes = [logical_hash for logical_hash in unique_hashes if logical_hash not in transferred]
 
+        processed_hashes = [
+            logical_hash
+            for logical_hash in unique_hashes
+            if runtime_infos.get(logical_hash) and hash_slot_data_map.get(logical_hash)
+        ]
+        native_morph_plans, native_morph_lookup_files = (
+            self._prepare_native_morph_bridge(
+                runtime_infos=runtime_infos,
+                logical_hashes=processed_hashes,
+                hash_slot_data_map=hash_slot_data_map,
+                sections=sections,
+                dest_res_dir=dest_res_dir,
+                shader_source_path=shader_source_path,
+            )
+        )
         logical_resource_meta = {}
         actual_resource_members = {}
-        for logical_hash in unique_hashes:
-            runtime_info = runtime_infos.get(logical_hash)
-            hash_slot_data = hash_slot_data_map.get(logical_hash, {})
-            if not runtime_info or not hash_slot_data:
-                continue
-
+        for logical_hash in processed_hashes:
+            runtime_info = runtime_infos[logical_hash]
+            hash_slot_data = hash_slot_data_map[logical_hash]
             hash_unique_names = list(
                 OrderedDict.fromkeys(
                     name for slot_data in hash_slot_data.values() for name in slot_data.keys()
@@ -622,15 +633,24 @@ class DirectShapeKeyGenerator(
             )
             frame_plan = None
             if frame_table_mode:
+                native_plan = native_morph_plans.get(logical_hash)
+                native_slots = {entry.shape_key_slot for entry in native_plan.entries} if native_plan else ()
                 try:
                     frame_plan = self._build_frame_table_plan(
-                        hash_unique_names, freq_params, sequence_groups, group_totals
+                        hash_unique_names, freq_params, sequence_groups, group_totals, native_slots,
+                    )
+                    fits_without_native_groups = (
+                        not frame_plan and bool(native_slots) and self._build_frame_table_plan(
+                            hash_unique_names, freq_params, sequence_groups, group_totals,
+                        ) is not None
                     )
                 except Exception as exc:
                     raise ShapeKeyDirectExportError(
                         f"{logical_hash}: 帧表分组计划构建失败: {exc!r}"
                     ) from exc
-                if not frame_plan:
+                if fits_without_native_groups:
+                    LOG.info(f"{logical_hash}: 原生表情独立分组超出帧表限制，使用常规形态键直出")
+                elif not frame_plan:
                     raise ShapeKeyDirectExportError(
                         f"{logical_hash}: 无法生成帧表分组计划。\n"
                         "请检查形态键强度变量、序列成员数量和分组数上限。"
@@ -719,21 +739,6 @@ class DirectShapeKeyGenerator(
             else:
                 hash_to_slot_maps[logical_hash] = slot_maps
 
-        processed_hashes = [
-            logical_hash
-            for logical_hash in unique_hashes
-            if runtime_infos.get(logical_hash) and hash_slot_data_map.get(logical_hash)
-        ]
-        native_morph_plans, native_morph_lookup_files = (
-            self._prepare_native_morph_bridge(
-                runtime_infos=runtime_infos,
-                logical_hashes=processed_hashes,
-                hash_slot_data_map=hash_slot_data_map,
-                sections=sections,
-                dest_res_dir=dest_res_dir,
-                shader_source_path=shader_source_path,
-            )
-        )
         hash_to_shader_paths = {}
         for logical_hash in processed_hashes:
             if logical_hash not in hash_slot_data_map or not hash_slot_data_map[logical_hash]:
@@ -742,7 +747,7 @@ class DirectShapeKeyGenerator(
             # 只播种缺失的模板；已存在则保持原样，由 _update_shader_file 以模板为源
             # 重新注入。不能用 shutil.copy2：它每轮把目标 mtime 重置成模板的旧
             # mtime，而 3DMigoto 的 .bin 缓存按"注入后写入时刻"对齐 → 每轮必错配。
-            if not frame_table_mode and not os.path.exists(shader_dest_path):
+            if not logical_resource_meta[logical_hash]["frame_plan"] and not os.path.exists(shader_dest_path):
                 with open(shader_source_path, 'r', encoding='utf-8') as f:
                     write_text_if_changed(shader_dest_path, f.read())
             hash_to_shader_paths[logical_hash] = shader_dest_path
@@ -830,7 +835,7 @@ class DirectShapeKeyGenerator(
                         )
 
                 frame_table_meta = None
-                if frame_table_mode:
+                if frame_plan:
                     if hash_to_merged_index_map.get(logical_hash) is None:
                         raise ShapeKeyDirectExportError(
                             f"{logical_hash}: 本次导出未生成 merged 数据，帧表无法构建。"
@@ -944,7 +949,7 @@ class DirectShapeKeyGenerator(
         )
         LOG.info(f"直出形态键: ini 更新完成 {perf_counter() - stage_start:.3f}s")
 
-        if frame_cache is not None and frame_table_meta_map:
+        if frame_cache is not None and frame_table_meta_map and len(frame_table_meta_map) == len(processed_hashes):
             output = Path(self.mod_export_path)
             files = [Path("res") / WEIGHT_SYNC_SHADER_NAME]
             if native_morph_plans:
@@ -990,10 +995,16 @@ class DirectShapeKeyGenerator(
         # mod 不会陷入「有声明无文件」的坏状态。
         if frame_table_meta_map:
             removed = 0
+            shared_intermediates = {
+                hash_to_actual_file_hash.get(logical_hash, logical_hash)
+                for logical_hash in processed_hashes if logical_hash not in frame_table_meta_map
+            }
             for logical_hash in processed_hashes:
                 if frame_table_meta_map.get(logical_hash) is None:
                     continue
                 actual_file_hash = hash_to_actual_file_hash.get(logical_hash, logical_hash)
+                if actual_file_hash in shared_intermediates:
+                    continue
                 for suffix in (
                     self.node._get_merged_data_file_suffix(use_delta),
                     "_merged_map",

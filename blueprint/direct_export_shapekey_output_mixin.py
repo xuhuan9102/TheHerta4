@@ -775,7 +775,7 @@ class DirectShapeKeyOutputMixin:
             groups[group_index] = [var for _order, var in items]
         return groups
 
-    def _build_frame_table_plan(self, unique_names, freq_params, sequence_groups, group_totals=None):
+    def _build_frame_table_plan(self, unique_names, freq_params, sequence_groups, group_totals=None, native_slots=()):
         """把形态键索引编排成帧表分组计划。
 
         每个分组 = 一条独立的帧序列；未分组的键各自成为「单帧组」（进度就是该键
@@ -787,7 +787,7 @@ class DirectShapeKeyOutputMixin:
         var_to_freq = {}
         for freq_index, name in enumerate(unique_names):
             param = freq_params.get(name)
-            if param:
+            if param and freq_index not in native_slots:
                 var_to_freq[str(param).lstrip("$")] = freq_index
 
         groups = []
@@ -818,7 +818,10 @@ class DirectShapeKeyOutputMixin:
             param = freq_params.get(name)
             if not param:
                 return None
-            groups.append({"group": None, "progress": param, "members": [freq_index]})
+            group = {"group": None, "progress": param, "members": [freq_index]}
+            if freq_index in native_slots:
+                group["native_weight_slot"] = freq_index
+            groups.append(group)
 
         if not groups:
             return None
@@ -938,6 +941,8 @@ class DirectShapeKeyOutputMixin:
                 "map_register": self.FRAME_TABLE_GROUP_MAP_REGISTER_BASE + slot_ordinal,
                 "local_index": local_index,
             })
+            if "native_weight_slot" in group:
+                group_meta[-1]["native_weight_slot"] = group["native_weight_slot"]
             offset += frames.shape[0] * union_size
 
         if not group_meta:
@@ -1024,8 +1029,9 @@ class DirectShapeKeyOutputMixin:
             lines.append(f"#define GROUP{ordinal}_OFFSET {meta['offset']}u")
             lines.append(f"#define GROUP{ordinal}_UNION {meta['union_size']}u")
             lines.append(f"#define GROUP{ordinal}_KEYS {meta['key_count']}u")
+            weight_slot = meta.get("native_weight_slot", key_count + ordinal)
             lines.append(
-                f"#define GROUP{ordinal}_PROGRESS ShapeKeyWeight[{key_count + ordinal}] // {meta['progress']}"
+                f"#define GROUP{ordinal}_PROGRESS ShapeKeyWeight[{weight_slot}] // {meta['progress']}"
             )
         return lines
 
@@ -1541,7 +1547,7 @@ class DirectShapeKeyOutputMixin:
         native_morph_plans = dict(native_morph_plans or {})
         native_morph_lookup_files = dict(native_morph_lookup_files or {})
         transfer_locks = getattr(self, "_native_expression_locks", {})
-        lock_indices = expression_lock.parse_channels(getattr(self.node, "native_expression_lock_channels", ""))
+        transfer_gates = {draw_hash: expression_lock.transfer_gate(draw_hash) for draw_hash in transfer_locks}
         force_all_vertex_channels_hashes = set(force_all_vertex_channels_hashes or ())
         if '[Constants]' not in sections:
             sections['[Constants]'] = []
@@ -1594,6 +1600,17 @@ class DirectShapeKeyOutputMixin:
         if intensity_lines:
             constants_lines.append("\n; --- Auto-generated Shape Key Intensity Controls (Additive Blending) ---")
             constants_lines.extend(intensity_lines)
+        for gate in transfer_gates.values():
+            if gate.casefold() not in declared_intensities:
+                constants_lines.append(f"global {gate} = 0")
+                declared_intensities.add(gate.casefold())
+
+        shape_names_by_hash = {
+            logical_hash: list(dict.fromkeys(
+                name for names in hash_slot_data_map.get(logical_hash, {}).values() for name in names
+            ))
+            for logical_hash in unique_hashes
+        }
 
         vertex_range_vars = {}
         if not use_optimized:
@@ -1729,11 +1746,19 @@ class DirectShapeKeyOutputMixin:
             guard_open = ['if $active0 == 1'] if self._uses_active_guard() else []
             indent = "    " * len(guard_open)
             native_lines.extend(guard_open)
-            native_lines.extend(
-                f"{indent}run = CustomShaderShapeKeyWeightSync_{logical_hash}"
-                for logical_hash in unique_hashes
-                if logical_hash in native_hashes
-            )
+            for logical_hash in unique_hashes:
+                if logical_hash not in native_hashes:
+                    continue
+                names = shape_names_by_hash[logical_hash]
+                native_slots = {entry.shape_key_slot for entry in native_morph_plans[logical_hash].entries}
+                frame_groups = (frame_table_meta_map or {}).get(logical_hash, {}).get("groups", ())
+                sync_command = f"run = CustomShaderShapeKeyWeightSync_{logical_hash}"
+                has_frame_progress = any("native_weight_slot" not in group for group in frame_groups)
+                if names and native_slots == set(range(len(names))) and not has_frame_progress:
+                    condition = expression_lock.nonzero_condition(shapekey_freq_params[name] for name in names)
+                    native_lines.extend([f"{indent}if {condition}", f"{indent}    {sync_command}", f"{indent}endif"])
+                else:
+                    native_lines.append(f"{indent}{sync_command}")
             native_lines.extend(
                 f"{indent}run = CustomShader_{logical_hash}_Anim"
                 for logical_hash in unique_hashes
@@ -1748,10 +1773,19 @@ class DirectShapeKeyOutputMixin:
             )
             native_lines.append(self._PRESENT_RUN_END)
             rebuilt_present_lines.extend(native_lines)
-        for draw_hash in transfer_locks:
-            line = f"run = {native_morph.custom_shader_clear_name(draw_hash)}"
-            if line not in rebuilt_present_lines:
-                rebuilt_present_lines.append(line)
+        if transfer_gates:
+            rebuilt_present_lines.append(self._PRESENT_RUN_BEGIN)
+            for draw_hash, gate in transfer_gates.items():
+                # Capture and transfer use the same gate for the entire frame.
+                # Clear old weights before enabling capture for the next frame.
+                condition = expression_lock.nonzero_condition(transfer_locks[draw_hash][0].values())
+                rebuilt_present_lines.extend([
+                    f"if {gate} != 0",
+                    f"    run = {native_morph.custom_shader_clear_name(draw_hash)}",
+                    "endif",
+                    f"post {gate} = {condition}",
+                ])
+            rebuilt_present_lines.append(self._PRESENT_RUN_END)
         sections['[Present]'] = rebuilt_present_lines
 
         if signature_vars:
@@ -1773,9 +1807,7 @@ class DirectShapeKeyOutputMixin:
             if not hash_slot_data:
                 continue
 
-            hash_unique_names = list(
-                OrderedDict.fromkeys(name for slot_data in hash_slot_data.values() for name in slot_data.keys())
-            )
+            hash_unique_names = shape_names_by_hash[logical_hash]
             hash_unique_objects = list(
                 OrderedDict.fromkeys(
                     obj
@@ -1803,28 +1835,17 @@ class DirectShapeKeyOutputMixin:
             frame_groups = frame_meta["groups"] if frame_meta else []
             weight_slots = len(hash_unique_names) + len(frame_groups)
             sync_lines = ["\n    ; --- Shape Key Weight Transfer (packed 4 keys per float4) ---"]
-            native_slots = {
-                entry.shape_key_slot for entry in native_morph_plans[logical_hash].entries
-            } if logical_hash in native_hashes else set()
-            lock_slots = {
-                slot
-                for native_index, slot in native_morph.shape_key_runtime_slot_by_index(hash_unique_names).items()
-                if slot in native_slots and native_index in lock_indices
-            }
             for index, name in enumerate(hash_unique_names):
                 freq_param = shapekey_freq_params.get(name)
-                if index in lock_slots and freq_param:
-                    sync_lines.extend(expression_lock.assignment_lines(freq_param, index))
-                elif index in native_slots:
-                    sync_lines.append(f"    {expression_lock.register_for_slot(index)} = 0")
-                elif freq_param:
+                if freq_param:
                     sync_lines.append(
                         f"    {'xyzw'[index % 4]}{self.node.INTENSITY_START_INDEX + index // 4} = {freq_param} \n; {name}"
                     )
             for ordinal, group in enumerate(frame_groups):
                 slot = len(hash_unique_names) + ordinal
+                progress = "0" if "native_weight_slot" in group else group["progress"]
                 sync_lines.append(
-                    f"    {'xyzw'[slot % 4]}{self.node.INTENSITY_START_INDEX + slot // 4} = {group['progress']}"
+                    f"    {'xyzw'[slot % 4]}{self.node.INTENSITY_START_INDEX + slot // 4} = {progress}"
                     f" \n; frame group ordinal {ordinal} (group {group['group']})"
                 )
             if logical_hash in native_hashes:
@@ -2351,6 +2372,7 @@ class DirectShapeKeyOutputMixin:
                     clear_shader_rel=(
                         f"./res/{native_morph.CLEAR_SHADER_NAME}"
                     ),
+                    capture_gates_by_hash=transfer_gates,
                 )
             )
         self.node._write_ordered_dict_to_ini(sections, target_ini_file, preserved_tail_content, preserved_driver_content)

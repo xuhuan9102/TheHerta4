@@ -410,11 +410,6 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         default=True,
         update=sync_shapekey_direct_mode,
     )
-    native_expression_lock_channels: bpy.props.StringProperty(
-        name="ZZMI 原生表情锁定通道",
-        description="填写 Deform 编号，例如 2, 15。对应的形态键强度变量为 0 时跟随游戏，非零时作为手动强度",
-        default="",
-    )
     bake_disabled_shape_keys: bpy.props.BoolProperty(
         name="烘焙未勾选的形态键",
         description=(
@@ -1014,7 +1009,6 @@ class SSMTNode_PostProcess_ShapeKey(SSMTNode_PostProcess_Base):
         export_box.label(text="导出优化", icon='EXPORT')
         export_box.prop(self, "direct_export_mode")
         export_box.prop(self, "bake_disabled_shape_keys")
-        export_box.prop(self, "native_expression_lock_channels")
 
         drive_box = layout.box()
         drive_box.label(text="拖拽驱动形态键", icon='DRIVER')

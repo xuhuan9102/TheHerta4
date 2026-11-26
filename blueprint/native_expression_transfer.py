@@ -278,7 +278,9 @@ def render_transfer_sections(draw_hash, mesh, mapping_file):
         "cs-t108 = null",
     ]
 
-    return f"run = {shader}", sections
+    command = f"CommandList{stem}"
+    sections[f"[{command}]"] = [f"run = {shader}"]
+    return f"run = {command}", sections
 
 
 def install_transfer_sections(sections, draw_hash, mesh, mapping_file):
@@ -289,6 +291,13 @@ def install_transfer_sections(sections, draw_hash, mesh, mapping_file):
     vertex_count = len(mesh.source_vertices)
     match_vertex_count = f"match_vertex_count = {len(mesh.native_basis)}"
     palette_prefix = f"ResourceZZPalette_{draw_hash}_s"
+    legacy_run = f"run = CustomShaderZZMINativeExpression_{draw_hash}"
+    legacy_prepare = f"{legacy_run}_PrepareLocks"
+    for lines in (position_lines, blend_lines):
+        lines[:] = [
+            line[:len(line) - len(line.lstrip())] + run_command if line.strip() == legacy_run else line
+            for line in lines if line.strip() != legacy_prepare
+        ]
     if (
         any(line.lstrip().startswith(palette_prefix) for line in blend_lines)
         and any(line.strip() == run_command for line in blend_lines)

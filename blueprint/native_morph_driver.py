@@ -273,7 +273,7 @@ def shader_override_name(shader_hash: str) -> str:
     return f"{SHADER_OVERRIDE_PREFIX}_{safe_name(shader_hash)}"
 
 
-def _group_capture_commands(plans_by_hash: dict) -> list:
+def _group_capture_commands(plans_by_hash: dict, capture_gates_by_hash: dict) -> list:
     grouped_by_filter = {}
     for logical_hash, plan in sorted(plans_by_hash.items()):
         for entry in plan.entries:
@@ -297,12 +297,16 @@ def _group_capture_commands(plans_by_hash: dict) -> list:
                 continue
             emitted_hashes.add(logical_hash)
             plan = plans_by_hash[logical_hash]
-            command_lines.extend(
-                [
-                    f"    x94 = {plan.lookup_count}",
-                    f"    run = {custom_shader_capture_name(logical_hash)}",
-                ]
-            )
+            gate = capture_gates_by_hash.get(logical_hash)
+            indent = "        " if gate else "    "
+            if gate:
+                command_lines.append(f"    if {gate} != 0")
+            command_lines.extend([
+                f"{indent}x94 = {plan.lookup_count}",
+                f"{indent}run = {custom_shader_capture_name(logical_hash)}",
+            ])
+            if gate:
+                command_lines.append("    endif")
         command_lines.append("endif")
     command_lines.extend(
         [
@@ -310,6 +314,10 @@ def _group_capture_commands(plans_by_hash: dict) -> list:
             "x95 = $zzmi_saved_x95",
         ]
     )
+    if plans_by_hash.keys() <= capture_gates_by_hash.keys():
+        gates = dict.fromkeys(capture_gates_by_hash[logical_hash] for logical_hash in sorted(plans_by_hash))
+        condition = " || ".join(f"{gate} != 0" for gate in gates)
+        return [f"if {condition}", *(f"    {line}" for line in command_lines), "endif"]
     return command_lines
 
 
@@ -320,6 +328,7 @@ def render_native_morph_ini_sections(
     lookup_filename_by_hash: dict,
     capture_shader_rel: str,
     clear_shader_rel: str,
+    capture_gates_by_hash=None,
 ) -> dict:
     sections = {}
     if not plans_by_hash:
@@ -356,7 +365,7 @@ def render_native_morph_ini_sections(
         GENERIC_CAPTURE_PATTERN,
     ]
     sections[f"[{GENERIC_CAPTURE_COMMAND}]"] = _group_capture_commands(
-        plans_by_hash
+        plans_by_hash, capture_gates_by_hash or {},
     )
 
     for logical_hash, plan in sorted(plans_by_hash.items()):
