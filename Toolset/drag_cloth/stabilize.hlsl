@@ -12,6 +12,15 @@ groupshared uint BiggestMove;
 
 float3 NativePosition(uint i) { return Source[Representatives[i]].position; }
 
+float3 StabilizationBase(float3 native, float3 up, float4 foot, float2 interval)
+{
+    if (!TwoEnded() || foot.w <= 1e-6)
+        return native;
+    float level = saturate(dot(native - foot.xyz, up) / foot.w);
+    // Keep both commanded cuff heights when attenuating the solved shape.
+    return native + up * ((lerp(interval.x, interval.y, level) - level) * foot.w);
+}
+
 [numthreads(64, 1, 1)]
 void main(uint lane : SV_GroupIndex)
 {
@@ -41,10 +50,13 @@ void main(uint lane : SV_GroupIndex)
     float common = 1.0;
     float poseScale = max(State[8].z, 0.001);
     float limitMotion = (max(Config[6].w * 1.5, 0.018) + max(1 - Config[4].x, 0) * Config[6].w) * poseScale;
+    float2 interval = GarmentInterval(State[0].xy);
+    float4 foot = State[4];
+    float3 up = State[5].xyz;
     for (uint i = lane; i < count; i += 64)
     {
         if (Representatives[i] >= nativeCount) { common = 0; continue; }
-        float3 offset = Particles[i].current.xyz - NativePosition(i);
+        float3 offset = Particles[i].current.xyz - StabilizationBase(NativePosition(i), up, foot, interval);
         float dist = length(offset);
         if (!isfinite(dist)) { common = 0; continue; }
         if (dist > limitMotion) common = min(common, limitMotion / max(dist, 0.000001));
@@ -56,9 +68,11 @@ void main(uint lane : SV_GroupIndex)
         uint a = asuint(edge.x), b = asuint(edge.y);
         if (edge.w > 0.5 || a >= count || b >= count || Representatives[a] >= nativeCount || Representatives[b] >= nativeCount)
             continue;
-        float3 base = NativePosition(a) - NativePosition(b);
+        float3 nativeA = NativePosition(a), nativeB = NativePosition(b);
+        float3 base = StabilizationBase(nativeA, up, foot, interval)
+            - StabilizationBase(nativeB, up, foot, interval);
         float3 solved = Particles[a].current.xyz - Particles[b].current.xyz;
-        float original = length(base);
+        float original = length(nativeA - nativeB);
         float result = length(solved);
         if (!isfinite(original) || !isfinite(result)) { common = 0; continue; }
         InterlockedMax(BiggestEdge, asuint(result / max(original, 0.000001)));
@@ -80,7 +94,7 @@ void main(uint lane : SV_GroupIndex)
         {
             if (Representatives[i] >= nativeCount) continue;
             Particle p = Particles[i];
-            float3 base = NativePosition(i);
+            float3 base = StabilizationBase(NativePosition(i), up, foot, interval);
             p.current.xyz = blend <= 0 ? base : lerp(base, p.current.xyz, blend);
             p.previous.xyz = p.current.xyz;
             Particles[i] = p;
