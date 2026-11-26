@@ -131,20 +131,13 @@ class SSMT_OT_FillMarkedTextureMaterials(bpy.types.Operator):
 
 
 def _merged_skeleton_logic_names() -> tuple:
-    """骨骼合并**复选框**（「使用融合统一顶点组」）适用的逻辑名集合。
-
-    WWMI（融合统一顶点组）/ EFMI（终末地）/ ZZMI（绝区零）/ HIMI（崩坏3）共用
-    同一把开关与同一批工作空间缓存键（VGMap/VGOffset/VGCount）。本次只**新增
-    HIMI**：WWMI / EFMI / ZZMI 的复选框可见性与改动前逐字相同。
-
-    在**调用时**求值并逐项 getattr 兜底：轻量宿主/测试桩可能只给 LogicName
-    挂了子集属性，模块导入期不得因此崩溃。
-    """
+    """暴露统一顶点组导入选项的游戏。"""
     return (
         getattr(LogicName, "WWMI", "WWMI"),
         getattr(LogicName, "EFMI", "EFMI"),
         getattr(LogicName, "ZZMI", "ZZMI"),
         getattr(LogicName, "HIMI", "HIMI"),
+        getattr(LogicName, "APMI", "APMI"),
     )
 
 

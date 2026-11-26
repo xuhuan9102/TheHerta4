@@ -892,6 +892,33 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
     if GlobalConfig.logic_name == _himi_logic_name and not himi_merged_consumption:
         merged_vgmap_import_override = None
 
+    apmi_skeletons = {}
+    if GlobalConfig.logic_name == LogicName.APMI:
+        merged_vgmap_import_override = False
+        if GlobalProterties.import_merged_vgmap():
+            from ..common.apmi_capture import APMICapture
+            from ..common.apmi_skeleton import SKELETON_PROPERTY, build_skeletons, capture_folder
+
+            yield 45, "读取 APMI 骨骼矩阵"
+            metadata_paths = {}
+            try:
+                workspace = GlobalConfig.path_workspace_folder()
+                selection_file = os.path.join(workspace, "Import.json")
+                selection = JsonUtils.LoadFromFile(selection_file) if os.path.isfile(selection_file) else {}
+                for target in import_targets:
+                    key = target["import_key"]
+                    folders = WorkSpaceHelper.get_ordered_gpu_cpu_import_folderpath_list(target["submesh_folder_path"])
+                    if not folders:
+                        raise ValueError(f"{key} 缺少 GameType 目录。")
+                    selected = selection.get(key)
+                    folder = next((path for path in folders if _extract_gametype_name(path) == selected), folders[0])
+                    metadata_paths[key] = os.path.join(folder, target["submesh_folder_name"] + ".json")
+                capture = APMICapture(capture_folder(workspace))
+                apmi_skeletons = build_skeletons(capture, metadata_paths.items(), workspace)
+            except (ValueError, OSError) as error:
+                self.report({'ERROR'}, f"APMI 合并骨骼导入失败：{error}")
+                return False
+
     foldername_gametypename_dict = {}
     imported_objects = []
     import_records = []
@@ -908,6 +935,9 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
         final_import_folder_path_list = WorkSpaceHelper.get_ordered_gpu_cpu_import_folderpath_list(
             target["submesh_folder_path"],
         )
+        apmi_skeleton = apmi_skeletons.get(target["import_key"])
+        if apmi_skeleton:
+            final_import_folder_path_list = [os.path.dirname(metadata_paths[target["import_key"]])]
         print("Final Import Folder Path List: " + str(final_import_folder_path_list))
 
         for import_folder_path in final_import_folder_path_list:
@@ -919,13 +949,20 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
             try:
                 print("尝试导入路径: " + import_folder_path)
                 json_file_path = os.path.join(import_folder_path, submesh_folder_name + ".json")
+                import_options = {}
+                if apmi_skeleton:
+                    skeleton, palette = apmi_skeleton
+                    import_options["merged_vgmap"] = dict(enumerate(palette.slots))
                 imported_obj = SSMTImportHelper.create_mesh_from_json(
                     json_file_path=json_file_path,
                     import_collection=target["import_collection"],
                     use_merged_vgmap=merged_vgmap_import_override,
+                    **import_options,
                 )
                 if imported_obj is None:
                     continue
+                if apmi_skeleton:
+                    imported_obj[SKELETON_PROPERTY] = skeleton.identity
 
                 display_name = target["display_name"]
                 workspace_unique_str = str(imported_obj.get("3DMigoto:WorkspaceUniqueStr", "") or "").strip()
@@ -971,6 +1008,12 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
                 print(f"导入目录失败：{import_folder_path}，错误：{e}")
                 continue
             break
+
+    if apmi_skeletons and len(import_records) != len(import_targets):
+        for obj in imported_objects:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        self.report({'ERROR'}, "APMI 合并骨骼导入未覆盖全部部件，请核对日志中的 GameType 与权重数据。")
+        return False
 
     if not import_records:
         self.report({'ERROR'}, "当前工作空间没有成功导入任何模型，已跳过蓝图生成。")

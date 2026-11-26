@@ -325,17 +325,7 @@ class ZZMIBlendDowncastGuardTests(unittest.TestCase):
 
 
 class GroupNameResolutionGateTests(unittest.TestCase):
-    """【t66 门控】按组名解析 BLENDINDICES 槽号**只对 HIMI 生效**。
-
-    `parse_elementname_data_dict` 把 `vertex_group_names` 交给 v3 提取器之前有一道门：
-    `GlobalConfig.logic_name != HIMI ⇒ vertex_group_names = None`。本用例用**间谍**替换
-    v3 提取器，直接观察它实际收到的参数 —— 非 HIMI 必须是 `None`（旧行为），
-    HIMI 必须拿到组名表（新行为）。
-
-    「拿到组名表之后会按名字写槽号」由
-    `tests/test_himi_merged_runtime.py::HIMIVertexGroupNameResolutionTests` 覆盖；
-    两条合起来才等于「HIMI 新、其余旧」。
-    """
+    """HIMI 与 APMI 以数字组名标识实际骨骼槽。"""
 
     def setUp(self):
         self._original_logic = GlobalConfig.logic_name
@@ -363,7 +353,7 @@ class GroupNameResolutionGateTests(unittest.TestCase):
         )
         return self.calls
 
-    def test_non_himi_logics_keep_the_old_index_behaviour(self):
+    def test_other_logics_keep_the_list_index_behaviour(self):
         """EFMI / GIMI / SRMI / HTMI 走 else 分支：提取器必须收到 None（= 旧行为）。
 
         刻意不含 ZZMI / ZZMIDX12（合并开关打开时走 for_layout 分支）、
@@ -376,21 +366,13 @@ class GroupNameResolutionGateTests(unittest.TestCase):
                     [None],
                 )
 
-    def test_himi_receives_the_group_names(self):
-        """HIMI 是唯一放行的逻辑：提取器必须收到组名表。"""
-        self.assertEqual(
-            self._names_seen_by_extractor("HIMI", ["5", "9"]),
-            [["5", "9"]],
-        )
-
-    def test_gate_is_present_in_the_call_site(self):
-        """源码级钉子：门控一旦被删掉（例如为了「统一口径」而顺手放开），本用例失败。"""
-        source = (ROOT / "common" / "obj_buffer_helper.py").read_text(encoding="utf-8")
-        self.assertIn(
-            'if GlobalConfig.logic_name != getattr(LogicName, "HIMI", "HIMI"):\n'
-            "                vertex_group_names = None",
-            source,
-        )
+    def test_himi_and_apmi_receive_the_group_names(self):
+        for logic_name in ("HIMI", "APMI"):
+            with self.subTest(logic_name=logic_name):
+                self.assertEqual(
+                    self._names_seen_by_extractor(logic_name, ["5", "9"]),
+                    [["5", "9"]],
+                )
 
 
 if __name__ == "__main__":

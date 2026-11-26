@@ -357,6 +357,7 @@ class ClearCacheLogicGateTests(unittest.TestCase):
                 LogicName.EFMI,
                 LogicName.ZZMI,
                 LogicName.HIMI,
+                "APMI",
             ),
         )
         self.assertEqual(
@@ -371,7 +372,7 @@ class ClearCacheLogicGateTests(unittest.TestCase):
         original = _panel.LogicName
         try:
             _panel.LogicName = subset
-            self.assertEqual(merged_skeleton_logic_names(), ("WWMI", "EFMI", "ZZMI", "HIMI"))
+            self.assertEqual(merged_skeleton_logic_names(), ("WWMI", "EFMI", "ZZMI", "HIMI", "APMI"))
             self.assertEqual(merged_skeleton_cache_logic_names(), ("EFMI", "ZZMI", "HIMI"))
         finally:
             _panel.LogicName = original

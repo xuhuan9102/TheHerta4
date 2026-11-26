@@ -767,19 +767,13 @@ class ObjBufferHelper:
             print("尘白禁区权重处理")
             blendweights_dict, blendindices_dict = VertexGroupUtils.get_blendweights_blendindices_v4_fast(mesh=mesh,normalize_weights = normalize_weights,blend_size=blend_size)
         else:
-            # 【t66 门控】按组名解析槽号**只对 HIMI 生效**：其它逻辑一律传 None
-            # ⇒ `resolve_group_slot` 不被调用，BLENDINDICES 仍是「`object.vertex_groups`
-            # 列表序号」= 本次改动之前的逐字节行为。
-            # 机制与单测保留（`utils/vertexgroup_utils.resolve_group_slot`），待某个游戏
-            # 验证过「组名 = 全局骨骼槽」口径之后再逐个放开。
-            if GlobalConfig.logic_name != getattr(LogicName, "HIMI", "HIMI"):
+            # HIMI 与 APMI 用数字组名保存实际骨骼槽。其他游戏沿用组列表顺序。
+            if GlobalConfig.logic_name not in (getattr(LogicName, "HIMI", "HIMI"), getattr(LogicName, "APMI", "APMI")):
                 vertex_group_names = None
             blendweights_dict, blendindices_dict = VertexGroupUtils.get_blendweights_blendindices_v3(
                 mesh=mesh,
                 normalize_weights=normalize_weights,
-                vertex_group_names=vertex_group_names,   # 【t66】按组名解析槽号（仅 HIMI）
-                # 【t88】HIMI 合并路线 fail-closed：组名不是纯数字就终止导出，
-                # 不再静默退回「取列表序号」——那条路会绑错骨而且没有任何提示。
+                vertex_group_names=vertex_group_names,
                 strict_group_names=vertex_group_names is not None,
                 object_name=object_name,
             )

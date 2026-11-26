@@ -28,6 +28,7 @@ class SSMTImportHelper:
 		json_file_path:str,
 		import_collection:bpy.types.Collection | None = None,
 		use_merged_vgmap:bool | None = None,
+		merged_vgmap:dict | None = None,
 	):
 		"""从子网格 JSON 创建对象。
 
@@ -54,6 +55,10 @@ class SSMTImportHelper:
 			and bool(getattr(submesh_json, "MergedSkeletonMetadataValid", True))
 			and int(submesh_json.VGCount or 0) > 0
 		) else None
+		vg_count = submesh_json.VGCount
+		if merged_vgmap is not None:
+			wwmi_vg_map = merged_vgmap
+			vg_count = len(merged_vgmap)
 
 		obj = MeshCreateHelper.create_mesh_object(
 			mesh_name=mesh_name,
@@ -75,7 +80,7 @@ class SSMTImportHelper:
 			wwmi_vertex_count=submesh_json.VertexCount,
 			wwmi_vg_map=wwmi_vg_map,
 			wwmi_vg_offset=submesh_json.VGOffset,
-			wwmi_vg_count=submesh_json.VGCount,
+			wwmi_vg_count=vg_count,
 		)
 		if obj is not None:
 			obj["3DMigoto:WorkspaceUniqueStr"] = SSMTImportHelper._build_workspace_unique_str_from_json_path(json_file_path)

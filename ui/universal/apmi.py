@@ -1,155 +1,41 @@
+import json
 import re
 import struct
 from collections import defaultdict
 from pathlib import Path
 
 from ...blueprint.export_helper import BlueprintExportHelper
-from ...common.efmi_skeleton import EFMISkeletonMergeHelper
+from ...common.apmi_capture import (
+    APMICapture, plan_texcoord_overrides, render_layout_captures, skin_group_count, texcoord_layout,
+)
+from ...common.apmi_skeleton import (
+    MATRIX_STRIDE, REPLACED_PARTS_PROPERTY, SKELETON_PROPERTY, build_skeletons, capture_folder, selected_metadata,
+)
 from ...common.export_section_registry import draw_ib_context
 from ...common.global_config import GlobalConfig
 from ...common.global_properties import GlobalProterties
 from ...common.ini_variable_validator import find_runtime_ini
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from ...common.m_ini_helper import M_IniHelper
-from ...common.object_prefix_helper import coerce_index
+from ...common.object_prefix_helper import ObjectPrefixHelper, coerce_index
 from ...common.submesh_metadata import SubmeshMetadataResolver
+from ...common.ttl_protocol import build_transparency_draw_lines, require_apmi_ttl_core
 from ...utils.obj_utils import ObjUtils
 from ...utils.timer_utils import TimerUtils
 from .unity import ExportUnity
 
 
-_SKIN_GROUP_SIZE = 64
 _SKIN_BINDINGS = ("cs-t0", "cs-t1", "cs-cb0", "cs-u0")
-_SKIN_DUMP = re.compile(r"(\d+)-(cs-t[01]|cs-cb0|u0)=([0-9a-f]{8})-cs=[0-9a-f]{16}\.buf", re.I)
-_DRAW_DUMP = re.compile(r"(\d+)-(ib|vb[013])=([0-9a-f]{8})-vs=([0-9a-f]{16})-.*\.buf", re.I)
-_DRAW_CALL = re.compile(r"(\d+) DrawIndexed\(IndexCount:(\d+), StartIndexLocation:(\d+), BaseVertexLocation:(-?\d+)\)")
-_DISPATCH_CALL = re.compile(r"(\d+) Dispatch\(ThreadGroupCountX:(\d+), ThreadGroupCountY:(\d+), ThreadGroupCountZ:(\d+)\)")
-_VB_ELEMENT = re.compile(
-    r"\s*SemanticName: (\w+)\s+SemanticIndex: (\d+)\s+Format: (\w+)"
-    r"\s+InputSlot: (\d+)\s+AlignedByteOffset: (\d+)"
-)
-
-
-def _texcoord_layout(game_type):
-    layout = {}
-    offset = 0
-    for element in game_type.D3D11ElementList:
-        if element.Category == "Texcoord":
-            layout[element.SemanticName, element.SemanticIndex] = offset, element.Format
-            offset += element.ByteWidth
-    return layout
-
-
-def _skin_group_count(vertex_count):
-    return (vertex_count + _SKIN_GROUP_SIZE - 1) // _SKIN_GROUP_SIZE
-
-
-def _validate_texcoord_layout(path, part, expected):
-    if path is None or not path.is_file():
-        raise ValueError(f"APMI：{part.unique_str} 的抓帧缺少 vb1 布局，请重新抓帧并保留 VB 的 TXT 文件。")
-    with path.open(encoding="utf-8", errors="replace") as stream:
-        header = []
-        for line in stream:
-            if line.startswith("vertex-data:"):
-                break
-            header.append(line)
-    text = "".join(header)
-    captured_stride = re.search(r"^stride: (\d+)", text, re.M)
-    stride = part.d3d11_game_type.CategoryStrideDict.get("Texcoord")
-    if captured_stride is None or int(captured_stride[1]) != stride:
-        actual = captured_stride[1] if captured_stride else "未知"
-        raise ValueError(f"APMI：{part.unique_str} 的 GameType 声明 vb1 步长为 {stride}，抓帧记录为 {actual}。")
-    captured = {
-        (name, int(index)): (int(offset), fmt)
-        for name, index, fmt, slot, offset in _VB_ELEMENT.findall(text)
-        if slot == "1"
-    }
-    for (name, index), (offset, fmt) in expected.items():
-        actual = captured.get((name, index))
-        if actual != (offset, fmt):
-            found = f"偏移 {actual[0]} / {actual[1]}" if actual else "缺失"
-            raise ValueError(
-                f"APMI：{part.unique_str} 的 vb1 {name}{index} 布局不一致。"
-                f"GameType 为偏移 {offset} / {fmt}，抓帧为 {found}。请校正数据类型后重新导入。"
-            )
-    # Multiple shader semantics can alias one physical field in the vertex buffer.
-    if set(captured.values()) != set(expected.values()):
-        raise ValueError(f"APMI：{part.unique_str} 的 GameType 未覆盖抓帧记录的 vb1 字段。")
-
-
-class _Capture:
-    def __init__(self, folder):
-        self.skin = defaultdict(dict)
-        self.draw = defaultdict(dict)
-        self.texcoord_dumps = {}
-        self.calls = {}
-        self.dispatches = {}
-        for path in Path(folder).glob("*.buf"):
-            match = _SKIN_DUMP.fullmatch(path.name)
-            if match:
-                ordinal, slot, resource_hash = match.groups()
-                self.skin[ordinal][slot] = (resource_hash, path)
-                continue
-            match = _DRAW_DUMP.fullmatch(path.name)
-            if match:
-                ordinal, slot, resource_hash, shader = match.groups()
-                self.draw[ordinal, shader][slot] = resource_hash
-                if slot == "vb1":
-                    self.texcoord_dumps[ordinal, shader] = path.with_suffix(".txt")
-        with (Path(folder) / "log.txt").open(encoding="utf-8", errors="replace") as log:
-            for line in log:
-                match = _DRAW_CALL.match(line)
-                if match:
-                    ordinal, count, start, base = match.groups()
-                    self.calls[ordinal] = int(count), int(start), int(base)
-                match = _DISPATCH_CALL.match(line)
-                if match:
-                    ordinal, x, y, z = match.groups()
-                    self.dispatches[ordinal] = int(x), int(y), int(z)
-
-    def skin_parameters(self, output_hash, position_stride, blend_stride):
-        params = set()
-        for ordinal, bindings in self.skin.items():
-            if len(bindings) != 4 or bindings["u0"][0] != output_hash:
-                continue
-            position_size = bindings["cs-t0"][1].stat().st_size
-            count, remainder = divmod(position_size, position_stride)
-            cb = bindings["cs-cb0"][1].read_bytes()
-            blend = bindings["cs-t1"][1]
-            if (count and not remainder and len(cb) == 16 and struct.unpack_from("<I", cb)[0] == count
-                    and self.dispatches.get(ordinal) == (_skin_group_count(count), 1, 1)
-                    and blend.stat().st_size == count * blend_stride and bindings["u0"][1].stat().st_size == position_size):
-                params.add(cb[4:])
-        if not params:
-            raise ValueError(
-                f"APMI：抓帧中没有匹配输出 {output_hash} 的蒙皮通道。"
-                f"请核对 GameType 的 Position 步长 {position_stride} 和 Blend 步长 {blend_stride}。"
-            )
-        if len(params) != 1:
-            raise ValueError(f"APMI：蒙皮输出 {output_hash} 在抓帧中对应多组蒙皮参数。")
-        return params.pop()
-
-    def draw_passes(self, draw_ib, output_hash, count, start, part, texcoord_layout):
-        shaders = set()
-        previous_position = False
-        for (ordinal, shader), bindings in self.draw.items():
-            if (bindings.get("ib") != draw_ib or bindings.get("vb0") != output_hash
-                    or self.calls.get(ordinal) != (count, start, 0)):
-                continue
-            if "vb3" in bindings and bindings["vb3"] != output_hash:
-                raise ValueError(f"APMI：{draw_ib} 的 vb3 与蒙皮输出不同，当前无法恢复该渲染输入。")
-            _validate_texcoord_layout(self.texcoord_dumps.get((ordinal, shader)), part, texcoord_layout)
-            previous_position |= "vb3" in bindings
-            shaders.add(shader)
-        if not shaders:
-            raise ValueError(f"APMI：抓帧中没有匹配 {draw_ib}（索引数 {count}，起始索引 {start}）的 DrawIndexed。")
-        return shaders, previous_position
+_PS_SLOT = re.compile(r"ps-t(0|[1-9]\d{0,2})", re.ASCII)
 
 
 class ExportAPMI(ExportUnity):
     def __init__(self, blueprint_model):
         game_types = {}
         validated = set()
+        self._skeleton_ids = {}
+        self._bone_ids = defaultdict(set)
+        self._replaced_parts = defaultdict(set)
         for draw_call in blueprint_model.ordered_draw_obj_data_model_list:
             identity = draw_call.get_workspace_unique_str()
             obj = ObjUtils.get_obj_by_name(draw_call.get_blender_obj_name())
@@ -157,7 +43,18 @@ class ExportAPMI(ExportUnity):
                 continue
             if identity not in game_types:
                 game_types[identity] = SubmeshMetadataResolver.resolve(identity).d3d11_game_type
-            self._validate_object(obj, game_types[identity])
+            self._bone_ids[identity].update(self._validate_object(obj, game_types[identity]))
+            skeleton_id = str(obj.get(SKELETON_PROPERTY, ""))
+            if skeleton_id and not GlobalProterties.import_merged_vgmap():
+                raise ValueError(f"APMI：{obj.name} 使用融合顶点组。请启用融合导出，或按局部顶点组重新导入。")
+            if self._skeleton_ids.setdefault(identity, skeleton_id) != skeleton_id:
+                raise ValueError(f"APMI：{identity} 混用了不同骨架的顶点组。")
+            replaced = obj.get(REPLACED_PARTS_PROPERTY)
+            if replaced is not None:
+                sources = json.loads(replaced) if isinstance(replaced, str) else None
+                if not skeleton_id or not isinstance(sources, list) or not all(isinstance(key, str) for key in sources):
+                    raise ValueError(f"APMI：{obj.name} 的合并来源记录无效。")
+                self._replaced_parts[identity].update(sources)
             validated.add((identity, obj.name))
         super().__init__(blueprint_model)
 
@@ -178,26 +75,48 @@ class ExportAPMI(ExportUnity):
         missing = uvs.difference(obj.data.uv_layers.keys()) | colors.difference(obj.data.color_attributes.keys())
         if missing:
             raise ValueError(f"APMI：{obj.name} 缺少 GameType 要求的属性 {', '.join(sorted(missing))}。")
-        weighted_vertices = {
-            vertex.index for vertex in obj.data.vertices
-            if any(group.weight > 0 for group in vertex.groups)
-        }
-        if any(loop.vertex_index not in weighted_vertices for loop in obj.data.loops):
-            raise ValueError(f"APMI：{obj.name} 有绘制顶点缺少有效顶点组权重，请重新导入或转移原始权重后再导出。")
+        used_bones = set()
+        for index in {loop.vertex_index for loop in obj.data.loops}:
+            weights = [group for group in obj.data.vertices[index].groups if group.weight > 0]
+            if not weights:
+                raise ValueError(f"APMI：{obj.name} 有绘制顶点缺少有效顶点组权重，请重新导入或转移原始权重后再导出。")
+            used_bones.update(group.group for group in weights)
+        bone_names = [obj.vertex_groups[index].name for index in used_bones]
+        if any(not name.isascii() or not name.isdecimal() for name in bone_names):
+            raise ValueError(f"APMI：{obj.name} 有非数字骨骼组参与绑定。")
+        return set(map(int, bone_names))
 
     def export(self):
         output_dir = GlobalConfig.path_generate_mod_folder()
         runtime_ini = find_runtime_ini(output_dir, GlobalConfig.current_game_migoto_folder)
-        skin_core = Path(runtime_ini).parent / "Core" / "APMI_Skinning.ini"
-        if not runtime_ini or not skin_core.is_file():
-            template = Path(__file__).resolve().parents[2] / "resources" / skin_core.name
-            raise ValueError(f"APMI：缺少共享蒙皮配置 {skin_core}。请安装随插件提供的 {template} 后重新导出。")
-        capture_dir = EFMISkeletonMergeHelper.resolve_frame_analysis_dir(GlobalConfig.path_workspace_folder())
-        if not capture_dir or not (Path(capture_dir) / "log.txt").is_file():
-            raise ValueError("APMI：工作空间缺少可读取的 FrameAnalysis。请关联提取时的抓帧目录后重新导出。")
-        capture = _Capture(capture_dir)
+        workspace = GlobalConfig.path_workspace_folder()
+        capture = APMICapture(capture_folder(workspace))
+        render_captures = render_layout_captures(workspace)
+        skeleton_ids_needed = set(self._skeleton_ids.values()) - {""}
+        skeletons_by_id = defaultdict(dict)
+        if skeleton_ids_needed:
+            source_metadata = list(selected_metadata(workspace))
+            for key, source in build_skeletons(capture, source_metadata, workspace).items():
+                skeletons_by_id[source[0].identity][key] = source
+            if skeleton_ids_needed - skeletons_by_id.keys():
+                for key, source in build_skeletons(capture, source_metadata, workspace, use_pose_samples=False).items():
+                    skeletons_by_id[source[0].identity][key] = source
+        core_files = ["APMI_Skinning.ini"]
+        if skeletons_by_id:
+            core_files.extend(("APMI_MergedSkeleton.ini", "APMI_ImportPalette.hlsl"))
+        if not runtime_ini:
+            raise ValueError("APMI：找不到加载器 d3dx.ini，请在 SSMT 中校正 APMI 的加载器目录。")
+        for name in core_files:
+            if not (Path(runtime_ini).parent / "Core" / name).is_file():
+                template = Path(__file__).resolve().parents[2] / "resources" / name
+                raise ValueError(f"APMI：缺少加载器 Core/{name}，请安装插件附带的 {template}。")
+        if any(drawcall.transparency_info for drawcall in self.blueprint_model.ordered_draw_obj_data_model_list):
+            require_apmi_ttl_core(runtime_ini)
         models = {model.draw_ib: model for model in self.drawib_model_list}
         plans = []
+        merged_jobs = defaultdict(list)
+        needed_slots = defaultdict(set)
+        replaced_draws = {}
         output_hashes = set()
         render_shaders = set()
         for draw_ib, model in models.items():
@@ -211,39 +130,147 @@ class ExportAPMI(ExportUnity):
             output_hashes.add(output_hash)
             cb_params = capture.skin_parameters(output_hash, position_stride, blend_stride)
             passes = []
-            texcoords = _texcoord_layout(model.d3d11_game_type)
+            first_draw = None
+            skeleton_ids = set()
+            texcoords = texcoord_layout(model.d3d11_game_type)
             for part in model.submesh_model_list:
                 strides = part.d3d11_game_type.CategoryStrideDict
                 if strides.get("Position") != position_stride or strides.get("Blend") != blend_stride:
                     raise ValueError(f"APMI：{part.unique_str} 的 Position 或 Blend 与同一蒙皮通道的布局不一致。")
-                if _texcoord_layout(part.d3d11_game_type) != texcoords:
+                if texcoord_layout(part.d3d11_game_type) != texcoords:
                     raise ValueError(f"APMI：{draw_ib} 的子网格声明了不同的 vb1 布局。")
                 count = coerce_index(part.match_index_count, field="match_index_count", context=part.unique_str)
                 start = coerce_index(part.match_first_index, field="match_first_index", context=part.unique_str)
-                shaders, previous_position = capture.draw_passes(draw_ib, output_hash, count, start, part, texcoords)
+                shaders, previous_position, first = capture.draw_passes(draw_ib, output_hash, count, start, part, texcoords)
+                overrides = {}
+                if render_captures:
+                    primary = dict(capture.native_texcoord_layouts(draw_ib, output_hash, count, start))
+                    observed = (
+                        layout for render_capture in render_captures
+                        for layout in render_capture.native_texcoord_layouts(draw_ib, output_hash, count, start)
+                    )
+                    overrides = plan_texcoord_overrides(primary, observed)
+                first_draw = first if first_draw is None else min(first, first_draw)
+                key = part.workspace_unique_str or part.unique_str
+                skeleton_ids.add(self._skeleton_ids.get(key, ""))
                 render_shaders.update(shaders)
-                passes.append((part, count, start, previous_position))
-            plans.append((model, cb_params, passes))
+                passes.append((part, count, start, previous_position, self._ps_texture_bindings(model, part), overrides))
+            if len(skeleton_ids) != 1:
+                raise ValueError(f"APMI：{draw_ib} 的子网格混用了不同骨架的顶点组。")
+            skeleton_id = next(iter(skeleton_ids))
+            skeleton = None
+            if skeleton_id:
+                skeletons = skeletons_by_id.get(skeleton_id, {})
+                found = skeletons.get(key)
+                if not found or found[0].identity != skeleton_id or found[1].output != output_hash:
+                    raise ValueError(f"APMI：{key} 的骨骼来源已经变化，请重新导入后再导出。")
+                skeleton, palette = found
+                for part in model.submesh_model_list:
+                    identity = part.workspace_unique_str or part.unique_str
+                    if max(self._bone_ids[identity], default=-1) >= skeleton.count:
+                        raise ValueError(f"APMI：{identity} 引用了骨骼池之外的顶点组。")
+                    needed_slots[skeleton].update(self._bone_ids[identity])
+                last_source = max(source.ordinal for source in skeleton.palettes)
+                hosts = [source for source in skeleton.palettes
+                         if source.shader == palette.shader and source.pose_constants == palette.pose_constants]
+                if not any(last_source <= source.ordinal < first_draw for source in hosts):
+                    raise ValueError(f"APMI：{draw_ib} 绘制前没有兼容的原生蒙皮调度可使用完整骨骼池。")
+                merged_jobs[skeleton].extend((host.output, draw_ib) for host in hosts)
+                for part in model.submesh_model_list:
+                    identity = part.workspace_unique_str or part.unique_str
+                    for source_key in sorted(self._replaced_parts.get(identity, ())):
+                        source = skeletons.get(source_key)
+                        if not source or source[0] != skeleton or source_key in self._skeleton_ids:
+                            raise ValueError(f"APMI：{source_key} 须与宿主 {identity} 共用骨架且由宿主统一导出。")
+                        metadata = SubmeshMetadataResolver.resolve(source_key)
+                        source_parts = ObjectPrefixHelper.parse_prefix_parts(source_key)
+                        source_ib = source_parts["draw_ib"]
+                        source_count = coerce_index(source_parts["index_count"], field="index_count", context=source_key)
+                        source_start = coerce_index(source_parts["first_index"], field="first_index", context=source_key)
+                        source_output = source[1].output
+                        source_shaders, _, source_first = capture.draw_passes(
+                            source_ib, source_output, source_count, source_start, metadata,
+                            texcoord_layout(metadata.d3d11_game_type),
+                        )
+                        if source_first <= last_source:
+                            raise ValueError(f"APMI：{source_key} 在宿主蒙皮完成前绘制，无法安全合并。")
+                        draw_key = source_ib, source_count, source_start
+                        replacement = draw_ib, source_output, skeleton.identity
+                        if replaced_draws.setdefault(draw_key, replacement) != replacement:
+                            raise ValueError(f"APMI：{source_key} 被指定给了多个宿主。")
+                        render_shaders.update(source_shaders)
+            plans.append((model, cb_params, passes, skeleton))
+
+        providers = {}
+        palette_layouts = {}
+        for skeleton in merged_jobs:
+            for palette in skeleton.palettes:
+                if providers.setdefault(palette.output, skeleton.identity) != skeleton.identity:
+                    raise ValueError(f"APMI：同一骨骼来源 {palette.output} 混用了两套统一编号，请按同一编号重新导入。")
+                layouts = {palette.blend_hash: palette.writes}
+                required = needed_slots[skeleton].intersection(palette.writes)
+                for order in palette.orders:
+                    writes = [-1] * palette.count
+                    for source_index, native_index in enumerate(order.local_indices):
+                        if native_index >= 0:
+                            writes[native_index] = palette.writes[source_index]
+                    if required.issubset(writes):
+                        layouts[order.blend_hash] = tuple(writes)
+                palette_layouts[palette.output] = layouts
+        filter_indices = {
+            blend_hash: 7311000 + index
+            for index, blend_hash in enumerate(sorted({key for layouts in palette_layouts.values() for key in layouts}))
+        }
 
         TimerUtils.start_stage("缓冲文件生成")
         output = Path(GlobalConfig.path_generatemod_buffer_folder())
         self.generate_buffer_files(str(output))
-        for model, cb_params, _ in plans:
+        for model, cb_params, _, _ in plans:
             (output / f"{model.draw_ib}-SkinParams.buf").write_bytes(struct.pack("<I", model.vertex_count) + cb_params)
+        for skeleton in merged_jobs:
+            for palette in skeleton.palettes:
+                for blend_hash, writes in palette_layouts[palette.output].items():
+                    layout_name = self._palette_layout_name(palette, blend_hash)
+                    use_map = self._needs_palette_map(palette, writes)
+                    (output / f"APMI-{layout_name}-PaletteRange.buf").write_bytes(
+                        struct.pack("<4I", palette.start, palette.count, use_map, 0),
+                    )
+                    if use_map:
+                        (output / f"APMI-{layout_name}-PaletteMap.buf").write_bytes(
+                            struct.pack(f"<{palette.count}I", *(slot & 0xffffffff for slot in writes)),
+                        )
         TimerUtils.end_stage("缓冲文件生成")
 
         TimerUtils.start_stage("INI配置生成")
-        ini = M_IniBuilder()
+        ini = M_IniBuilder(compact=True)
         M_IniHelper.generate_hash_style_texture_ini(ini, models)
         M_IniHelper.generate_shared_slot_style_texture_ini(ini, models)
         self._integrate_object_swap_ini_hook(ini)
         for shader in sorted(render_shaders):
             self._section(ini, M_SectionType.VertexShaderCheck, f"ShaderOverrideAPMIDraw_{shader}",
                           [f"hash = {shader}", "allow_duplicate_hash = overrule", "checktextureoverride = ib"])
-        for model, _, passes in plans:
+        replacement_hosts = {host for host, _, _ in replaced_draws.values()}
+        for model, _, passes, skeleton in plans:
             with draw_ib_context(model.draw_ib):
-                self._write_drawib(ini, model, passes)
+                self._write_drawib(ini, model, passes, skeleton, track_replacement=model.draw_ib in replacement_hosts)
             M_IniHelper.move_slot_style_textures(draw_ib_model=model)
+        for skeleton, jobs in merged_jobs.items():
+            self._write_skeleton(ini, skeleton, jobs, palette_layouts, filter_indices)
+        for blend_hash, index in filter_indices.items():
+            self._section(ini, M_SectionType.TextureOverrideVB, f"TextureOverrideAPMIBlendLayout_{blend_hash}", [
+                f"hash = {blend_hash}", "match_priority = -870", f"filter_index = {index}",
+            ])
+        for (source_ib, count, start), (host, source_output, skeleton_id) in replaced_draws.items():
+            self._section(ini, M_SectionType.TextureOverrideIB, f"TextureOverrideAPMIReplaced_{source_ib}_{count}_{start}", [
+                f"hash = {source_ib}",
+                f"match_first_index = {start}",
+                f"match_index_count = {count}",
+                f"if $costume_mods && $apmi_{host}_skinned && !$APMISkeleton_{skeleton_id}_ambiguous"
+                f" && ($apmi_{host}_drawn || $apmi_{host}_drawn_previous)"
+                f" && @vb0 === @ResourceAPMINativeOutput_{source_output}",
+                "    handling = skip",
+                "endif",
+            ])
         M_IniHelper.add_branch_key_sections(ini, self.blueprint_model.keyname_mkey_dict)
         M_IniHelper.add_shapekey_ini_sections(ini, models)
         ini.save_to_file(GlobalConfig.path_generate_mod_ini())
@@ -257,23 +284,166 @@ class ExportAPMI(ExportUnity):
         else:
             section.append(f"[{name}]")
         section.extend(lines)
-        section.new_line()
         ini.append_section(section)
 
-    def _write_drawib(self, ini, model, passes):
+    @staticmethod
+    def _ps_texture_bindings(model, part):
+        slots = {}
+        if GlobalProterties.forbid_auto_texture_ini():
+            return slots
+        for mark in model.get_submesh_texture_markup_info_list(part):
+            if not M_IniHelper.is_slot_binding_mark_type(mark.mark_type):
+                continue
+            slot = str(mark.mark_slot or "").strip().lower()
+            match = _PS_SLOT.fullmatch(slot)
+            if not match or int(match[1]) >= 128:
+                raise ValueError(f"APMI：{part.unique_str} 的贴图 {mark.mark_name} 使用了无效的 PS 插槽 {mark.mark_slot!r}。")
+            slots[slot] = mark.get_resource_name()
+        return slots
+
+    @staticmethod
+    def _ttl_draw_lines(model, part, drawcall, offsets, base_vertex):
+        info = drawcall.transparency_info
+        if not info:
+            return None
+        resource = ""
+        if info["mode"] == "TEXTURE":
+            diffuse = {
+                mark.get_resource_name() for mark in model.get_submesh_texture_markup_info_list(part)
+                if mark.mark_name.casefold() == "diffusemap" and M_IniHelper.is_slot_binding_mark_type(mark.mark_type)
+                and mark.mark_filename and not GlobalProterties.forbid_auto_texture_ini()
+            }
+            if len(diffuse) != 1 or drawcall.match_draw_ib != model.draw_ib:
+                raise ValueError(f"APMI：{drawcall.obj_name} 的透明贴图节点需要唯一的 PS 插槽 DiffuseMap。")
+            resource = diffuse.pop()
+        index_offset = drawcall.index_offset if offsets is None else offsets.get(drawcall.obj_name, drawcall.index_offset)
+        return build_transparency_draw_lines(info, resource, drawcall.index_count, index_offset, base_vertex)
+
+    @staticmethod
+    def _palette_layout_name(source, blend_hash):
+        return source.output if blend_hash == source.blend_hash else f"{source.output}-{blend_hash}"
+
+    @staticmethod
+    def _needs_palette_map(source, writes):
+        return writes != tuple(range(source.start, source.start + source.count))
+
+    def _write_skeleton(self, ini, skeleton, jobs, palette_layouts, filter_indices):
+        prefix = f"APMISkeleton_{skeleton.identity}"
+        pool = "Resource" + prefix
+        failed = "$" + prefix + "_ambiguous"
+        seen = {source.output: "$" + prefix + f"_{source.output}_seen" for source in skeleton.palettes}
+        self._section(ini, M_SectionType.Constants, "Constants",
+                      [f"global {name} = 0" for name in (failed, *seen.values())])
+        self._section(ini, M_SectionType.Present, "Present",
+                      [f"post {name} = 0" for name in (failed, *seen.values())])
+        self._section(ini, M_SectionType.ResourceBuffer, pool, [
+            "type = StructuredBuffer", f"stride = {MATRIX_STRIDE}", f"array = {skeleton.count}",
+            "bind_flags = shader_resource unordered_access",
+        ])
+        saved_cb, saved_uav = pool + "_SavedCB", pool + "_SavedUAV"
+        for resource in (saved_cb, saved_uav):
+            self._section(ini, M_SectionType.ResourceBuffer, resource, [])
+        save = f"CommandList{prefix}_SaveBindings"
+        collect = f"CommandList{prefix}_CollectPalette"
+        save_lines = [f"{saved_cb} = ref cs-cb0", f"{saved_uav} = ref cs-u0"]
+        collect_lines = [r"run = CustomShader\APMI\Skeleton\ImportPalette"]
+        saved_map = pool + "_SavedMap"
+        if any(self._needs_palette_map(palette, writes) for palette in skeleton.palettes
+               for writes in palette_layouts[palette.output].values()):
+            self._section(ini, M_SectionType.ResourceBuffer, saved_map, [])
+            save_lines.append(f"{saved_map} = ref cs-t3")
+            collect_lines.extend((f"cs-t3 = ref {saved_map}", f"{saved_map} = null"))
+        save_lines.append(f"cs-u0 = ref {pool}")
+        collect_lines.extend([
+            f"cs-u0 = ref {saved_uav}", f"cs-cb0 = ref {saved_cb}",
+            f"{saved_uav} = null", f"{saved_cb} = null",
+        ])
+        kind = M_SectionType.MergedSkeleton
+        self._section(ini, kind, save, save_lines)
+        self._section(ini, kind, collect, collect_lines)
+
+        scheduled_hosts = defaultdict(list)
+        for host, draw_ib in jobs:
+            scheduled_hosts[host].append(draw_ib)
+        skin_groups = {}
+        ready = " && ".join(seen.values())
+        for targets in dict.fromkeys(tuple(draw_ibs) for draw_ibs in scheduled_hosts.values()):
+            command = f"CommandList{prefix}_Skin{len(skin_groups) + 1}"
+            skin_groups[targets] = command
+            self._section(ini, kind, command, [
+                f"if {ready}",
+                *(f"  run = CommandListAPMISkin_{draw_ib}" for draw_ib in targets),
+                "endif",
+            ])
+        folder = BlueprintExportHelper.get_current_buffer_folder_name()
+        for source in skeleton.palettes:
+            output = source.output
+            source_seen = seen[output]
+            native_output = f"ResourceAPMINativeOutput_{output}"
+            self._section(ini, M_SectionType.ResourceBuffer, native_output, [])
+            self._section(ini, M_SectionType.Present, "Present", [f"post {native_output} = null"])
+            layouts = palette_layouts[output]
+            selection = []
+            for index, (blend_hash, writes) in enumerate(layouts.items()):
+                layout_name = self._palette_layout_name(source, blend_hash)
+                params = pool + "_" + layout_name.replace("-", "_") + "_Range"
+                self._section(ini, M_SectionType.ResourceBuffer, params, [
+                    "type = Buffer", "bind_flags = constant_buffer",
+                    f"filename = {folder}/APMI-{layout_name}-PaletteRange.buf",
+                ])
+                keyword = "if" if index == 0 else "elif"
+                selection.append(f"    {keyword} cs-t1 == {filter_indices[blend_hash]}")
+                selection.append(f"      cs-cb0 = ref {params}")
+                if self._needs_palette_map(source, writes):
+                    slot_map = pool + "_" + layout_name.replace("-", "_") + "_Map"
+                    self._section(ini, M_SectionType.ResourceBuffer, slot_map, [
+                        "type = StructuredBuffer", "stride = 4",
+                        f"filename = {folder}/APMI-{layout_name}-PaletteMap.buf",
+                    ])
+                    selection.append(f"      cs-t3 = ref {slot_map}")
+            selection.append("    endif")
+            blend_matches = " || ".join(f"cs-t1 == {filter_indices[key]}" for key in layouts)
+            commands = [
+                f"hash = {output}",
+                f"if $costume_mods && cs-t2->stride == {MATRIX_STRIDE} && cs-t2->size == {source.count * MATRIX_STRIDE}"
+                f" && ({blend_matches})",
+                f"  if {source_seen}",
+                f"    {failed} = 1",
+                f"  elif !{failed}",
+                f"    {native_output} = ref cs-u0",
+                f"    run = {save}",
+                *selection,
+                rf"    $\APMI\Skeleton\groups = {skin_group_count(source.count)}",
+                f"    run = {collect}",
+                f"    {source_seen} = 1",
+            ]
+            if output in scheduled_hosts:
+                commands.append(f"    run = {skin_groups[tuple(scheduled_hosts[output])]}")
+            commands.extend(("  endif", "endif"))
+            self._section(ini, M_SectionType.TextureOverrideVB, f"TextureOverrideAPMIPalette_{output}", commands)
+
+    def _write_drawib(self, ini, model, passes, skeleton, *, track_replacement):
         draw_ib = model.draw_ib
         folder = BlueprintExportHelper.get_current_buffer_folder_name()
         position = f"Resource{draw_ib}Position"
         prefix = f"ResourceAPMI_{draw_ib}_"
         active = f"$apmi_{draw_ib}_skinned"
         has_previous = f"$apmi_{draw_ib}_has_previous"
-        needs_previous = any(previous for _, _, _, previous in passes)
+        drawn = f"$apmi_{draw_ib}_drawn"
+        drawn_previous = f"$apmi_{draw_ib}_drawn_previous"
+        needs_previous = any(previous for _, _, _, previous, _, _ in passes)
         constants = [f"global {active} = 0"]
         present = []
+        if track_replacement:
+            constants.extend((f"global {drawn} = 0", f"global {drawn_previous} = 0"))
+            present.extend((f"post {drawn_previous} = {drawn}", f"post {drawn} = 0"))
         if needs_previous:
             constants.append(f"global {has_previous} = 0")
+            history_ready = active
+            if skeleton:
+                history_ready += f" && !$APMISkeleton_{skeleton.identity}_ambiguous"
             present.extend([
-                f"if {active}",
+                f"if {history_ready}",
                 f"  post {prefix}Previous = copy {prefix}Skinned",
                 f"  post {has_previous} = 1",
                 "else",
@@ -298,44 +468,79 @@ class ExportAPMI(ExportUnity):
             self._section(ini, buffer_type, prefix + "Previous", ["type = Buffer", f"stride = {position_stride}", "bind_flags = vertex_buffer"])
         texcoord_stride = strides["Texcoord"]
         self._section(ini, buffer_type, prefix + "Texcoord", ["type = Buffer", f"stride = {texcoord_stride}", f"filename = {folder}/{draw_ib}-Texcoord.buf"])
-        saved = {slot: prefix + "Saved_" + slot.replace("-", "_") for slot in (*_SKIN_BINDINGS, "ib", "vb0", "vb1", "vb3")}
+        ps_slots = sorted({slot for _, _, _, _, textures, _ in passes for slot in textures})
+        skin_bindings = dict(zip(_SKIN_BINDINGS, (prefix + "SkinInput", prefix + "Blend", prefix + "Params", prefix + "Skinned")))
+        if skeleton:
+            skin_bindings = {"cs-t2": f"ResourceAPMISkeleton_{skeleton.identity}", **skin_bindings}
+        saved = {slot: prefix + "Saved_" + slot.replace("-", "_") for slot in (*skin_bindings, "ib", "vb0", "vb1", "vb3", *ps_slots)}
         for resource in saved.values():
             self._section(ini, buffer_type, resource, [])
 
         # The native position input can change between scenes while the skin output remains bound to the draw.
-        commands = [f"hash = {model.vertex_limit_hash}", "if $costume_mods", f"  {prefix}SkinInput = copy {position}"]
-        for slot, resource in zip(_SKIN_BINDINGS, (prefix + "SkinInput", prefix + "Blend", prefix + "Params", prefix + "Skinned")):
+        commands = ["if $costume_mods", f"  {prefix}SkinInput = copy {position}"]
+        for slot, resource in skin_bindings.items():
             commands.extend([f"  {saved[slot]} = ref {slot}", f"  {slot} = ref {resource}"])
-        commands.append(f"  dispatch = {_skin_group_count(model.vertex_count)}, 1, 1")
-        for slot in reversed(_SKIN_BINDINGS):
+        commands.append(f"  dispatch = {skin_group_count(model.vertex_count)}, 1, 1")
+        for slot in reversed(skin_bindings):
             commands.extend([f"  {slot} = ref {saved[slot]}", f"  {saved[slot]} = null"])
         if needs_previous:
             commands.extend([f"  if !{has_previous}", f"    {prefix}Previous = copy {prefix}Skinned", "  endif"])
         commands.extend([f"  {active} = 1", "endif"])
-        self._section(ini, M_SectionType.TextureOverrideVB, f"TextureOverrideAPMISkin_{draw_ib}", commands)
+        if skeleton:
+            self._section(ini, M_SectionType.MergedSkeleton, f"CommandListAPMISkin_{draw_ib}", commands)
+        else:
+            self._section(ini, M_SectionType.TextureOverrideVB, f"TextureOverrideAPMISkin_{draw_ib}",
+                          [f"hash = {model.vertex_limit_hash}", *commands])
 
-        for part, count, start, previous_position in passes:
+        for part, count, start, previous_position, textures, overrides in passes:
             ib_resource = model.get_submesh_ib_resource_name(part)
             basename = part.workspace_unique_str or part.unique_str
             self._section(ini, buffer_type, ib_resource, ["type = Buffer", "format = DXGI_FORMAT_R32_UINT", f"filename = {folder}/{basename}-Index.buf"])
             bindings = {"ib": ib_resource, "vb0": prefix + "Skinned", "vb1": prefix + "Texcoord"}
             if previous_position:
                 bindings["vb3"] = prefix + "Previous"
-            commands = [f"hash = {draw_ib}", f"match_first_index = {start}", f"match_index_count = {count}", f"if $costume_mods && {active} && vb1->stride == {texcoord_stride}", "  handling = skip"]
+            bindings.update(textures)
+            stride_matches = " || ".join(f"vb1->stride == {stride}" for stride in (texcoord_stride, *overrides))
+            ready = f"{active} && ({stride_matches})"
+            if skeleton:
+                ready += f" && !$APMISkeleton_{skeleton.identity}_ambiguous && @vb0 === @ResourceAPMINativeOutput_{model.vertex_limit_hash}"
+            commands = [f"hash = {draw_ib}", f"match_first_index = {start}", f"match_index_count = {count}", f"if $costume_mods && {ready}", "  handling = skip"]
+            for stride, lines in overrides.items():
+                commands.append(f"  if vb1->stride == {stride}")
+                commands.extend("    " + line for line in lines)
+                commands.append("  endif")
             if self.blueprint_model.keyname_mkey_dict:
                 commands.append("  $active0 = 1")
             for slot, resource in bindings.items():
                 commands.extend([f"  {saved[slot]} = ref {slot}", f"  {slot} = ref {resource}"])
             if not GlobalProterties.forbid_auto_texture_ini():
                 for mark in model.get_submesh_texture_markup_info_list(part):
-                    if M_IniHelper.is_slot_binding_mark_type(mark.mark_type):
-                        commands.append(f"  {mark.mark_slot} = {mark.get_resource_name()}")
-                    elif mark.mark_type == "Hash":
+                    if mark.mark_type == "Hash":
                         commands.append(f"  checktextureoverride = {mark.mark_slot}")
-            commands.extend("  " + line for line in M_IniHelper.get_drawindexed_str_list(part.drawcall_model_list, model.obj_name_draw_offset) if line)
-            for slot in reversed(bindings):
-                commands.extend([f"  {slot} = ref {saved[slot]}", f"  {saved[slot]} = null"])
-            commands.append("endif")
+            def draw_lines_for_object(drawcall, offsets, base):
+                lines = self._ttl_draw_lines(model, part, drawcall, offsets, base)
+                if not track_replacement or drawcall.index_count <= 0:
+                    return lines
+                if lines is None:
+                    lines = [drawcall.get_drawindexed_str(offsets, base_vertex=base)]
+                return [*lines, f"{drawn} = 1"]
+
+            draw_lines = M_IniHelper.get_drawindexed_str_list(
+                part.drawcall_model_list, model.obj_name_draw_offset,
+                draw_lines=draw_lines_for_object,
+            )
+            commands.extend("  " + line for line in draw_lines if line)
             suffix = model.get_submesh_texture_override_suffix(part)
+            if textures:
+                restore = f"CommandListAPMIRestoreTextures_{suffix}"
+                self._section(ini, M_SectionType.CommandList, restore, [
+                    line for slot in reversed(textures)
+                    for line in (f"{slot} = ref {saved[slot]}", f"{saved[slot]} = null")
+                ])
+                commands.append(f"  run = {restore}")
+            for slot in reversed(bindings):
+                if slot not in textures:
+                    commands.extend([f"  {slot} = ref {saved[slot]}", f"  {saved[slot]} = null"])
+            commands.append("endif")
             self._section(ini, M_SectionType.TextureOverrideIB, f"TextureOverride_{suffix}", commands)
         self.add_resource_texture_sections(ini, model)

@@ -1,6 +1,16 @@
 """TTL 协议公共实现：多个后处理节点共用同一份解析/生成逻辑。"""
 
 import re
+from pathlib import Path
+
+
+def require_apmi_ttl_core(runtime_ini):
+    if not runtime_ini or not Path(runtime_ini).is_file():
+        raise ValueError("APMI：TTL 需要有效的加载器 d3dx.ini。")
+    core = Path(runtime_ini).parent / "Core"
+    for name in ("APMI_TTL.ini", "APMI_TTLMask.hlsl", "APMI_TTLComposite.hlsl"):
+        if not (core / name).is_file():
+            raise ValueError(f"APMI：TTL 缺少加载器文件 {core / name}。")
 
 
 _TTL_DRAW_ARG_RE = re.compile(

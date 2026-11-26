@@ -204,6 +204,7 @@ class M_IniHelper:
         ordered_draw_obj_model_list: list[DrawCallModel],
         obj_name_draw_offset_dict: dict[str, int] | None = None,
         base_vertex: int = 0,
+        draw_lines=None,
     ) -> list[str]:
         """获取 drawindexed 命令字符串列表
         
@@ -216,6 +217,7 @@ class M_IniHelper:
             ordered_draw_obj_model_list: DrawCallModel 列表，按绘制顺序排列
             obj_name_draw_offset_dict: 对象名称到绘制偏移的映射字典
             base_vertex: drawindexed 的 base_vertex，合并网格重定向时使用
+            draw_lines: 可选的绘制命令回调，返回 None 时生成普通 drawindexed
             
         Returns:
             list[str]: drawindexed 命令字符串列表
@@ -231,6 +233,11 @@ class M_IniHelper:
             for obj_model in obj_model_list:
                 display_name = str(getattr(obj_model, 'obj_name', '') or getattr(obj_model, 'display_name', '') or '')
                 drawindexed_str_list.append(indent + "; [mesh:" + display_name + "] [vertex_count:" + str(obj_model.vertex_count) + "]" )
+                if draw_lines is not None:
+                    replacement = draw_lines(obj_model, obj_name_draw_offset_dict, base_vertex)
+                    if replacement is not None:
+                        drawindexed_str_list.extend(indent + line for line in replacement)
+                        continue
                 drawindexed = (
                     obj_model.get_drawindexed_str(obj_name_draw_offset_dict)
                     if base_vertex == 0
