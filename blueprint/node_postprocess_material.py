@@ -1976,6 +1976,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         """全局总开关；纯 Python 测试宿主没有 bpy 时按关闭处理（保持旧行为）。"""
         try:
             from ..common.global_properties import GlobalProterties
+            if GlobalConfig.logic_name == getattr(LogicName, "APMI", "APMI"):
+                return False
             if GlobalConfig.logic_name == LogicName.EFMI and cls._efmi_texture_slot_namespace():
                 return False
             return bool(GlobalProterties.use_dhash_texture())
@@ -2498,6 +2500,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         from ..utils.log_utils import LOG as _LOG
         if self._skip_ttl_for_transparency_node():
             return next_swap_key_num
+        apmi = GlobalConfig.logic_name == getattr(LogicName, "APMI", "APMI")
+        ttl_core_checked = False
         # 旧版把 TTL 排在段尾；重导出时先摘掉那几组，免得和就地替换叠成两份绘制。
         self._strip_ttl_groups(lines)
         mesh_lines_info = [(i, self.extract_mesh_name(line)) for i, line in enumerate(lines) if self.extract_mesh_name(line)]
@@ -2546,15 +2550,27 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
             # 已有库调用不重复转换，只同步物体名指定的层级。
             if any(str(bl).strip().casefold() == _TTL_CALL_LINE.casefold() for bl in block_lines):
-                layer_index, _weight = self._ttl_layer_settings_for_mesh(mesh_name, obj)
-                lines[block_start:block_end] = self._ttl_update_existing_layers(block_lines, layer_index)
+                if not apmi:
+                    layer_index, _weight = self._ttl_layer_settings_for_mesh(mesh_name, obj)
+                    lines[block_start:block_end] = self._ttl_update_existing_layers(block_lines, layer_index)
                 continue
             if not any(self._ttl_parse_drawindexed(str(bl).strip()) is not None for bl in block_lines):
                 _LOG.info(f"      TTL: 跳过 '{mesh_name}'（块内无 drawindexed）")
                 continue
 
+            if apmi and not ttl_core_checked:
+                from ..common.ini_variable_validator import find_runtime_ini
+                from ..common.ttl_protocol import require_apmi_ttl_core
+
+                require_apmi_ttl_core(find_runtime_ini(
+                    all_sections.get("_config_path", ""), GlobalConfig.current_game_migoto_folder,
+                ))
+                ttl_core_checked = True
+
             # 一个物体的所有 TTLMap 共用物体名指定的层号和权重。
             layer_index, layer_weight = self._ttl_layer_settings_for_mesh(mesh_name, obj)
+            if apmi and layer_index not in (None, 0):
+                raise ValueError(f"APMI：{mesh_name} 的 TTL 目前支持第 0 层，请移除或调整 TTL 层号。")
 
             # 参数紧贴调用写、落在同一个分支里：TTLib 每笔 Draw 结尾会把 alpha /
             # mask_channel / mask_invert / 遮罩 / _1.._3 全部复位，所以下一个块必须
@@ -2575,6 +2591,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 ttl_materials, r"Resource\TTL\TransparencyTex", "TTLMap", obj, texture_folder, all_sections,
                 {}, material_group_to_swapkey, swap_key_prefix, next_swap_key_num, used_swap_keys,
                 alpha_line_provider=alpha_line_provider)
+            if apmi and not any(line.strip().startswith(r"Resource\TTL\TransparencyTex =") for line in ttl_ref_lines):
+                raise ValueError(f"APMI：无法导出 {mesh_name} 的 TTLMap，请检查材质的贴图文件。")
             param_lines.extend(ttl_ref_lines)
             param_lines.append("${}TTL{}mask_channel = 3".format(chr(92), chr(92)))
             param_lines.append(_TTL_MASK_INVERT_LINE)
@@ -2583,7 +2601,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 alpha_value = self._ttl_apply_weight(alpha_value, layer_weight)
                 alpha_var = self._ttl_ensure_alpha_variable(alpha_value, all_sections)
                 param_lines.append("${}TTL{}alpha = {}".format(chr(92), chr(92), alpha_var))
-            if layer_index is not None:
+            if layer_index is not None and not apmi:
                 param_lines.append("${}TTL{}layer_index = {}".format(chr(92), chr(92), layer_index))
             param_lines.append("${}TTL{}V = {}".format(chr(92), chr(92), _TTL_DEFAULT_BRIGHTNESS))
 
@@ -3509,18 +3527,11 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 reset_insert_idx = self._find_mesh_block_reset_insert_index(lines, insert_index)
                 if reset_insert_idx != -1:
                     lines[reset_insert_idx:reset_insert_idx] = reset_lines
-        # 半透明生成有两套互不相干的协议，按游戏分派：
-        # - ZZMI：TTLib 的「把这一笔拆成第二遍绘制」，_process_ttl_sections 就地换掉绘制行；
-        # - EFMI：EFMITTL 共享库接管这一笔绘制，_process_efmi_ttl_sections 就地换掉
-        #   drawindexed 并交给库（同样不新建段、不改索引/顶点缓冲绑定）。
-        # 别的逻辑只做普通材质转资源与 FX/Glowmap，不得因为某种 drawindexed 参数恰好
-        # 能被正则解析就误入半透明链路。
-        # 别和 HI3FX 的 TTLMap 混淆：那是**第二个遮罩通道**（抖动半透明），属于普通
-        # 材质转资源，由上面的 FX 段落产出，不涉及这里的绘制接管。
+        # ZZMI 和 APMI 共用 TTL Draw 协议，EFMI 使用 EFMITTL。
         logic_name = GlobalConfig.logic_name
         if debug_disable_fx_ttl:
             _LOG.info(f"      调试开关已开启，跳过 {section_name} 的 FX/TTL 生成")
-        elif logic_name == LogicName.ZZMI:
+        elif logic_name in (LogicName.ZZMI, getattr(LogicName, "APMI", "APMI")):
             next_swap_key_num = self._process_ttl_sections(
                 section_name, lines, all_sections, material_group_to_swapkey,
                 swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder)

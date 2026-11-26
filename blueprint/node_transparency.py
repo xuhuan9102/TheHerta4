@@ -1,4 +1,4 @@
-"""按蓝图连接路径配置 ZZMI 的 TTL 透明绘制。"""
+"""按蓝图连接路径配置 TTL 透明绘制。"""
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty
@@ -31,9 +31,7 @@ class SSMTNode_Transparency(SSMTNodeBase):
         ),
         default='3',
     )
-    # 面板只服务 ZZMI（见 draw_buttons 的「仅在 ZZMI 模式生成 TTL 绘制」）：
-    # TTLib 需要 1 才是「白 = 不透明」，与 DiffuseMap / TTLMap 的 A = 不透明度一致。
-    # EFMI 另走 $\EFMITTL\mask_invert 常量（默认 0），不读这个面板值。
+    # ZZMI 和 APMI 共用 TTL 的「白 = 不透明」约定。
     mask_invert: BoolProperty(name="反转通道", default=True)
     alpha: FloatProperty(name="Alpha", default=0.5, min=0.0, max=1.0)
     brightness: FloatProperty(name="亮度", default=1.5, min=0.0, soft_max=5.0)
@@ -60,7 +58,7 @@ class SSMTNode_Transparency(SSMTNodeBase):
         else:
             layout.prop(self, "alpha", slider=True)
         layout.prop(self, "brightness")
-        layout.label(text="仅在 ZZMI 模式生成 TTL 绘制", icon='INFO')
+        layout.label(text="支持 ZZMI 和 APMI", icon='INFO')
 
     def get_transparency_info(self):
         """每条处理链拿独立快照，避免多节点、分支与重复导出串参数。"""

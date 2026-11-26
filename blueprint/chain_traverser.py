@@ -64,9 +64,9 @@ class ChainTraverser:
         self._model = blueprint_model
         self._tree = blueprint_model._tree
         self._duplicate_counter: Dict[str, int] = {}
-        self._zzmi_transparency_enabled = GlobalConfig.logic_name == LogicName.ZZMI
+        self._transparency_enabled = GlobalConfig.logic_name in (LogicName.ZZMI, getattr(LogicName, "APMI", "APMI"))
         self._transparency_parent_nodes = (
-            self._collect_transparency_parent_nodes() if self._zzmi_transparency_enabled else None
+            self._collect_transparency_parent_nodes() if self._transparency_enabled else None
         )
 
     def _collect_transparency_parent_nodes(self):
@@ -453,7 +453,7 @@ class ChainTraverser:
             chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
 
         elif node_type == _NODE_TYPE_TRANSPARENCY:
-            if self._zzmi_transparency_enabled:
+            if self._transparency_enabled:
                 chain.node_path.append(current_node)
                 chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
                 if chain.transparency_info is None:
