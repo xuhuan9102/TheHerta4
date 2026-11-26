@@ -15,9 +15,11 @@ def _install_module(name, **attrs):
 
 
 PKG = "_node_swap_context_copy_test_pkg"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common"):
     package = _install_module(package_name)
     package.__path__ = []
+sys.modules[f"{PKG}.common"].__path__ = [str(REPO_ROOT / "common")]
 
 
 class _FakeMenu:
@@ -55,7 +57,7 @@ _install_module(
 )
 
 
-module_path = Path(__file__).resolve().parents[1] / "blueprint" / "node_swap.py"
+module_path = REPO_ROOT / "blueprint" / "node_swap.py"
 spec = importlib.util.spec_from_file_location(f"{PKG}.blueprint.node_swap", module_path)
 node_swap = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = node_swap

@@ -15,9 +15,11 @@ def _install_module(name, **attrs):
 
 
 PKG = "_export_helper_shapekey_objects_test_pkg"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 for package_name in (PKG, f"{PKG}.blueprint", f"{PKG}.common", f"{PKG}.utils"):
     package = _install_module(package_name)
     package.__path__ = []
+sys.modules[f"{PKG}.blueprint"].__path__ = [str(REPO_ROOT / "blueprint")]
 
 
 class _FakeObjects(dict):
@@ -127,7 +129,7 @@ _install_module(
 )
 
 
-module_path = Path(__file__).resolve().parents[1] / "blueprint" / "export_helper.py"
+module_path = REPO_ROOT / "blueprint" / "export_helper.py"
 spec = importlib.util.spec_from_file_location(f"{PKG}.blueprint.export_helper", module_path)
 export_helper = importlib.util.module_from_spec(spec)
 sys.modules[f"{PKG}.blueprint.export_helper"] = export_helper
