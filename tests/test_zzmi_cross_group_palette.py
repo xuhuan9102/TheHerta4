@@ -85,7 +85,9 @@ def test_draw_palette_uses_live_anchors_for_donor_slots():
         donor["draw_ib"]: ("same-frame", separate, donor_rows),
     }
 
-    rows, params = cgp.direct_draw_palette_tables({"components": []}, owner, [donor], samples, 8)
+    tables, cb1_donors, helpers = cgp.direct_draw_palette_tables({"components": []}, owner, [donor], samples, 8)
+    assert cb1_donors == helpers == ()
+    rows, params = tables
 
     assert params == (0, 2, 8, 0)
     assert rows[:8] == [2, 3, 0, 1, 0, 0, 0, 0]
@@ -98,6 +100,48 @@ def test_draw_palette_uses_live_anchors_for_donor_slots():
     live_donor_rows = numpy.linalg.inv(live_conversion) @ _affine44(live_rows)
     recovered = _affine44(live_rows)[parent_slot - 2] @ numpy.linalg.inv(live_donor_rows[donor_slot - 5])
     numpy.testing.assert_allclose(recovered @ live_donor_rows, _affine44(live_rows), atol=1e-7)
+
+
+def test_draw_palette_walks_intermediate_parts_and_routes_unreachable_donors_to_cb1():
+    owner, bridge, donor, isolated = [
+        {"draw_ib": name, "vg_offset": i * 2, "vg_count": 2}
+        for i, name in enumerate(("body", "arm", "hand", "prop"))
+    ]
+    world = _affine44(_skeleton(8))
+    samples = {}
+    for name, indices, angle in (
+        ("body", [0, 1], 0.0), ("arm", [1, 2], .2),
+        ("hand", [2, 3], .5), ("prop", [4, 5], 1.0),
+    ):
+        transform = _conversion(angle=angle)
+        samples[name] = ("same-frame", transform, (numpy.linalg.inv(transform) @ world[indices])[:, :3])
+    tables, cb1_donors, helpers = cgp.direct_draw_palette_tables(
+        {"components": []}, owner, [donor, isolated], samples, 8, intermediates=[bridge],
+    )
+    rows, params = tables
+    assert params == (0, 3, 8, 0)
+    assert rows[8:14] == [2, 2, 0, 1, 1, 2]
+    assert rows[16:22] == [4, 2, 1, 1, 3, 4]
+    assert helpers == ("arm",)
+    assert cb1_donors == ("prop",)
+
+
+def test_disconnected_donor_reference_uses_the_owner_slot_and_bind_conversion():
+    owner = {"draw_ib": "body", "vg_offset": 4, "vg_count": 2}
+    donor = {"draw_ib": "prop", "vg_offset": 18, "vg_count": 1}
+    owner_transform = _conversion(translation=(.2, -.4, .8), angle=.5)
+    donor_transform = _conversion(translation=(.8, -.6, .1), angle=.7)
+    body_rows = _affine44(_skeleton(2))
+    desired = body_rows[1].copy()
+    desired[1, 3] += .002
+    donor_rows = numpy.linalg.solve(donor_transform, owner_transform @ desired)[None, :3]
+    samples = {"body": ("frame", owner_transform, body_rows[:, :3]),
+               "prop": ("frame", donor_transform, donor_rows)}
+    ref = numpy.frombuffer(cgp.direct_cb1_anchor_reference(owner, donor, samples), "<f4").reshape(4,4)
+    assert ref[3,0] == 5
+    numpy.testing.assert_allclose(body_rows[1] @ numpy.vstack((ref[:3], [0,0,0,1])), desired, atol=1e-6)
+    samples["prop"] = ("older", donor_transform, donor_rows)
+    assert cgp.direct_cb1_anchor_reference(owner, donor, samples) is None
 
 
 class FindWorldMatchesTest(unittest.TestCase):

@@ -2763,6 +2763,33 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
         exporter._append_merged_absorbed_skin_render(render_lines, "a23aa8a3")
         self.assertIn("    vb0 = ref ResourceZZSkinOut_a23aa8a3_s1", render_lines)
 
+    def test_disconnected_donor_uses_fresh_render_cb1_before_skinning(self):
+        exporter, models = self._make_exporter(sibling_blend_stride=16, host_groups=(0, 105))
+        exporter._zzmi_direct_cb1_donors = {"a23aa8a3": ("b20f90ea",)}
+        host_text = self._vb_text(exporter, models[0])
+        donor_text = self._vb_text(exporter, models[1])
+        self.assertIn("ResourceZZDirectCB1SO_a23aa8a3_s1 = ref so0", host_text)
+        self.assertIn("ResourceZZDirectCB1SO_b20f90ea_s1 = ref so0", donor_text)
+        self.assertNotIn("vb0 = Resourcea23aa8a3Position", host_text)
+        self.assertNotIn("run = CustomShaderZZMISkin_G0_s1_a23aa8a3", donor_text)
+
+        builder = _FakeIniBuilder()
+        exporter.add_merged_skeleton_sections(builder)
+        ini = "\n".join(_all_builder_lines(builder))
+        self.assertIn("cs-t2 = ref ResourceZZDirectCB1Palette_a23aa8a3_s1", ini)
+        self.assertIn("    run = CustomShaderZZDirectCB1Rebase_a23aa8a3_b20f90ea_s1\n"
+                      "    local $zz_cb1_saved_x1 = x1", ini)
+        self.assertIn("if $zz_cb1_published_a23aa8a3_s1 == 0", ini)
+        self.assertIn("$zz_cb1_ready_b20f90ea_s1 = 0", ini)
+
+        render = []
+        self.assertTrue(exporter._append_direct_cb1_draw_begin(render, "a23aa8a3"))
+        render_text = "\n".join(render)
+        self.assertIn("@vb0 == @ResourceZZDirectCB1SO_a23aa8a3_s1", render_text)
+        self.assertIn("$zz_cb1_ready_b20f90ea_s1 != 0", render_text)
+        self.assertIn("$zz_cb1_pose_b20f90ea_s2 == 0", render_text)
+        self.assertIn("run = CommandListZZDirectCB1Skin_a23aa8a3_s1", render_text)
+
     def test_host_without_supported_skin_layout_prints_diagnostic(self):
         import contextlib
         import io
@@ -2773,6 +2800,28 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             self._vb_text(exporter, models[0])
         self.assertIn("SKIN_LAYOUT_UNSUPPORTED", buf.getvalue())
+
+    def test_calibrated_fallback_keeps_the_body_draw_when_the_donor_is_absent(self):
+        exporter, _ = self._make_exporter(sibling_blend_stride=16, host_groups=(0, 105))
+        exporter._zzmi_direct_cb1_donors = {"a23aa8a3": ("b20f90ea",)}
+        reference = bytes(range(64))
+        exporter._zzmi_direct_cb1_references = {"a23aa8a3": {"b20f90ea": reference}}
+        written = {}
+        exporter._atomic_write_binary = lambda path, contents: written.update({os.path.basename(path): contents})
+
+        builder = _FakeIniBuilder()
+        exporter.add_merged_skeleton_sections(builder)
+        ini = "\n".join(_all_builder_lines(builder))
+        self.assertEqual(written["zz_cb1_reference_a23aa8a3_b20f90ea.buf"], reference)
+        self.assertIn("cs = ./res/zzmi_cb1_anchor_rebase.hlsl", ini)
+        self.assertIn("if $zz_cb1_live_b20f90ea != 0\n        run = CustomShaderZZDirectCB1Rebase", ini)
+        self.assertIn("else\n        run = CustomShaderZZDirectCB1Anchor_a23aa8a3_b20f90ea_s1", ini)
+
+        render = []
+        self.assertTrue(exporter._append_direct_cb1_draw_begin(render, "a23aa8a3"))
+        render_text = "\n".join(render)
+        self.assertIn("if @vb0 == @ResourceZZDirectCB1SO_a23aa8a3_s1", render_text)
+        self.assertNotIn("$zz_cb1_ready_b20f90ea_s1", render_text)
 
 
 class ZZMIStubObjectTests(unittest.TestCase):

@@ -2964,13 +2964,16 @@ class ExportZZMI(ExportUnity):
     def _prepare_direct_draw_palettes(self):
         """Plan live donor-to-owner conversions without renumbering the workspace VGMap."""
         self._zzmi_direct_draw_palettes = {}
+        self._zzmi_direct_cb1_donors = {}
+        self._zzmi_direct_cb1_references = {}
+        self._zzmi_direct_palette_intermediates = {}
         if not self.merged_skeleton_components or not self._merged_palette_enabled():
             return
         profile = _merged_palette_profile()
         if profile is None:
             return
         from ...common.zzmi_cross_group_palette import (
-            ZZMICrossGroupPaletteError,
+            direct_cb1_anchor_reference,
             direct_draw_palette_tables,
             merged_components,
         )
@@ -2996,16 +2999,30 @@ class ExportZZMI(ExportUnity):
                 donors = [entry for entry in donors if entry["draw_ib"] not in known]
             if not donors:
                 continue
-            for entry in (owner, *donors):
+            candidates = [entry for entry in components if entry["skeleton_group"] == owner["skeleton_group"]]
+            for entry in candidates:
                 ib = entry["draw_ib"]
                 if ib not in samples:
                     samples[ib] = self._read_draw_palette_sample(models[ib], entry["vg_count"])
-            try:
-                tables = direct_draw_palette_tables(profile, owner, donors, samples, capacity)
-            except ZZMICrossGroupPaletteError as error:
-                raise Fatal(f"ZZMI 合并蒙皮空间换算失败：{error}") from error
+            tables, cb1_donors, intermediates = direct_draw_palette_tables(
+                profile, owner, donors, samples, capacity, intermediates=candidates,
+            )
             if tables is not None:
                 self._zzmi_direct_draw_palettes[draw_ib] = tables
+            if intermediates:
+                self._zzmi_direct_palette_intermediates[draw_ib] = intermediates
+            if cb1_donors:
+                self._zzmi_direct_cb1_donors[draw_ib] = cb1_donors
+                references = {}
+                for donor in donors:
+                    donor_ib = donor["draw_ib"]
+                    if donor_ib in cb1_donors:
+                        reference = direct_cb1_anchor_reference(owner, donor, samples)
+                        if reference is not None:
+                            references[donor_ib] = reference
+                if references:
+                    self._zzmi_direct_cb1_references[draw_ib] = references
+                print(f"[ZZMI骨骼合并] {draw_ib} 的供骨 {', '.join(cb1_donors)} 使用渲染阶段 CB1 换算")
 
     def _read_draw_palette_sample(self, drawib_model, count):
         import numpy
@@ -3135,6 +3152,192 @@ class ExportZZMI(ExportUnity):
     @staticmethod
     def _merged_absorbed_skin_out_name(draw_ib: str, slot: int) -> str:
         return f"ResourceZZSkinOut_{draw_ib}_s{slot}"
+
+    def _direct_cb1_donors(self, draw_ib):
+        return getattr(self, "_zzmi_direct_cb1_donors", {}).get(draw_ib, ())
+
+    def _direct_cb1_references(self, draw_ib):
+        return getattr(self, "_zzmi_direct_cb1_references", {}).get(draw_ib, {})
+
+    def _direct_cb1_live_condition(self, owner, donor, slot, slots):
+        checks = [f"$zz_cb1_ready_{ib}_s{slot} != 0" for ib in (owner, donor)]
+        checks.extend(f"{self._merged_seen_var(self.merged_skeleton_component_id_dict[ib], slot)} > 0" for ib in (owner, donor))
+        # Occurrence slots alone cannot pair disconnected duplicate instances.
+        checks.extend(f"$zz_cb1_pose_{ib}_s{other} == 0" for ib in (owner, donor) for other in slots if other != slot)
+        return " && ".join(checks)
+
+    def _direct_cb1_capture_ids(self):
+        return {ib for host, donors in getattr(self, "_zzmi_direct_cb1_donors", {}).items() for ib in (host, *donors)}
+
+    def _append_direct_cb1_pose_capture(self, section, draw_ib, slot, indent):
+        if draw_ib in self._direct_cb1_capture_ids():
+            suffix = f"{draw_ib}_s{slot}"
+            section.extend([
+                f"{indent}ResourceZZDirectCB1SO_{suffix} = ref so0",
+                f"{indent}$zz_cb1_pose_{suffix} = 1",
+                # A new pose in a recycled slot invalidates the earlier render capture.
+                f"{indent}$zz_cb1_ready_{suffix} = 0",
+            ])
+            for host, donors in getattr(self, "_zzmi_direct_cb1_donors", {}).items():
+                if draw_ib == host or draw_ib in donors:
+                    section.append(f"{indent}$zz_cb1_published_{host}_s{slot} = 0")
+
+    def _append_direct_cb1_draw_begin(self, section, draw_ib):
+        """Capture this render's transform and select a current-frame skin output."""
+        if draw_ib not in self._direct_cb1_capture_ids():
+            return False
+        slots = self._merged_skeleton_slots()
+        pose_matches = {
+            slot: f"$zz_cb1_pose_{draw_ib}_s{slot} != 0 && @vb0 == @ResourceZZDirectCB1SO_{draw_ib}_s{slot}"
+            for slot in slots
+        }
+        for slot in slots:
+            suffix = f"{draw_ib}_s{slot}"
+            exclusive = "".join(f" && !({expr})" for other, expr in pose_matches.items() if other != slot)
+            section.extend([
+                f"if @vb0 != 0 && {pose_matches[slot]}{exclusive}",
+                f"    ResourceZZDirectCB1_{suffix} = copy vs-cb1",
+                f"    $zz_cb1_ready_{suffix} = ResourceZZDirectCB1_{suffix}->size >= 64",
+                "endif",
+            ])
+        donors = self._direct_cb1_donors(draw_ib)
+        if not donors:
+            return False
+
+        component_id = self.merged_skeleton_component_id_dict[draw_ib]
+        group = self.merged_skeleton_components[component_id]["skeleton_group"]
+        host = next(host for host in self._merged_group_absorbed_hosts(group) if host["draw_ib"] == draw_ib)
+        references = self._direct_cb1_references(draw_ib)
+        optional_writers = {self.merged_skeleton_component_id_dict[ib] for ib in references}
+        ready = {}
+        for slot in slots:
+            checks = [
+                f"{self._merged_seen_var(cid, slot)} > 0" for cid in host["required_component_ids"]
+                if cid not in optional_writers and (cid != component_id or not references)
+            ]
+            checks.extend(
+                self._direct_cb1_live_condition(draw_ib, donor, slot, slots)
+                for donor in donors if donor not in references
+            )
+            ready[slot] = " && " + " && ".join(dict.fromkeys(checks)) if checks else ""
+        section.append("local $zz_cb1_draw_slot = 0")
+        section.append("if @vb0 != 0")
+        slot_options = []
+        for slot in slots:
+            match = f"@vb0 == @ResourceZZDirectCB1SO_{draw_ib}_s{slot}"
+            exclusive = "".join(
+                f" && @vb0 != @ResourceZZDirectCB1SO_{draw_ib}_s{other}" for other in slots if other != slot
+            )
+            if not references:
+                match = pose_matches[slot]
+                exclusive = "".join(f" && !({pose_matches[other]})" for other in slots if other != slot)
+            slot_options.append((slot, match + exclusive + ready[slot]))
+        if references:
+            for slot in slots:
+                sole = f"$zz_cb1_pose_{draw_ib}_s{slot} != 0"
+                sole += "".join(f" && $zz_cb1_pose_{draw_ib}_s{other} == 0" for other in slots if other != slot)
+                slot_options.append((slot, sole + ready[slot]))
+        for i, (slot, condition) in enumerate(slot_options):
+            section.extend([f"    {'if' if i == 0 else 'elif'} {condition}", f"        $zz_cb1_draw_slot = {slot}"])
+        section.extend(["    endif", "endif"])
+        section.append("if $zz_cb1_draw_slot != 0")
+        for slot in slots:
+            section.extend([
+                f"    if $zz_cb1_draw_slot == {slot}",
+                f"        run = CommandListZZDirectCB1Skin_{draw_ib}_s{slot}",
+                "    endif",
+            ])
+        return True
+
+    def _append_direct_cb1_resources(self, section, constants, slots, bones_count, mod_meshes_dir):
+        for ib in sorted(self._direct_cb1_capture_ids()):
+            for slot in slots:
+                suffix = f"{ib}_s{slot}"
+                constants.extend([f"global $zz_cb1_pose_{suffix} = 0", f"global $zz_cb1_ready_{suffix} = 0"])
+                section.extend([
+                    f"[ResourceZZDirectCB1SO_{suffix}]", "",
+                    f"[ResourceZZDirectCB1_{suffix}]", "type = Buffer", "stride = 16",
+                    "format = R32G32B32A32_FLOAT", "bind_flags = shader_resource", "misc_flags = none", "",
+                ])
+        for host_ib, donors in sorted(getattr(self, "_zzmi_direct_cb1_donors", {}).items()):
+            cid = self.merged_skeleton_component_id_dict[host_ib]
+            group = self.merged_skeleton_components[cid]["skeleton_group"]
+            references = self._direct_cb1_references(host_ib)
+            for donor_ib, payload in sorted(references.items()):
+                stem = f"{host_ib}_{donor_ib}"
+                filename = f"zz_cb1_reference_{stem}.buf"
+                self._atomic_write_binary(os.path.join(mod_meshes_dir, filename), payload)
+                section.extend([
+                    f"[ResourceZZDirectCB1Reference_{stem}]", "type = Buffer",
+                    "format = R32G32B32A32_FLOAT", f"filename = Meshes/{filename}", "",
+                ])
+            for donor_ib in donors:
+                donor = self.merged_skeleton_components[self.merged_skeleton_component_id_dict[donor_ib]]
+                section.extend([
+                    f"[ResourceZZDirectCB1Range_{host_ib}_{donor_ib}]", "type = Buffer",
+                    "format = R32G32B32A32_UINT", f"data = {donor['vg_offset']} {donor['vg_count']} 0 0", "",
+                ])
+            for slot in slots:
+                suffix = f"{host_ib}_s{slot}"
+                palette = f"ResourceZZDirectCB1Palette_{suffix}"
+                published = f"$zz_cb1_published_{suffix}"
+                constants.append(f"global {published} = 0")
+                control = [f"[CommandListZZDirectCB1Skin_{suffix}]"]
+                pending = [f"{published} == 0"]
+                remember = []
+                for donor_ib in sorted(references):
+                    desired = f"$zz_cb1_live_{donor_ib}"
+                    previous = f"$zz_cb1_last_{host_ib}_{donor_ib}_s{slot}"
+                    constants.append(f"global {previous} = 0")
+                    control.append(f"local {desired} = {self._direct_cb1_live_condition(host_ib, donor_ib, slot, slots)}")
+                    pending.append(f"{desired} != {previous}")
+                    remember.append(f"{previous} = {desired}")
+                section.extend([
+                    f"[{palette}]", "type = RWBuffer", "format = R32G32B32A32_FLOAT",
+                    f"array = {bones_count * 3}", "bind_flags = shader_resource unordered_access", "",
+                ])
+                commands = []
+                if self._has_draw_palette_conversion(host_ib):
+                    commands.append(f"run = {self._merged_palette_conv_section_name(cid, slot)}")
+                commands.append(f"{palette} = copy {self._merged_deform_palette_name(host_ib, group, slot)}")
+                for donor_ib in donors:
+                    donor = self.merged_skeleton_components[self.merged_skeleton_component_id_dict[donor_ib]]
+                    shader = f"CustomShaderZZDirectCB1Rebase_{host_ib}_{donor_ib}_s{slot}"
+                    if donor_ib in references:
+                        fallback = f"CustomShaderZZDirectCB1Anchor_{host_ib}_{donor_ib}_s{slot}"
+                        commands.extend([f"if $zz_cb1_live_{donor_ib} != 0", f"    run = {shader}",
+                                         "else", f"    run = {fallback}", "endif"])
+                        section.extend([
+                            f"[{fallback}]", "cs = ./res/zzmi_cb1_anchor_rebase.hlsl",
+                            f"cs-t0 = ref {self._merged_skeleton_name(group, slot)}",
+                            f"cs-t1 = ref ResourceZZDirectCB1Reference_{host_ib}_{donor_ib}",
+                            f"cs-t3 = ref ResourceZZDirectCB1Range_{host_ib}_{donor_ib}",
+                            f"cs-u0 = ref {palette}",
+                            f"Dispatch = {self._merged_skin_dispatch_count(donor['vg_count'])}, 1, 1",
+                            "cs-u0 = null", "cs-t0 = null", "cs-t1 = null", "cs-t3 = null", "",
+                        ])
+                    else:
+                        commands.append(f"run = {shader}")
+                    section.extend([
+                        f"[{shader}]", "cs = ./res/zzmi_cb1_palette_rebase.hlsl",
+                        f"cs-t0 = ref {self._merged_skeleton_name(group, slot)}",
+                        f"cs-t1 = ref ResourceZZDirectCB1_{donor_ib}_s{slot}",
+                        f"cs-t2 = ref ResourceZZDirectCB1_{suffix}",
+                        f"cs-t3 = ref ResourceZZDirectCB1Range_{host_ib}_{donor_ib}",
+                        f"cs-u0 = ref {palette}",
+                        f"Dispatch = {self._merged_skin_dispatch_count(donor['vg_count'])}, 1, 1",
+                        "cs-u0 = null", "cs-t0 = null", "cs-t1 = null", "cs-t2 = null", "cs-t3 = null", "",
+                    ])
+                params = ("x1", "y1", "z1", "w1")
+                commands.extend(f"local $zz_cb1_saved_{param} = {param}" for param in params)
+                commands.append(f"run = {self._merged_skin_cs_name(group, slot, host_ib=host_ib)}")
+                commands.extend(f"{param} = $zz_cb1_saved_{param}" for param in params)
+                section.extend([
+                    *control, "if " + " || ".join(pending),
+                    *(f"    {line}" for line in (*commands, *remember)),
+                    f"    {published} = 1", "endif",
+                    f"vb0 = ref {self._merged_absorbed_skin_out_name(host_ib, slot)}", "",
+                ])
 
     @staticmethod
     def _zzmi_layout_element_format(semantic, element_format) -> str:
@@ -3587,6 +3790,8 @@ class ExportZZMI(ExportUnity):
         section.append("endif")
 
     def _append_merged_absorbed_skin_render(self, section, draw_ib):
+        if self._direct_cb1_donors(draw_ib):
+            return
         component_id = self.merged_skeleton_component_id_dict.get(draw_ib)
         if component_id is None:
             return
@@ -3775,6 +3980,8 @@ class ExportZZMI(ExportUnity):
                         slot,
                     )
                     if direct_host:
+                        if self._direct_cb1_donors(direct_host):
+                            palette = f"ResourceZZDirectCB1Palette_{direct_host}_s{slot}"
                         own_buffer = self._merged_absorbed_skin_out_name(direct_host, slot)
                         output = f"ResourceZZSkinWrite_{direct_host}_s{slot}"
                         section.append(f"{output} = ref {own_buffer}")
@@ -4912,6 +5119,7 @@ class ExportZZMI(ExportUnity):
             owned_plan = self._merged_owned_redirect_plan(skeleton_group)
             if owned_plan and component_id in owned_plan["required_component_ids"]:
                 section.append(f"{indent}ResourceZZSpaceSO_{draw_ib}_s{target_slot} = ref so0")
+            self._append_direct_cb1_pose_capture(section, draw_ib, target_slot, indent)
             if owner:
                 so_name = (
                     self._merged_absorbed_so_name(skeleton_group, target_slot, draw_ib)
@@ -5109,6 +5317,8 @@ class ExportZZMI(ExportUnity):
             for host in self._merged_group_absorbed_hosts(skeleton_group):
                 if component_id not in host["required_component_ids"]:
                     continue
+                if self._direct_cb1_donors(host["draw_ib"]):
+                    continue  # Its render CB1 is not available during deformation.
                 skin_plan = self._merged_absorbed_skin_plan(host)
                 if not self._merged_skin_publish_supported(skin_plan):
                     continue
@@ -5262,6 +5472,7 @@ class ExportZZMI(ExportUnity):
                 capture_lines.append(f"    {palette_line}")
                 if owned_plan and component_id in owned_plan["required_component_ids"]:
                     capture_lines.append(f"    ResourceZZSpaceSO_{draw_ib}_s{slot} = ref so0")
+                self._append_direct_cb1_pose_capture(capture_lines, draw_ib, slot, "    ")
                 for _so_owner_target_ib in so_owner_target_ibs:
                     capture_lines.append(
                         f"    {self._merged_redirect_so_name(skeleton_group, slot)} = ref so0"
@@ -5401,6 +5612,10 @@ class ExportZZMI(ExportUnity):
 
         # 4.5) 【已回退】F5 曾在此处（attach 之后）追加一次捕获以实现跨组同帧化，
         #      用户实测导致「两侧都抖、骨骼矩阵不对」——原因见 3) 上方注释。
+
+        if self._direct_cb1_donors(draw_ib):
+            # Capture the original SO for the render pass, and let the native draw populate it.
+            return
 
         # 5) 默认绑定与各实例绘制共用骨骼表选择规则。
         palette_source = self._merged_deform_palette_name(
@@ -5847,6 +6062,11 @@ class ExportZZMI(ExportUnity):
                 continue
             referenced = self._merged_referenced_bone_ids(draw_ib)
             required = {int(component_id)}
+            required.update(
+                self.merged_skeleton_component_id_dict[ib]
+                for ib in getattr(self, "_zzmi_direct_palette_intermediates", {}).get(draw_ib, ())
+                if ib in self.merged_skeleton_component_id_dict
+            )
             for writer_id in group_component_ids:
                 writer = self.merged_skeleton_components[writer_id]
                 offset = int(writer["vg_offset"])
@@ -5868,7 +6088,7 @@ class ExportZZMI(ExportUnity):
     def _merged_absorbed_skin_plan(self, host: dict) -> dict | None:
         """Use compute when a required writer cannot replay the host's input layout."""
         draw_ib = host["draw_ib"]
-        if all(
+        if not self._direct_cb1_donors(draw_ib) and all(
             self._merged_absorbed_replay_compatible(
                 self.merged_skeleton_components[component_id]["draw_ib"], draw_ib
             )
@@ -5988,6 +6208,8 @@ class ExportZZMI(ExportUnity):
         本块等待宿主捕获 SO，并按其网格引用的骨骼检查供骨件的到达情况。
         守卫闭合后，布局兼容的挂点即可重放蒙皮。
         """
+        if self._direct_cb1_donors(host["draw_ib"]):
+            return
         # 跨组供骨件（F3）：合并几何里被吸收的**别组**顶点，其骨骼由跨组 attach 写进
         # 本组缓冲，而那个 attach 读的是**跨组件自己那一段**捕获的 palette。守卫若不
         # 等它们到达，就只可能在宿主自己那段闭合——而宿主常常排在跨组件**之前**
@@ -6404,6 +6626,8 @@ class ExportZZMI(ExportUnity):
             for original_category_name, draw_category_name in d3d11_game_type.CategoryDrawCategoryDict.items():
                 if category_name != draw_category_name:
                     continue
+                if self._direct_cb1_donors(draw_ib):
+                    continue  # The native VB must remain drawable until both render transforms arrive.
                 category_original_slot = d3d11_game_type.CategoryExtractSlotDict[original_category_name]
                 texture_override_vb_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
 
@@ -7551,6 +7775,9 @@ class ExportZZMI(ExportUnity):
                 carrier_component_id = component_id_by_draw_ib.get(carrier["draw_ib"])
                 if carrier_component_id is not None:
                     required_component_ids.add(carrier_component_id)
+                for ib in getattr(self, "_zzmi_direct_palette_intermediates", {}).get(carrier["draw_ib"], ()):
+                    if ib in component_id_by_draw_ib:
+                        required_component_ids.add(component_id_by_draw_ib[ib])
                 for bone_id in self._collect_drawib_referenced_bone_ids(carrier["draw_ib"]):
                     owner_id = slot_owner.get(bone_id)
                     if owner_id is not None:
@@ -8130,6 +8357,7 @@ class ExportZZMI(ExportUnity):
                 self._atomic_write_binary(
                     os.path.join(mod_meshes_dir, filename), _struct.pack(f"<{len(values)}I", *values)
                 )
+        self._append_direct_cb1_resources(section, constants_section, slots, bones_count, mod_meshes_dir)
 
         # 跨组：每骨架组一份「对象→世界 cb1」捕获资源（**拆分绘制**用）。
         # 合并网格按来源拆成多次绘制时，每次绘制要绑**该来源自己**的对象变换，而
@@ -8623,6 +8851,11 @@ class ExportZZMI(ExportUnity):
                 present_section.append(
                     f"{self._merged_seen_var(component_id, slot)} = 0"
                 )
+        for ib in sorted(self._direct_cb1_capture_ids()):
+            for slot in slots:
+                present_section.extend([f"$zz_cb1_pose_{ib}_s{slot} = 0", f"$zz_cb1_ready_{ib}_s{slot} = 0"])
+                if self._direct_cb1_donors(ib):
+                    present_section.append(f"$zz_cb1_published_{ib}_s{slot} = 0")
         present_section.new_line()
 
         ini_builder.append_section(section)
@@ -8652,8 +8885,10 @@ class ExportZZMI(ExportUnity):
             self._merged_owned_redirect_plan(group)
             for group in self._merged_skeleton_groups()
         )
-        if owned_redirect:
+        if owned_redirect or self._direct_cb1_capture_ids():
             shader_names.append("zzmi_cb1_palette_rebase.hlsl")
+        if getattr(self, "_zzmi_direct_cb1_references", {}):
+            shader_names.append("zzmi_cb1_anchor_rebase.hlsl")
         direct_skinning = any(
             self._merged_skin_publish_supported(self._merged_absorbed_skin_plan(host))
             for group in self._merged_skeleton_groups()
@@ -8889,6 +9124,13 @@ class ExportZZMI(ExportUnity):
                         )
 
             # 原生 vb0 的资源身份对应当前实例的 deform SO。
+            direct_cb1_draw = self._append_direct_cb1_draw_begin(texture_override_ib_section, draw_ib)
+            if direct_cb1_draw:
+                game_type = drawib_model.d3d11GameType
+                for category in game_type.CategoryDrawCategoryDict:
+                    if category not in {"Position", "Blend"}:
+                        slot = game_type.CategoryExtractSlotDict[category]
+                        texture_override_ib_section.append(f"{slot} = Resource{draw_ib}{category}")
 
             ib_buf = drawib_model.submesh_ib_dict.get(submesh_model.unique_str, None)
             if ib_buf is None or len(ib_buf) == 0:
@@ -9122,6 +9364,8 @@ class ExportZZMI(ExportUnity):
                 # 材质节点把绘制单元移到 ;MARK: 之前。此处仍走 pre，
                 # 因为换绑 IB 后，ZZMI 的 post 检查可能找不到原来的渲染段。
                 texture_override_ib_section.extend(flow_restore)
+            if direct_cb1_draw:
+                texture_override_ib_section.extend(["else", "    drawindexed = auto", "endif"])
 
         ini_builder.append_section(texture_override_ib_section)
 
@@ -9362,6 +9606,25 @@ class ExportZZMI(ExportUnity):
             self._redirect_carrier_map, self._redirect_target_map, unredirected = (
                 self._build_merged_mesh_redirect_plan()
             )
+            cb1_groups = {
+                self.merged_skeleton_components[self.merged_skeleton_component_id_dict[ib]]["skeleton_group"]
+                for ib in self._zzmi_direct_cb1_donors
+            }
+            if cb1_groups:
+                self._redirect_target_map = {
+                    ib: plan for ib, plan in self._redirect_target_map.items()
+                    if self.merged_skeleton_components[self.merged_skeleton_component_id_dict[ib]]["skeleton_group"] not in cb1_groups
+                }
+                self._redirect_carrier_map = {
+                    ib: entry for ib, entry in self._redirect_carrier_map.items()
+                    if entry["target"] in self._redirect_target_map
+                }
+                for group in cb1_groups:
+                    for host in self._merged_group_absorbed_hosts(group):
+                        if self._direct_cb1_donors(host["draw_ib"]):
+                            plan = self._merged_absorbed_skin_plan(host)
+                            if not self._merged_skin_publish_supported(plan):
+                                raise Fatal(f"ZZMI CB1 蒙皮布局不兼容：{self._merged_skin_layout_diag(group, plan)}")
             if not _zzmi_prop_flag(
                 "zzmi_merged_redirect_enabled", False
             ) and (self._redirect_carrier_map or self._redirect_target_map):

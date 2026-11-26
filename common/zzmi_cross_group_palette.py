@@ -650,8 +650,8 @@ def find_world_matches(
     return unique_pairs, int(matches.sum())
 
 
-def direct_draw_palette_tables(profile, owner, donors, samples, capacity):
-    """Build the existing palette shader's tables for an owner that borrows additional bones.
+def direct_draw_palette_tables(profile, owner, donors, samples, capacity, *, intermediates=()):
+    """Build an anchored palette, and identify the donors that require CB1 conversion.
 
     Samples carry a common frame signature, a column-vector object-to-world matrix,
     and the original local palette. Only anchor indices are sent to the shader.
@@ -668,42 +668,80 @@ def direct_draw_palette_tables(profile, owner, donors, samples, capacity):
         rows = runtime_component_table(profile)
         known = set(indices)
 
-    original_size = len(rows)
-    owner_sample = samples.get(owner_ib)
-    for donor in donors:
-        donor_ib = donor["draw_ib"]
-        if donor_ib in known:
+    index_by_ib = {entry["ib_hash"]: index for index, entry in enumerate(existing) if entry["ib_hash"] in known}
+    index_by_ib[owner_ib] = owner_index
+    components = {entry["draw_ib"]: entry for entry in (*intermediates, *donors, owner)}
+    donor_ibs = {entry["draw_ib"] for entry in donors} - known
+    worlds = {}
+    frame = samples[owner_ib][0] if samples.get(owner_ib) else None
+    for ib, component in components.items():
+        sample = samples.get(ib)
+        if sample and sample[0] == frame:
+            _, object_matrix, palette = sample
+            worlds[ib] = object_matrix @ _affine_of(palette[:component["vg_count"]])
+    same_space = {
+        ib for ib in donor_ibs & worlds.keys()
+        if numpy.array_equal(samples[owner_ib][1], samples[ib][1])
+    }
+    needed_donors = donor_ibs - same_space
+    names_by_id = {entry["component_id"]: entry["ib_hash"] for entry in existing}
+    known_parents = {
+        entry["ib_hash"]: names_by_id[entry["parent_component_id"]]
+        for entry in existing if entry["ib_hash"] in known
+    }
+    known_parents.setdefault(owner_ib, owner_ib)
+    ancestor_paths = {}
+    for ib in known:
+        ancestors = []
+        current = ib
+        while known_parents[current] != current:
+            current = known_parents[current]
+            ancestors.append(current)
+        ancestor_paths[ib] = ancestors
+    depth = {ib: len(path) for ib, path in ancestor_paths.items()}
+    parents = {}
+    pending = set(worlds) - known
+    frontier = [owner_ib] + sorted(known - {owner_ib})
+    for parent in frontier:
+        if not (needed_donors - parents.keys()) or parent not in worlds or depth[parent] >= 32:
             continue
-        donor_sample = samples.get(donor_ib)
-        if not owner_sample or not donor_sample or owner_sample[0] != donor_sample[0]:
-            raise ZZMICrossGroupPaletteError(f"{owner_ib} ← {donor_ib} 缺少同帧骨骼和对象矩阵缓存")
-        _, owner_object, owner_palette = owner_sample
-        _, donor_object, donor_palette = donor_sample
-        if numpy.array_equal(owner_object, donor_object):
+        for child in sorted(pending):
+            parent_world, child_world = worlds[parent], worlds[child]
+            anchors, _ = find_world_matches(
+                parent_world, child_world, rotation_tolerance=2e-4,
+                translation_tolerance=2e-4, relative_translation_tolerance=0,
+            )
+            valid = [
+                (a, b) for a, b in anchors
+                if abs(numpy.linalg.det(parent_world[a, :3, :3])) > 1e-6
+                and abs(numpy.linalg.det(child_world[b, :3, :3])) > 1e-6
+            ]
+            if valid:
+                a, b = min(valid, key=lambda pair: numpy.max(numpy.abs(parent_world[pair[0]] - child_world[pair[1]])))
+                parents[child] = parent, a, b
+                depth[child] = depth[parent] + 1
+                pending.remove(child)
+                frontier.append(child)
+
+    path_ibs = set()
+    for ib in needed_donors & parents.keys():
+        while ib not in known and ib not in path_ibs:
+            path_ibs.add(ib)
+            ib = parents[ib][0]
+        if ib != owner_ib:
+            path_ibs.add(ib)
+        path_ibs.update(ancestor_paths.get(ib, ()))
+    if path_ibs:
+        path_ibs.update(ancestor_paths[owner_ib])
+    for ib, (parent, a, b) in parents.items():
+        if ib not in path_ibs:
             continue
+        index_by_ib[ib] = len(rows) // 8
+        rows.extend((components[ib]["vg_offset"], components[ib]["vg_count"], index_by_ib[parent], 1,
+                     components[parent]["vg_offset"] + a, components[ib]["vg_offset"] + b, 0, 0))
 
-        owner_world = owner_object @ _affine_of(owner_palette[:owner["vg_count"]])
-        donor_world = donor_object @ _affine_of(donor_palette[:donor["vg_count"]])
-        anchors, _ = find_world_matches(
-            owner_world, donor_world, rotation_tolerance=2e-4,
-            translation_tolerance=2e-4, relative_translation_tolerance=0,
-        )
-        valid = [
-            (a, b) for a, b in anchors
-            if abs(numpy.linalg.det(owner_world[a, :3, :3])) > 1e-6
-            and abs(numpy.linalg.det(donor_world[b, :3, :3])) > 1e-6
-        ]
-        if not valid:
-            raise ZZMICrossGroupPaletteError(f"{owner_ib} ← {donor_ib} 找不到可用于空间换算的共同骨骼")
-        a, b = min(valid, key=lambda pair: numpy.max(numpy.abs(owner_world[pair[0]] - donor_world[pair[1]])))
-        rows.extend((
-            donor["vg_offset"], donor["vg_count"], owner_index, 1,
-            owner["vg_offset"] + a, donor["vg_offset"] + b, 0, 0,
-        ))
-
-    if len(rows) == original_size:
-        return None
-    return rows, (owner_index, len(rows) // 8, capacity, 0)
+    tables = (rows, (owner_index, len(rows) // 8, capacity, 0)) if path_ibs & parents.keys() else None
+    return tables, tuple(sorted(needed_donors - parents.keys())), tuple(sorted(path_ibs - donor_ibs - {owner_ib}))
 
 
 def _affine_of(palette) -> numpy.ndarray:
@@ -715,6 +753,38 @@ def _affine_of(palette) -> numpy.ndarray:
     affine[:, :3, :] = rows
     affine[:, 3, 3] = 1.0
     return affine
+
+
+def direct_cb1_anchor_reference(owner, donor, samples):
+    """Store each donor's calibrated transform relative to a live owner bone."""
+    owner_sample = samples.get(owner["draw_ib"])
+    donor_sample = samples.get(donor["draw_ib"])
+    if owner_sample is None or donor_sample is None or not owner_sample[0] or owner_sample[0] != donor_sample[0]:
+        return None
+    _, owner_cb, owner_rows = owner_sample
+    _, donor_cb, donor_rows = donor_sample
+    owner_bones = _affine_of(owner_rows[:owner["vg_count"]])
+    donor_bones = _affine_of(donor_rows[:donor["vg_count"]])
+    if len(owner_bones) != owner["vg_count"] or len(donor_bones) != donor["vg_count"]:
+        return None
+    if not all(numpy.isfinite(rows).all() for rows in (owner_cb, donor_cb, donor_bones)):
+        return None
+    finite = numpy.flatnonzero(numpy.isfinite(owner_bones).all(axis=(1, 2)))
+    eligible = finite[numpy.abs(numpy.linalg.det(owner_bones[finite, :3, :3])) > 1e-6]
+    if not eligible.size or not len(donor_bones):
+        return None
+    if min(abs(numpy.linalg.det(owner_cb)), abs(numpy.linalg.det(donor_cb))) < 1e-6:
+        return None
+    if numpy.any(numpy.abs(numpy.linalg.det(donor_bones[:, :3, :3])) < 1e-6):
+        return None
+    into_owner = numpy.linalg.solve(owner_cb, donor_cb) @ donor_bones
+    candidate_rows = owner_bones[eligible, :3, :]
+    errors = numpy.abs(candidate_rows[:, None] - into_owner[None, :, :3, :]).max(axis=(2, 3))
+    anchors = eligible[errors.argmin(axis=0)]
+    reference = numpy.zeros((len(donor_bones), 4, 4), dtype="<f4")
+    reference[:, :3] = numpy.linalg.solve(owner_bones[anchors], into_owner)[:, :3]
+    reference[:, 3, 0] = anchors + owner["vg_offset"]
+    return reference.tobytes() if numpy.isfinite(reference).all() else None
 
 
 def _palette_tag(palette) -> str:

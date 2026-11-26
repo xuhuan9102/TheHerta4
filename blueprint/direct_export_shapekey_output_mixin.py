@@ -2012,6 +2012,9 @@ class DirectShapeKeyOutputMixin:
             else:
                 block_lines.append(f"    {res_to_bind[0]} = ref cs-u5")
             block_lines.append(f"    Dispatch = {dispatch_count}, 1, 1")
+            direct_skin_input = f"ResourceZZSkinPosition_{hash_prefix}"
+            if f"[CommandListZZDirectCB1Skin_{hash_prefix}_s1]" in sections and f"[{direct_skin_input}]" in sections:
+                block_lines.append(f"    {direct_skin_input} = copy cs-u5")
             if logical_hash in native_hashes:
                 for _plan, skin_input in self._merged_native_morph_carriers(logical_hash):
                     if f"[{skin_input}]" in sections:
