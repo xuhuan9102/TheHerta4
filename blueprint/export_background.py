@@ -733,6 +733,7 @@ def _collect_ini_variable_warnings(output_dir: str) -> list:
     try:
         from ..common.ini_variable_validator import (
             find_primary_ini,
+            find_runtime_ini,
             format_findings,
             validate_ini_file,
         )
@@ -740,7 +741,8 @@ def _collect_ini_variable_warnings(output_dir: str) -> list:
         ini_path = find_primary_ini(output_dir, GlobalConfig.get_generate_mod_name())
         if not ini_path:
             return []
-        report = validate_ini_file(ini_path)
+        runtime_ini = find_runtime_ini(output_dir, getattr(GlobalConfig, "current_game_migoto_folder", ""))
+        report = validate_ini_file(ini_path, runtime_ini_path=runtime_ini)
         if not report.get("undeclared") and not report.get("duplicate_globals"):
             return []
         return [str(line) for line in format_findings(report)]

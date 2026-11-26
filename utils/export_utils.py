@@ -203,6 +203,7 @@ class ExportUtils:
     def requires_export_space_transform(logic_name: Optional[str] = None) -> bool:
         resolved_logic_name = ExportUtils.get_effective_export_logic_name(logic_name)
         return resolved_logic_name in {
+            getattr(LogicName, "APMI", "APMI"),
             getattr(LogicName, "SRMI", "SRMI"),
             getattr(LogicName, "GIMI", "GIMI"),
             getattr(LogicName, "HIMI", "HIMI"),
@@ -228,6 +229,7 @@ class ExportUtils:
 
         resolved_logic_name = ExportUtils.get_effective_export_logic_name(logic_name)
         if resolved_logic_name in {
+            getattr(LogicName, "APMI", "APMI"),
             getattr(LogicName, "SRMI", "SRMI"),
             getattr(LogicName, "GIMI", "GIMI"),
             getattr(LogicName, "HIMI", "HIMI"),

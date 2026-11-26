@@ -2,6 +2,7 @@ import numpy
 
 
 _X_NEGATIVE_90_LOGICS = {
+    "APMI",
     "SRMI",
     "GIMI",
     "HIMI",

@@ -19,6 +19,7 @@
 import glob
 import os
 import re
+from pathlib import Path
 
 # 3DMigoto 内建变量：无需声明，跨段可读。
 BUILTIN_VARIABLES = frozenset({
@@ -71,7 +72,7 @@ def _strip_comment(line: str) -> str:
     return str(line or "").split(";", 1)[0]
 
 
-def analyze_ini_text(text: str) -> dict:
+def analyze_ini_text(text: str, *, runtime_globals=()) -> dict:
     """扫描 ini 文本，返回声明/引用统计与问题清单。
 
     两遍扫描：先收集全部声明（3DMigoto 的变量登记与声明出现位置无关，跨段引用
@@ -91,6 +92,7 @@ def analyze_ini_text(text: str) -> dict:
     declared = set()
     local_declared = set()
     global_counts = {}
+    runtime_names = {name.casefold() for name in runtime_globals}
 
     for raw_line in lines:
         body = _strip_comment(raw_line)
@@ -121,6 +123,8 @@ def analyze_ini_text(text: str) -> dict:
         for name in _VAR_TOKEN_RE.findall(body):
             if name in declared or name in local_declared or name in BUILTIN_VARIABLES:
                 continue
+            if name.casefold() in runtime_names:
+                continue
             if name in undeclared:
                 if section not in undeclared[name]:
                     undeclared[name].append(section)
@@ -137,17 +141,49 @@ def analyze_ini_text(text: str) -> dict:
     }
 
 
-def validate_ini_file(ini_path: str) -> dict:
+def _read_runtime_globals(path: str) -> set[str]:
+    """读取 3DMigoto 主配置 [Constants] 中由模组共用的全局变量。"""
+    if not path:
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
+            in_constants = False
+            names = set()
+            for line in handle:
+                body = _strip_comment(line).strip().casefold()
+                section = _SECTION_RE.fullmatch(body)
+                if section:
+                    in_constants = section[1] == "constants"
+                elif in_constants:
+                    names.update(_GLOBAL_DECL_RE.findall(body))
+            return names
+    except OSError:
+        return set()
+
+
+def validate_ini_file(ini_path: str, *, runtime_ini_path: str = "") -> dict:
     """校验单个 ini 文件；文件不存在时返回 ``{"missing": True}``。"""
     path = str(ini_path or "")
     if not path or not os.path.isfile(path):
         return {"missing": True, "path": path}
     with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
         text = handle.read()
-    report = analyze_ini_text(text)
+    report = analyze_ini_text(text, runtime_globals=_read_runtime_globals(runtime_ini_path))
     report["missing"] = False
     report["path"] = path
     return report
+
+
+def find_runtime_ini(mod_export_path: str, configured_game_path: str = "") -> str:
+    """优先使用产物所在 Mods 目录的主配置，自定义输出目录沿用当前游戏配置。"""
+    if mod_export_path:
+        output = Path(mod_export_path).resolve()
+        for folder in (output, *output.parents):
+            if folder.name.casefold() == "mods":
+                candidate = folder.parent / "d3dx.ini"
+                if candidate.is_file():
+                    return str(candidate)
+    return str(Path(configured_game_path) / "d3dx.ini") if configured_game_path else ""
 
 
 def find_primary_ini(mod_export_path: str, workspace_name: str = "") -> str:

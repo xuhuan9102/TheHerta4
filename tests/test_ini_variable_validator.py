@@ -194,6 +194,31 @@ class FindPrimaryIniTests(unittest.TestCase):
         self.assertFalse(report["missing"])
         self.assertIn("$ghost", report["undeclared"])
 
+    def test_validate_ini_file_resolves_runtime_constants(self):
+        mod = self._write("A.ini", "[Present]\nif $costume_mods\n$ghost = 1\nendif\n")
+        runtime = self._write("d3dx.ini", "[Constants]\nGLOBAL $COSTUME_MODS = 1\n; global $ghost = 0\n")
+
+        report = validator.validate_ini_file(mod, runtime_ini_path=runtime)
+
+        self.assertEqual(set(report["undeclared"]), {"$ghost"})
+        self.assertEqual(report["declared"], set())
+
+    def test_validate_ini_file_without_runtime_declaration_reports_missing(self):
+        mod = self._write("A.ini", "[Present]\nif $costume_mods\nendif\n")
+        runtime = self._write("d3dx.ini", "[KeyToggleMods]\n$costume_mods = 0, 1\n")
+
+        report = validator.validate_ini_file(mod, runtime_ini_path=runtime)
+
+        self.assertIn("$costume_mods", report["undeclared"])
+
+    def test_find_runtime_ini_prefers_the_install_containing_the_mod(self):
+        runtime = self._write("d3dx.ini")
+        output = os.path.join(self.dir, "Mods", "SSMTGeneratedMod", "MyMod")
+        configured_game = os.path.join(self.dir, "OtherGame")
+
+        self.assertTrue(os.path.samefile(validator.find_runtime_ini(output, configured_game), runtime))
+        self.assertEqual(validator.find_runtime_ini(self.dir, configured_game), os.path.join(configured_game, "d3dx.ini"))
+
     def test_validate_missing_file(self):
         report = validator.validate_ini_file(os.path.join(self.dir, "nope.ini"))
         self.assertTrue(report["missing"])

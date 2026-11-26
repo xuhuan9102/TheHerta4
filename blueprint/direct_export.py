@@ -394,6 +394,9 @@ def sync_multifile_direct_mode(node, context=None):
 
 
 def _build_exporter(blueprint_model):
+    if GlobalConfig.logic_name == getattr(LogicName, "APMI", "APMI"):
+        from ..ui.universal.apmi import ExportAPMI
+        return ExportAPMI(blueprint_model=blueprint_model)
     if GlobalConfig.logic_name in (LogicName.EFMI, LogicName.HTMI):
         return ExportEFMI(blueprint_model=blueprint_model)
     if GlobalConfig.logic_name == "GIMI":

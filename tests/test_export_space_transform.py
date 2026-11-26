@@ -111,7 +111,7 @@ class ExportSpaceTransformTests(unittest.TestCase):
 
     def test_all_game_logic_coordinate_families(self):
         coords = np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32)
-        for logic_name in ("SRMI", "GIMI", "HIMI", "YYSLS", "IdentityV"):
+        for logic_name in ("APMI", "SRMI", "GIMI", "HIMI", "YYSLS", "IdentityV"):
             with self.subTest(logic_name=logic_name):
                 np.testing.assert_allclose(
                     export_utils.ExportUtils.convert_position_coords_for_export(coords, logic_name=logic_name),
@@ -119,7 +119,7 @@ class ExportSpaceTransformTests(unittest.TestCase):
                 )
         for logic_name in (
             "ZZMI", "ZZMIDX12", "WWMI", "EFMI", "HTMI", "GF2", "AILIMIT",
-            "DOAV", "Naraka", "NarakaM", "NTEMI", "APMI", "NEMI",
+            "DOAV", "Naraka", "NarakaM", "NTEMI", "NEMI",
         ):
             with self.subTest(logic_name=logic_name):
                 np.testing.assert_allclose(

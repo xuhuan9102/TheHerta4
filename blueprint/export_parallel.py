@@ -166,7 +166,10 @@ class ExportRoundExecutor:
 
     @staticmethod
     def export_with_ini(blueprint_model):
-        if GlobalConfig.logic_name in (LogicName.EFMI, LogicName.HTMI):
+        if GlobalConfig.logic_name == getattr(LogicName, "APMI", "APMI"):
+            from ..ui.universal.apmi import ExportAPMI
+            _run_exporter(ExportAPMI(blueprint_model=blueprint_model))
+        elif GlobalConfig.logic_name in (LogicName.EFMI, LogicName.HTMI):
             _run_exporter(ExportEFMI(blueprint_model=blueprint_model))
         elif GlobalConfig.logic_name == LogicName.GIMI:
             _run_exporter(ExportGIMI(blueprint_model=blueprint_model))
@@ -194,7 +197,10 @@ class ExportRoundExecutor:
 
     @staticmethod
     def export_buffers_only(blueprint_model):
-        if GlobalConfig.logic_name in (LogicName.EFMI, LogicName.HTMI):
+        if GlobalConfig.logic_name == getattr(LogicName, "APMI", "APMI"):
+            from ..ui.universal.apmi import ExportAPMI
+            _run_exporter(ExportAPMI(blueprint_model=blueprint_model), "export_buffers_only")
+        elif GlobalConfig.logic_name in (LogicName.EFMI, LogicName.HTMI):
             _run_exporter(ExportEFMI(blueprint_model=blueprint_model), "export_buffers_only")
         elif GlobalConfig.logic_name == LogicName.GIMI:
             _run_exporter(ExportGIMI(blueprint_model=blueprint_model), "export_buffers_only")
