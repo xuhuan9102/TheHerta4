@@ -2030,7 +2030,8 @@ class DirectShapeKeyOutputMixin:
             base_resources = hash_to_base_resources.get(hash_prefix, [])
             primary_base_resource = base_resources[0] if base_resources else f"Resource_{self.node._hash_to_resource_prefix(logical_hash)}_Position"
             section_name = f"[{derive_shapekey_base_resource_name(primary_base_resource)}]"
-            if section_name not in sections and section_name not in generated_section_names:
+            needs_absolute_base = not use_delta or logical_hash in native_hashes
+            if needs_absolute_base and section_name not in sections and section_name not in generated_section_names:
                 stride = hash_to_stride.get(hash_prefix, 40)
                 resource_lines = [
                     section_name,
@@ -2046,12 +2047,13 @@ class DirectShapeKeyOutputMixin:
                 resource_lines.append("")
                 new_resource_lines.extend(resource_lines)
                 generated_section_names.add(section_name)
-            self._set_resource_field(
-                sections,
-                section_name,
-                "stride",
-                hash_to_stride.get(hash_prefix, 40),
-            )
+            if needs_absolute_base:
+                self._set_resource_field(
+                    sections,
+                    section_name,
+                    "stride",
+                    hash_to_stride.get(hash_prefix, 40),
+                )
 
             # 形态键权重缓冲：mod 专属 RWBuffer（资源名即命名空间），由
             # CustomShaderShapeKeyWeightSync 每帧写入。不给 filename 即零初始化。
