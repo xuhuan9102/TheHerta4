@@ -172,6 +172,11 @@ class ObjBufferHelper:
         return positions
 
     @staticmethod
+    def _invalid_surface_directions(vectors):
+        # Blender fills missing imported attributes with zero when joining meshes.
+        return ~numpy.isfinite(vectors).all(axis=1) | numpy.all(vectors == 0, axis=1)
+
+    @staticmethod
     def _parse_normal(
         mesh_loops,
         mesh_loops_length,
@@ -188,11 +193,20 @@ class ObjBufferHelper:
                 mesh_loops.foreach_get("vertex_index", loop_vertex_indices)
                 values = numpy.empty(len(mesh.vertices) * 3, dtype=numpy.float32)
                 attr.data.foreach_get("vector", values)
-                values = values.reshape(-1, 3)
-                normals = values[loop_vertex_indices].reshape(-1)
-        if normals is None:
-            normals = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
-            mesh_loops.foreach_get('normal', normals)
+                normals = values.reshape(-1, 3)[loop_vertex_indices]
+        invalid = None if normals is None else ObjBufferHelper._invalid_surface_directions(normals)
+        if normals is None or invalid.any():
+            evaluated = numpy.empty((mesh_loops_length, 3), dtype=numpy.float32)
+            corners = getattr(mesh, "corner_normals", None)
+            if corners is not None and len(corners) == mesh_loops_length:
+                corners.foreach_get("vector", evaluated.ravel())
+            else:
+                mesh_loops.foreach_get("normal", evaluated.ravel())
+            if normals is None:
+                normals = evaluated
+            else:
+                normals[invalid] = evaluated[invalid]
+        normals = normals.ravel()
 
         if d3d11_element.Format == 'R16G16B16A16_FLOAT':
             result = numpy.ones(mesh_loops_length * 4, dtype=numpy.float32)
@@ -304,17 +318,25 @@ class ObjBufferHelper:
                 xyz = numpy.empty(len(mesh.vertices) * 3, dtype=numpy.float32)
                 xyz_attr.data.foreach_get("vector", xyz)
                 xyz = xyz.reshape(-1, 3)
-                imported_xyz = xyz[loop_vertex_indices].reshape(-1)
+                imported_xyz = xyz[loop_vertex_indices]
                 w = numpy.empty(len(mesh.vertices), dtype=numpy.float32)
                 w_attr.data.foreach_get("value", w)
                 imported_w = w[loop_vertex_indices]
 
-        # 使用 foreach_get 批量获取切线和副切线符号数据
-        if imported_xyz is None:
-            tangents = numpy.empty(mesh_loops_length * 3, dtype=numpy.float32)
-            mesh_loops.foreach_get("tangent", tangents)
+        valid_imported = None
+        if imported_xyz is not None:
+            valid_imported = (
+                ~ObjBufferHelper._invalid_surface_directions(imported_xyz)
+                & numpy.isfinite(imported_w)
+            )
+        if valid_imported is None or not valid_imported.all():
+            tangents = numpy.empty((mesh_loops_length, 3), dtype=numpy.float32)
+            mesh_loops.foreach_get("tangent", tangents.ravel())
+            if valid_imported is not None:
+                tangents[valid_imported] = imported_xyz[valid_imported]
         else:
             tangents = imported_xyz
+        tangents = tangents.ravel()
 
         # 将切线分量放置到输出数组中
         result[0::4] = tangents[0::3]  # x 分量
@@ -338,8 +360,9 @@ class ObjBufferHelper:
             # 这里翻转（翻转指的就是 *= -1）是因为如果要确保Unity游戏中渲染正确，必须翻转TANGENT的W分量
             bitangent_signs *= -1
             result[3::4] = bitangent_signs  # w 分量 (副切线符号)
-        if imported_w is not None:
-            result[3::4] = imported_w
+        if valid_imported is not None:
+            tangent_signs = result[3::4]
+            tangent_signs[valid_imported] = imported_w[valid_imported]
         # 重塑 output_tangents 成 (mesh_loops_length, 4) 形状的二维数组
         result = result.reshape(-1, 4)
 

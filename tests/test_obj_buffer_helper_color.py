@@ -67,6 +67,48 @@ ObjBufferHelper = obj_buffer_helper_module.ObjBufferHelper
 FormatUtils = format_utils_module.FormatUtils
 
 
+class ImportedSurfaceBasisTests(unittest.TestCase):
+    def test_missing_imported_normals_and_tangents_use_evaluated_loop_data(self):
+        class Records:
+            def __init__(self, **fields):
+                self.fields = fields
+
+            def __len__(self):
+                return len(next(iter(self.fields.values())))
+
+            def foreach_get(self, field, result):
+                result[:] = np.asarray(self.fields[field]).ravel()
+
+        loops = Records(
+            vertex_index=[0, 1, 1, 2],
+            tangent=[[1, 0, 0], [0, 0, 1], [0, 1, 0], [0, 0, 1]],
+            bitangent_sign=[1, -1, 1, 1],
+        )
+        mesh = types.SimpleNamespace(
+            vertices=[None, None, None],
+            corner_normals=Records(vector=[[0, 1, 0], [1, 0, 0], [0, 0, 1], [0, 1, 0]]),
+            attributes={
+                "3DMigoto_NORMAL_XYZ": types.SimpleNamespace(
+                    data=Records(vector=[[0, 0, 1], [0, 0, 0], [np.nan, 0, 0]]),
+                ),
+                "3DMigoto_TANGENT_XYZ": types.SimpleNamespace(
+                    data=Records(vector=[[0, 1, 0], [0, 0, 0], [np.inf, 0, 0]]),
+                ),
+                "3DMigoto_TANGENT_W": types.SimpleNamespace(data=Records(value=[1, 0, 1])),
+            },
+        )
+
+        normals = ObjBufferHelper._parse_normal(
+            loops, len(loops), types.SimpleNamespace(Format="R32G32B32_FLOAT"), mesh=mesh,
+        )
+        tangents = ObjBufferHelper._parse_tangent(
+            loops, len(loops), types.SimpleNamespace(Format="R32G32B32A32_FLOAT"), mesh=mesh,
+        )
+
+        np.testing.assert_array_equal(normals, [[0, 0, 1], [1, 0, 0], [0, 0, 1], [0, 1, 0]])
+        np.testing.assert_array_equal(tangents, [[0, 1, 0, 1], [0, 0, 1, 1], [0, 1, 0, -1], [0, 0, 1, -1]])
+
+
 class DummyColorAttributeData:
     def __init__(self, records, field_name):
         self.records = np.asarray(records, dtype=np.float32).reshape(-1, 4)
