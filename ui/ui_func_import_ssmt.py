@@ -893,7 +893,7 @@ def _iter_workspace_import(self, context, *, background_zzmi=False):
         merged_vgmap_import_override = None
 
     apmi_skeletons = {}
-    if GlobalConfig.logic_name == LogicName.APMI:
+    if GlobalConfig.logic_name == getattr(LogicName, "APMI", "APMI"):
         merged_vgmap_import_override = False
         if GlobalProterties.import_merged_vgmap():
             from ..common.apmi_capture import APMICapture
