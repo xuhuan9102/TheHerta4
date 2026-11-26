@@ -95,6 +95,21 @@ m_ini_helper = _load_real(f"{PKG}.common.m_ini_helper", M_INI_HELPER_PATH)
 M_IniHelper = m_ini_helper.M_IniHelper
 
 
+class DrawActivationTests(unittest.TestCase):
+    def test_driver_can_request_activation_without_branch_keys(self):
+        ini = m_ini_helper.M_IniBuilder()
+        M_IniHelper.add_branch_key_sections(ini, {}, active_mod_count=1)
+        self.assertEqual(
+            [(section.SectionName, section.SectionLineList) for section in ini.ini_section_list],
+            [("Constants", ["global $active0"]), ("Present", ["post $active0 = 0"])],
+        )
+
+    def test_export_without_keys_or_driver_adds_no_activation_sections(self):
+        ini = m_ini_helper.M_IniBuilder()
+        M_IniHelper.add_branch_key_sections(ini, {})
+        self.assertEqual(ini.ini_section_list, [])
+
+
 class FakeDrawCallModel:
     """只实现发射器用得到的那几个成员。"""
 

@@ -911,7 +911,7 @@ class M_IniHelper:
 
 
     @classmethod
-    def add_branch_key_sections(cls, ini_builder:M_IniBuilder, key_name_mkey_dict:dict[str,M_Key]):
+    def add_branch_key_sections(cls, ini_builder:M_IniBuilder, key_name_mkey_dict:dict[str,M_Key], *, active_mod_count: int | None = None):
         """添加分支按键配置段落
         
         在 INI 中添加物体切换相关的配置，包括：
@@ -925,20 +925,22 @@ class M_IniHelper:
         Args:
             ini_builder: INI 构建器
             key_name_mkey_dict: 按键名称到 M_Key 的映射字典
+            active_mod_count: 需要角色激活标志的模组数，可用于没有分支按键的驱动蓝图。
         """
-        if len(key_name_mkey_dict.keys()) != 0:
+        needs_activation = bool(key_name_mkey_dict) or active_mod_count is not None
+        if needs_activation:
             constants_section = None
             for section in ini_builder.ini_section_list:
                 if section.SectionType == M_SectionType.Constants:
                     constants_section = section
                     break
             
-            if constants_section is None:
+            create_constants = constants_section is None
+            if create_constants:
                 constants_section = M_IniSection(M_SectionType.Constants)
                 constants_section.SectionName = "Constants"
-                ini_builder.append_section(constants_section)
 
-            mod_count = GlobalKeyCountHelper.generated_mod_number
+            mod_count = GlobalKeyCountHelper.generated_mod_number if active_mod_count is None else active_mod_count
             for i in range(mod_count):
                 active_line = f"global $active{i}"
                 already_exists = any(active_line in line for line in constants_section.SectionLineList)
@@ -954,13 +956,14 @@ class M_IniHelper:
                 already_exists = any(key_str in line for line in constants_section.SectionLineList)
                 if not already_exists:
                     constants_section.append(key_str)
+            if create_constants:
+                ini_builder.append_section(constants_section)
 
 
-        if len(key_name_mkey_dict.keys()) != 0:
+        if needs_activation:
             present_section = M_IniSection(M_SectionType.Present)
             present_section.SectionName = "Present"
             
-            mod_count = GlobalKeyCountHelper.generated_mod_number
             for i in range(mod_count):
                 present_section.append(f"post $active{i} = 0")
             ini_builder.append_section(present_section)

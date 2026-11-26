@@ -250,9 +250,17 @@ class ExportAPMI(ExportUnity):
             self._section(ini, M_SectionType.VertexShaderCheck, f"ShaderOverrideAPMIDraw_{shader}",
                           [f"hash = {shader}", "allow_duplicate_hash = overrule", "checktextureoverride = ib"])
         replacement_hosts = {host for host, _, _ in replaced_draws.values()}
+        branch_keys = self.blueprint_model.keyname_mkey_dict
+        mark_active = bool(branch_keys) or any(
+            node.bl_idname == "SSMTNode_PostProcess_AnimDriver" and node.blueprint_name not in ("", "NONE")
+            for node in self.blueprint_model.postprocess_nodes
+        )
         for model, _, passes, skeleton in plans:
             with draw_ib_context(model.draw_ib):
-                self._write_drawib(ini, model, passes, skeleton, track_replacement=model.draw_ib in replacement_hosts)
+                self._write_drawib(
+                    ini, model, passes, skeleton,
+                    track_replacement=model.draw_ib in replacement_hosts, mark_active=mark_active,
+                )
             M_IniHelper.move_slot_style_textures(draw_ib_model=model)
         for skeleton, jobs in merged_jobs.items():
             self._write_skeleton(ini, skeleton, jobs, palette_layouts, filter_indices)
@@ -271,7 +279,7 @@ class ExportAPMI(ExportUnity):
                 "    handling = skip",
                 "endif",
             ])
-        M_IniHelper.add_branch_key_sections(ini, self.blueprint_model.keyname_mkey_dict)
+        M_IniHelper.add_branch_key_sections(ini, branch_keys, active_mod_count=1 if mark_active else None)
         M_IniHelper.add_shapekey_ini_sections(ini, models)
         ini.save_to_file(GlobalConfig.path_generate_mod_ini())
         TimerUtils.end_stage("INI配置生成")
@@ -429,7 +437,7 @@ class ExportAPMI(ExportUnity):
             commands.extend(("  endif", "endif"))
             self._section(ini, M_SectionType.TextureOverrideVB, f"TextureOverrideAPMIPalette_{output}", commands)
 
-    def _write_drawib(self, ini, model, passes, skeleton, *, track_replacement):
+    def _write_drawib(self, ini, model, passes, skeleton, *, track_replacement, mark_active):
         draw_ib = model.draw_ib
         folder = BlueprintExportHelper.get_current_buffer_folder_name()
         position = f"Resource{draw_ib}Position"
@@ -516,7 +524,7 @@ class ExportAPMI(ExportUnity):
                 commands.append(f"  if vb1->stride == {stride}")
                 commands.extend("    " + line for line in lines)
                 commands.append("  endif")
-            if self.blueprint_model.keyname_mkey_dict:
+            if mark_active:
                 commands.append("  $active0 = 1")
             for slot, resource in bindings.items():
                 commands.extend([f"  {saved[slot]} = ref {slot}", f"  {slot} = ref {resource}"])
