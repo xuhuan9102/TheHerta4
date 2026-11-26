@@ -18,6 +18,7 @@ Buffer<float4> HemParams : register(t117);
 Buffer<float4> HullPoints : register(t118);
 Buffer<uint> HullCount : register(t119);
 Buffer<float4> OriginalBlend : register(t86);
+Buffer<float4> ControlAxes : register(t88);
 Buffer<float4> Skeleton1 : register(t2);
 Buffer<float4> Skeleton2 : register(t3);
 Buffer<float4> PaletteDecision : register(t96);
@@ -306,6 +307,13 @@ void FaceGlobal(uint face)
         }
     }
 }
+float AdvanceControl(float amount, float delta, float maximum)
+{
+    // A shorter control only limits forward travel. Re-grabbing a garment
+    // already past its endpoint leaves the pose intact until it is pulled back.
+    return clamp(amount + delta, 0, max(amount, maximum));
+}
+
 void Control()
 {
     float4 a=State[0],b=State[1];bool reset=b.w<.5 || b.z!=IniParams[116].z;
@@ -320,7 +328,7 @@ void Control()
     }
     if(held && a.z<.5)
     {
-        b.x=-1;uint n,stride;Detect.GetDimensions(n,stride);
+        b.x=-1;State[14]=0;uint n,stride;Detect.GetDimensions(n,stride);
         if(n>7 && Detect[0].x>=0)
         {
             uint nearest=(uint)clamp(round(Detect[3].w),0,2),row=(uint)max(Detect[3][nearest],0);
@@ -340,6 +348,15 @@ void Control()
                             b.x=code==3?(Rest[particle*2+1].z>=.5?0:1):(code==1?0:1);
                             float signValue=b.x<.5?-1:1;
                             float3 direction=State[5].xyz*signValue;
+                            uint axesCount;ControlAxes.GetDimensions(axesCount);
+                            if (zone < axesCount && ControlAxes[zone].w > 0)
+                            {
+                                Blend hit;
+                                hit.weights=OriginalBlend[row*2];
+                                hit.indices=asuint(OriginalBlend[row*2+1]);
+                                float4 mx,my,mz;Rows(hit,mx,my,mz);
+                                direction=SafeUnit(Rotate(mx,my,mz,ControlAxes[zone].xyz),direction);
+                            }
                             float2 projected=n>9?ClothScreenDirection(direction,Detect[8],Detect[9]):0;
                             float lengthValue=length(projected);
                             bool basisValid=n>9 && Detect[8].w>.5 && Detect[9].w>1e-5;
@@ -371,9 +388,9 @@ void Control()
                 if(Config[0].w>.5){a.x=saturate(a.x+delta);a.y=a.x;}
                 else if(b.x<.5)a.x=saturate(a.x+delta);else a.y=saturate(a.y+delta);
             }
-            else if(!TwoEnded()){a.x=clamp(a.x+delta,0,State[14].z);a.y=a.x;}
-            else if(b.x<.5){a.x=clamp(a.x+delta,0,State[14].z);a.y=min(a.y,1-a.x);}
-            else{a.y=clamp(a.y+delta,0,State[14].z);a.x=min(a.x,1-a.y);}
+            else if(!TwoEnded()){a.x=AdvanceControl(a.x,delta,State[14].z);a.y=a.x;}
+            else if(b.x<.5){a.x=AdvanceControl(a.x,delta,State[14].z);a.y=min(a.y,1-a.x);}
+            else{a.y=AdvanceControl(a.y,delta,State[14].z);a.x=min(a.x,1-a.y);}
             if(Branched()){a.x=0;a.y=min(a.y,Config[14].x/max(1-Config[13].w,.001));}
         }
         else

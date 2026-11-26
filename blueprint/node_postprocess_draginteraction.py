@@ -363,6 +363,21 @@ class SSMT_DragZoneSettings(bpy.types.PropertyGroup):
         ),
         default=False,
     )
+    cloth_wear_enabled: bpy.props.BoolProperty(
+        name="可穿脱",
+        description="允许此区域触发穿脱。关闭后仍可普通拉扯，并沿用区域的碰撞设置",
+        default=True,
+    )
+    cloth_limb_slide: bpy.props.BoolProperty(
+        name="沿肢体整体滑移",
+        description="使用连续代理带动本区域的衣片和附件，沿穿脱箭头整体移动。需要设置箭头起点和端点",
+        default=False,
+    )
+    cloth_proxy_enabled: bpy.props.BoolProperty(
+        name="代理穿脱",
+        description="用连续代理带动衣物，沿箭头收拢。勾选沿肢体整体滑移时改为整件滑动",
+        default=False,
+    )
     cloth_direction: bpy.props.EnumProperty(
         name="穿脱方向",
         description="按衣物轴设置开口移动方向。向上穿脱需要独立下开口；向下也兼容原来的闭合脚部丝袜",
@@ -1477,9 +1492,13 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 sub.prop(obj.ssmt_drag_zone, "damping")
                 sub.prop(obj.ssmt_drag_zone, "grabbable")
                 sub.prop(obj.ssmt_drag_zone, "drag_along_normal")
-                if self._cloth_enabled():
+                sub.prop(obj.ssmt_drag_zone, "cloth_wear_enabled")
+                wear_enabled = self._cloth_enabled() and obj.ssmt_drag_zone.cloth_wear_enabled
+                if wear_enabled:
                     path_box = sub.box()
                     path_box.label(text="穿脱行程：起点 → 停止位置", icon='EMPTY_ARROWS')
+                    path_box.prop(obj.ssmt_drag_zone, "cloth_proxy_enabled")
+                    path_box.prop(obj.ssmt_drag_zone, "cloth_limb_slide")
                     path_box.prop(obj.ssmt_drag_zone, "cloth_path_start")
                     path_box.prop(obj.ssmt_drag_zone, "cloth_path_end")
                     path_row = path_box.row(align=True)
@@ -1494,7 +1513,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                         path_box.prop(obj.ssmt_drag_zone, "cloth_direction")
                 # 包含物体列表（留空 = 全部物体）
                 inc_box = sub.box()
-                inc_box.label(text="包含物体（穿脱衣物须指定）" if self._cloth_enabled() else "包含物体（留空=全部）", icon='OBJECT_DATA')
+                inc_box.label(text="包含物体（穿脱衣物须指定）" if wear_enabled else "包含物体（留空=全部）", icon='OBJECT_DATA')
                 inc_row = inc_box.row(align=True)
                 add_inc = inc_row.operator(SSMT_OT_DragZoneIncludeAdd.bl_idname, text="添加选中物体", icon='ADD')
                 add_inc.empty_name = obj.name
@@ -2096,7 +2115,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             current_logic = str(getattr(GlobalConfig, "logic_name", "") or "")
         except Exception:
             current_logic = ""
-        if self._cloth_enabled() and current_logic and not LogicName.is_zzmi_family(current_logic):
+        cloth_export = self._cloth_export_enabled()
+        if cloth_export and current_logic and not LogicName.is_zzmi_family(current_logic):
             raise ValueError("上下拖拽目前需要 ZZMI 合并骨架，当前游戏不生成此运行时")
         if current_logic == LogicName.EFMI:
             from .node_postprocess_draginteraction_efmi import (
@@ -2118,7 +2138,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             )
             return
         print(f"[DragInteraction] 开始执行, 输出路径: {mod_export_path}")
-        if self._cloth_enabled():
+        if cloth_export:
             self._cloth_object_names(required=True)
             if not self._collect_enabled_zone_entries():
                 raise ValueError("上下拖拽：请先配置至少一个启用的拖拽区域")
@@ -2228,7 +2248,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 preserved_tail = drag_tear.emit(self, sections, preserved_tail, components, ns, tear,
                                                 promote_native_ttl=promote_native_ttl)
                 tear_tokens.add(tear.directory.name)
-            if self._cloth_enabled():
+            if cloth_export:
                 from .drag_cloth import stabilize_globals
                 stabilize_globals(sections, ns)
 
@@ -2252,7 +2272,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         drag_tear.prune(mod_export_path, ns, tear_tokens | untouched_tokens)
         if getattr(self, "tear_enabled", False) and not tear_tokens:
             print("[DragInteraction][WARNING] 丝袜破洞未找到可生成遮罩的衣物，请检查区域的包含物体、主 UV 和 R32_UINT 索引")
-        if self._cloth_enabled() and not cloth_tokens:
+        if cloth_export and not cloth_tokens:
             raise ValueError("上下拖拽：衣物没有匹配到有效拖拽组件，请检查目标哈希、区域包含物体和身体碰撞体")
         print("[DragInteraction] 完成")
 
@@ -2786,7 +2806,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # 碰撞检测资源（仅模式三/拉扯模式；碰撞体未命中仅警告，不阻断拖拽导出）
         if self._collision_enabled_for_component():
             self._write_collision_resources(mod_export_path, sections, comp, ns)
-        if self._cloth_enabled():
+        if self._cloth_export_enabled():
             from .drag_cloth import bake_component
             cloth_names, body_names = self._cloth_object_names()
             comp['cloth'] = bake_component(self, mod_export_path, sections, comp, ns,
@@ -4701,10 +4721,18 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
     def _cloth_enabled(self):
         return bool(getattr(self, 'cloth_slide_enabled', False))
 
+    def _cloth_export_enabled(self):
+        if not self._cloth_enabled():
+            return False
+        entries = self._collect_enabled_zone_entries()
+        return not entries or any(getattr(empty.ssmt_drag_zone, "cloth_wear_enabled", True) for _, empty in entries)
+
     def _cloth_object_names(self, required=False):
         cloth, body = set(), set()
         for _, empty in self._collect_enabled_zone_entries():
             settings = empty.ssmt_drag_zone
+            if not getattr(settings, "cloth_wear_enabled", True):
+                continue
             included = _zone_allowed_names(settings)
             colliders = _collider_allowed_names(settings)
             if included and colliders:
@@ -4790,7 +4818,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
 
     def validate_export_configuration(self):
         """在写入任何导出文件前验证拖拽交互的跨节点约束。"""
-        if self._cloth_enabled():
+        if self._cloth_export_enabled():
             self._cloth_object_names(required=True)
             if not self._collect_enabled_zone_entries():
                 raise ValueError("上下拖拽：请先配置至少一个启用的拖拽区域")
@@ -5193,7 +5221,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # ---- 视口探针系统：资源 + 探针段 + ShaderOverride ----
         if self.enable_viewport_probe:
             self._emit_viewport_probe_sections(sections, ns)
-        if self._cloth_enabled():
+        if self._cloth_export_enabled():
             from .drag_cloth import emit_components
             emit_components(self, sections, components, ns)
 

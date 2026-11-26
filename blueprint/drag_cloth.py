@@ -13,6 +13,7 @@ import numpy as np
 from ..common.safe_write import write_bytes_if_changed_atomic
 from .drag_cloth_geometry import bake_garments
 from .drag_cloth_path import exported_path
+from .drag_cloth_proxy import bake_limb_track
 from .drag_cloth_regions import reference_branches, cap_domain
 from .drag_collision import bake_sweep_order
 
@@ -31,6 +32,7 @@ SHADERS = (
     "frozen_skin.hlsl",
     "frozen_display.hlsl",
     "display_normals.hlsl",
+    "stabilize.hlsl",
     "apply.hlsl",
     "exterior.hlsl",
     "contacts.hlsl",
@@ -120,7 +122,8 @@ def _skin_writes(sections, comp, group, family, vertex_count):
     """Identify writes of this component's skinned rows and their actual palette."""
     base = comp["base_resource"].casefold()
     base_layout = _position_buffer_key(sections.get(f"[{comp['base_resource']}]", ()))
-    outputs = {f"{family}_G{group}_s{slot}".casefold(): slot for slot in (1, 2)}
+    prefix = f"{family}_G{group}" if family in ("ResourceZZRedirectSO", "ResourceZZSkinOut") else family
+    outputs = {f"{prefix}_s{slot}".casefold(): slot for slot in (1, 2)}
     palettes = re.compile(
         rf"ResourceZZ(?:MergedSkeleton_G{group}|PaletteConv_C\d+)_s([12])",
         re.IGNORECASE,
@@ -397,6 +400,8 @@ def _shader(node, name, constants):
     text = text.replace('#include "constants.hlsli"', constants).replace(
         '#include "common.hlsli"', common
     )
+    if name == "proxy_apply.hlsl":
+        text = struct + "\n" + text
     if '#include "screen_direction.hlsli"' in text:
         text = text.replace('#include "screen_direction.hlsli"', (TOOLSET / "screen_direction.hlsli").read_text("utf8"))
     if name == "select.hlsl":
@@ -435,6 +440,8 @@ def _control_regions(
     regions = []
     for zone, empty in entries:
         settings = empty.ssmt_drag_zone
+        if not getattr(settings, "cloth_wear_enabled", True):
+            continue
         selected_names = {
             name_key(item.object.name)
             for item in getattr(settings, "include_objects", ())
@@ -474,6 +481,8 @@ def _control_regions(
                 node._get_export_space_matrix(),
                 node._get_non_mirror_mirror(),
             )
+        if path is None and (getattr(settings, "cloth_limb_slide", False) or getattr(settings, "cloth_proxy_enabled", False)):
+            raise ValueError(f"上下拖拽：区域 {zone} 的代理穿脱需要穿脱箭头")
         regions.append((int(zone), code, rows, selected, body, path))
     return regions
 
@@ -548,9 +557,19 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
     group, occ, reason = node._merged_skeleton_binding(sections, comp)
     if group is None or occ is None:
         raise ValueError("上下拖拽需要可确定的 ZZMI 合并骨架：" + reason)
+    draw_output = f"ResourceZZSkinOut_{comp['hash']}"
+    output_prefixes = {
+        "ResourceZZRedirectSO": f"ResourceZZRedirectSO_G{group}",
+        "ResourceZZSkinOut": f"ResourceZZSkinOut_G{group}",
+        draw_output: draw_output,
+    }
+    bound_skin_outputs = {
+        f"{output_prefixes[family]}_s{slot}".casefold(): family
+        for family in ("ResourceZZSkinOut", draw_output) for slot in (1, 2)
+    }
     candidates = []
-    for family in ("ResourceZZRedirectSO", "ResourceZZSkinOut"):
-        if all(f"[{family}_G{group}_s{slot}]" in sections for slot in (1, 2)):
+    for family, prefix in output_prefixes.items():
+        if all(f"[{prefix}_s{slot}]" in sections for slot in (1, 2)):
             candidates.append(family)
     if not candidates:
         raise ValueError("上下拖拽：产物没有当前帧合并蒙皮输出，请重新导出合并骨架")
@@ -563,18 +582,16 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
             continue
         visited.add(section)
         for line in sections.get(section, ()):
-            if re.search(
-                r"vb0\s*=\s*(?:ref\s+)?ResourceZZSkinOut_G" + str(group) + r"_s[12]",
-                line,
-            ):
-                source = "ResourceZZSkinOut"
+            bound = re.match(r"\s*vb0\s*=\s*(?:ref\s+)?([^\s;]+)", line, re.IGNORECASE)
+            if bound:
+                source = bound_skin_outputs.get(bound[1].casefold(), source)
             match = re.match(r"\s*run\s*=\s*(\S+)", line)
             if match and "[" + match.group(1) + "]" in sections:
                 pending.append("[" + match.group(1) + "]")
     if source not in candidates:
         raise ValueError("上下拖拽：当前绘制的蒙皮输出没有完整的两个实例槽位")
     for slot in (1, 2):
-        declared_stride = _field(sections[f"[{source}_G{group}_s{slot}]"], "stride")
+        declared_stride = _field(sections[f"[{output_prefixes[source]}_s{slot}]"], "stride")
         if declared_stride is not None and int(declared_stride) != stride:
             raise ValueError("上下拖拽：蒙皮输出视图步长与当前顶点布局不一致")
     skin_writes = _skin_writes(sections, comp, group, source, len(positions))
@@ -607,11 +624,23 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
     collider_objects = [
         ref.object
         for _, entry in node._collect_enabled_zone_entries()
+        if getattr(entry.ssmt_drag_zone, "cloth_wear_enabled", True)
         for ref in getattr(entry.ssmt_drag_zone, "collider_objects", ())
         if getattr(ref, "object", None) is not None
     ]
     written_rows = np.zeros(count, bool)
+    proxy_modes = {}
+    for zone, empty in node._collect_enabled_zone_entries():
+        settings = empty.ssmt_drag_zone
+        if getattr(settings, "cloth_limb_slide", False):
+            proxy_modes[zone] = "track"
+        elif getattr(settings, "cloth_proxy_enabled", False):
+            proxy_modes[zone] = "compress"
     for selected, collider, controls in _region_batches(regions):
+        active_modes = {proxy_modes[zone] for zone, *_ in controls if zone in proxy_modes}
+        if active_modes and len(controls) != 1:
+            raise ValueError("代理穿脱需要独立的穿脱区域。具有多个箭头的衣物可继续使用共享穿脱")
+        proxy_faces = triangles[selected] if active_modes == {"compress"} else None
         _, unique = np.unique(
             np.sort(triangles[collider], axis=1), axis=0, return_index=True
         )
@@ -677,7 +706,8 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
             ),
             None,
         )
-        if pool is None:
+        new_pool = pool is None
+        if new_pool:
             pool = len(bodies)
             order, leaves = bake_sweep_order(positions[body_faces])
             bodies.append(
@@ -692,16 +722,47 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
                 }
             )
         two_ended = np.zeros(len(positions), np.uint8)
+        automatic_rows = np.zeros(len(positions), bool)
         for _, code, rows, _, _, path in controls:
-            if code != 3 and path is None:
-                two_ended = np.maximum(
-                    two_ended, rows.astype(np.uint8) * (2 if code == 2 else 1)
-                )
+            if path is None:
+                automatic_rows |= rows
+                if code != 3:
+                    two_ended = np.maximum(
+                        two_ended, rows.astype(np.uint8) * (2 if code == 2 else 1)
+                    )
         if body_domain is not None and bodies[pool]["surface"] is None:
             bodies[pool]["surface"] = np.r_[
                 np.ones(cap_start, np.uint32),
                 np.zeros(len(body_faces) - cap_start, np.uint32),
             ]
+        track = None
+        geometry_paths = [(zone, rows, path) for zone, _, rows, _, _, path in controls if path is not None]
+        compression_path = None
+        if proxy_faces is not None:
+            zone, mask, compression_path = geometry_paths[0]
+            direction = compression_path[1] - compression_path[0]
+            length = float(np.linalg.norm(direction))
+            axis = direction / length
+            garment_span = float(np.ptp(positions[np.unique(proxy_faces)] @ axis))
+            if length >= .9 * garment_span:
+                # The cuff geometry supplies input routing only. Reserve a
+                # valid local frame even when the proxy compresses further.
+                limit = min(length, float(np.ptp(positions[body_faces] @ axis)) * .048)
+                geometry_paths = [(zone, mask, np.stack((compression_path[0], compression_path[0] + axis * limit)))]
+        if active_modes == {"track"}:
+            track_zone, mask, path = geometry_paths[0]
+            direction = path[1] - path[0]
+            length = float(np.linalg.norm(direction))
+            axis = direction / length
+            cloth_triangles = triangles[selected]
+            affected = cloth_triangles[mask[cloth_triangles].all(axis=1)]
+            if not len(affected):
+                raise ValueError(f"上下拖拽：区域 {track_zone} 没有命中可整体滑移的衣物面")
+            track = bake_limb_track(positions, normals, affected, reference_body_faces, weights, indices, path, base)
+            # The existing grab/state machine still needs a local cuff frame.
+            # The published geometry and the actual control use the full arrow.
+            cuff_travel = min(length, float(np.ptp(positions[body_faces] @ axis)) * .048)
+            geometry_paths = [(track_zone, mask, np.stack((path[0], path[0] + axis * cuff_travel)))]
         baked = bake_garments(
             positions,
             normals,
@@ -719,12 +780,36 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
             body_branch_weights=branch_reference,
             body_skin_faces=cap_start,
             reference_body_faces=reference_body_faces,
-            manual_paths=[
-                (zone, rows, path)
-                for zone, _, rows, _, _, path in controls
-                if path is not None
-            ],
+            automatic_rows=automatic_rows,
+            manual_paths=geometry_paths,
         )
+        if track is not None:
+            if not baked:
+                raise ValueError(f"上下拖拽：区域 {track_zone} 找不到可供抓取的开口")
+            data = max(baked, key=lambda item: len(np.intersect1d(np.flatnonzero(item["map"] != 0xFFFFFFFF), track[0])))
+            baked = [data]
+            data["proxy_rows"], data["proxy_track"] = track
+            data["map"][track[0]] = np.minimum(data["map"][track[0]], int(data["config"][0, 0]) - 1)
+            data["path_axes"][track_zone] = (*axis, length)
+        elif proxy_faces is not None and baked:
+            zone = geometry_paths[0][0]
+            # Only the cuff carrier supplies the legacy control frame. The
+            # proxy carries every included object, including unpainted hardware.
+            data = max(baked, key=lambda item: np.count_nonzero(item["map"] != 0xFFFFFFFF))
+            baked = [data]
+            surface = data["surface_mask"] != 0
+            cfg = data["config"]
+            data["proxy_rows"], data["proxy_track"] = bake_limb_track(
+                positions, normals, proxy_faces, body_faces[surface], weights, indices,
+                compression_path, base, compression_frame=cfg[6:8, :3],
+            )
+            data["path_axes"][zone] = (*axis, length)
+            rows = data["proxy_rows"]
+            data["map"][rows] = np.minimum(data["map"][rows], int(cfg[0, 0]) - 1)
+        if not baked:
+            if new_pool:
+                bodies.pop()
+            continue
         bodies[pool]["surface"] = baked[0]["surface_mask"]
         for data in baked:
             owned = data["map"] != 0xFFFFFFFF
@@ -826,14 +911,18 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
         controls = np.zeros(
             (max((region[0] for region in regions), default=0) + 1, 4), np.float32
         )
+        control_axes = np.zeros_like(controls)
         garment_rows = data["map"][base : base + len(positions)] != 0xFFFFFFFF
-        for zone, code, rows, _, _, _ in garment_regions[index]:
+        for zone, code, rows, _, _, path in garment_regions[index]:
             if np.any(garment_rows[: len(rows)] & rows):
                 limit = data.get("path_controls", {}).get(zone)
-                controls[zone] = (
-                    [code, 1, 0, 0] if limit is None else [limit[0], limit[1], 0, 1]
-                )
+                if limit is not None:
+                    controls[zone] = [limit[0], limit[1], 0, 1]
+                    control_axes[zone] = data["path_axes"][zone]
+                elif path is None:
+                    controls[zone] = [code, 1, 0, 0]
         data["control_zones"] = controls
+        data["control_axes"] = control_axes
         pool = bodies[data["body_index"]]
         leaves = int(pool["leaves"])
         owner_bounds = np.zeros(leaves * 2, np.uint32)
@@ -908,6 +997,9 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
                 ("CLOTH_CLOSED_DOMAIN", int(cfg.shape[0] > 16 and cfg[16, 3] > 0.5)),
             ]
         )
+        if "proxy_track" in data:
+            constants += f"\n#define PROXY_SAMPLES {len(data['proxy_track'])}\n"
+            assets.put(f"g{index}/proxy_apply.hlsl", _shader(node, "proxy_apply.hlsl", constants))
         hem_map = data["hem_map"]
         upper = int(cfg[13, 0]) if cfg[13, 2] > 0.5 else h
         foot = ((hem_map >= upper) & (hem_map < h)) if cfg[13, 2] > 0.5 else data["rest"][1::2, 2] < .065
@@ -1103,6 +1195,7 @@ class _Emitter:
             85: r("Representatives"),
             86: self.r("Blend"),
             87: body("BodyVerts"),
+            88: r("ControlAxes"),
             89: body("BodyOrder"),
             91: body(f"Bounds_s{slot}"),
             94: r("Map"),
@@ -1174,6 +1267,7 @@ class _Emitter:
             "DisplayTriangles": ("display_triangles", "R32_UINT"),
             "DisplayWeights": ("display_weights", "R32G32B32A32_FLOAT"),
             "ControlZones": ("control_zones", "R32G32B32A32_FLOAT"),
+            "ControlAxes": ("control_axes", "R32G32B32A32_FLOAT"),
             "BodySeeds": ("body_seeds", "R32_UINT"),
             "BodyDirections": ("body_directions", "R32G32B32A32_FLOAT"),
             "BodyChannels": ("body_channels", "R32G32B32A32_FLOAT"),
@@ -1186,6 +1280,10 @@ class _Emitter:
         }
         for name, (file, fmt) in static.items():
             self.resource(f"G{g}_" + name, fmt=fmt, file=path + "/" + file + ".buf")
+        tracked = "proxy_track" in data
+        if tracked:
+            self.resource(f"G{g}_ProxyRows", fmt="R32_UINT", file=path + "/proxy_rows.buf")
+            self.resource(f"G{g}_ProxyTrack", fmt="R32G32B32A32_FLOAT", file=path + "/proxy_track.buf")
         quality_enabled = cfg.shape[0] > 16 and cfg[16, 3] > 0.5
         quality_rows = 2 * (p + int(cfg[0, 2])) if quality_enabled else 0
         self.resource(
@@ -1278,6 +1376,19 @@ class _Emitter:
             ]
             call = lambda tag, slot=slot: self.shader(f"G{g}{tag}_s{slot}")
             run = lambda tag, call=call: "run = " + call(tag)
+            health = f"G{g}_Stability_s{slot}"
+            self.resource(health, 1, "R32G32B32A32_FLOAT", writable=True)
+            self.s(call("Stabilize"), [
+                "cs = " + path + "/stabilize.hlsl",
+                "cs-t24 = ref " + self.r("NativeInput"),
+                "cs-t77 = ref " + r("State"),
+                "cs-t82 = ref " + r("Config"),
+                "cs-t85 = ref " + r("Representatives"),
+                "cs-t113 = ref " + r("Edges"),
+                "cs-u0 = ref " + r(f"Particles_s{slot}"),
+                "cs-u1 = ref " + self.r(health),
+                "Dispatch = 1, 1, 1", "cs-u0 = null", "cs-u1 = null", "cs-t77 = null",
+            ])
             for tag, phase, file, groups in [
                 ("Control", 0, "cloth_nodes", 1),
                 ("Frame", 8, "cloth_nodes", 1),
@@ -1493,6 +1604,18 @@ class _Emitter:
                     "cs-t74 = null",
                 ],
             )
+            if tracked:
+                self.s(call("Apply"), [
+                    "cs = " + path + "/proxy_apply.hlsl",
+                    "cs-t2 = ref " + self.skin_palette(1),
+                    "cs-t3 = ref " + self.skin_palette(2),
+                    "cs-t24 = ref " + self.r("NativeInput"),
+                    "cs-t28 = ref " + r("ProxyRows"), "cs-t29 = ref " + r("ProxyTrack"),
+                    "cs-t77 = ref " + r("State"), "cs-t96 = ref " + r("Decision"),
+                    "cs-u0 = ref " + self.r(f"Write_s{slot}"),
+                    f"Dispatch = {(len(data['proxy_rows']) + 127) // 128}, 1, 1",
+                    "cs-u0 = null", "cs-t28 = null", "cs-t29 = null", "cs-t77 = null",
+                ])
             lines = [
                 f"{self.var}passive = 0",
                 f"{self.var}repair_g{g} = 0",
@@ -1530,6 +1653,10 @@ class _Emitter:
                 run("Frame"),
                 run("Startup"),
             ]
+            if tracked:
+                self.s(self.cmd(f"G{g}Simulate_s{slot}"), lines + [run("Apply")])
+                self.s(self.cmd(f"G{g}Follow_s{slot}"), ["run = " + self.cmd(f"G{g}Simulate_s{slot}")])
+                continue
             if quality_enabled:
                 lines += [run("Precision")]
             lines += [run("Advect")]
@@ -1602,7 +1729,7 @@ class _Emitter:
                     lines += [run("Face" + str(i)) for i in range(len(offsets) - 1)]
                     lines += [run("Collision"), run("Validate"), run("Quality")]
                 lines += [f"{self.var}repair_g{g} = 0"]
-            lines += [run("Velocity"), run("Weights"), run("Normals"), run("Apply")]
+            lines += [run("Velocity"), run("Weights"), run("Stabilize"), run("Normals"), run("Apply")]
             self.s(self.cmd(f"G{g}Simulate_s{slot}"), lines)
             # Stopping the pointer freezes the last solved mesh. This path
             # deliberately contains no collision search or constraint solve.
@@ -1611,7 +1738,7 @@ class _Emitter:
                 f"{self.var}control_due_g{g} = 0",
                 f"if {self.var}control_time_g{g} != time",
                 "\t" + run("Control"),
-                f"\t{self.var}control_time_g{g} = time", "endif", run("Normals"), run("Apply"),
+                f"\t{self.var}control_time_g{g} = time", "endif", run("Stabilize"), run("Normals"), run("Apply"),
             ])
             simulate = self.sections["[" + self.cmd(f"G{g}Simulate_s{slot}") + "]"]
             simulate.insert(len(simulate)-2, run("Capture"))
@@ -1624,7 +1751,7 @@ class _Emitter:
         self.resource("Intent", 1, "R32_FLOAT", writable=True)
         select = self.cmd("SelectGesture")
         selection = [f"clear = {self.r('Intent')}"]
-        registers = ("cs-t2", "cs-t67", "cs-t82", "cs-t86", "cs-t94", "cs-t110", "cs-u0")
+        registers = ("cs-t2", "cs-t67", "cs-t82", "cs-t86", "cs-t88", "cs-t94", "cs-t110", "cs-u0")
         saved = []
         for register in registers:
             name = "GestureSave_" + register.replace("-", "")
@@ -1643,11 +1770,12 @@ class _Emitter:
                     f"cs-t67 = ref {self.r('GestureHit')}",
                     f"cs-t82 = ref {self.r(f'G{g}_Config')}",
                     f"cs-t86 = ref {self.r('Blend')}",
+                    f"cs-t88 = ref {self.r(f'G{g}_ControlAxes')}",
                     f"cs-t94 = ref {self.r(f'G{g}_Map')}",
                     f"cs-t110 = ref {self.r(f'G{g}_ControlZones')}",
                     f"cs-t2 = ref {self.skin_palette(slot)}",
                     f"cs-u0 = ref {self.r('Intent')}", "dispatch = 1, 1, 1", "cs-u0 = null",
-                    *(f"cs-t{binding} = null" for binding in (2, 67, 82, 86, 94, 110)),
+                    *(f"cs-t{binding} = null" for binding in (2, 67, 82, 86, 88, 94, 110)),
                     *(f"{c}67 = $cloth_gesture_{c}67" for c in "xyzw"),
                 ])
                 selection.append(f"\trun = {name}")
@@ -2126,6 +2254,9 @@ def publish_before_draws(sections, comp):
             )
             if match:
                 pending.append("[" + match.group(1) + "]")
+            if re.match(r"\s*drawindexed\s*=\s*auto(?:\s|$)", line, re.IGNORECASE):
+                out.append(line)
+                continue
             if re.match(
                 r"\s*(?:drawindexed(?:instanced)?\s*=|run\s*=\s*CommandList(?:SSMTTTLDraw_|\\TTL\\Draw\b))",
                 line,

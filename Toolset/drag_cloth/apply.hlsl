@@ -77,6 +77,11 @@ float3 ParticleNormal(uint particle){return DisplayNormals[particle].xyz;}
         float2 gather=MaterialProfile(weights.w,State[0].xy);
         residual-=State[5].xyz*dot(residual,State[5].xyz)*(1-gather.y);
     }
+    float originalResidual=length(vertex.position-origin);
+    float actualResidual=length(residual);
+    if(!isfinite(actualResidual))residual=vertex.position-origin;
+    else if(actualResidual>originalResidual*1.7+0.001)
+        residual*=(originalResidual*1.7+0.001)/max(actualResidual,0.000001);
     p+=residual;
     float travel=Sliding()?abs(1-Config[4].x):0;
     if(!all(isfinite(p)) || distance(p,vertex.position)>Config[6].w*State[8].z*(1.7+travel))return;

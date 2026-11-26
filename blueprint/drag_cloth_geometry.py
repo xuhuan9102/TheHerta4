@@ -373,10 +373,18 @@ def _boundary_loops(faces):
     return boundary, loops
 
 
+def _opening_width(points, side, forward):
+    return max(float(np.ptp(points @ side)), float(np.ptp(points @ forward)))
+
+
 def _hem(faces, points, up, side, forward, *, lower=False, budget=128, min_width=0.2):
     boundary, loops = _boundary_loops(faces)
     if not loops:
         raise ValueError("上下拖拽：未识别到衣物开口，请保留袜口或裤腰边界")
+    threshold = _opening_width(points, side, forward) * min_width
+    loops = [ids for ids in loops if len(ids) >= 3 and _opening_width(points[ids], side, forward) >= threshold]
+    if not loops:
+        raise ValueError("上下拖拽：只找到小孔或裂缝，未识别到有效袜口/裤腰")
     direction = -up if lower else up
     top = max(float((points[ids] @ direction).mean()) for ids in loops)
     span = float(np.ptp(points @ up))
@@ -405,12 +413,6 @@ def _hem(faces, points, up, side, forward, *, lower=False, budget=128, min_width
         ids = ids[np.linspace(0, len(ids) - 1, budget).astype(int)]
     if len(ids) < 3:
         raise ValueError("上下拖拽：衣物开口不足三个有效顶点")
-    cuff_width = max(
-        float(np.ptp(points[ids] @ side)), float(np.ptp(points[ids] @ forward))
-    )
-    cloth_width = max(float(np.ptp(points @ side)), float(np.ptp(points @ forward)))
-    if cuff_width < cloth_width * min_width:
-        raise ValueError("上下拖拽：只找到小孔或裂缝，未识别到有效袜口/裤腰")
     return ids
 
 
@@ -832,6 +834,125 @@ def bind_skin_partition(positions, body_faces, weights, indices, cuff, side):
     return np.asarray(score[body_faces].mean(1) < 0.5), score
 
 
+def _garment_frame(points, faces, body_points, body_topology, body_height_rows, body, up_axis, paths):
+    _, _, axes = np.linalg.svd(points - points.mean(0), full_matrices=False)
+    up = axes[0]
+    if paths:
+        directions = np.array([_unit(path[0] - path[1]) for _, path in paths])
+        # A connected cloth needs one surface chart. Keep each arrow's real
+        # direction separately for hit testing and pointer projection.
+        signs = np.where(directions @ directions[0] < 0, -1, 1)
+        up = _unit((directions * signs[:, None]).sum(0))
+    elif up_axis == "AUTO":
+        _, openings = _boundary_loops(faces)
+        if openings:
+            ring = max(
+                openings, key=lambda ids: np.linalg.norm(np.ptp(points[ids], axis=0))
+            )
+            _, spread, ring_axes = np.linalg.svd(
+                points[ring] - points[ring].mean(0), full_matrices=False
+            )
+            if (
+                spread[1] > 1e-8
+                and spread[2] < spread[1] * 0.3
+                and abs(up @ ring_axes[2]) < 0.75
+            ):
+                up = ring_axes[2]
+    if not paths and up_axis != "AUTO":
+        up = np.zeros(3)
+        up["XYZ".index(up_axis[-1])] = -1 if up_axis.startswith("-") else 1
+    if (
+        not paths
+        and up_axis == "AUTO"
+        and (up[2] if abs(up[2]) > 0.2 else up[np.argmax(abs(up))]) < 0
+    ):
+        up = -up
+    global_height = float(np.ptp(points @ up))
+    foot_points = points[(points @ up) <= np.quantile(points @ up, 0.08)]
+    body_feet = _lower_centers(body_points, body_topology, up)
+    cloth_feet = _lower_centers(points, faces, up)
+    # A shorts crotch can join its two lower cloth bands and leave front/back
+    # islands. The body's separated feet provide the anatomical left/right axis.
+    candidates = body_feet if len(body_feet) >= 2 else cloth_feet
+    side = np.array([1.0, 0, 0])
+    side -= up * (side @ up)
+    if np.linalg.norm(side) < 0.2:
+        side = axes[1] - up * (axes[1] @ up)
+    if len(candidates) >= 2:
+        pairs = [
+            (np.linalg.norm((a - b) - up * ((a - b) @ up)), a - b)
+            for i, a in enumerate(candidates)
+            for b in candidates[i + 1 :]
+        ]
+        distance, direction = max(pairs, key=lambda pair: pair[0])
+        if distance > global_height * 0.03:
+            side = direction - up * (direction @ up)
+    side = _unit(side)
+    if side[np.argmax(abs(side))] < 0:
+        side = -side
+    forward = _unit(np.cross(up, side))
+    bottom = foot_points.mean(0)
+    body_foot_sides = [float(p @ side) for p in body_feet]
+    centerline = (
+        (min(body_foot_sides) + max(body_foot_sides)) * 0.5
+        if len(body_foot_sides) >= 2
+        else float(np.median(body_height_rows @ side))
+    )
+    bottom += side * (centerline - bottom @ side)
+    body_center = body.mean(1) - bottom
+    bh = body_center @ up / max(global_height, 1e-8)
+    bs = (body - bottom) @ side / max(global_height, 1e-8)
+    # Clothing height is not a leg radius. A lateral crop by that height
+    # discards the outer half of short socks' body cross-sections.
+    valid = (bh > -0.1) & (bh < 1.08)
+    owners = np.where(
+        valid,
+        np.where(np.all(bs < 0, axis=1), 1, np.where(np.all(bs >= 0, axis=1), 2, 3)),
+        0,
+    ).astype(np.uint32)
+    return up, side, forward, bottom, body_foot_sides, owners
+
+
+def _assign_manual_paths(points, faces, components, owned_rows, manual_paths):
+    if not manual_paths:
+        return [[] for _ in components]
+
+    _, openings = _boundary_loops(faces)
+    component_id = np.full(len(points), -1, int)
+    for index, component in enumerate(components):
+        component_id[component] = index
+    rims = defaultdict(list)
+    for opening in openings:
+        rims[component_id[opening[0]]].extend(opening)
+
+    assigned = [[] for _ in components]
+    # Nearby openings take precedence over other islands touched by a mask.
+    # Coincident garment alternatives can share the same authored control.
+    for zone, selected, path in sorted(manual_paths, key=lambda item: item[0]):
+        travel = float(np.linalg.norm(path[1] - path[0]))
+        direction = _unit(path[1] - path[0])
+        distances = {}
+        suitable = {}
+        for index, component in enumerate(components):
+            if not np.any(selected[owned_rows[index]]):
+                continue
+            offsets = points[rims[index] or component] - path[0]
+            distance = float(np.linalg.norm(offsets, axis=1).min())
+            distances[index] = distance
+            span = float(np.ptp(points[component] @ direction))
+            # Even a folded panel needs about half the proposed travel.
+            # A cuff trim can be closer to the handle than the actual panel.
+            if span >= travel * 0.5 and np.min(np.abs(offsets @ direction)) <= max(0.01, span * 0.1):
+                suitable[index] = distance
+        distances = suitable or distances
+        if distances:
+            nearest = min(distances.values())
+            for index, distance in distances.items():
+                if distance <= nearest + max(0.01, nearest * 0.15):
+                    assigned[index].append((zone, path))
+    return assigned
+
+
 def bake_garments(
     positions,
     normals,
@@ -851,6 +972,7 @@ def bake_garments(
     body_branch_weights=None,
     body_skin_faces=0,
     reference_body_faces=None,
+    automatic_rows=None,
 ):
     """Return one independently controlled runtime per welded cloth component."""
     positions = np.asarray(positions, float)
@@ -915,42 +1037,6 @@ def bake_garments(
     faces = faces[keep]
     _, indices = np.unique(np.sort(faces, axis=1), axis=0, return_index=True)
     faces = faces[np.sort(indices)]
-    _, _, axes = np.linalg.svd(points - points.mean(0), full_matrices=False)
-    up = axes[0]
-    if manual_paths:
-        first_path = manual_paths[0][2]
-        up = _unit(first_path[0] - first_path[1])
-        for _, _, path in manual_paths:
-            if abs(_unit(path[1] - path[0]) @ up) < 0.98:
-                raise ValueError(
-                    "同一连通衣物的多个穿脱箭头须沿同一轴；不同衣物可使用不同方向"
-                )
-    elif up_axis == "AUTO":
-        _, openings = _boundary_loops(faces)
-        if openings:
-            ring = max(
-                openings, key=lambda ids: np.linalg.norm(np.ptp(points[ids], axis=0))
-            )
-            _, spread, ring_axes = np.linalg.svd(
-                points[ring] - points[ring].mean(0), full_matrices=False
-            )
-            if (
-                spread[1] > 1e-8
-                and spread[2] < spread[1] * 0.3
-                and abs(up @ ring_axes[2]) < 0.75
-            ):
-                up = ring_axes[2]
-    if not manual_paths and up_axis != "AUTO":
-        up = np.zeros(3)
-        up["XYZ".index(up_axis[-1])] = -1 if up_axis.startswith("-") else 1
-    if (
-        not manual_paths
-        and up_axis == "AUTO"
-        and (up[2] if abs(up[2]) > 0.2 else up[np.argmax(abs(up))]) < 0
-    ):
-        up = -up
-    global_height = float(np.ptp(points @ up))
-    foot_points = points[(points @ up) <= np.quantile(points @ up, 0.08)]
     body_rows = np.unique(body_faces)
     _, body_first, body_weld = np.unique(
         np.rint(positions[body_rows] / epsilon).astype(np.int64),
@@ -959,48 +1045,7 @@ def bake_garments(
         return_inverse=True,
     )
     body_topology = body_weld[np.searchsorted(body_rows, body_faces)]
-    body_feet = _lower_centers(positions[body_rows[body_first]], body_topology, up)
-    cloth_feet = _lower_centers(points, faces, up)
-    # A shorts crotch can join its two lower cloth bands and leave front/back
-    # islands. The body's separated feet provide the anatomical left/right axis.
-    candidates = body_feet if len(body_feet) >= 2 else cloth_feet
-    side = np.array([1.0, 0, 0])
-    side -= up * (side @ up)
-    if np.linalg.norm(side) < 0.2:
-        side = axes[1] - up * (axes[1] @ up)
-    if len(candidates) >= 2:
-        pairs = [
-            (np.linalg.norm((a - b) - up * ((a - b) @ up)), a - b)
-            for i, a in enumerate(candidates)
-            for b in candidates[i + 1 :]
-        ]
-        distance, direction = max(pairs, key=lambda pair: pair[0])
-        if distance > global_height * 0.03:
-            side = direction - up * (direction @ up)
-    side = _unit(side)
-    if side[np.argmax(abs(side))] < 0:
-        side = -side
-    forward = _unit(np.cross(up, side))
-    bottom = foot_points.mean(0)
-    body_foot_sides = [float(p @ side) for p in body_feet]
-    centerline = (
-        (min(body_foot_sides) + max(body_foot_sides)) * 0.5
-        if len(body_foot_sides) >= 2
-        else float(np.median(positions[body_rows] @ side))
-    )
-    bottom += side * (centerline - bottom @ side)
     body = positions[body_faces]
-    body_center = body.mean(1) - bottom
-    bh = body_center @ up / max(global_height, 1e-8)
-    bs = (body - bottom) @ side / max(global_height, 1e-8)
-    # Clothing height is not a leg radius. A lateral crop by that height
-    # discards the outer half of short socks' body cross-sections.
-    valid = (bh > -0.1) & (bh < 1.08)
-    owners = np.where(
-        valid,
-        np.where(np.all(bs < 0, axis=1), 1, np.where(np.all(bs >= 0, axis=1), 2, 3)),
-        0,
-    ).astype(np.uint32)
     surface = (
         np.asarray(body_surface, np.uint32)
         if body_surface is not None
@@ -1029,8 +1074,12 @@ def bake_garments(
                     choices, key=lambda other: float(n[face] @ n[other])
                 )
     result = []
-    for component in _components(faces, len(points)):
-        if len(component) < 3:
+    components = [component for component in _components(faces, len(points)) if len(component) >= 3]
+    rows_by_component = [rows[np.isin(weld, component)] for component in components]
+    assigned = _assign_manual_paths(points, faces, components, rows_by_component, manual_paths)
+    frames = {}
+    for component, owned_rows, paths in zip(components, rows_by_component, assigned):
+        if manual_paths and not paths and (automatic_rows is None or not np.any(automatic_rows[owned_rows])):
             continue
         mask = np.zeros(len(points), bool)
         mask[component] = True
@@ -1038,12 +1087,13 @@ def bake_garments(
         local = np.full(len(points), -1, int)
         local[component] = np.arange(len(component))
         cf = local[cf]
-        owned_rows = rows[np.isin(weld, component)]
-        paths = [
-            (zone, path)
-            for zone, selected_rows, path in manual_paths
-            if np.any(selected_rows[owned_rows])
-        ]
+        frame_key = tuple(zone for zone, _ in paths)
+        if frame_key not in frames:
+            frames[frame_key] = _garment_frame(
+                points, faces, positions[body_rows[body_first]], body_topology,
+                positions[body_rows], body, up_axis, paths,
+            )
+        up, side, forward, bottom, body_foot_sides, owners = frames[frame_key]
         two_ended = bool(np.any(directional[owned_rows]))
         lower_required = bool(np.any(directional[owned_rows] >= 2))
         p, f, reps = _simplify(
@@ -1055,6 +1105,10 @@ def bake_garments(
         _, openings = _boundary_loops(f)
         if not openings:
             raise ValueError("上下拖拽：未识别到衣物开口，请保留衣物边界")
+        if not paths:
+            # A buttonhole or seam slit must not count as an extra leg opening.
+            threshold = _opening_width(p, side, forward) * 0.05
+            openings = [ring for ring in openings if _opening_width(p[ring], side, forward) >= threshold] or openings
         opening_height = np.array([float((p[ring] @ up).mean()) for ring in openings])
         span = float(np.ptp(p @ up))
         width = float(np.ptp(p @ side))
@@ -1072,15 +1126,28 @@ def bake_garments(
             and abs(float((p[ring].mean(0) - p.mean(0)) @ side)) > width * 0.25
         ]
         branched = len(openings) >= 4 and len(sleeves) >= 2 and lower_required
+        lower_sides = [float((p[ring].mean(0) - bottom) @ side) for ring in bottom_openings]
         sliding = (
-            len(openings) == 3 and len(bottom_openings) == 2 and not lower_required
+            len(openings) == 3 and len(lower_sides) == 2 and not lower_required
+            and min(lower_sides) < -width * 0.05 and max(lower_sides) > width * 0.05
         )
+        opening_by_zone = {}
+        ends = {}
         if paths:
-            two_ended = len(paths) > 1 and any(
-                (path[1] - path[0]) @ up > 0 for _, path in paths
-            )
+            opening_by_zone = {
+                zone: min(range(len(openings)), key=lambda index: float(np.linalg.norm(p[openings[index]] - path[0], axis=1).min()))
+                for zone, path in paths
+            }
+            primary_opening = opening_by_zone[paths[0][0]]
+            ends = {
+                zone: 2 if opening_height[primary_opening] - opening_height[index] > span * 0.5 else 1
+                for zone, index in opening_by_zone.items()
+            }
+            two_ended = 2 in ends.values()
             lower_required = two_ended
             branched = False
+            if two_ended:
+                sliding = False
         if sliding:
             two_ended = False
         upper_cuff = _hem(
@@ -1093,17 +1160,7 @@ def bake_garments(
             min_width=0 if paths else (0.08 if branched else 0.2),
         )
         if paths:
-            negative_paths = [
-                (zone, path) for zone, path in paths if (path[1] - path[0]) @ up < 0
-            ]
-            if not negative_paths:
-                raise ValueError("衣物箭头未指向衣物内部，请检查起点与端点")
-            upper_cuff = min(
-                openings,
-                key=lambda ring: float(
-                    np.linalg.norm(p[ring].mean(0) - negative_paths[0][1][0])
-                ),
-            )
+            upper_cuff = openings[primary_opening]
             center = p[upper_cuff].mean(0)
             xy = np.c_[
                 (p[upper_cuff] - center) @ side, (p[upper_cuff] - center) @ forward
@@ -1143,9 +1200,11 @@ def bake_garments(
         height = float((top - low) @ up)
         if height <= 1e-6:
             raise ValueError("上下拖拽：衣物开口不是长轴上端，请调整拖拽轴")
-        for _, path in paths:
-            opening = top if (path[1] - path[0]) @ up < 0 else low
-            if abs(float((path[0] - opening) @ up)) > max(height * 0.1, 0.01):
+        for zone, path in paths:
+            rim_levels = p[openings[opening_by_zone[zone]]] @ up
+            start_level = path[0] @ up
+            offset = max(float(rim_levels.min() - start_level), float(start_level - rim_levels.max()), 0)
+            if offset > max(height * 0.1, 0.01):
                 raise ValueError(
                     "穿脱箭头起点应放在衣物开口平面附近；请移动起点后重新生成"
                 )
@@ -1176,7 +1235,7 @@ def bake_garments(
         torso_sheet = None
         skin_partition = None
         if paths and not two_ended:
-            travel = float(np.linalg.norm(paths[0][1][1] - paths[0][1][0]))
+            travel = max(float(np.linalg.norm(path[1] - path[0])) for _, path in paths)
             manual_target = 1 - travel / height
             if not sliding:
                 manual_anchor = (
@@ -1544,6 +1603,7 @@ def bake_garments(
             config[4, 0] = min(0.0, (ankle - low @ up) / height + 1)
             config[14, 3] = 2
         path_controls = {}
+        path_axes = {}
         if paths:
             config[15, 3] = 1
             config[15, 1:3] = 1
@@ -1570,15 +1630,16 @@ def bake_garments(
                     float(np.ptp(p[upper_cuff] @ side)) * 0.6, height * 0.2
                 )
             for zone, path in paths:
-                code = 1 if (path[1] - path[0]) @ up < 0 else 2
+                arrow = path[1] - path[0]
+                length = float(np.linalg.norm(arrow))
+                code = ends[zone]
                 maximum = (
-                    float(np.linalg.norm(path[1] - path[0]))
-                    / height
-                    / (1 - config[13, 3])
+                    length / height / (1 - config[13, 3])
                     if two_ended
-                    else 1.0
+                    else length / travel
                 )
                 path_controls[zone] = (code, maximum)
+                path_axes[zone] = (*_unit(arrow), length)
             if manual_target is not None and not sliding and config[12, 3] < 0.5:
                 connected = surface_track_component(
                     positions,
@@ -1693,6 +1754,7 @@ def bake_garments(
                 "display_triangles": display.ravel(),
                 "display_weights": weights,
                 "path_controls": path_controls,
+                "path_axes": path_axes,
                 "body_seeds": contact_seeds,
                 "body_channels": channels,
                 "body_directions": body_directions(

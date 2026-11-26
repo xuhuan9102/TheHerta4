@@ -67,3 +67,23 @@ class OwnedSkinClothTests(unittest.TestCase):
             self.assertEqual({entry[2] for entry in found()}, {1})
             sections["[ResourceZZRedirectSkinPosition_G3_c0]"][-1] = "filename = Meshes/unrelated-Position.buf"
             self.assertEqual(found(), [])
+
+    def test_follows_per_draw_skin_output_through_a_render_command_list(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture, node, sections, comp = self.owned_fixture(Path(temp))
+            draw_output = f"ResourceZZSkinOut_{comp['hash']}"
+            for section, lines in list(sections.items()):
+                del sections[section]
+                sections[section.replace("ResourceZZSkinOut_G3", draw_output)] = [
+                    line.replace("ResourceZZSkinOut_G3", draw_output) for line in lines
+                ]
+            draw = sections[comp["parts"][0]["section"]]
+            sections["[CommandListSkinDraw]"] = [line for line in draw if f"vb0 = ref {draw_output}" in line]
+            draw[:] = [line for line in draw if f"vb0 = ref {draw_output}" not in line]
+            draw.insert(0, "run = CommandListSkinDraw")
+            cloth, body = node._cloth_object_names(required=True)
+            result = fixture.exporter.bake_component(
+                node, temp, sections, comp, "unit", cloth, body, fixture.mod._blender_object_key,
+            )
+            self.assertEqual(result["native_family"], draw_output)
+            self.assertEqual(result["palette_rows"], {1: 6, 2: 6})

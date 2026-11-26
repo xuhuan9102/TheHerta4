@@ -98,6 +98,19 @@ class GarmentGeometryTests(unittest.TestCase):
         cls.mod = _load_drag_module()
         cls.geom = importlib.import_module("_ssmt_root.blueprint.drag_cloth_geometry")
 
+    def test_limb_guide_stays_on_its_branch_past_the_end(self):
+        proxy = importlib.import_module("_ssmt_root.blueprint.drag_cloth_proxy_core")
+        left, _, left_faces = cylinder(-.12, .05, height=1.0, cap_bottom=True)
+        right, _, right_faces = cylinder(.12, .05, height=1.1, cap_bottom=True)
+        right[:, 2] -= .25
+        cloth, _, _ = cylinder(-.12, .055, height=.15)
+        cloth[:, 2] += .55
+        body = np.concatenate((left[left_faces], right[right_faces]), axis=0)
+        sections = proxy.BodySections(body, cloth, -.15, .75, 40, extend_lower=True)
+        np.testing.assert_allclose(sections.centers[:, 0], -.12, atol=.01)
+        np.testing.assert_array_equal(sections.centers[0], sections.centers[1])
+        self.assertTrue(np.isfinite(sections.radii).all())
+
     def test_intrinsic_surface_coordinate_retains_tube_boundaries(self):
         p, _n, f = cylinder(0, 0.1, rings=21, sides=24, cap_bottom=True, cap_top=True)
         field = self.geom.intrinsic_levels(
@@ -444,6 +457,31 @@ class GarmentGeometryTests(unittest.TestCase):
         self.assertEqual(data["path_controls"][1][0], 2)
         self.assertAlmostEqual(data["path_controls"][0][1], 0.3 / 0.95, places=5)
         self.assertAlmostEqual(data["path_controls"][1][1], 0.4 / 0.95, places=5)
+
+    def test_two_angled_arrows_on_one_opening_share_the_longest_route(self):
+        p, n, _, _, cloth, body = fixture(two=False, open_ends=True)
+        rows = np.zeros(len(p), bool)
+        rows[np.unique(cloth)] = True
+        left = np.array([[-0.16, 0, 1], [-0.10, 0, 0.80]])
+        right = np.array([[-0.08, 0, 1], [-0.20, 0, 0.60]])
+        paths = [(0, rows & (p[:, 0] <= -0.10), left), (1, rows & (p[:, 0] >= -0.14), right)]
+        data, = self.geom.bake_garments(p, n, cloth, body, exterior=False, manual_paths=paths)
+
+        for zone, arrow, maximum in ((0, left, 0.5), (1, right, 1.0)):
+            self.assertEqual(data["path_controls"][zone][0], 1)
+            self.assertAlmostEqual(data["path_controls"][zone][1], maximum)
+            delta = arrow[1] - arrow[0]
+            np.testing.assert_allclose(data["path_axes"][zone][:3], delta / np.linalg.norm(delta))
+
+    def test_tiny_hole_above_the_waist_does_not_hide_the_real_opening(self):
+        cloth, _, cloth_faces = cylinder(0, 0.15, height=0.8, cap_top=False)
+        trim, _, trim_faces = cylinder(0, 0.003, height=0.01, cap_top=False)
+        trim[:, 2] += 1.2
+        points = np.r_[cloth, trim]
+        faces = np.r_[cloth_faces, trim_faces + len(cloth)]
+        cuff = self.geom._hem(faces, points, np.array([0, 0, 1]), np.array([1, 0, 0]), np.array([0, 1, 0]))
+        self.assertTrue(np.all(cuff < len(cloth)))
+        np.testing.assert_allclose(points[cuff, 2], 0.8)
 
     def test_arrow_world_reference_export_and_mirror_match_region_transform(self):
         paths = importlib.import_module("_ssmt_root.blueprint.drag_cloth_path")
@@ -2155,7 +2193,7 @@ class GarmentExportTests(unittest.TestCase):
                 for name, value in saved.items():
                     np.testing.assert_array_equal(read(name, value.shape[1]), value)
                 self.assertTrue(traces)
-                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
+                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "stabilize.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
                 self.assertFalse(any(name == "frozen_skin.hlsl" and mode == 1 for name, mode in traces))
                 # A render row omitted from the proxy must not be reprojected
                 # from the native, fully worn garment while the pointer rests.
@@ -2189,7 +2227,7 @@ class GarmentExportTests(unittest.TestCase):
                 np.testing.assert_allclose(out[mask, :3], old[mask, :3] @ rotation.T + translation, atol=1e-6)
                 for name, value in saved.items():
                     np.testing.assert_array_equal(read(name, value.shape[1]), value)
-                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
+                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "stabilize.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
                 traces.clear()
                 r.frame(760, True, hit)
                 self.assertTrue(any(name == "cloth_nodes_p4.hlsl" for name, _ in traces), traces)
@@ -2198,7 +2236,7 @@ class GarmentExportTests(unittest.TestCase):
                 traces.clear()
                 for _ in range(8):
                     np.testing.assert_array_equal(r.frame(760, False), resumed)
-                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
+                self.assertTrue(all(name in ("copy_native.hlsl", "select.hlsl", "frozen_skin.hlsl", "cloth_nodes_p0.hlsl", "stabilize.hlsl", "display_normals.hlsl", "apply.hlsl") for name, _ in traces), traces)
             finally:
                 r.close()
 
@@ -2650,6 +2688,95 @@ RWBuffer<float4> Result : register(u0);
                 self.assertNotIn("#include", data)
                 self.assertIn("geometryReady", data)
 
+    def test_region_wear_switch_leaves_ordinary_drag_and_collision_available(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(
+                root, bake=False, collision=True, directions=("NEGATIVE", "NEGATIVE")
+            )
+            entries = node._collect_enabled_zone_entries()
+            disabled = entries[0][1].ssmt_drag_zone
+            disabled.cloth_wear_enabled = False
+            disabled.cloth_path_start = object()
+            self.assertTrue(node._cloth_export_enabled())
+            self.assertEqual(len(node._collect_enabled_zone_entries()), 2)
+            self.assertTrue(node._collision_enabled_for_component())
+            clothes, bodies = node._cloth_object_names(required=True)
+            cloth = self.exporter.bake_component(
+                node, temp, sections, comp, "unit", clothes, bodies, self.mod._blender_object_key,
+            )
+            for index in range(len(cloth["garments"])):
+                controls = np.fromfile(
+                    root / cloth["directory"] / f"g{index}/control_zones.buf", "<f4"
+                ).reshape(-1, 4)
+                self.assertEqual(controls[0, 0], 0)
+                self.assertEqual(controls[1, 0], 1)
+            entries[1][1].ssmt_drag_zone.cloth_wear_enabled = False
+            self.assertFalse(node._cloth_export_enabled())
+            self.assertEqual(node._cloth_object_names(), (set(), set()))
+            self.assertTrue(node._collision_enabled_for_component())
+
+    def test_limb_proxy_export_writes_its_shader_and_uses_the_full_arrow(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root, bake=False)
+            settings = node._collect_enabled_zone_entries()[0][1].ssmt_drag_zone
+            settings.include_objects = settings.include_objects[:1]
+            settings.cloth_limb_slide = True
+            start, end = np.eye(4), np.eye(4)
+            start[:3, 3] = (-.12, 0, 1)
+            end[:3, 3] = (-.12, 0, .8)
+            settings.cloth_path_start = types.SimpleNamespace(matrix_world=start)
+            settings.cloth_path_end = types.SimpleNamespace(matrix_world=end)
+            node._get_reference_matrix_inv = lambda _comp: None
+            node._get_export_space_matrix = lambda: None
+            node._get_non_mirror_mirror = lambda: None
+            clothes, body = node._cloth_object_names(required=True)
+            with patch.object(
+                self.exporter, "bake_limb_track",
+                return_value=(np.arange(3, dtype="<u4"), np.zeros((17, 3, 4, 4), "<f4")),
+            ):
+                comp["cloth"] = self.exporter.bake_component(
+                    node, temp, sections, comp, "unit", clothes, body, self.mod._blender_object_key,
+                )
+            node._emit_sections(sections, [comp], "unit")
+            directory = root / comp["cloth"]["directory"] / "g0"
+            shader = directory / "proxy_apply.hlsl"
+            lines = sections["[CustomShaderSSMTClothG0Apply_s1_abc123_unit]"]
+            self.assertEqual(lines[0], "cs = " + shader.relative_to(root).as_posix())
+            self.assertIn("#define PROXY_SAMPLES 17", shader.read_text("utf8"))
+            axes = np.fromfile(directory / "control_axes.buf", "<f4").reshape(-1, 4)
+            np.testing.assert_allclose(axes[0], (0, 0, -1, .2))
+
+    def test_compression_proxy_binds_other_included_meshes_away_from_the_cuff(self):
+        with tempfile.TemporaryDirectory() as temp:
+            node, sections, comp = self.prepare(Path(temp), bake=False)
+            settings = node._collect_enabled_zone_entries()[0][1].ssmt_drag_zone
+            settings.cloth_proxy_enabled = True
+            start, end = np.eye(4), np.eye(4)
+            start[:3, 3], end[:3, 3] = (-.12, 0, 1), (-.12, 0, .08)
+            settings.cloth_path_start = types.SimpleNamespace(matrix_world=start)
+            settings.cloth_path_end = types.SimpleNamespace(matrix_world=end)
+            node._get_reference_matrix_inv = lambda _comp: None
+            node._get_export_space_matrix = lambda: None
+            node._get_non_mirror_mirror = lambda: None
+            clothes, body = node._cloth_object_names(required=True)
+            faces, names = node._read_component_triangles(temp, sections, comp, comp["vertex_count"])
+            expected = faces[np.isin(names, ["Stocking0", "Stocking1"])]
+            self.assertGreater(len(expected), len(faces[names == "Stocking0"]))
+            rows = np.unique(expected).astype("<u4")
+            with patch.object(self.exporter, "bake_limb_track", return_value=(
+                rows, np.zeros((17, len(rows), 4, 4), "<f4"),
+            )) as bake:
+                cloth = self.exporter.bake_component(
+                    node, temp, sections, comp, "unit", clothes, body, self.mod._blender_object_key,
+                )
+            bake.assert_called_once()
+            np.testing.assert_array_equal(bake.call_args.args[2], expected)
+            np.testing.assert_allclose(bake.call_args.args[6], [start[:3, 3], end[:3, 3]])
+            np.testing.assert_allclose(cloth["garments"][0]["path_axes"][0], [0, 0, -1, .92])
+            np.testing.assert_array_equal(cloth["garments"][0]["proxy_rows"], rows)
+
     @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
     def test_single_zone_can_pull_either_end_through_the_full_travel(self):
         path = Path(__file__).resolve().parents[1] / "tools/check_drag_cloth.py"
@@ -2839,6 +2966,49 @@ RWBuffer<float4> Result : register(u0);
                     )
                 self.assertGreater(read()[0, 1], 0.1)
                 self.assertEqual(read()[0, 0], 0)
+            finally:
+                runner.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_switching_to_an_angled_shorter_control_preserves_the_shared_pose(self):
+        path = Path(__file__).resolve().parents[1] / "tools/check_drag_cloth.py"
+        spec = importlib.util.spec_from_file_location("angled_controls_gpu", path)
+        gpu = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gpu)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root, directions=("NEGATIVE", "NEGATIVE"))
+            meta = comp["cloth"]
+            assets = root / meta["directory"] / "g0"
+            np.array([[1, 0.9, 0, 1], [1, 0.025, 0, 1]], np.float32).tofile(assets / "control_zones.buf")
+            np.array([[1, 0, 0, 0.9], [0, 0, -1, 0.025]], np.float32).tofile(assets / "control_axes.buf")
+            node._emit_sections(sections, [comp], "unit")
+            runner = gpu.GeneratedCloth(root, sections, comp)
+            try:
+                runner.prepare_identity()
+                row = int(meta["garments"][0]["representatives"][20])
+                resource = runner.resource("ResourceSSMTCloth_abc123_unit_G0_State")
+
+                def state():
+                    return runner.gpu.read_bytes(resource.pointer, resource.size).view("<f4").reshape(-1, 4)
+
+                basis = ([1, 0, 0], [0, 0, 1])
+                runner.frame(hit_row=row)
+                runner.frame(600, True, row, zone=0, cursor_x=800, camera_basis=basis)
+                for step in range(1, 9):
+                    runner.frame(600, True, row, zone=0, cursor_x=800 + 8 * step, camera_basis=basis)
+                before = state()[0, 0]
+                epoch = state()[2, 0]
+                self.assertGreater(before, 0.05)
+                runner.frame(600, False, row, zone=0, cursor_x=864, camera_basis=basis)
+                runner.frame(600, True, row, zone=1, cursor_x=864, camera_basis=basis)
+                np.testing.assert_allclose(state()[14, :2], [0, -1], atol=1e-5)
+                runner.frame(592, True, row, zone=1, cursor_x=864, camera_basis=basis)
+                self.assertAlmostEqual(state()[0, 0], before, places=6)
+                self.assertEqual(state()[2, 0], epoch)
+                runner.frame(600, True, row, zone=1, cursor_x=864, camera_basis=basis)
+                self.assertGreater(state()[0, 0], 0.025)
+                self.assertLess(state()[0, 0], before)
             finally:
                 runner.close()
 
