@@ -380,8 +380,13 @@ class ExportAPMI(ExportUnity):
             output = source.output
             source_seen = seen[output]
             native_output = f"ResourceAPMINativeOutput_{output}"
-            self._section(ini, M_SectionType.ResourceBuffer, native_output, [])
-            self._section(ini, M_SectionType.Present, "Present", [f"post {native_output} = null"])
+            palette_input = f"{pool}_{output}_NativePalette"
+            blend_input = f"{pool}_{output}_NativeBlend"
+            native_bindings = {"cs-u0": native_output, "cs-t2": palette_input, "cs-t1": blend_input}
+            for resource in native_bindings.values():
+                self._section(ini, M_SectionType.ResourceBuffer, resource, [])
+            self._section(ini, M_SectionType.Present, "Present",
+                          [f"post {resource} = null" for resource in native_bindings.values()])
             layouts = palette_layouts[output]
             selection = []
             for index, (blend_hash, writes) in enumerate(layouts.items()):
@@ -403,14 +408,16 @@ class ExportAPMI(ExportUnity):
                     selection.append(f"      cs-t3 = ref {slot_map}")
             selection.append("    endif")
             blend_matches = " || ".join(f"cs-t1 == {filter_indices[key]}" for key in layouts)
+            same_native_bindings = " && ".join(f"@{slot} === @{resource}" for slot, resource in native_bindings.items())
             commands = [
                 f"hash = {output}",
                 f"if $costume_mods && cs-t2->stride == {MATRIX_STRIDE} && cs-t2->size == {source.count * MATRIX_STRIDE}"
                 f" && ({blend_matches})",
-                f"  if {source_seen}",
+                # The game can update the same palette again before drawing this instance.
+                f"  if {source_seen} && !({same_native_bindings})",
                 f"    {failed} = 1",
                 f"  elif !{failed}",
-                f"    {native_output} = ref cs-u0",
+                *(f"    {resource} = ref {slot}" for slot, resource in native_bindings.items()),
                 f"    run = {save}",
                 *selection,
                 rf"    $\APMI\Skeleton\groups = {skin_group_count(source.count)}",
