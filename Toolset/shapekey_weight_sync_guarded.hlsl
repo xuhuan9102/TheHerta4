@@ -1,7 +1,6 @@
 // shapekey_weight_sync_guarded.hlsl
 //
-// Same manual-weight transfer as shapekey_weight_sync.hlsl, except slots owned
-// by the native ZZMI morph bridge are left untouched.
+// Native ZZMI weights are preserved unless their packed parameter encodes a lock.
 
 #define SHAPEKEY_WEIGHT_SYNC_BASE 100
 #define SHAPEKEY_WEIGHT_MIN (-4.0)
@@ -32,12 +31,18 @@ void main(uint3 threadID : SV_DispatchThreadID)
     uint i = threadID.x;
     uint count;
     ShapeKeyWeight.GetDimensions(count);
-    if (i >= count || IsNativeMorphSlot(i))
+    if (i >= count)
     {
         return;
     }
 
     float raw = IniParams[SHAPEKEY_WEIGHT_SYNC_BASE + (i >> 2)][i & 3];
+    if (IsNativeMorphSlot(i))
+    {
+        if (!(raw >= 12.0 && raw <= 20.0))
+            return;
+        raw -= 16.0;
+    }
     if (isnan(raw))
     {
         raw = 0.0;

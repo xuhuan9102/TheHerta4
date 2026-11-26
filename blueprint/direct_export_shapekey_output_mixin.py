@@ -30,8 +30,10 @@ from .direct_export_runtime_utils import iter_drawib_models as _iter_drawib_mode
 from .direct_export_shapekey_shared import ShapeKeyDirectExportError, _buffer_to_bytes, resolve_use_delta
 try:
     from . import native_morph_driver as native_morph
+    from . import native_expression_lock as expression_lock
 except ImportError:
     from blueprint import native_morph_driver as native_morph
+    from blueprint import native_expression_lock as expression_lock
 try:
     from .shapekey_sparse_index import (
         NO_FREQ_INDEX,
@@ -1429,6 +1431,7 @@ class DirectShapeKeyOutputMixin:
             reserved_filter_indices=native_morph.collect_reserved_filter_indices(
                 sections
             ),
+            source_filter_indices=getattr(self, "_native_expression_source_filters", {}),
         )
         if not plans:
             return {}, {}
@@ -1537,6 +1540,8 @@ class DirectShapeKeyOutputMixin:
     ):
         native_morph_plans = dict(native_morph_plans or {})
         native_morph_lookup_files = dict(native_morph_lookup_files or {})
+        transfer_locks = getattr(self, "_native_expression_locks", {})
+        lock_indices = expression_lock.parse_channels(getattr(self.node, "native_expression_lock_channels", ""))
         force_all_vertex_channels_hashes = set(force_all_vertex_channels_hashes or ())
         if '[Constants]' not in sections:
             sections['[Constants]'] = []
@@ -1571,12 +1576,20 @@ class DirectShapeKeyOutputMixin:
         shapekey_freq_params = {}
         for name in all_unique_names:
             shapekey_freq_params[name] = self.node.get_shape_key_export_variable_name(name)
+        for variables, _plan, _weights, _path in transfer_locks.values():
+            shapekey_freq_params.update(variables)
 
+        declared_intensities = {
+            match[1].casefold()
+            for line in constants_lines
+            if (match := re.match(r"^\s*global\s+(?:persist\s+)?(\$[^\s=;]+)", line, re.IGNORECASE))
+        }
         intensity_lines = []
         for name, param in shapekey_freq_params.items():
-            if param not in constants_content:
+            if param.casefold() not in declared_intensities:
                 intensity_lines.append(f"; 控制形态键 '{name}' 的强度")
                 intensity_lines.append(f"global persist {param} = 0.0")
+                declared_intensities.add(param.casefold())
 
         if intensity_lines:
             constants_lines.append("\n; --- Auto-generated Shape Key Intensity Controls (Additive Blending) ---")
@@ -1735,6 +1748,10 @@ class DirectShapeKeyOutputMixin:
             )
             native_lines.append(self._PRESENT_RUN_END)
             rebuilt_present_lines.extend(native_lines)
+        for draw_hash in transfer_locks:
+            line = f"run = {native_morph.custom_shader_clear_name(draw_hash)}"
+            if line not in rebuilt_present_lines:
+                rebuilt_present_lines.append(line)
         sections['[Present]'] = rebuilt_present_lines
 
         if signature_vars:
@@ -1786,9 +1803,21 @@ class DirectShapeKeyOutputMixin:
             frame_groups = frame_meta["groups"] if frame_meta else []
             weight_slots = len(hash_unique_names) + len(frame_groups)
             sync_lines = ["\n    ; --- Shape Key Weight Transfer (packed 4 keys per float4) ---"]
+            native_slots = {
+                entry.shape_key_slot for entry in native_morph_plans[logical_hash].entries
+            } if logical_hash in native_hashes else set()
+            lock_slots = {
+                slot
+                for native_index, slot in native_morph.shape_key_runtime_slot_by_index(hash_unique_names).items()
+                if slot in native_slots and native_index in lock_indices
+            }
             for index, name in enumerate(hash_unique_names):
                 freq_param = shapekey_freq_params.get(name)
-                if freq_param:
+                if index in lock_slots and freq_param:
+                    sync_lines.extend(expression_lock.assignment_lines(freq_param, index))
+                elif index in native_slots:
+                    sync_lines.append(f"    {expression_lock.register_for_slot(index)} = 0")
+                elif freq_param:
                     sync_lines.append(
                         f"    {'xyzw'[index % 4]}{self.node.INTENSITY_START_INDEX + index // 4} = {freq_param} \n; {name}"
                     )
@@ -2282,7 +2311,7 @@ class DirectShapeKeyOutputMixin:
             ):
                 sections.pop(section_name, None)
         sections.update(compute_blocks_to_add)
-        if native_morph_plans:
+        if native_morph_plans or transfer_locks:
             lookup_resource_by_hash = {}
             weight_resource_by_hash = {}
             for logical_hash in native_morph_plans:
@@ -2302,9 +2331,15 @@ class DirectShapeKeyOutputMixin:
                 weight_resource_by_hash[logical_hash] = (
                     derive_shapekey_weight_resource_name(primary_base_resource)
                 )
+            capture_plans = dict(native_morph_plans)
+            for draw_hash, (_variables, plan, weights, lookup_path) in transfer_locks.items():
+                capture_plans[draw_hash] = plan
+                lookup_resource_by_hash[draw_hash] = f"ResourceZZMINativeExpression_{draw_hash}_NativeMorphLookup"
+                weight_resource_by_hash[draw_hash] = weights
+                native_morph_lookup_files[draw_hash] = lookup_path
             sections.update(
                 native_morph.render_native_morph_ini_sections(
-                    plans_by_hash=native_morph_plans,
+                    plans_by_hash=capture_plans,
                     lookup_resource_by_hash=lookup_resource_by_hash,
                     weight_resource_by_hash=weight_resource_by_hash,
                     lookup_filename_by_hash=native_morph_lookup_files,

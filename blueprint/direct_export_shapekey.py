@@ -10,7 +10,7 @@ import bpy
 
 from ..utils.log_utils import LOG
 from ..utils.shapekey_utils import ShapeKeyUtils
-from ..common.safe_write import write_text_if_changed
+from ..common.safe_write import write_text_if_changed, write_bytes_if_changed_atomic
 from .direct_export_runtime_utils import normalize_runtime_name as _normalize_runtime_name
 from .direct_export_shapekey_output_mixin import DirectShapeKeyOutputMixin
 from .direct_export_shapekey_output_mixin import WEIGHT_SYNC_SHADER_NAME
@@ -38,6 +38,8 @@ class DirectShapeKeyGenerator(
         self.meshes_dir = os.path.join(mod_export_path, "Meshes0000")
         self.merged_name_members = {}
         self._processing_chain_alias_lookup = None
+        self._native_expression_locks = {}
+        self._native_expression_source_filters = {}
 
     def _install_native_expression_transfers(
         self, sections, runtime_infos, processed_hashes, hash_slot_data_map,
@@ -47,9 +49,11 @@ class DirectShapeKeyGenerator(
         from ..common.logic_name import LogicName
         from ..common.workspace_helper import WorkSpaceHelper
         from . import native_expression_transfer as transfer
+        from . import native_expression_lock as locks
 
         if not LogicName.is_zzmi_family(GlobalConfig.logic_name):
             return set()
+        lock_indices = locks.parse_channels(getattr(self.node, "native_expression_lock_channels", ""))
 
         grouped_hashes = {}
         for logical_hash in processed_hashes:
@@ -62,10 +66,8 @@ class DirectShapeKeyGenerator(
             model = info.get("drawib_model")
             attributes = info.get("native_shapekey_attributes")
             metadata = getattr(model, "import_json_dict", {}) or {}
-            if not (
-                attributes and attributes.by_name
-                and native_morph.parse_native_morph_keys(metadata.get("ShapeKeysInfo", {}))
-            ):
+            native_keys = native_morph.parse_native_morph_keys(metadata.get("ShapeKeysInfo", {}))
+            if not (attributes and attributes.by_name and native_keys):
                 continue
             try:
                 mesh = transfer.read_transfer_mesh(
@@ -98,6 +100,30 @@ class DirectShapeKeyGenerator(
             shader = Path(shader_source_path).with_name(transfer.SHADER_NAME)
             write_text_if_changed(Path(dest_res_dir) / transfer.SHADER_NAME, shader.read_text(encoding="utf-8"))
             transfer.install_transfer_sections(sections, draw_hash, mesh, f"Meshes0000/{filename}")
+            if lock_indices:
+                lock = locks.prepare_transfer_bridge(
+                    draw_hash, lock_indices, native_keys, attributes.by_name, len(mesh.native_basis),
+                    native_morph.collect_reserved_filter_indices(sections), self._native_expression_source_filters,
+                )
+                if lock:
+                    indices, plan, deltas = lock
+                    self._native_expression_source_filters.update(plan.source_filters)
+                    delta_path = f"Meshes0000/{draw_hash}-NativeExpressionLockDelta.buf"
+                    lookup_path = f"Meshes0000/{draw_hash}-NativeExpressionLockLookup.buf"
+                    write_bytes_if_changed_atomic(Path(self.mod_export_path) / delta_path, deltas)
+                    write_bytes_if_changed_atomic(Path(self.mod_export_path) / lookup_path, plan.lookup_buffer)
+                    variables = {
+                        f"Deform {index}": self.node.get_shape_key_export_variable_name(f"Deform {index}")
+                        for index in indices
+                    }
+                    weights = locks.render_transfer_locks(sections, draw_hash, tuple(variables.values()), delta_path)
+                    self._native_expression_locks[draw_hash] = (variables, plan, weights, lookup_path)
+                    write_text_if_changed(
+                        Path(dest_res_dir) / locks.TRANSFER_SHADER,
+                        "#define SSMT_NATIVE_EXPRESSION_LOCKS\n" + shader.read_text(encoding="utf-8"),
+                    )
+                    for name in (locks.WEIGHT_SHADER, native_morph.CAPTURE_SHADER_NAME, native_morph.CLEAR_SHADER_NAME):
+                        write_text_if_changed(Path(dest_res_dir) / name, shader.with_name(name).read_text(encoding="utf-8"))
             transferred.update(logical_hashes)
             LOG.info(f"ZZMI: 原生表情顶点重映射已启用 {draw_hash}，顶点数={len(mesh.source_vertices)}")
         return transferred
@@ -221,6 +247,11 @@ class DirectShapeKeyGenerator(
         return related_names
 
     def generate(self, frame_cache=None):
+        from . import native_expression_lock as locks
+
+        locks.parse_channels(getattr(self.node, "native_expression_lock_channels", ""))
+        self._native_expression_locks = {}
+        self._native_expression_source_filters = {}
         stage_start = perf_counter()
         classification_text_obj = None
         if self.blueprint_model is not None:

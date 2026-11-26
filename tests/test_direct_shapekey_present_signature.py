@@ -82,6 +82,7 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 module.derive_shapekey_frame_table_resource_name = lambda base: f"{base}_FrameTable"
 module.derive_shapekey_group_map_resource_name = lambda base, index: f"{base}_GroupMap{index}"
+module.derive_shapekey_weight_resource_name = lambda base: f"{base}_ShapeKeyWeight"
 
 
 class _NodeStub:
@@ -98,7 +99,7 @@ class _NodeStub:
         return str(logical_hash).replace("-", "_")
 
     def get_shape_key_export_variable_name(self, name):
-        return f"$Freq_{name}"
+        return "$Freq_" + name.replace(" ", "_")
 
     def _compute_dispatch_group_count(self, vertex_count, threads_per_group=16):
         return max(1, int(vertex_count) // int(threads_per_group))
@@ -146,6 +147,9 @@ class _Harness(module.DirectShapeKeyOutputMixin):
         self.blueprint_model = types.SimpleNamespace(keyname_mkey_dict=key_map or {"$swap": object()})
         self.node = _NodeStub()
 
+    def _merged_native_morph_carriers(self, _logical_hash):
+        return []
+
 
 def _sections():
     return OrderedDict([
@@ -160,8 +164,11 @@ def _sections():
 
 def _run_update(sections, drag_drive_resource=None, frame_table_meta_map=None,
                 target_ini_file="mod.ini", logical_hashes=("d942b3a7-39828-0",),
-                frame_shader_sources=None):
+                frame_shader_sources=None, shape_names=("shape_a", "shape_b"),
+                native_morph_plans=None, transfer_locks=None, lock_channels=""):
     harness = _Harness()
+    harness.node.native_expression_lock_channels = lock_channels
+    harness._native_expression_locks = transfer_locks or {}
     harness._update_ini_sections(
         sections,
         preserved_tail_content="",
@@ -169,13 +176,13 @@ def _run_update(sections, drag_drive_resource=None, frame_table_meta_map=None,
         slot_to_name_to_objects={},
         unique_hashes=list(logical_hashes),
         hash_to_objects={key: ["body"] for key in logical_hashes},
-        all_unique_names=["shape_a", "shape_b"],
+        all_unique_names=list(shape_names),
         all_unique_objects=["body"],
         calculated_ranges={"body": (0, 10)},
         hash_to_stride={"d942b3a7": 40},
         hash_to_actual_file_hash={key: "d942b3a7" for key in logical_hashes},
         hash_to_vertex_count={"d942b3a7": 32},
-        hash_slot_data_map={key: {1: {"shape_a": ["body"], "shape_b": ["body"]}} for key in logical_hashes},
+        hash_slot_data_map={key: {1: {name: ["body"] for name in shape_names}} for key in logical_hashes},
         hash_to_base_resources={"d942b3a7": ["Resourced942b3a7Position"]},
         use_packed=True,
         use_delta=True,
@@ -184,11 +191,54 @@ def _run_update(sections, drag_drive_resource=None, frame_table_meta_map=None,
         drag_drive_resource=drag_drive_resource,
         frame_table_meta_map=frame_table_meta_map,
         frame_shader_sources=frame_shader_sources,
+        native_morph_plans=native_morph_plans,
+        native_morph_lookup_files={key: f"Meshes0000/{key}-Lookup.buf" for key in native_morph_plans or {}},
     )
     return harness
 
 
 class ShapeKeyPresentSignatureWiringTests(unittest.TestCase):
+    def test_stock_and_edited_faces_keep_their_control_and_capture_paths(self):
+        edited = "d942b3a7-39828-0"
+        stock = "8b067f99"
+        key = module.native_morph.NativeMorphKey
+
+        def channel(index, offset):
+            return key("0123456789abcdef", "12345678", "87654321", offset, 2, index)
+
+        stock_plan = module.native_morph.build_native_morph_plans(
+            {stock: [channel(15, 10)]}, {stock: {15: 0}},
+        )[stock]
+        plans = module.native_morph.build_native_morph_plans(
+            {edited: [channel(2, 20), channel(3, 30)]}, {edited: {2: 0, 3: 1}},
+            source_filter_indices=stock_plan.source_filters,
+        )
+        sections = _sections()
+        sections["[Constants]"].append("global persist $Freq_Deform_15 = 0.25")
+        transfers = {
+            stock: ({"Deform 15": "$Freq_Deform_1"}, stock_plan, "ResourceStockLockWeight", "Meshes0000/StockLookup.buf")
+        }
+        for _ in range(2):
+            _run_update(
+                sections, shape_names=("Deform 2", "Deform 3", "authored"),
+                native_morph_plans=plans, transfer_locks=transfers, lock_channels="2, 15",
+            )
+
+        constants = sections["[Constants]"]
+        self.assertEqual(constants.count("global persist $Freq_Deform_1 = 0.0"), 1)
+        self.assertIn("global persist $Freq_Deform_15 = 0.25", constants)
+        sync = "\n".join(sections[f"[CustomShaderShapeKeyWeightSync_{edited}]"])
+        self.assertIn("x100 = 16 + $Freq_Deform_2", sync)
+        self.assertIn("y100 = 0", sync)
+        self.assertNotIn("y100 = $Freq_Deform_3", sync)
+        self.assertIn("z100 = $Freq_authored", sync)
+        present = sections["[Present]"]
+        for logical_hash in (edited, stock):
+            self.assertEqual(present.count(f"run = {module.native_morph.custom_shader_clear_name(logical_hash)}"), 1)
+        self.assertIn(f"[CustomShaderZZMINativeMorphCapture_{stock}]", sections)
+        self.assertIn(f"[CustomShaderZZMINativeMorphCapture_{edited.replace('-', '_')}]", sections)
+        self.assertEqual(sum(name.startswith("[TextureOverrideZZMINativeMorphSource_") for name in sections), 1)
+
     def test_frame_table_inputs_use_compatible_shader_resource_references(self):
         sections = _sections()
         table = "Resourced942b3a7Position_FrameTable"

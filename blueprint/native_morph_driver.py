@@ -169,6 +169,7 @@ def build_native_morph_plans(
     keys_by_hash: dict,
     runtime_slot_by_native_index: dict,
     reserved_filter_indices=None,
+    source_filter_indices=None,
 ) -> dict:
     used_filter_indices = set()
     if reserved_filter_indices is not None:
@@ -180,7 +181,8 @@ def build_native_morph_plans(
             used_filter_indices.update(int(value) for value in reserved_filter_indices)
 
     plans = {}
-    source_filter_by_hash = {}
+    source_filter_by_hash = dict(source_filter_indices or {})
+    used_filter_indices.update(source_filter_by_hash.values())
     for logical_hash, keys in sorted((keys_by_hash or {}).items()):
         slot_map = dict((runtime_slot_by_native_index or {}).get(logical_hash, {}) or {})
         source_filters = {}
