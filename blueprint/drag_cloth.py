@@ -14,6 +14,7 @@ from ..common.safe_write import write_bytes_if_changed_atomic
 from .drag_cloth_geometry import bake_garments
 from .drag_cloth_path import exported_path
 from .drag_cloth_proxy import bake_limb_track
+from .drag_cloth_proxy_core import ProxySectionCoverageError, islands
 from .drag_cloth_regions import reference_branches, cap_domain
 from .drag_collision import bake_sweep_order
 
@@ -484,7 +485,12 @@ def _control_regions(
         if path is None and getattr(settings, "cloth_limb_slide", False):
             raise ValueError(f"上下拖拽：区域 {zone} 的整体滑移需要穿脱箭头")
         regions.append((int(zone), code, rows, selected, body, path))
-    return regions
+    if ids is not None and len(ids) >= base + vertex_count:
+        ids = ids[base : base + vertex_count]
+        weights = weights[base : base + vertex_count]
+    else:
+        ids = weights = None
+    return regions, ids, weights
 
 
 def _region_batches(regions):
@@ -502,6 +508,50 @@ def _region_batches(regions):
             selected |= previous
             controls.extend(linked)
         batches.append((selected, body, controls))
+    return batches
+
+
+def _split_wear_batch(positions, triangles, selected, controls, ids, weights):
+    """Assign whole welded islands to independent handles when ownership is clear."""
+    if len(controls) < 2 or not all(control[-1] is not None for control in controls):
+        return None
+
+    face_ids = np.flatnonzero(selected)
+    faces = triangles[face_ids]
+    rows = np.unique(faces)
+    local = np.searchsorted(rows, faces)
+    labels = islands(positions[rows], local)
+    if len(np.unique(labels)) < len(controls):
+        return None
+
+    assigned = defaultdict(list)
+    for label in np.unique(labels):
+        piece = face_ids[labels[local[:, 0]] == label]
+        piece_rows = rows[labels == label]
+        strengths = []
+        for zone, _, zone_rows, zone_faces, _, _ in controls:
+            if not np.any(zone_faces[piece]):
+                strengths.append(-1.0)
+            elif ids is None:
+                strengths.append(float(np.count_nonzero(zone_rows[piece_rows])))
+            else:
+                strengths.append(float(weights[piece_rows][ids[piece_rows] == zone].sum()))
+        eligible = np.flatnonzero(np.asarray(strengths) >= 0)
+        owner = int(np.argmax(strengths))
+        # Overlapping brushes can reach both legs. An island that does not
+        # give one handle a majority remains on the shared solver.
+        if len(eligible) > 1 and strengths[owner] <= sum(strengths[i] for i in eligible if i != owner):
+            return None
+        assigned[owner].append(piece)
+
+    if len(assigned) != len(controls):
+        return None
+    batches = []
+    for owner, pieces in assigned.items():
+        region = controls[owner]
+        faces = np.zeros_like(selected)
+        faces[np.concatenate(pieces)] = True
+        batches.append((faces, region[4], [region]))
     return batches
 
 
@@ -607,7 +657,7 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
         raise ValueError("上下拖拽：需要四权重/四uint索引的32字节合并 Blend 缓冲")
     weights = blend.view("<f4").reshape(-1, 8)[:, :4]
     indices = blend.view("<u4").reshape(-1, 8)[:, 4:]
-    regions = _control_regions(
+    regions, zone_ids, zone_weights = _control_regions(
         node,
         root,
         sections,
@@ -636,7 +686,11 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
             proxy_modes[zone] = "track"
         elif getattr(settings, "cloth_proxy_enabled", False):
             proxy_modes[zone] = "compress"
+    batches = []
     for selected, collider, controls in _region_batches(regions):
+        split = _split_wear_batch(positions, triangles, selected, controls, zone_ids, zone_weights)
+        batches.extend(split or [(selected, collider, controls)])
+    for selected, collider, controls in batches:
         proxy_mode = None
         if len(controls) == 1 and controls[0][-1] is not None:
             proxy_mode = proxy_modes.get(controls[0][0])
@@ -738,7 +792,8 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
                 np.zeros(len(body_faces) - cap_start, np.uint32),
             ]
         track = None
-        geometry_paths = [(zone, rows, path) for zone, _, rows, _, _, path in controls if path is not None]
+        authored_paths = [(zone, rows, path) for zone, _, rows, _, _, path in controls if path is not None]
+        geometry_paths = authored_paths
         compression_path = None
         if proxy_faces is not None:
             zone, mask, compression_path = geometry_paths[0]
@@ -760,35 +815,41 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
             affected = cloth_triangles[mask[cloth_triangles].all(axis=1)]
             if not len(affected):
                 raise ValueError(f"上下拖拽：区域 {track_zone} 没有命中可整体滑移的衣物面")
-            track = bake_limb_track(positions, normals, affected, reference_body_faces, weights, indices, path, base)
+            try:
+                track = bake_limb_track(positions, normals, affected, reference_body_faces, weights, indices, path, base)
+            except ProxySectionCoverageError as error:
+                raise ValueError(f"上下拖拽：区域 {track_zone} 的整体滑移缺少连续的碰撞体截面：{error}") from error
             # The existing grab/state machine still needs a local cuff frame.
             # The published geometry and the actual control use the full arrow.
             cuff_travel = min(length, float(np.ptp(positions[body_faces] @ axis)) * .048)
             geometry_paths = [(track_zone, mask, np.stack((path[0], path[0] + axis * cuff_travel)))]
-        try:
-            baked = bake_garments(
-                positions,
-                normals,
-                triangles[selected],
-                body_faces,
-                count,
-                base,
-                budget=getattr(node, "cloth_proxy_budget", 2450),
-                up_axis=getattr(node, "cloth_up_axis", "AUTO"),
-                two_ended_rows=two_ended,
-                body_surface=bodies[pool]["surface"],
-                blend_weights=weights,
-                blend_indices=indices,
-                body_domain=body_domain,
-                body_branch_weights=branch_reference,
-                body_skin_faces=cap_start,
-                reference_body_faces=reference_body_faces,
-                automatic_rows=automatic_rows,
-                manual_paths=geometry_paths,
-            )
-        except ValueError as error:
-            zones = "、".join(str(zone) for zone in sorted({control[0] for control in controls}))
-            raise ValueError(f"上下拖拽区域 {zones}：{error}") from error
+        def bake_openings(paths):
+            try:
+                return bake_garments(
+                    positions,
+                    normals,
+                    triangles[selected],
+                    body_faces,
+                    count,
+                    base,
+                    budget=getattr(node, "cloth_proxy_budget", 2450),
+                    up_axis=getattr(node, "cloth_up_axis", "AUTO"),
+                    two_ended_rows=two_ended,
+                    body_surface=bodies[pool]["surface"],
+                    blend_weights=weights,
+                    blend_indices=indices,
+                    body_domain=body_domain,
+                    body_branch_weights=branch_reference,
+                    body_skin_faces=cap_start,
+                    reference_body_faces=reference_body_faces,
+                    automatic_rows=automatic_rows,
+                    manual_paths=paths,
+                )
+            except ValueError as error:
+                zones = "、".join(str(zone) for zone in sorted({control[0] for control in controls}))
+                raise ValueError(f"上下拖拽区域 {zones}：{error}") from error
+
+        baked = bake_openings(geometry_paths)
         if track is not None:
             if not baked:
                 raise ValueError(f"上下拖拽：区域 {track_zone} 找不到可供抓取的开口")
@@ -802,16 +863,22 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
             # Only the cuff carrier supplies the legacy control frame. The
             # proxy carries every included object, including unpainted hardware.
             data = max(baked, key=lambda item: np.count_nonzero(item["map"] != 0xFFFFFFFF))
-            baked = [data]
             surface = data["surface_mask"] != 0
             cfg = data["config"]
-            data["proxy_rows"], data["proxy_track"] = bake_limb_track(
-                positions, normals, proxy_faces, body_faces[surface], weights, indices,
-                compression_path, base, compression_frame=cfg[6:8, :3],
-            )
-            data["path_axes"][zone] = (*axis, length)
-            rows = data["proxy_rows"]
-            data["map"][rows] = np.minimum(data["map"][rows], int(cfg[0, 0]) - 1)
+            try:
+                rows, track_data = bake_limb_track(
+                    positions, normals, proxy_faces, body_faces[surface], weights, indices,
+                    compression_path, base, compression_frame=cfg[6:8, :3],
+                )
+            except ProxySectionCoverageError as error:
+                if geometry_paths is not authored_paths:
+                    baked = bake_openings(authored_paths)
+                print(f"[DragInteraction] 上下拖拽区域 {zone}：{error}，按原箭头使用衣物网格求解")
+            else:
+                baked = [data]
+                data["proxy_rows"], data["proxy_track"] = rows, track_data
+                data["path_axes"][zone] = (*axis, length)
+                data["map"][rows] = np.minimum(data["map"][rows], int(cfg[0, 0]) - 1)
         if not baked:
             if new_pool:
                 bodies.pop()

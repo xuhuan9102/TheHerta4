@@ -376,8 +376,8 @@ class SSMT_DragZoneSettings(bpy.types.PropertyGroup):
     cloth_proxy_enabled: bpy.props.BoolProperty(
         name="代理穿脱",
         description=(
-            "单个区域设置穿脱箭头时，用连续代理带动一件或多件衣物收拢。"
-            "自动方向或多个区域共用衣物时沿用原有求解。勾选沿肢体整体滑移时改为整件滑动"
+            "为区域内可独立控制的衣片生成代理，沿各自的穿脱箭头收拢。"
+            "自动方向或多个区域共控同一片连续衣物时使用共享求解。勾选沿肢体整体滑移时改为整件滑动"
         ),
         default=True,
     )

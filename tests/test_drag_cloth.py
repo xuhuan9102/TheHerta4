@@ -111,6 +111,19 @@ class GarmentGeometryTests(unittest.TestCase):
         np.testing.assert_array_equal(sections.centers[0], sections.centers[1])
         self.assertTrue(np.isfinite(sections.radii).all())
 
+    def test_compression_guide_fits_a_small_endpoint_overhang(self):
+        proxy = importlib.import_module("_ssmt_root.blueprint.drag_cloth_proxy_core")
+        body, _, faces = cylinder(0, .05, height=1, cap_bottom=True, cap_top=True)
+        cloth, _, _ = cylinder(0, .055, height=.8015)
+        cloth[:, 2] -= .0015
+        sections = proxy.BodySections(body[faces], cloth, -.0025, .801, 40, fit_ends=True)
+        self.assertAlmostEqual(float(sections.heights[0]), -.0025)
+        self.assertTrue(np.isfinite(sections.radii).all())
+        np.testing.assert_allclose(sections.centers[0], (0, 0), atol=.01)
+        self.assertGreater(float(sections.radii[0].min()), .04)
+        with self.assertRaises(proxy.ProxySectionCoverageError):
+            proxy.BodySections(body[faces], cloth, -.08, .801, 40, fit_ends=True)
+
     def test_intrinsic_surface_coordinate_retains_tube_boundaries(self):
         p, _n, f = cylinder(0, 0.1, rings=21, sides=24, cap_bottom=True, cap_top=True)
         field = self.geom.intrinsic_levels(
@@ -2826,6 +2839,75 @@ RWBuffer<float4> Result : register(u0);
                 bake.assert_not_called()
                 self.assertTrue(cloth["garments"])
                 self.assertTrue(all("proxy_track" not in group for group in cloth["garments"]))
+
+    def test_shared_mesh_with_independent_islands_uses_each_zones_arrow(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root, bake=False, directions=("NEGATIVE", "NEGATIVE"))
+            positions = np.fromfile(root / "Meshes/abc123-Position.buf", "<f4").reshape(-1, 10)[:, :3]
+            right = positions[:, 0] > 0
+            ids = np.tile(np.array([0, 1, 0xFFFFFFFF, 0xFFFFFFFF], "<u4"), (len(positions), 1))
+            weights = np.zeros_like(ids, dtype="<f4")
+            weights[:, 0] = np.where(right, .2, .8)
+            weights[:, 1] = np.where(right, .8, .2)
+            ids.tofile(root / "Meshes/abc123JiggleZoneIDs.buf")
+            weights.tofile(root / "Meshes/abc123JiggleZoneWeights.buf")
+            authored = {}
+            for zone, entry in node._collect_enabled_zone_entries():
+                settings = entry.ssmt_drag_zone
+                settings.cloth_proxy_enabled = True
+                start, end = np.eye(4), np.eye(4)
+                start[:3, 3] = (-.12 if zone == 0 else .12, 0, 1)
+                end[:3, 3] = (-.12 if zone == 0 else .135, 0, .8 if zone == 0 else .72)
+                settings.cloth_path_start = types.SimpleNamespace(matrix_world=start)
+                settings.cloth_path_end = types.SimpleNamespace(matrix_world=end)
+                vector = end[:3, 3] - start[:3, 3]
+                length = np.linalg.norm(vector)
+                authored[zone] = (*vector / length, length)
+            node._get_reference_matrix_inv = lambda _comp: None
+            node._get_export_space_matrix = lambda: None
+            node._get_non_mirror_mirror = lambda: None
+
+            def stub_track(positions, normals, faces, body, weights, indices, path, base, **kwargs):
+                rows = np.unique(faces).astype("<u4") + base
+                return rows, np.zeros((17, len(rows), 4, 4), "<f4")
+
+            clothes, body = node._cloth_object_names(required=True)
+            with patch.object(self.exporter, "bake_limb_track", side_effect=stub_track):
+                result = self.exporter.bake_component(
+                    node, root, sections, comp, "unit", clothes, body, self.mod._blender_object_key,
+                )
+            self.assertEqual(len(result["garments"]), 2)
+            for garment in result["garments"]:
+                zone, = np.flatnonzero(garment["control_zones"][:, 0])
+                np.testing.assert_allclose(garment["control_axes"][zone], authored[zone], atol=1e-6)
+                np.testing.assert_array_equal(right[garment["proxy_rows"]], zone == 1)
+
+    def test_proxy_without_a_body_section_keeps_the_authored_wear_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root, bake=False)
+            _, empty = node._collect_enabled_zone_entries()[0]
+            settings = empty.ssmt_drag_zone
+            settings.cloth_proxy_enabled = True
+            settings.include_objects = settings.include_objects[:1]
+            start, end = np.eye(4), np.eye(4)
+            start[:3, 3] = (-.12, 0, 1)
+            end[:3, 3] = (-.12, 0, .8)
+            settings.cloth_path_start = types.SimpleNamespace(matrix_world=start)
+            settings.cloth_path_end = types.SimpleNamespace(matrix_world=end)
+            node._get_reference_matrix_inv = lambda _comp: None
+            node._get_export_space_matrix = lambda: None
+            node._get_non_mirror_mirror = lambda: None
+            clothes, body = node._cloth_object_names(required=True)
+            with patch.object(self.exporter, "bake_limb_track", side_effect=self.exporter.ProxySectionCoverageError):
+                cloth = self.exporter.bake_component(
+                    node, root, sections, comp, "unit", clothes, body, self.mod._blender_object_key,
+                )
+            self.assertTrue(cloth["garments"])
+            for garment in cloth["garments"]:
+                self.assertNotIn("proxy_track", garment)
+                np.testing.assert_allclose(garment["path_axes"][0], (0, 0, -1, .2))
 
     @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
     def test_single_zone_can_pull_either_end_through_the_full_travel(self):

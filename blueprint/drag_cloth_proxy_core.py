@@ -7,6 +7,10 @@ from .drag_cloth_geometry import _components
 TAU = 2.0 * np.pi
 
 
+class ProxySectionCoverageError(ValueError):
+    """The selected collision body cannot supply a sleeve cross-section."""
+
+
 def unit(v):
     length = np.linalg.norm(v, axis=-1, keepdims=True)
     return v / np.maximum(length, 1e-12)
@@ -44,7 +48,7 @@ def section_hull(triangles, level, hint, span=None):
     hits = (heights.min(1) < 0) & (heights.max(1) > 0)
     tri, z = triangles[hits], heights[hits]
     if not len(tri):
-        raise ValueError(f"No body surface crosses guide height {level:.4f}")
+        raise ProxySectionCoverageError(f"高度 {level:.4f} 处没有碰撞体截面")
     nxt = np.roll(z, -1, axis=1)
     f, e = np.nonzero((z > 0) != (nxt > 0))
     t = z[f, e] / (z[f, e] - nxt[f, e])
@@ -66,7 +70,7 @@ def section_hull(triangles, level, hint, span=None):
         if area > 1e-5:
             options.append((np.linalg.norm(midpoint - hint), midpoint, hull))
     if not options:
-        raise ValueError(f"No usable body contour at height {level:.4f}")
+        raise ProxySectionCoverageError(f"高度 {level:.4f} 处没有可用的碰撞体轮廓")
     _, midpoint, hull = min(options, key=lambda option: option[0])
     if span is not None:
         nearby = [polygon for distance, _, polygon in options if distance < span]
@@ -81,7 +85,7 @@ def section_hull(triangles, level, hint, span=None):
 class BodySections:
     """Convex outer contours of one body branch, sampled along the guide axis."""
 
-    def __init__(self, triangles, cloth, lo, hi, spokes, span=None, extend_lower=False):
+    def __init__(self, triangles, cloth, lo, hi, spokes, span=None, extend_lower=False, *, fit_ends=False):
         self.heights = np.linspace(lo, hi, 81)
         self.spokes = spokes
         theta = np.arange(spokes) * TAU / spokes
@@ -91,7 +95,7 @@ class BodySections:
         garment_bottom = cloth[:, 2].min()
         max_step = max(.025, 3 * (self.heights[1] - self.heights[0]))
         released = False
-        for level in levels:
+        for index, level in enumerate(levels):
             if released:
                 center.append(center[-1])
                 radii.append(radii[-1])
@@ -99,7 +103,22 @@ class BodySections:
             nearest = np.argsort(np.abs(cloth[:, 2] - level))[:max(12, len(cloth) // 8)]
             hint = np.median(cloth[nearest, :2], axis=0) if span is None else np.median(cloth[:, :2], axis=0)
             try:
-                midpoint, eq = section_hull(triangles, level, hint, span)
+                try:
+                    midpoint, eq = section_hull(triangles, level, hint, span)
+                except ProxySectionCoverageError:
+                    if not fit_ends or index not in (0, len(levels) - 1):
+                        raise
+                    adjacent = levels[1] if index == 0 else levels[-2]
+                    # The garment can extend past a tapered tip by less than one
+                    # sampling interval. Keep its height and use an inner contour.
+                    for sample in (level + .25 * (adjacent - level), adjacent):
+                        try:
+                            midpoint, eq = section_hull(triangles, sample, hint, span)
+                            break
+                        except ProxySectionCoverageError:
+                            continue
+                    else:
+                        raise
                 if extend_lower and center and np.linalg.norm(midpoint - center[-1]) > max_step:
                     midpoint, eq = section_hull(triangles, level, center[-1], span)
                     if np.linalg.norm(midpoint - center[-1]) > max_step:

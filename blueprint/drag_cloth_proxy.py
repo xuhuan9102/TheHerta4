@@ -30,7 +30,10 @@ def bake_limb_track(positions, normals, faces, body_faces, weights, bones, path,
     if motion == "compress" and distance >= .97 * (hi - lo):
         raise ValueError("代理穿脱箭头超过衣物的可压缩行程，可改用沿肢体整体滑移")
     lower = lo if motion == "compress" else lo - distance
-    sections = BodySections(body, vertices, lower - .001, hi + .001, 64, extend_lower=motion == "track")
+    sections = BodySections(
+        body, vertices, lower - .001, hi + .001, 64,
+        extend_lower=motion == "track", fit_ends=motion == "compress",
+    )
     clearance = float(np.clip(np.median(sections.gap(vertices)), .002, .012))
     solver = SleeveSolver(sections, lo, hi, 15, 40, clearance, distance, 0.0, motion)
     labels = islands(vertices, faces)
