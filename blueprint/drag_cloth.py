@@ -119,11 +119,25 @@ def _position_buffer_key(lines):
     return None
 
 
+def _redirect_so_prefix(sections, group, draw_ib):
+    group_prefix = f"ResourceZZRedirectSO_G{group}"
+    host_prefix = f"{group_prefix}_{draw_ib}"
+    if any(f"[{host_prefix}_s{slot}]" in sections for slot in (1, 2)):
+        return host_prefix
+    return group_prefix
+
+
 def _skin_writes(sections, comp, group, family, vertex_count):
     """Identify writes of this component's skinned rows and their actual palette."""
     base = comp["base_resource"].casefold()
     base_layout = _position_buffer_key(sections.get(f"[{comp['base_resource']}]", ()))
-    prefix = f"{family}_G{group}" if family in ("ResourceZZRedirectSO", "ResourceZZSkinOut") else family
+    if family == "ResourceZZRedirectSO":
+        prefix = _redirect_so_prefix(sections, group, comp["hash"])
+    elif family == "ResourceZZSkinOut":
+        prefix = f"{family}_G{group}"
+    else:
+        prefix = family
+    implicit_so = prefix == f"ResourceZZRedirectSO_G{group}"
     outputs = {f"{prefix}_s{slot}".casefold(): slot for slot in (1, 2)}
     palettes = re.compile(
         rf"ResourceZZ(?:MergedSkeleton_G{group}|PaletteConv_C\d+)_s([12])",
@@ -198,8 +212,8 @@ def _skin_writes(sections, comp, group, family, vertex_count):
                         slot = int(match[1])
                         explicit_so = current.get("so0")
                         if (
-                            explicit_so is None
-                            or outputs.get(explicit_so.casefold()) == slot
+                            (implicit_so and explicit_so is None)
+                            or outputs.get((explicit_so or "").casefold()) == slot
                         ):
                             writes.append((section, index, slot, palette, "so0"))
     return writes
@@ -609,13 +623,13 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
         raise ValueError("上下拖拽需要可确定的 ZZMI 合并骨架：" + reason)
     draw_output = f"ResourceZZSkinOut_{comp['hash']}"
     output_prefixes = {
-        "ResourceZZRedirectSO": f"ResourceZZRedirectSO_G{group}",
+        "ResourceZZRedirectSO": _redirect_so_prefix(sections, group, comp["hash"]),
         "ResourceZZSkinOut": f"ResourceZZSkinOut_G{group}",
         draw_output: draw_output,
     }
     bound_skin_outputs = {
-        f"{output_prefixes[family]}_s{slot}".casefold(): family
-        for family in ("ResourceZZSkinOut", draw_output) for slot in (1, 2)
+        f"{prefix}_s{slot}".casefold(): family
+        for family, prefix in output_prefixes.items() for slot in (1, 2)
     }
     candidates = []
     for family, prefix in output_prefixes.items():
@@ -1832,7 +1846,7 @@ class _Emitter:
             selection.append(f"{self.r(name)} = ref {register}")
             saved.extend((f"{register} = ref {self.r(name)}", f"{self.r(name)} = null"))
         for slot in (1, 2):
-            selection.append(f"if {var}slot == {slot} && {var}source_valid_s{slot} == 1")
+            selection.append(f"if {var}slot == {slot}")
             for g in range(len(self.meta["garments"])):
                 name = self.shader(f"G{g}Gesture_s{slot}")
                 self.s(name, [
@@ -1871,7 +1885,7 @@ class _Emitter:
             "\tendif",
             f"\tlocal $cloth_dx = $cursorX - {var}start_x",
             f"\tlocal $cloth_dy = $cursorY - {var}start_y",
-            f"\tif {var}intent == 0 && ($cloth_dx * $cloth_dx + $cloth_dy * $cloth_dy) >= 64",
+            f"\tif {var}slot != 0 && {var}intent == 0 && ($cloth_dx * $cloth_dx + $cloth_dy * $cloth_dy) >= 64",
             f"\t\trun = {select}", "\tendif",
             "else", f"\t{var}pointer_held = 0", f"\t{var}intent = 0", "endif",
         ]
@@ -1933,6 +1947,8 @@ class _Emitter:
             ("wear_held", 0),
             ("jiggle_slot", 0),
             ("jiggle_dispatch_slot", 0),
+            ("seen", 0),
+            ("last_skin_write_slot", 0),
             ("overlay_time", -1),
             ("solve_until", -1),
             ("passive", 0),
@@ -2028,27 +2044,58 @@ class _Emitter:
                     )
         for g, data in enumerate(m["garments"]):
             self.garment(g, data)
+        for buffer in ("DrawVB0", "DrawVB2"):
+            self.resource(buffer, alias=True)
         source = lambda slot: self.r(f"SkinSource_s{slot}")
         enabled = f"{self.mode} >= 2"
         effective = enabled + f" && {self.var}activated == 1"
         lines = [
+            f"{self.r('DrawVB0')} = ref vb0",
+            f"{self.r('DrawVB2')} = ref vb2",
+            f"{self.var}slot = 0",
+            "if vb0 !== null",
+            *(
+                f"\tlocal $cloth_matches_s{slot} = vb0 === {source(slot)}"
+                for slot in (1, 2)
+            ),
+            *(
+                f"\tlocal $cloth_published_s{slot} = vb0 === {self.r(f'Published_s{slot}')}"
+                for slot in (1, 2)
+            ),
+        ]
+        matches = {
+            slot: f"$cloth_matches_s{slot} && {self.var}source_valid_s{slot} == 1"
+            for slot in (1, 2)
+        }
+        if self.bone_input:
+            lines += [
+                f"\tif {self.var}bone_slot != 0",
+                f"\t\t{self.var}slot = {self.var}bone_slot",
+            ]
+        lines += [
+            f"\t{'elif' if self.bone_input else 'if'} {matches[1]} && {matches[2]}",
+            f"\t\t{self.var}slot = {self.var}last_skin_write_slot",
+            f"\telif {matches[1]}",
+            f"\t\t{self.var}slot = 1",
+            f"\telif {matches[2]}",
+            f"\t\t{self.var}slot = 2",
+        ]
+        for slot in (1, 2):
+            lines += [
+                f"\telif {self.var}ready_s{slot} == time && $cloth_published_s{slot}",
+                f"\t\t{self.var}slot = {slot}",
+            ]
+        lines += [
+            "\tendif", "endif",
+            f"if {self.var}slot != 0",
+            f"\t{self.var}seen = 1",
+            "endif",
             "if " + enabled,
             f"\tif {self.var}activation_reset != {self.reset}",
             f"\t\t{self.var}activated = 0",
             f"\t\t{self.var}activation_reset = {self.reset}",
             f"\t\tif {self.var}pointer_held == 1",
             f"\t\t\t{self.var}intent = 1", "\t\tendif",
-            "\tendif",
-            f"\t{self.var}slot = 1",
-            *([
-                f"\tif {self.var}bone_slot != 0",
-                f"\t\t{self.var}slot = {self.var}bone_slot",
-                f"\telif vb0 === {source(2)}",
-            ] if self.bone_input else [f"\tif vb0 === {source(2)}"]),
-            f"\t\t{self.var}slot = 2",
-            f"\telif vb0 === {source(1)}",
-            f"\telif $zz_ms_occ_{m['occ']} == 2",
-            f"\t\t{self.var}slot = 2",
             "\tendif",
         ]
         if self.bone_input:
@@ -2057,7 +2104,7 @@ class _Emitter:
                 lines.extend((
                     f"\tif {self.var}bone_slot == {slot}",
                     f"\t\t{effective_palette} = ref {self.r('BonePalette')}",
-                    "\telse",
+                    f"\telif {self.var}ready_s{slot} != time",
                     f"\t\t{effective_palette} = ref {self.r(f'SkinPalette_s{slot}')}",
                     "\tendif",
                 ))
@@ -2092,7 +2139,7 @@ class _Emitter:
         ]
         for slot in (1, 2):
             native = self.r(f"Native_s{slot}")
-            valid = f"{self.var}source_valid_s{slot} == 1"
+            valid = f"({self.var}source_valid_s{slot} == 1 || {self.var}ready_s{slot} == time)"
             bind_native = [f"\t\t\t{native} = ref {source(slot)} unless_null"]
             if self.bone_input:
                 valid = f"({valid} || {self.var}bone_slot == {slot})"
@@ -2184,25 +2231,25 @@ class _Emitter:
                 "\tendif",
             ]
         self.s(self.cmd("Bind"), lines + ["endif"])
-        for action in ("Publish", "Restore"):
-            lines = ["if " + effective]
-            for slot in (1, 2):
-                target = (
-                    self.r(f"Output_s{slot}") if action == "Publish" else source(slot)
-                )
-                lines += [
-                    f"\tif {self.var}slot == {slot} && {self.var}ready_s{slot} == time",
-                    "\t\tvb0 = ref " + target + " unless_null",
-                    "\t\tvb2 = ref " + self.r(f"NativeBlend_s{slot}") + " unless_null",
-                ]
-                if action == "Publish":
-                    lines += [
-                        f"\t\tif {self.var}overlay_time == time && {self.var}jiggle_slot == {slot} && {self.var}intent != 2",
-                        f"\t\t\tvb0 = ref ResourceDragJiggleTempVB0_{self.suffix} unless_null",
-                        "\t\tendif",
-                    ]
-                lines.append("\tendif")
-            self.s(self.cmd(action), lines + ["endif"])
+        lines = ["if " + effective]
+        for slot in (1, 2):
+            lines += [
+                f"\tif {self.var}slot == {slot} && {self.var}ready_s{slot} == time",
+                "\t\tvb0 = ref " + self.r(f"Output_s{slot}") + " unless_null",
+                "\t\tvb2 = ref " + self.r(f"NativeBlend_s{slot}") + " unless_null",
+                f"\t\tif {self.var}overlay_time == time && {self.var}jiggle_slot == {slot} && {self.var}intent != 2",
+                f"\t\t\tvb0 = ref ResourceDragJiggleTempVB0_{self.suffix} unless_null",
+                "\t\tendif",
+                "\tendif",
+            ]
+        self.s(self.cmd("Publish"), lines + ["endif"])
+        # Regular drag can also change the slots, before any garment has moved.
+        self.s(self.cmd("Restore"), [
+            f"vb0 = ref {self.r('DrawVB0')}",
+            f"vb2 = ref {self.r('DrawVB2')}",
+            f"{self.r('DrawVB0')} = null",
+            f"{self.r('DrawVB2')} = null",
+        ])
         return self
 
 
@@ -2249,6 +2296,21 @@ def emit_components(node, sections, components, ns):
     inserts = defaultdict(lambda: defaultdict(list))
     for comp in active:
         emitter = _Emitter(node, sections, comp, ns).emit()
+        var = emitter.var
+        last_dispatch = f"$ssmtdrag_last_dispatch_{emitter.suffix}"
+        sections.setdefault(f"[ResourceDragLastSourceVB0_{emitter.suffix}]", [])
+        sections.setdefault("[Present]", []).extend([
+            DRAW_BEGIN,
+            f"if {var}seen == 0",
+            *(f"    {var}source_valid_s{slot} = 0" for slot in (1, 2)),
+            *(f"    {var}ready_s{slot} = -1" for slot in (1, 2)),
+            f"    {var}last_skin_write_slot = 0",
+            f"    {var}jiggle_dispatch_slot = 0",
+            f"    {last_dispatch} = -1",
+            "endif",
+            f"post {var}seen = 0",
+            DRAW_END,
+        ])
         for section, index, slot, palette, vertices in comp["cloth"]["skin_writes"]:
             line = sections[section][index]
             indent = line[: len(line) - len(line.lstrip())]
@@ -2264,6 +2326,9 @@ def emit_components(node, sections, components, ns):
                 + f" = copy {palette}",
                 indent + "\t" + emitter.var + f"ready_s{slot} = -1",
                 indent + "\t" + emitter.var + f"source_valid_s{slot} = 1",
+                indent + "\t" + var + f"last_skin_write_slot = {slot}",
+                indent + "\t" + var + "seen = 1",
+                indent + "\t" + last_dispatch + " = -1",
                 indent + "endif",
                 indent + DRAW_END,
             ]

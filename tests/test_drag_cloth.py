@@ -3233,9 +3233,12 @@ RWBuffer<float4> Result : register(u0);
                 )
                 cloth = runner.prefix + cn + "_"
                 runner.variables[cloth + "activated"] = 0
+                draw_source = runner.resources["vb0"].pointer
                 runner.execute("TestDrawGate")
                 self.assertEqual(runner.variables["$ordinary_called"], 1)
                 self.assertEqual(runner.dispatches, 0)
+                runner.execute(comp["cloth_restore"])
+                self.assertEqual(runner.resources["vb0"].pointer, draw_source)
                 runner.resources[f"ResourceSSMTCloth_{cn}_unit_GestureHit"] = runner.resource(
                     f"ResourceDragPinnedComponentInfo_{cn}_unit"
                 )
@@ -3347,6 +3350,82 @@ RWBuffer<float4> Result : register(u0);
                 finally:
                     runner.close()
 
+    @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
+    def test_cold_render_slot_keeps_the_current_wear_grab(self):
+        from tools.check_drag_cloth import GeneratedCloth
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root)
+            node._emit_sections(sections, [comp], "unit")
+            runner = GeneratedCloth(root, sections, comp)
+            try:
+                runner.prepare_identity()
+                runner.force_full_solver = False
+                wear_map = comp["cloth"]["garments"][0]["map"]
+                rows = np.flatnonzero(wear_map != 0xFFFFFFFF)
+                hit = int(rows[len(rows) // 2])
+                name = "ResourceSSMTCloth_abc123_unit_G0_State"
+
+                def read_state():
+                    resource = runner.resource(name)
+                    return runner.gpu.read_bytes(resource.pointer, resource.size).view("<f4").reshape(-1, 4)
+
+                runner.frame(600, False, hit)
+                runner.frame(600, True, hit)
+                runner.frame(580, True, hit)
+                before = read_state()
+                self.assertGreater(float(before[0, 0]), 0)
+                self.assertGreaterEqual(float(before[1, 0]), 0)
+                self.assertEqual(float(before[18, 2]), 0)
+
+                runner.frame(570, True, hit, slot=2)
+                switched = read_state()
+                self.assertEqual(float(switched[0, 2]), 1)
+                self.assertEqual(float(switched[1, 0]), float(before[1, 0]))
+                self.assertGreater(float(switched[0, 0]), float(before[0, 0]))
+
+                runner.frame(560, True, hit, slot=1)
+                self.assertGreater(float(read_state()[0, 0]), float(switched[0, 0]))
+            finally:
+                runner.close()
+
+    def test_host_scoped_stream_output_snapshots_only_its_own_slots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            node, sections, comp = self.prepare(root, bake=False, prefix=3)
+            count = comp["vertex_count"] - 3
+            deform = "[TextureOverride_VB_abc123_Position]"
+            lines = sections[deform]
+            del lines[3:]
+            for slot in (1, 2):
+                host = f"ResourceZZRedirectSO_G3_abc123_s{slot}"
+                other = f"ResourceZZRedirectSO_G3_def456_s{slot}"
+                palette = f"ResourceZZPaletteConv_C7_s{slot}"
+                for output in (host, other):
+                    sections[f"[{output}]"] = ["type = Buffer", "stride = 40"]
+                sections[f"[{palette}]"] = ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 6"]
+                for output in (other, f"ResourceZZRedirectSO_G3_s{slot}", host):
+                    lines.extend([
+                        "if $seen == 1", f"    vs-t0 = {palette}", f"    so0 = ref {output}",
+                        f"    draw = {count}, 0", "    so0 = null", "endif",
+                    ])
+
+            cloth, body = node._cloth_object_names(required=True)
+            comp["cloth"] = self.exporter.bake_component(
+                node, root, sections, comp, "unit", cloth, body, self.mod._blender_object_key,
+            )
+            writes = comp["cloth"]["skin_writes"]
+            self.assertEqual(comp["cloth"]["palette_rows"], {1: 6, 2: 6})
+            self.assertEqual([(slot, palette, source) for _, _, slot, palette, source in writes], [
+                (slot, f"ResourceZZPaletteConv_C7_s{slot}", "so0") for slot in (1, 2)
+            ])
+            for section, index, slot, _, _ in writes:
+                self.assertEqual(sections[section][index - 1].strip(),
+                                 f"so0 = ref ResourceZZRedirectSO_G3_abc123_s{slot}")
+            node._emit_sections(sections, [comp], "unit")
+            self.assertEqual(sum(" = ref so0" in line for line in sections[deform]), 2)
+
     def test_skinout_snapshots_the_converted_palette_at_each_dispatch(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -3387,7 +3466,7 @@ RWBuffer<float4> Result : register(u0);
                 lines = sections[f"[CustomShaderZZMISkin_G3_s{slot}]"]
                 dispatch = lines.index("Dispatch = 8, 1, 1")
                 self.assertEqual(
-                    [line.strip() for line in lines[dispatch - 9 : dispatch]],
+                    [line.strip() for line in lines[dispatch - 12 : dispatch]],
                     [
                         self.exporter.DRAW_BEGIN,
                         f"$ssmtcloth_unit_abc123_source_valid_s{slot} = 0",
@@ -3396,6 +3475,9 @@ RWBuffer<float4> Result : register(u0);
                         f"ResourceSSMTCloth_abc123_unit_SkinPalette_s{slot} = copy ResourceZZPaletteConv_C7_s{slot}",
                         f"$ssmtcloth_unit_abc123_ready_s{slot} = -1",
                         f"$ssmtcloth_unit_abc123_source_valid_s{slot} = 1",
+                        f"$ssmtcloth_unit_abc123_last_skin_write_slot = {slot}",
+                        "$ssmtcloth_unit_abc123_seen = 1",
+                        "$ssmtdrag_last_dispatch_abc123_unit = -1",
                         "endif",
                         self.exporter.DRAW_END,
                     ],

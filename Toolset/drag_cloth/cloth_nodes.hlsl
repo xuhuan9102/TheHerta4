@@ -322,7 +322,10 @@ void Control()
     float cursorX=IniParams[118].x;
     uint slot=(uint)clamp(round(IniParams[118].w),1,2);
     float4 initialized=State[16+slot];
-    if(initialized.z<.5 || initialized.w!=State[2].x)
+    // The grab belongs to the garment. A different render slot can still be
+    // initializing its particles while the same grab and cursor motion continue.
+    bool latched=held && a.z>.5 && b.x>=0;
+    if((initialized.z<.5 || initialized.w!=State[2].x) && !latched)
     {
         a.z=0;a.w=cursor;b.x=-1;b.y=cursorX;State[0]=a;State[1]=b;return;
     }

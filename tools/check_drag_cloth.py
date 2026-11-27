@@ -339,7 +339,7 @@ class GeneratedCloth:
         text = text.strip()
         if "===" in text or "!==" in text:
             symbol = "!==" if "!==" in text else "==="
-            a, b = map(str.strip, text.split(symbol, 1))
+            a, b = (operand.strip().lstrip("@") for operand in text.split(symbol, 1))
             same = self.resources.get(a) is self.resources.get(b) or (
                 a in self.resources
                 and b in self.resources
@@ -663,12 +663,12 @@ class GeneratedCloth:
             f'{meta["native_family"]}_G{meta["group"]}_s1'
         ]
 
-    def capture_skin_inputs(self):
+    def capture_skin_inputs(self, slots=(1, 2)):
         """Run the emitted capture commands at a simulated deform draw."""
         meta = self.comp["cloth"]
         prefix = f'ResourceSSMTCloth_{self.comp["comp_name"]}_{self.ns}_'
         command = "[TestSkinCapture]"
-        for slot in (1, 2):
+        for slot in slots:
             section = next(
                 section for section, _, i, _, _ in meta["skin_writes"] if i == slot
             )

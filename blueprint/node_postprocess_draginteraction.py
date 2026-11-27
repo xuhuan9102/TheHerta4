@@ -5760,7 +5760,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 lines.append(f"cs-u3 = ResourceDragJiggleSlideState_{cn}_{ns}")
                 lines.append(f"cs-t86 = ResourceDragJiggleBlendTyped_{cn}_{ns}")
                 lines.append(f"cs-u2 = ResourceDragJiggleBlendOut_{cn}_{ns}")
-                # 碰撞蒙皮与当前 vb0 使用同一份骨骼表。旧产物依照 deform 的出现次选槽。
+                # 碰撞蒙皮用当前 vb0 对应的骨骼表。没有缓冲关联信息的旧产物保留原选槽方式。
                 if self._is_merged_skeleton_product(sections):
                     calibrated_inputs = self._redirect_collision_inputs(sections, comp)
                     skeleton_group, skeleton_occ, skeleton_reason = self._merged_skeleton_binding(
@@ -5770,7 +5770,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                     if cloth_var:
                         source = "EffectivePalette" if comp.get("cloth_bone_input") else "SkinPalette"
                         choices.extend(
-                            (f"{cloth_var}jiggle_slot == {slot}", f"ResourceSSMTCloth_{cn}_{ns}_{source}_s{slot}")
+                            (f"{cloth_var}slot == {slot}", f"ResourceSSMTCloth_{cn}_{ns}_{source}_s{slot}")
                             for slot in (1, 2)
                         )
                     choices.extend((f"@vb0 != 0 && @vb0 == @{output}", palette)
@@ -5781,10 +5781,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                             f"\t{branch} {condition}",
                             f"\t\tcs-t88 = ref {palette}",
                         ])
-                    if skeleton_group is not None and skeleton_occ is not None:
-                        branch = "elif" if choices else "if"
+                    if not choices and skeleton_group is not None and skeleton_occ is not None:
                         lines.extend([
-                            f"\t{branch} $zz_ms_occ_{skeleton_occ} == 2",
+                            f"\tif $zz_ms_occ_{skeleton_occ} == 2",
                             f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s2",
                             "\telse",
                             f"\t\tcs-t88 = ref ResourceZZMergedSkeleton_G{skeleton_group}_s1",
@@ -6678,6 +6677,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         if oid is not None:
             before.insert(-1, f"$ssmtdrag_objvis_{ns}_{oid} = 1")
         after = [f"; --- DRAG HOOK BEGIN restore_{cn}_{ns} ---"]
+        if comp.get("cloth_restore"):
+            after.append(f"run = {comp['cloth_restore']}")
         for slot in (2, 0):
             resource = f"ResourceDragSavedVB{slot}_{cn}_{ns}"
             after.extend((f"vb{slot} = ref {resource}", f"{resource} = null"))
@@ -6785,11 +6786,12 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         can_jiggle = f"\tif {drag_mode_var} >= 2 && $ssmtdrag_mode_{ns} == 1"
         dispatch = f"\t\tif time != {last_dispatch}"
         if cloth_var:
-            can_jiggle += f" && ({cloth_var}intent == 1 || $isMouseButtonDown == 0)"
+            can_jiggle += f" && ({cloth_var}slot == 0 || {cloth_var}intent == 1 || $isMouseButtonDown == 0)"
             dispatch += f" || {cloth_var}jiggle_dispatch_slot != {cloth_var}jiggle_slot"
-        if bone_draw is not None:
+        track_source = bool(cloth_var) or bone_draw is not None
+        if track_source:
             saved_source = f"ResourceDragLastSourceVB0_{cn}_{ns}"
-            dispatch += f" || @vb0 !== @{saved_source}"
+            dispatch += " || $drag_source_changed"
         lines.append(can_jiggle)
         if cloth_var:
             lines += [
@@ -6800,8 +6802,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"\t\t\t{cloth_var}jiggle_slot = 2", "\t\tendif",
             ]
         lines.extend([
+            *([f"\t\tlocal $drag_source_changed = @vb0 !== @{saved_source}"] if track_source else []),
             dispatch,
-            *([f"\t\t\t{saved_source} = ref vb0"] if bone_draw is not None else []),
+            *([f"\t\t\t{saved_source} = ref vb0"] if track_source else []),
             f"\t\t\trun = CustomShaderDragJiggle{cn}_{ns}",
             f"\t\t\t{last_dispatch} = time",
             *([f"\t\t\t{cloth_var}jiggle_dispatch_slot = {cloth_var}jiggle_slot"] if cloth_var else []),

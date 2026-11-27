@@ -95,5 +95,37 @@ class ClothGestureTests(unittest.TestCase):
                 self.assertEqual(runner.resources["vb0"].pointer, runner.resources["ResourceTestDisplaced"].pointer)
                 runner.execute(comp["cloth_restore"])
                 np.testing.assert_array_equal(runner.frame(645, False, route_gesture=True), frozen)
+
+                native_name = f"ResourceZZRedirectSO_G{comp['cloth']['group']}_s"
+                runner.resources[native_name + "2"] = runner.resources[native_name + "1"]
+                for capture_order in ((1, 2), (2, 1)):
+                    with self.subTest(capture_order=capture_order):
+                        runner.capture_skin_inputs(capture_order)
+                        out = runner.frame(645, False, slot=1, route_gesture=True)
+                        self.assertEqual(runner.variables[var + "slot"], capture_order[-1])
+                        self.assertFalse(np.array_equal(out, runner.native))
+
+                # A different render buffer must not fall back to an occurrence
+                # slot, even after stockings have moved on the last actor.
+                runner.external("vb0", runner.native, 40, flags=1)
+                original = runner.resources["vb0"].pointer
+                runner.variables["$zz_ms_occ_" + str(comp["cloth"]["occ"])] = 2
+                runner.execute(comp["cloth_bind"])
+                runner.execute(comp["cloth_publish"])
+                self.assertEqual(runner.variables[var + "slot"], 0)
+                self.assertEqual(runner.resources["vb0"].pointer, original)
+
+                # An empty frame invalidates both aliases even if the engine
+                # later reuses the same buffer address for a different pose.
+                runner.variables[var + "seen"] = 0
+                sections["[TestIdlePresent]"] = [
+                    line for line in sections["[Present]"] if not line.startswith("post ")
+                ]
+                runner.execute("TestIdlePresent")
+                np.testing.assert_array_equal(runner.frame(slot=1), runner.native)
+                self.assertEqual(runner.variables[var + "slot"], 0)
+                runner.capture_skin_inputs((1,))
+                runner.frame(slot=1)
+                self.assertEqual(runner.variables[var + "slot"], 1)
             finally:
                 runner.close()
