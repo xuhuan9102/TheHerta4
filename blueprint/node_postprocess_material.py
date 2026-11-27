@@ -70,6 +70,7 @@ _DRAG_TEAR_BEGIN = "; --- SSMT TEAR BEGIN ---"
 _DRAG_TEAR_END = "; --- SSMT TEAR END ---"
 _DRAG_TEAR_GUARD_RE = re.compile(r"if \$ssmtdragtear_ready_(\w+) == 1")
 _DRAG_TEAR_MASK_RE = re.compile(r"ps-t116 = ref ResourceDragTearMask_(\w+)")
+_DRAG_TEAR_TTL_SECTION_RE = re.compile(r"^[ \t]*(\[CommandListDragTearTTL(?:Bind|Restore)_\w+\])[ \t\r]*$", re.MULTILINE)
 # TTL 合成亮度默认值（TTLib 的 $\TTL\V，即 HSV 的 Value）。
 # 必须写在 if 条件块之外：TTLib 的 CommandListFrameReset 每帧把 $V 重置为 1.0，
 # 只有绘制前重新赋值才生效；不需要提亮的段落手动删掉这一行即可。
@@ -2449,7 +2450,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 return guard[0], bind, restore
         return None
 
-    def _ttl_inline_draws(self, block_lines, param_lines, all_sections):
+    def _ttl_inline_draws(self, block_lines, param_lines, available_sections):
         """把块里的绘制行就地换成「参数 + TTL 调用」，其余行原样保留。
 
         TTLib 的捕获走的是 CustomShader，而 3Dmigoto 在执行 CustomShader 前后会把
@@ -2466,7 +2467,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 inline.append(line)
                 continue
             indent = raw[:len(raw) - len(raw.lstrip())]
-            tear_binding = self._ttl_drag_tear_binding(inline, all_sections)
+            tear_binding = self._ttl_drag_tear_binding(inline, available_sections)
             for param in param_lines:
                 inline.append(indent + str(param))
             if tear_binding:
@@ -2538,11 +2539,13 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         return True
 
     def _process_ttl_sections(self, section_name, lines, all_sections, material_group_to_swapkey,
-                              swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder):
+                              swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder,
+                              *, preserved_tear_sections=()):
         from ..utils.log_utils import LOG as _LOG
         if self._skip_ttl_for_transparency_node():
             return next_swap_key_num
         apmi = GlobalConfig.logic_name == getattr(LogicName, "APMI", "APMI")
+        available_sections = all_sections.keys() | preserved_tear_sections
         ttl_core_checked = False
         # 旧版把 TTL 排在段尾；重导出时先摘掉那几组，免得和就地替换叠成两份绘制。
         self._strip_ttl_groups(lines)
@@ -2650,7 +2653,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             # 就地替换：块位置、mesh 注释、贴图绑定、if 结构都不动，只把这一笔绘制
             # 换成库调用。重导出时块照旧被这张节点认领；拖拽节点的 vb0 换绑也天然
             # 作用在同一段上（命令列表内部的换绑不会传给嵌套的 run）。
-            lines[block_start:block_end] = self._ttl_inline_draws(block_lines, param_lines, all_sections)
+            lines[block_start:block_end] = self._ttl_inline_draws(block_lines, param_lines, available_sections)
 
         return next_swap_key_num
 
@@ -3227,7 +3230,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
 
     def process_texture_override_section(self, section_name, all_sections,
                                           material_group_to_swapkey, swap_key_prefix=None, next_swap_key_num=None,
-                                          used_swap_keys=None, transparency_sections_to_add=None):
+                                          used_swap_keys=None, transparency_sections_to_add=None,
+                                          *, preserved_tear_sections=()):
         from ..utils.log_utils import LOG as _LOG
         debug_disable_fx_ttl = bool(getattr(self, "debug_disable_fx_ttl", False))
         is_efmi = GlobalConfig.logic_name == LogicName.EFMI
@@ -3576,7 +3580,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         elif logic_name in (LogicName.ZZMI, getattr(LogicName, "APMI", "APMI")):
             next_swap_key_num = self._process_ttl_sections(
                 section_name, lines, all_sections, material_group_to_swapkey,
-                swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder)
+                swap_key_prefix, next_swap_key_num, used_swap_keys, texture_folder,
+                preserved_tear_sections=preserved_tear_sections)
         elif logic_name == LogicName.EFMI:
             next_swap_key_num = self._process_efmi_ttl_sections(
                 section_name, lines, all_sections, material_group_to_swapkey,
@@ -4235,6 +4240,9 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             content = self._strip_previous_transparency_sections(content)
             preserved_tail_content = ""
             content, preserved_tail_content = self.split_auto_appended_tail_content(content)
+            # Drag interaction definitions can live in the preserved tail, while
+            # the body holds the draws that need to call them.
+            preserved_tear_sections = set(_DRAG_TEAR_TTL_SECTION_RE.findall(preserved_tail_content))
 
             preamble_lines, sections = self._parse_ini_content(content)
 
@@ -4253,7 +4261,8 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 next_swap_key_num = self.process_texture_override_section(
                     section_name, sections,
                     material_group_to_swapkey, swap_key_prefix, next_swap_key_num,
-                    used_swap_keys, transparency_sections_to_add
+                    used_swap_keys, transparency_sections_to_add,
+                    preserved_tear_sections=preserved_tear_sections,
                 )
 
             del sections['_config_path']

@@ -2130,8 +2130,18 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             pixel_mask = "ps-t116 = ref ResourceDragTearMask_241deac5P0M1_unit"
             pixel_restore = "ps-t116 = ref ResourceDragTearSavedPS_unit"
             guard = "if $ssmtdragtear_ready_unit == 1"
-            sections = OrderedDict([
-                (section, [
+            tail_marker = "; --- AUTO-APPENDED DRAG INTERACTION MODULE ---"
+            tail = "\n".join([
+                tail_marker,
+                "[CommandListDragTearTTLBind_241deac5P0M1_unit]",
+                "run = CustomShaderDragTearTTLCompose_241deac5P0M1_unit",
+                "[CommandListDragTearTTLRestore_unit]",
+                r"Resource\TTL\TransparencyTex = ref ResourceDragTearSavedTTL_unit",
+                "",
+            ])
+            ini_path = Path(temp_dir) / "Mod.ini"
+            ini_path.write_text("\n".join([
+                    section,
                     "hash = 241deac5", "ib = ResourceIB",
                     f"; [mesh:{mesh_name}] [vertex_count:6]",
                     "; --- SSMT TEAR BEGIN ---", guard,
@@ -2142,15 +2152,21 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
                     "; --- SSMT TEAR BEGIN ---", guard,
                     "\tx494 = $ssmtdragtear_saved_magic_unit", "\t" + pixel_restore,
                     "\tResourceDragTearSavedPS_unit = null", "endif", "; --- SSMT TEAR END ---",
-                ]),
-                ("[CommandListDragTearTTLBind_241deac5P0M1_unit]", []),
-                ("[CommandListDragTearTTLRestore_unit]", []),
-                ("_config_path", temp_dir),
-            ])
+                    "", tail,
+            ]), encoding="utf-8")
             node = _ttl_node()
+            node._create_cumulative_backup = mock.Mock()
+
+            def split_tail(content):
+                body, marker, rest = content.partition(tail_marker)
+                return body, marker + rest
+
+            node.split_auto_appended_tail_content = split_tail
             for _ in range(2):
-                _run_process(node, sections, section)
-                lines = [line.strip() for line in sections[section]]
+                node.execute_postprocess(temp_dir)
+                body, actual_tail = split_tail(ini_path.read_text(encoding="utf-8"))
+                self.assertEqual(actual_tail, tail)
+                lines = [line.strip() for line in node._parse_ini_content(body)[1][section]]
                 selection = next(i for i, line in enumerate(lines)
                                  if line.startswith(r"Resource\TTL\TransparencyTex = ref Resource_TTLMap_"))
                 self.assertIn(pixel_mask, lines)

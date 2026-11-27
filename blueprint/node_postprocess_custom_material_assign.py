@@ -3101,6 +3101,8 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
         next_swap_key_num=None,
         used_swap_keys=None,
         transparency_sections_to_add=None,
+        *,
+        preserved_tear_sections=(),
     ):
         """只进入包含指定部件的段，并在其绘制后恢复默认贴图。"""
         if used_swap_keys is None or used_swap_keys is Ellipsis:
@@ -3131,6 +3133,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 next_swap_key_num=next_swap_key_num,
                 used_swap_keys=used_swap_keys,
                 transparency_sections_to_add=transparency_sections_to_add,
+                preserved_tear_sections=preserved_tear_sections,
             )
 
         lines = all_sections.get(section_name, [])
@@ -3154,6 +3157,7 @@ class SSMTNode_PostProcess_CustomMaterialAssign(SSMTNode_PostProcess_MaterialBas
                 next_swap_key_num=next_swap_key_num,
                 used_swap_keys=used_swap_keys,
                 transparency_sections_to_add=transparency_sections_to_add,
+                preserved_tear_sections=preserved_tear_sections,
             )
             self._split_mixed_target_if_blocks(lines)
             self._move_targets_to_end_of_top_level_if_blocks(lines)
