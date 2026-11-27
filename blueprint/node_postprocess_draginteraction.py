@@ -7020,11 +7020,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         # 发布恒读 0、显隐门控误杀全部命中）。
         for oid in self._global_object_oids(components):
             globals_to_add.append(f"global $ssmtdrag_objvis_{ns}_{oid} = 0")
-        # IniParams 卫生修复：存/还共享槽位的备份变量（drag 块 + 手型绘制段引用）
+        # DragPinDetected uses these to restore shared IniParams.
         for _slot in ("69", "70", "72", "73", "97"):
-            for _comp in ("x", "y", "z", "w"):
-                globals_to_add.append(f"global $ssmtdrag_ipbak_{_comp}{_slot} = 0")
-        for _slot in ("94", "95", "98"):
             for _comp in ("x", "y", "z", "w"):
                 globals_to_add.append(f"global $ssmtdrag_ipbak_{_comp}{_slot} = 0")
         for g in globals_to_add:
@@ -7290,6 +7287,11 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         if self.enable_hand_cursor:
             # S8 手型光标：先更新手部屏幕位置，描边先画垫底（只露轮廓边）、填充后画；
             # 抓取中或 RMB 独按蓄力时用 Action 网格（握拳），否则 NoAction（张开）
+            hand_slots = dict.fromkeys(
+                line.partition(" = ")[0]
+                for outline in (True, False)
+                for line in self._hand_param_lines(ns, outline)
+            )
             block.extend([
                 # 门控必须含 $ssmtdrag_mode（Alt 臂动）：检测只在臂动时刷新命中数据，
                 # 松开 Alt 后 PinnedDetectInfo 是陈旧值——若只按 drawn 门控，手型光标
@@ -7301,20 +7303,8 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"\t\trun = CustomShaderDragJiggleCursor_{ns}",
                 "\tendif",
                 f"\tif $ssmtdrag_hand_debug_{ns} >= 1",
-                # 根源卫生修复：手型绘制段写共享 IniParams 槽 83/89-95/98，
-                # 其中 94/95/98 与 TTL 的 layout/mask/lift 槽冲突——先存后还。
-                f"\t\t$ssmtdrag_ipbak_x94 = x94",
-                f"\t\t$ssmtdrag_ipbak_y94 = y94",
-                f"\t\t$ssmtdrag_ipbak_z94 = z94",
-                f"\t\t$ssmtdrag_ipbak_w94 = w94",
-                f"\t\t$ssmtdrag_ipbak_x95 = x95",
-                f"\t\t$ssmtdrag_ipbak_y95 = y95",
-                f"\t\t$ssmtdrag_ipbak_z95 = z95",
-                f"\t\t$ssmtdrag_ipbak_w95 = w95",
-                f"\t\t$ssmtdrag_ipbak_x98 = x98",
-                f"\t\t$ssmtdrag_ipbak_y98 = y98",
-                f"\t\t$ssmtdrag_ipbak_z98 = z98",
-                f"\t\t$ssmtdrag_ipbak_w98 = w98",
+                # Save the shared parameters once for both hand draws.
+                *(f"\t\tlocal $ssmtdrag_saved_hand_{slot}_{ns} = {slot}" for slot in hand_slots),
                 f"\t\tif $isMouseButtonDown == 1 || $ssmtdrag_rmb_lone_hold_{ns} == 1",
                 f"\t\t\trun = CustomShaderDragPresentHandActionOutline_{ns}",
                 f"\t\t\trun = CustomShaderDragPresentHandAction_{ns}",
@@ -7322,18 +7312,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 f"\t\t\trun = CustomShaderDragPresentHandOutline_{ns}",
                 f"\t\t\trun = CustomShaderDragPresentHand_{ns}",
                 "\t\tendif",
-                f"\t\tx94 = $ssmtdrag_ipbak_x94",
-                f"\t\ty94 = $ssmtdrag_ipbak_y94",
-                f"\t\tz94 = $ssmtdrag_ipbak_z94",
-                f"\t\tw94 = $ssmtdrag_ipbak_w94",
-                f"\t\tx95 = $ssmtdrag_ipbak_x95",
-                f"\t\ty95 = $ssmtdrag_ipbak_y95",
-                f"\t\tz95 = $ssmtdrag_ipbak_z95",
-                f"\t\tw95 = $ssmtdrag_ipbak_w95",
-                f"\t\tx98 = $ssmtdrag_ipbak_x98",
-                f"\t\ty98 = $ssmtdrag_ipbak_y98",
-                f"\t\tz98 = $ssmtdrag_ipbak_z98",
-                f"\t\tw98 = $ssmtdrag_ipbak_w98",
+                *(f"\t\t{slot} = $ssmtdrag_saved_hand_{slot}_{ns}" for slot in hand_slots),
                 "\tendif",
                 "endif",
             ])

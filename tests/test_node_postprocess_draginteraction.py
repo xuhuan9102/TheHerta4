@@ -17,6 +17,7 @@
 
 import importlib.util
 import os
+import re
 import shutil
 import struct
 import sys
@@ -2602,6 +2603,32 @@ class DragNodeEmitTests(unittest.TestCase):
         )
         idx = present.index(gate_line)
         self.assertIn("run = CustomShaderDragUpdateJiggleCursorPreview_testns", present[idx + 1])
+
+    def test_hand_cursor_restores_every_shared_parameter_after_both_passes(self):
+        node, sections, comps = self._emit(enable_hand_cursor=True)
+        node._emit_present_and_constants(sections, comps, "testns")
+        shaders = {
+            name[1:-1]: lines for name, lines in sections.items()
+            if name.startswith("[CustomShaderDragPresentHand")
+        }
+        self.assertEqual(len(shaders), 4)
+        slots = {
+            match.group(1)
+            for lines in shaders.values()
+            for line in lines
+            if (match := re.match(r"^([xyzw]\d+) = ", line))
+        }
+        self.assertIn("y91", slots)
+
+        present = [line.strip() for line in sections["[Present]"]]
+        prefix = "$ssmtdrag_saved_hand_"
+        draws = [present.index(f"run = {name}") for name in shaders]
+        saves = [line for line in present if line.startswith(f"local {prefix}")]
+        restores = [line for line in present if f" = {prefix}" in line]
+        self.assertCountEqual(saves, [f"local {prefix}{slot}_testns = {slot}" for slot in slots])
+        self.assertCountEqual(restores, [f"{slot} = {prefix}{slot}_testns" for slot in slots])
+        self.assertLess(max(present.index(line) for line in saves), min(draws))
+        self.assertLess(max(draws), min(present.index(line) for line in restores))
 
     def test_drag_runtime_mode_one_keeps_detection_but_disables_deformation(self):
         node, sections, comps = self._emit(drag_system_mode_default=1, enable_hand_cursor=True)
