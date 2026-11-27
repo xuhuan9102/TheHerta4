@@ -26,6 +26,7 @@ import bpy
 from .node_postprocess_base import SSMTNode_PostProcess_Base
 from ..common.global_config import GlobalConfig
 from ..common.ini_variable_validator import find_primary_ini
+from ..common.key_type import one_shot_key_type
 try:
     from ..common.ui_image_color import mark_png_as_srgb
 except (ImportError, ModuleNotFoundError):
@@ -2647,12 +2648,12 @@ class _SSMTNode_PostProcess_SwapPanelMixin:
         other_sections[f"[Key放大-ZoomIn_{ns}]"] = [
             f"condition = ${ns}_help == 1 && ${ns}_ui_active == 1",
             f"; @@{self.PANEL_TAG}:zoom_in_key@@", f"key = {zoom_in_key}",
-            "type = press", f"run = CommandListZoomIn_{ns}"
+            f"type = {one_shot_key_type()}", f"run = CommandListZoomIn_{ns}"
         ]
         other_sections[f"[Key缩小-ZoomOut_{ns}]"] = [
             f"condition = ${ns}_help == 1 && ${ns}_ui_active == 1",
             f"; @@{self.PANEL_TAG}:zoom_out_key@@", f"key = {zoom_out_key}",
-            "type = press", f"run = CommandListZoomOut_{ns}"
+            f"type = {one_shot_key_type()}", f"run = CommandListZoomOut_{ns}"
         ]
         other_sections[f"[Key鼠标拖动-MouseDrag_{ns}]"] = [
             f"condition = ${ns}_help == 1 && ${ns}_ui_active == 1",

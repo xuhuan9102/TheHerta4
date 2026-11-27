@@ -8,6 +8,7 @@ from ...blueprint.export_helper import BlueprintExportHelper
 from ...common.apmi_capture import (
     APMICapture, plan_texcoord_overrides, render_layout_captures, skin_group_count, texcoord_layout,
 )
+from ...common.apmi_runtime import ensure_runtime_core_files
 from ...common.apmi_skeleton import (
     MATRIX_STRIDE, REPLACED_PARTS_PROPERTY, SKELETON_PROPERTY, build_skeletons, capture_folder, selected_metadata,
 )
@@ -106,10 +107,12 @@ class ExportAPMI(ExportUnity):
             core_files.extend(("APMI_MergedSkeleton.ini", "APMI_ImportPalette.hlsl"))
         if not runtime_ini:
             raise ValueError("APMI：找不到加载器 d3dx.ini，请在 SSMT 中校正 APMI 的加载器目录。")
-        for name in core_files:
-            if not (Path(runtime_ini).parent / "Core" / name).is_file():
-                template = Path(__file__).resolve().parents[2] / "resources" / name
-                raise ValueError(f"APMI：缺少加载器 Core/{name}，请安装插件附带的 {template}。")
+        try:
+            installed_core_files = ensure_runtime_core_files(runtime_ini, core_files)
+        except OSError as error:
+            raise ValueError(f"APMI：安装加载器核心文件失败：{error}") from error
+        if installed_core_files:
+            print("APMI：已安装加载器核心文件 " + ", ".join(installed_core_files))
         if any(drawcall.transparency_info for drawcall in self.blueprint_model.ordered_draw_obj_data_model_list):
             require_apmi_ttl_core(runtime_ini)
         models = {model.draw_ib: model for model in self.drawib_model_list}

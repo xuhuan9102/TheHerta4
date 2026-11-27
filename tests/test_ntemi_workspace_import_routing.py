@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -222,6 +223,58 @@ spec = importlib.util.spec_from_file_location(f"{PKG}.ui.ui_func_import_ssmt", m
 ui_func_import_ssmt = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = ui_func_import_ssmt
 spec.loader.exec_module(ui_func_import_ssmt)
+
+
+class APMIWorkspaceImportGameTypeTests(unittest.TestCase):
+    def _ordered_folders(self, logic_name):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            component_folder = Path(temp_dir) / "cd7b0837-25761-0"
+            no_blend = component_folder / "TYPE_GPU_P12_N12_TA16_C4_T4_T1-8_"
+            with_blend = component_folder / (
+                "TYPE_GPU_P12_N12_TA16_C4_T4_T1-8_BW16_BI16_"
+            )
+            no_blend.mkdir(parents=True)
+            with_blend.mkdir()
+            json_name = "cd7b0837-25761-0.json"
+            (no_blend / json_name).write_text("{}", encoding="utf-8")
+            (with_blend / json_name).write_text("{}", encoding="utf-8")
+
+            def load_category_map(json_path):
+                if "BW16_BI16" in json_path:
+                    return {"CategoryDrawCategoryMap": {"Blend": "Blend"}}
+                return {"CategoryDrawCategoryMap": {"Position": "Position"}}
+
+            with (
+                mock.patch.object(
+                    ui_func_import_ssmt.GlobalConfig,
+                    "logic_name",
+                    logic_name,
+                ),
+                mock.patch.object(
+                    ui_func_import_ssmt.WorkSpaceHelper,
+                    "get_ordered_gpu_cpu_import_folderpath_list",
+                    return_value=[str(no_blend), str(with_blend)],
+                    create=True,
+                ),
+                mock.patch.object(
+                    ui_func_import_ssmt.JsonUtils,
+                    "LoadFromFile",
+                    side_effect=load_category_map,
+                    create=True,
+                ),
+            ):
+                return ui_func_import_ssmt._ordered_workspace_import_folderpath_list(
+                    str(component_folder),
+                    "cd7b0837-25761-0",
+                )
+
+    def test_apmi_prefers_game_type_with_blend(self):
+        folders = self._ordered_folders("APMI")
+        self.assertIn("BW16_BI16", folders[0])
+
+    def test_non_apmi_keeps_existing_folder_order(self):
+        folders = self._ordered_folders("ZZMI")
+        self.assertNotIn("BW16_BI16", folders[0])
 
 
 class _FakeCollectionRegistry(dict):
