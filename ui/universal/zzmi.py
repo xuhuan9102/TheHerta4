@@ -765,17 +765,23 @@ class ExportZZMI(ExportUnity):
         # 注入 3 顶点占位，最终把完整合并网格隐藏掉。
         self._zzmi_merged_identity_records = []
         try:
-            from ...common.zzmi_native_flow import UV_LAYER, prepare_native_flow, has_native_flow_node
+            from ...common.zzmi_native_flow import prepare_native_flow, has_native_flow_node
+            from ...common.zzmi_native_vertex_data import UV2_LAYER, build_uv2_projection_map
 
             self._normalize_merged_object_drawcalls(blueprint_model)
             native_flow_enabled = has_native_flow_node(blueprint_model)
-            reproject_uv2 = native_flow_enabled and any(
+            # TEXCOORD2 is part of the native ZZMI vertex contract, not a
+            # GlowFX-only feature.  Fit the projection from native reference
+            # objects and apply it to every missing export stream.
+            uv2_projections = build_uv2_projection_map(blueprint_model)
+            native_flow_fallback_reproject = native_flow_enabled and any(
                 getattr(obj, "type", None) == "MESH" and obj.data.polygons
-                and UV_LAYER not in obj.data.uv_layers
+                and UV2_LAYER not in obj.data.uv_layers
                 for draw in getattr(blueprint_model, "ordered_draw_obj_data_model_list", ())
                 if not getattr(draw, "zzmi_stub", False)
                 for obj in (self._zzmi_drawcall_object(draw),)
             )
+            reproject_uv2 = bool(uv2_projections) or native_flow_fallback_reproject
             if GlobalProterties.import_merged_vgmap():
                 # 占位是合并骨架渲染身份完整性的硬前提。创建失败时中止导出，
                 # 不能回退到旧的 ib=null/IB skip 路径让部件静默消失并串扰其它 hash。
@@ -786,10 +792,17 @@ class ExportZZMI(ExportUnity):
             super().__init__(blueprint_model)
             # 属性缺失就跳过：测试桩会把父类 __init__ 换成 no-op，产品代码要容忍。
             drawib_models = getattr(self, "drawib_model_list", ())
-            self._native_flow_height = (
-                prepare_native_flow(drawib_models, reproject_uv2)
-                if (drawib_models and native_flow_enabled) else None
-            )
+            self._native_flow_height = None
+            if drawib_models and (native_flow_enabled or reproject_uv2):
+                prepared_height = prepare_native_flow(
+                    drawib_models,
+                    reproject_uv2,
+                    uv2_projections or None,
+                )
+                # The height scope belongs to the GlowFX feature.  UV2 repair
+                # is global and must not enable the shader override by itself.
+                if native_flow_enabled:
+                    self._native_flow_height = prepared_height
 
             self.cross_ib_info_dict = blueprint_model.cross_ib_info_dict
             self.cross_ib_method_dict = blueprint_model.cross_ib_method_dict
