@@ -140,6 +140,62 @@ def shape_key_runtime_slot_by_index(shape_key_names) -> dict:
     return result
 
 
+def reanchor_merged_morph_preskin(sections, draw_ib, native_vertex_count):
+    """Keep direct-export native morphs on the face's stable preskin input."""
+    try:
+        vertex_count = int(native_vertex_count)
+    except (TypeError, ValueError):
+        return False
+    if vertex_count <= 0:
+        return False
+
+    prefix = f"[TextureOverride_VB_{draw_ib}_".casefold()
+    position_sections = [
+        name for name in sections
+        if name.casefold().startswith(prefix) and name.casefold().endswith("_position]")
+    ]
+    if len(position_sections) != 1:
+        return False
+    position_name, = position_sections
+    blend_name = position_name[:-len("Position]")] + "Blend]"
+    if blend_name not in sections:
+        return False
+    position, blend = sections[position_name], sections[blend_name]
+    if not any(line.strip().casefold() == "handling = skip" for line in position):
+        return False
+    native_position_name = position_name[:-1] + "_NativePalette]"
+    native_blend_name = blend_name[:-1] + "_NativePalette]"
+    native_capture = sections.get(native_position_name, position)
+    palette_prefix = f"ResourceZZPalette_{draw_ib}_s".casefold()
+    if not any(line.lstrip().casefold().startswith(palette_prefix) for line in native_capture):
+        return False
+    blend_hashes = [i for i, line in enumerate(blend) if line.strip().casefold().startswith("hash = ")]
+    if len(blend_hashes) != 1 or any(
+        line.strip() and not line.lstrip().startswith(";") and i not in blend_hashes
+        for i, line in enumerate(blend)
+    ):
+        return False
+
+    # The native morph can rotate Position buffers. Match the same stable Blend
+    # draw for both the read-only capture and the geometry replacement.
+    insert = blend_hashes[0] + 1
+    vertex_match = f"match_vertex_count = {vertex_count}"
+    if native_position_name in sections:
+        sections[native_blend_name] = [blend[insert - 1], vertex_match, *native_capture[1:]]
+        del sections[native_position_name]
+    alias_prefix = position_name[:-1] + "_SkinInput_"
+    for name in tuple(sections):
+        if name.startswith(alias_prefix):
+            del sections[name]
+    retained, moved = [], []
+    for line in position:
+        destination = retained if line.strip().casefold().startswith(("hash = ", ";mark:")) else moved
+        destination.append(line)
+    position[:] = retained
+    blend[insert:insert] = [vertex_match, *moved]
+    return True
+
+
 def collect_reserved_filter_indices(sections) -> set:
     result = set()
     for section_name, lines in (sections or {}).items():

@@ -566,7 +566,7 @@ class ZZSIMergedSkeletonIniTests(unittest.TestCase):
         idx_seen2 = text.index("$zz_ms_seen_02 = $zz_ms_seen_02 + ($zz_ms_occ_0 == 2)")
         idx_copy = text.index(
             "if $zz_ms_occ_0 == 1\n"
-            "    ResourceZZPalette_b20f90ea_s1 = copy vs-t0 unless_null"
+            "        ResourceZZPalette_b20f90ea_s1 = copy vs-t0 unless_null"
         )
         idx_run = text.index("run = CustomShaderZZMIMergedSkeletonAttach_C0_s1")
         idx_swap = text.index("vs-t0 = ResourceZZMergedSkeleton_G0_s1")
@@ -576,6 +576,14 @@ class ZZSIMergedSkeletonIniTests(unittest.TestCase):
         self.assertLess(idx_seen2, idx_copy)
         self.assertLess(idx_copy, idx_run)
         self.assertLess(idx_run, idx_swap)
+        capture_start = next(i for i, line in enumerate(lines) if line.endswith("_NativePalette]"))
+        capture_end = next(i for i in range(capture_start + 1, len(lines)) if lines[i].startswith("["))
+        capture = [line.strip() for line in lines[capture_start:capture_end]]
+        self.assertEqual(capture[1], lines[capture_end + 1])
+        self.assertIn("match_priority = -100", capture)
+        self.assertIn("if so0 !== null && vs-t0 !== null", capture)
+        self.assertFalse(any(line.startswith(("vb0 =", "vb2 =", "vs-t0 =", "so0 =", "run =", "handling =")) for line in capture))
+        self.assertNotIn("copy vs-t0", "\n".join(lines[capture_end:]))
         # 运行时不重放持久 palette，避免脏数据。
         self.assertNotIn("$zz_ms_attach_offset", text)
 
@@ -1914,12 +1922,12 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
         exporter.add_unity_vs_texture_override_vb_sections(builder, models[0])
         lines = _all_builder_lines(builder)
 
-        # 出现次 palette 捕获与自足绘制各有一条 `if $zz_ms_occ_0 == 1`
+        # 捕获守卫在独立的早期覆盖段内，自足绘制保持原来的顶层守卫。
         guard_starts = [
             index for index, line in enumerate(lines)
             if line.startswith("if $zz_ms_occ_0 == 1")
         ]
-        self.assertEqual(len(guard_starts), 2, "palette 捕获 + 自足绘制各一条")
+        self.assertEqual(len(guard_starts), 1, "自足绘制守卫只有一条")
         start = guard_starts[-1]
         end = lines.index("endif", start)
         body = lines[start + 1 : end]
@@ -2222,7 +2230,7 @@ class ZZSIMultiInstanceGuardTests(unittest.TestCase):
             stripped.count("ResourceZZPalette_5144c409_s2 = copy vs-t0 unless_null"), 1
         )
         self.assertIn("if $zz_ms_occ_0 == 1", lines)
-        self.assertIn("else", lines)
+        self.assertIn("else", stripped)
         # 本组 2 个组件 × 2 个槽 = 4 条顶层 attach
         self.assertEqual(exporter._merged_group_component_ids(2), [0, 1])
         for cid in (0, 1):
@@ -2723,6 +2731,19 @@ class ZZSIMergedHostDirectPathTests(unittest.TestCase):
         # 宿主段不能捕获兄弟的 SO：捕获只在宿主自己段发生
         self.assertNotIn("ResourceZZRedirectSO_G0_s1 = ref so0", sib_text)
         self.assertIn("ResourceZZRedirectSO_G0_s1 = ref so0", host_text)
+
+    def test_own_slot_two_draw_keeps_original_vertex_and_stream_output_bindings(self):
+        exporter, models = self._make_exporter()
+        sibling = self._vb_text(exporter, models[1])
+        own_second = (
+            "if $zz_ms_occ_1 == 2\n"
+            "    vs-t0 = ResourceZZMergedSkeleton_G0_s2\n"
+            "    draw = 3, 0\n"
+            "endif"
+        )
+        # A slot-one replay can be ready on a slot-two call. The native draw
+        # must run before the replay binds another mesh and clears so0.
+        self.assertLess(sibling.index(own_second), sibling.index("so0 = ref ResourceZZRedirectSO_G0_s1"))
 
     def test_incompatible_sibling_does_not_replay(self):
         """Blend 布局不兼容的兄弟挂点不得重放（BI4 与 BW16_BI16 不能混用）。"""

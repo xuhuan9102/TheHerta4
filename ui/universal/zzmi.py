@@ -5292,7 +5292,7 @@ class ExportZZMI(ExportUnity):
         )
 
     def _append_merged_skeleton_deform_block(
-        self, texture_override_vb_section, drawib_model
+        self, texture_override_vb_section, drawib_model, native_capture
     ) -> None:
         """deform 段合并骨架注入 = 正文（每槽 draw 门控）+ 末尾「每槽发布」块。
 
@@ -5305,7 +5305,7 @@ class ExportZZMI(ExportUnity):
         只有 ~3100/13671 行吻合 = 用户看到的「一直闪」）。
         """
         self._append_merged_skeleton_deform_block_body(
-            texture_override_vb_section, drawib_model
+            texture_override_vb_section, drawib_model, native_capture
         )
         draw_ib = drawib_model.draw_ib
         component_id = int(self.merged_skeleton_component_id_dict[draw_ib])
@@ -5363,15 +5363,14 @@ class ExportZZMI(ExportUnity):
         )
 
     def _append_merged_skeleton_deform_block_body(
-        self, texture_override_vb_section, drawib_model
+        self, texture_override_vb_section, drawib_model, native_capture
     ) -> None:
         """deform 段合并骨架注入（v9：出现次槽位 + 每槽守卫）。
 
         生成顺序**必须**保持如下（每一条都对应一次游戏内实测失败）：
-        1. `$zz_ms_occ_<i>` 顶层自增 + `>= 3` 回绕为 1（槽位 1/2 循环）；
-        2. `$zz_ms_seen_<i><k>` 顶层 sticky 累加（**绝不能在 if 体内赋值**：
-           只在 if 体内赋值的变量会被加载期优化器按初值静态折叠 → 守卫整段
-           被删除 → 重放不发生）；
+        1. 优先匹配的只读段确认原生 SO 和 palette 已绑定后，自增 `$zz_ms_occ_<i>`，
+           `>= 3` 回绕为 1（槽位 1/2 循环）；
+        2. 在同一段累加 `$zz_ms_seen_<i><k>`，供本帧其余部件的重放守卫读取；
         3. `if $zz_ms_occ_<i> == 1 ... else ... endif` 把当帧 palette 复制进本槽
            的 palette 资源；SO 捕获**只由 SO owner（载体）部件做**；
         4. 顶层无条件 `run` 全部 (部件, 槽) attach（**run 绝不能进 if**：本 fork
@@ -5402,15 +5401,16 @@ class ExportZZMI(ExportUnity):
         occ_var = self._merged_occ_var(component_id)
         slot_first = slots[0]
 
-        # 1) 出现次（顶层）
-        texture_override_vb_section.append(f"{occ_var} = {occ_var} + 1")
-        texture_override_vb_section.append(f"if {occ_var} >= {ZZMI_MERGED_SKELETON_OCC_WRAP}")
-        texture_override_vb_section.append(f"    {occ_var} = {slot_first}")
-        texture_override_vb_section.append("endif")
-        # 2) 到达标记（顶层 sticky 累加；绝不在 if 体内赋值）
+        # 1–2) 先记录原生蒙皮调用的槽位，供后续 attach 和绘制使用。
+        native_capture.extend([
+            f"{occ_var} = {occ_var} + 1",
+            f"if {occ_var} >= {ZZMI_MERGED_SKELETON_OCC_WRAP}",
+            f"    {occ_var} = {slot_first}",
+            "endif",
+        ])
         for slot in slots:
             seen_var = self._merged_seen_var(component_id, slot)
-            texture_override_vb_section.append(
+            native_capture.append(
                 f"{seen_var} = {seen_var} + ({occ_var} == {slot})"
             )
 
@@ -5557,9 +5557,8 @@ class ExportZZMI(ExportUnity):
                 ),
             )
 
-        # 3.9) 捕获按原次序落在 attach **之前**（attach 读到当帧 palette；F5 的后移已回退）。
-        for _capture_line in capture_lines:
-            texture_override_vb_section.append(_capture_line)
+        # The early selector runs before matching overrides can replace VS-t0 or SO0.
+        native_capture.extend(capture_lines)
 
         # 4) 顶层无条件 attach（每个 (部件, 槽) 一条 run；run 绝不进 if）
         #
@@ -6348,6 +6347,7 @@ class ExportZZMI(ExportUnity):
                 for host in hosts
                 if self._merged_absorbed_replay_compatible(draw_ib, str(host["draw_ib"]))
             ]
+            slots = tuple(slots)
             for slot in slots:
                 # 直连路径自足挂点：按本轮出现次绑本槽骨架后直接绘制本部件几何
                 # （说明留源码，不写进配置表）
@@ -6357,6 +6357,9 @@ class ExportZZMI(ExportUnity):
                 )
                 section.append(f"    draw = {draw_count}, 0")
                 section.append("endif")
+            # A host replay replaces vb0/vb2 and clears so0. Draw the current
+            # component with the incoming bindings before replaying either slot.
+            for slot in slots:
                 for host in replay_hosts:
                     self._append_merged_absorbed_replay(
                         section, host, skeleton_group, slot, consumer_ib=draw_ib
@@ -6557,6 +6560,20 @@ class ExportZZMI(ExportUnity):
             raise ValueError(f"Invalid ZZMI skin input aliases for DrawIB {draw_ib}: {path}")
         return tuple(dict.fromkeys(alias for alias in aliases if alias != category_hash))
 
+    @staticmethod
+    def _native_palette_override(vb_name_suffix, category_hash, commands):
+        if not commands:
+            return []
+        return [
+            f"[TextureOverride_{vb_name_suffix}_NativePalette]",
+            f"hash = {category_hash}",
+            "match_priority = -100",
+            "if so0 !== null && vs-t0 !== null",
+            *("    " + line if line else "" for line in commands),
+            "endif",
+            "",
+        ]
+
     def add_unity_vs_texture_override_vb_sections(self, ini_builder: M_IniBuilder, drawib_model):
         d3d11_game_type = drawib_model.d3d11GameType
         draw_ib = drawib_model.draw_ib
@@ -6619,6 +6636,8 @@ class ExportZZMI(ExportUnity):
         for category_name in d3d11_game_type.OrderedCategoryNameList:
             category_hash = drawib_model.category_hash_dict.get(category_name, "")
             texture_override_vb_name_suffix = "VB_" + draw_ib + "_" + drawib_model.draw_ib_alias + "_" + category_name
+            section_start = len(texture_override_vb_section.SectionLineList)
+            native_capture = []
             texture_override_vb_section.append("[TextureOverride_" + texture_override_vb_name_suffix + "]")
             texture_override_vb_section.append("hash = " + category_hash)
             body_start = len(texture_override_vb_section.SectionLineList)
@@ -6635,7 +6654,7 @@ class ExportZZMI(ExportUnity):
             if draw_category_name is not None and category_name == draw_category_name:
                 if self.merged_skeleton_component_id_dict.get(draw_ib) is not None:
                     self._append_merged_skeleton_deform_block(
-                        texture_override_vb_section, drawib_model
+                        texture_override_vb_section, drawib_model, native_capture
                     )
                 else:
                     # B3/C1 回归修复（用户裁决 2026-09-11）：非合并路径必须保留
@@ -6662,10 +6681,13 @@ class ExportZZMI(ExportUnity):
             texture_override_vb_section.new_line()
             if draw_category_name is not None and category_name == draw_category_name:
                 body = texture_override_vb_section.SectionLineList[body_start:]
+                texture_override_vb_section.SectionLineList[section_start:section_start] = (
+                    self._native_palette_override(texture_override_vb_name_suffix, category_hash, native_capture)
+                )
                 for alias in self._skin_input_aliases(draw_ib, category_hash):
-                    texture_override_vb_section.append(
-                        f"[TextureOverride_{texture_override_vb_name_suffix}_SkinInput_{alias}]"
-                    )
+                    alias_suffix = f"{texture_override_vb_name_suffix}_SkinInput_{alias}"
+                    texture_override_vb_section.extend(self._native_palette_override(alias_suffix, alias, native_capture))
+                    texture_override_vb_section.append(f"[TextureOverride_{alias_suffix}]")
                     texture_override_vb_section.append(f"hash = {alias}")
                     texture_override_vb_section.extend(body)
 

@@ -1470,6 +1470,12 @@ class DirectShapeKeyOutputMixin:
                 plan.lookup_buffer,
             )
             lookup_files[logical_hash] = f"Meshes0000/{file_name}"
+            model = runtime_infos[logical_hash]["drawib_model"]
+            draw_ib = self.node._extract_hash_prefix(logical_hash)
+            if native_morph.reanchor_merged_morph_preskin(
+                sections, draw_ib, getattr(model, "original_vertex_count", 0),
+            ):
+                LOG.info(f"ZZMI: 直出原生表情预蒙皮按 Blend 匹配 {draw_ib}")
 
         LOG.info(
             "直出形态键: 原生 morph 权重桥接已启用 "

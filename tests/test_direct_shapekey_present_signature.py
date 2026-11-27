@@ -11,6 +11,7 @@ import types
 import unittest
 from collections import OrderedDict
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _install_module(name, **attrs):
@@ -197,6 +198,60 @@ def _run_update(sections, drag_drive_resource=None, frame_table_meta_map=None,
 
 
 class ShapeKeyPresentSignatureWiringTests(unittest.TestCase):
+    def test_native_morph_bridge_moves_merged_preskin_to_stable_blend(self):
+        logical_hash = "d942b3a7-39828-0"
+        position = "[TextureOverride_VB_d942b3a7_d942b3a7_Position]"
+        blend = "[TextureOverride_VB_d942b3a7_d942b3a7_Blend]"
+        deform = [
+            "vb0 = Resourced942b3a7Position",
+            "vb2 = Resourced942b3a7Blend",
+            "if $zz_ms_occ_2 == 1",
+            "    ResourceZZPalette_d942b3a7_s1 = copy vs-t0 unless_null",
+            "endif",
+            "handling = skip",
+            "draw = 3773, 0",
+        ]
+        sections = _sections()
+        sections[position] = ["hash = 12345678", *deform]
+        sections[blend] = ["hash = 87654321", ";MARK:TextureOverrideVB"]
+        model = types.SimpleNamespace(original_vertex_count=3466)
+        h = _Harness()
+        h.meshes_dir = "."
+        h._native_morph_keys_for_export = lambda *_args: [
+            module.native_morph.NativeMorphKey("0123456789abcdef", "12345678", "87654321", 4, 2, 2)
+        ]
+        shader_source = module_path.parents[1] / "Toolset" / "unused_template_name.hlsl"
+        with patch.object(module, "LOG"), patch.object(module, "write_text_if_changed"):
+            for _ in range(2):
+                plans, _ = h._prepare_native_morph_bridge(
+                    {logical_hash: {"drawib_model": model}}, [logical_hash],
+                    {logical_hash: {1: {"Deform 2": ["face"]}}}, sections, ".", str(shader_source),
+                )
+                self.assertIn(logical_hash, plans)
+        self.assertEqual(sections[position], ["hash = 12345678"])
+        self.assertEqual(sections[blend], [
+            "hash = 87654321", "match_vertex_count = 3466", *deform, ";MARK:TextureOverrideVB",
+        ])
+
+    def test_reanchored_face_capture_and_deform_match_the_same_blend_draw(self):
+        draw_ib = "f137c27d"
+        prefix = f"[TextureOverride_VB_{draw_ib}_{draw_ib}_"
+        position, blend = prefix + "Position]", prefix + "Blend]"
+        capture = ["match_priority = -100", f"ResourceZZPalette_{draw_ib}_s1 = copy vs-t0 unless_null"]
+        sections = {
+            position: ["hash = 12345678", "handling = skip", "draw = 180, 0"],
+            blend: ["hash = 87654321"],
+            prefix + "Position_NativePalette]": ["hash = 12345678", *capture],
+            prefix + "Position_SkinInput_abcdef01]": ["hash = abcdef01", "handling = skip"],
+            prefix + "Position_SkinInput_abcdef01_NativePalette]": ["hash = abcdef01", *capture],
+        }
+        self.assertTrue(module.native_morph.reanchor_merged_morph_preskin(sections, draw_ib, 90))
+        self.assertEqual(sections, {
+            position: ["hash = 12345678"],
+            blend: ["hash = 87654321", "match_vertex_count = 90", "handling = skip", "draw = 180, 0"],
+            prefix + "Blend_NativePalette]": ["hash = 87654321", "match_vertex_count = 90", *capture],
+        })
+
     def test_stock_and_edited_faces_keep_their_control_and_capture_paths(self):
         edited = "d942b3a7-39828-0"
         stock = "8b067f99"
