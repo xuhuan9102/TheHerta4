@@ -1265,7 +1265,8 @@ def bake_garments(
                         raise ValueError("穿脱箭头超过衣片的可折返长度，请缩短行程")
                 elif manual_target <= 0.03:
                     raise ValueError(
-                        "穿脱箭头超过衣物可压缩长度；请缩短行程或使用可沿身体整体滑移的裤装"
+                        f"穿脱箭头超过衣物可压缩长度（行程 {travel:.4f}，上限 {height * .97:.4f}）。"
+                        "请缩短箭头；如果衣物需要整件沿肢体移动，请开启「沿肢体整体滑移」"
                     )
                 rest[::2, 3] = hn > manual_anchor
         if fold_branch:

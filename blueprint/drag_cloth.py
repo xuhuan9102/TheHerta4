@@ -481,8 +481,8 @@ def _control_regions(
                 node._get_export_space_matrix(),
                 node._get_non_mirror_mirror(),
             )
-        if path is None and (getattr(settings, "cloth_limb_slide", False) or getattr(settings, "cloth_proxy_enabled", False)):
-            raise ValueError(f"上下拖拽：区域 {zone} 的代理穿脱需要穿脱箭头")
+        if path is None and getattr(settings, "cloth_limb_slide", False):
+            raise ValueError(f"上下拖拽：区域 {zone} 的整体滑移需要穿脱箭头")
         regions.append((int(zone), code, rows, selected, body, path))
     return regions
 
@@ -637,10 +637,12 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
         elif getattr(settings, "cloth_proxy_enabled", False):
             proxy_modes[zone] = "compress"
     for selected, collider, controls in _region_batches(regions):
-        active_modes = {proxy_modes[zone] for zone, *_ in controls if zone in proxy_modes}
-        if active_modes and len(controls) != 1:
-            raise ValueError("代理穿脱需要独立的穿脱区域。具有多个箭头的衣物可继续使用共享穿脱")
-        proxy_faces = triangles[selected] if active_modes == {"compress"} else None
+        proxy_mode = None
+        if len(controls) == 1 and controls[0][-1] is not None:
+            proxy_mode = proxy_modes.get(controls[0][0])
+        elif any(proxy_modes.get(zone) == "track" for zone, *_ in controls):
+            raise ValueError("沿肢体整体滑移需要独立的穿脱区域。具有多个箭头的衣物可继续使用共享穿脱")
+        proxy_faces = triangles[selected] if proxy_mode == "compress" else None
         _, unique = np.unique(
             np.sort(triangles[collider], axis=1), axis=0, return_index=True
         )
@@ -749,7 +751,7 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
                 # valid local frame even when the proxy compresses further.
                 limit = min(length, float(np.ptp(positions[body_faces] @ axis)) * .048)
                 geometry_paths = [(zone, mask, np.stack((compression_path[0], compression_path[0] + axis * limit)))]
-        if active_modes == {"track"}:
+        if proxy_mode == "track":
             track_zone, mask, path = geometry_paths[0]
             direction = path[1] - path[0]
             length = float(np.linalg.norm(direction))
@@ -763,26 +765,30 @@ def bake_component(node, root, sections, comp, ns, cloth_names, body_names, name
             # The published geometry and the actual control use the full arrow.
             cuff_travel = min(length, float(np.ptp(positions[body_faces] @ axis)) * .048)
             geometry_paths = [(track_zone, mask, np.stack((path[0], path[0] + axis * cuff_travel)))]
-        baked = bake_garments(
-            positions,
-            normals,
-            triangles[selected],
-            body_faces,
-            count,
-            base,
-            budget=getattr(node, "cloth_proxy_budget", 2450),
-            up_axis=getattr(node, "cloth_up_axis", "AUTO"),
-            two_ended_rows=two_ended,
-            body_surface=bodies[pool]["surface"],
-            blend_weights=weights,
-            blend_indices=indices,
-            body_domain=body_domain,
-            body_branch_weights=branch_reference,
-            body_skin_faces=cap_start,
-            reference_body_faces=reference_body_faces,
-            automatic_rows=automatic_rows,
-            manual_paths=geometry_paths,
-        )
+        try:
+            baked = bake_garments(
+                positions,
+                normals,
+                triangles[selected],
+                body_faces,
+                count,
+                base,
+                budget=getattr(node, "cloth_proxy_budget", 2450),
+                up_axis=getattr(node, "cloth_up_axis", "AUTO"),
+                two_ended_rows=two_ended,
+                body_surface=bodies[pool]["surface"],
+                blend_weights=weights,
+                blend_indices=indices,
+                body_domain=body_domain,
+                body_branch_weights=branch_reference,
+                body_skin_faces=cap_start,
+                reference_body_faces=reference_body_faces,
+                automatic_rows=automatic_rows,
+                manual_paths=geometry_paths,
+            )
+        except ValueError as error:
+            zones = "、".join(str(zone) for zone in sorted({control[0] for control in controls}))
+            raise ValueError(f"上下拖拽区域 {zones}：{error}") from error
         if track is not None:
             if not baked:
                 raise ValueError(f"上下拖拽：区域 {track_zone} 找不到可供抓取的开口")

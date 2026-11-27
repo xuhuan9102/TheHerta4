@@ -2716,37 +2716,60 @@ RWBuffer<float4> Result : register(u0);
             self.assertEqual(node._cloth_object_names(), (set(), set()))
             self.assertTrue(node._collision_enabled_for_component())
 
-    def test_limb_proxy_export_writes_its_shader_and_uses_the_full_arrow(self):
+    def test_overlong_compression_arrow_reports_its_zone_and_travel(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            node, sections, comp = self.prepare(root, bake=False)
-            settings = node._collect_enabled_zone_entries()[0][1].ssmt_drag_zone
+            node, sections, comp = self.prepare(Path(temp), bake=False)
+            _, entry = node._collect_enabled_zone_entries()[0]
+            node._collect_enabled_zone_entries = lambda: [(3, entry)]
+            settings = entry.ssmt_drag_zone
             settings.include_objects = settings.include_objects[:1]
-            settings.cloth_limb_slide = True
             start, end = np.eye(4), np.eye(4)
             start[:3, 3] = (-.12, 0, 1)
-            end[:3, 3] = (-.12, 0, .8)
+            end[:3, 3] = (-.12, 0, -.1)
             settings.cloth_path_start = types.SimpleNamespace(matrix_world=start)
             settings.cloth_path_end = types.SimpleNamespace(matrix_world=end)
             node._get_reference_matrix_inv = lambda _comp: None
             node._get_export_space_matrix = lambda: None
             node._get_non_mirror_mirror = lambda: None
             clothes, body = node._cloth_object_names(required=True)
-            with patch.object(
-                self.exporter, "bake_limb_track",
-                return_value=(np.arange(3, dtype="<u4"), np.zeros((17, 3, 4, 4), "<f4")),
-            ):
-                comp["cloth"] = self.exporter.bake_component(
+            with self.assertRaisesRegex(ValueError, r"区域 3.*行程 1.1000.*上限.*沿肢体整体滑移"):
+                self.exporter.bake_component(
                     node, temp, sections, comp, "unit", clothes, body, self.mod._blender_object_key,
                 )
-            node._emit_sections(sections, [comp], "unit")
-            directory = root / comp["cloth"]["directory"] / "g0"
-            shader = directory / "proxy_apply.hlsl"
-            lines = sections["[CustomShaderSSMTClothG0Apply_s1_abc123_unit]"]
-            self.assertEqual(lines[0], "cs = " + shader.relative_to(root).as_posix())
-            self.assertIn("#define PROXY_SAMPLES 17", shader.read_text("utf8"))
-            axes = np.fromfile(directory / "control_axes.buf", "<f4").reshape(-1, 4)
-            np.testing.assert_allclose(axes[0], (0, 0, -1, .2))
+
+    def test_single_mesh_proxy_exports_with_full_arrow_in_both_modes(self):
+        for limb_slide in (False, True):
+            with self.subTest(limb_slide=limb_slide), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                node, sections, comp = self.prepare(root, bake=False)
+                settings = node._collect_enabled_zone_entries()[0][1].ssmt_drag_zone
+                settings.include_objects = settings.include_objects[:1]
+                settings.cloth_proxy_enabled = True
+                settings.cloth_limb_slide = limb_slide
+                start, end = np.eye(4), np.eye(4)
+                start[:3, 3] = (-.12, 0, 1)
+                end[:3, 3] = (-.12, 0, .8)
+                settings.cloth_path_start = types.SimpleNamespace(matrix_world=start)
+                settings.cloth_path_end = types.SimpleNamespace(matrix_world=end)
+                node._get_reference_matrix_inv = lambda _comp: None
+                node._get_export_space_matrix = lambda: None
+                node._get_non_mirror_mirror = lambda: None
+                clothes, body = node._cloth_object_names(required=True)
+                with patch.object(
+                    self.exporter, "bake_limb_track",
+                    return_value=(np.arange(3, dtype="<u4"), np.zeros((17, 3, 4, 4), "<f4")),
+                ):
+                    comp["cloth"] = self.exporter.bake_component(
+                        node, temp, sections, comp, "unit", clothes, body, self.mod._blender_object_key,
+                    )
+                node._emit_sections(sections, [comp], "unit")
+                directory = root / comp["cloth"]["directory"] / "g0"
+                shader = directory / "proxy_apply.hlsl"
+                lines = sections["[CustomShaderSSMTClothG0Apply_s1_abc123_unit]"]
+                self.assertEqual(lines[0], "cs = " + shader.relative_to(root).as_posix())
+                self.assertIn("#define PROXY_SAMPLES 17", shader.read_text("utf8"))
+                axes = np.fromfile(directory / "control_axes.buf", "<f4").reshape(-1, 4)
+                np.testing.assert_allclose(axes[0], (0, 0, -1, .2))
 
     def test_compression_proxy_binds_other_included_meshes_away_from_the_cuff(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2776,6 +2799,33 @@ RWBuffer<float4> Result : register(u0);
             np.testing.assert_allclose(bake.call_args.args[6], [start[:3, 3], end[:3, 3]])
             np.testing.assert_allclose(cloth["garments"][0]["path_axes"][0], [0, 0, -1, .92])
             np.testing.assert_array_equal(cloth["garments"][0]["proxy_rows"], rows)
+
+    def test_proxy_default_keeps_automatic_and_shared_arrow_controls_exportable(self):
+        for shared_arrows in (False, True):
+            with self.subTest(shared_arrows=shared_arrows), tempfile.TemporaryDirectory() as temp:
+                directions = ("NEGATIVE", "NEGATIVE") if shared_arrows else ()
+                node, sections, comp = self.prepare(Path(temp), bake=False, directions=directions)
+                node._get_reference_matrix_inv = lambda _comp: None
+                node._get_export_space_matrix = lambda: None
+                node._get_non_mirror_mirror = lambda: None
+                for zone, entry in node._collect_enabled_zone_entries():
+                    settings = entry.ssmt_drag_zone
+                    settings.cloth_proxy_enabled = True
+                    settings.include_objects = settings.include_objects[:1]
+                    if shared_arrows:
+                        start, end = np.eye(4), np.eye(4)
+                        start[:3, 3] = (-.12, 0, 1)
+                        end[:3, 3] = (-.12, 0, .8 - zone * .1)
+                        settings.cloth_path_start = types.SimpleNamespace(matrix_world=start)
+                        settings.cloth_path_end = types.SimpleNamespace(matrix_world=end)
+                clothes, body = node._cloth_object_names(required=True)
+                with patch.object(self.exporter, "bake_limb_track") as bake:
+                    cloth = self.exporter.bake_component(
+                        node, temp, sections, comp, "unit", clothes, body, self.mod._blender_object_key,
+                    )
+                bake.assert_not_called()
+                self.assertTrue(cloth["garments"])
+                self.assertTrue(all("proxy_track" not in group for group in cloth["garments"]))
 
     @unittest.skipUnless(sys.platform == "win32", "D3D11 execution requires Windows")
     def test_single_zone_can_pull_either_end_through_the_full_travel(self):

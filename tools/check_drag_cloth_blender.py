@@ -39,7 +39,7 @@ try:
     item.expanded = True
     assert zone.ssmt_drag_zone.cloth_direction == "AUTO"
     assert zone.ssmt_drag_zone.cloth_wear_enabled is True
-    assert zone.ssmt_drag_zone.cloth_proxy_enabled is False
+    assert zone.ssmt_drag_zone.cloth_proxy_enabled is True
     assert zone.ssmt_drag_zone.cloth_limb_slide is False
     zone.ssmt_drag_zone.cloth_direction = "POSITIVE"
     labels = []
