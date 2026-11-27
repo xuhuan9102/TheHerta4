@@ -4,6 +4,7 @@ Buffer<float4> Grab : register(t107);
 StructuredBuffer<float3> Rest : register(t108);
 Buffer<uint> Original : register(t109);
 Buffer<uint> Owners : register(t110);
+Buffer<uint> TearZones : register(t111);
 Texture1D<float4> IniParams : register(t120);
 RWBuffer<float4> Gesture : register(u0);
 
@@ -39,6 +40,16 @@ void main()
         uint owner = Owners[face + 2];
         uint3 indices = uint3(Original[first], Original[first + 1], Original[first + 2]);
         if (owner == 0 || any(indices >= vertexCount))
+            return;
+
+        float hitZone = Hit[7].w;
+        uint zone = (uint)hitZone;
+        uint wordsPerOwner = TearZones[0];
+        uint zoneWord = zone / 32u;
+        if (hitZone < 0.0 || zoneWord >= wordsPerOwner)
+            return;
+        uint allowed = TearZones[1u + (owner - 1u) * wordsPerOwner + zoneWord];
+        if ((allowed & (1u << (zone % 32u))) == 0u)
             return;
 
         float3 a = Rest[indices.x], b = Rest[indices.y], c = Rest[indices.z];

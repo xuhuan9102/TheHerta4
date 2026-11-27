@@ -368,6 +368,11 @@ class SSMT_DragZoneSettings(bpy.types.PropertyGroup):
         description="允许此区域触发穿脱。关闭后仍可普通拉扯，并沿用区域的碰撞设置",
         default=True,
     )
+    tear_enabled: bpy.props.BoolProperty(
+        name="丝袜破洞",
+        description="节点启用丝袜破洞时，允许从此区域抓取包含列表里的物体并拉出破洞",
+        default=True,
+    )
     cloth_limb_slide: bpy.props.BoolProperty(
         name="沿肢体整体滑移",
         description="使用连续代理带动本区域的衣片和附件，沿穿脱箭头整体移动。需要设置箭头起点和端点",
@@ -1165,7 +1170,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
 
     tear_enabled: bpy.props.BoolProperty(
         name="启用丝袜破洞",
-        description="拖动区域包含的衣物时在绘制中生成破洞",
+        description="允许从开启丝袜破洞的区域拉破其包含列表里的衣物",
         default=False,
     )
     tear_reset_key: bpy.props.StringProperty(
@@ -1496,6 +1501,9 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
                 sub.prop(obj.ssmt_drag_zone, "grabbable")
                 sub.prop(obj.ssmt_drag_zone, "drag_along_normal")
                 sub.prop(obj.ssmt_drag_zone, "cloth_wear_enabled")
+                tear_zone_row = sub.row()
+                tear_zone_row.enabled = cloth_supported
+                tear_zone_row.prop(obj.ssmt_drag_zone, "tear_enabled")
                 wear_enabled = self._cloth_enabled() and obj.ssmt_drag_zone.cloth_wear_enabled
                 if wear_enabled:
                     path_box = sub.box()
@@ -2167,24 +2175,29 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         tear_tokens = set()
         written_inis = set()
         from . import drag_tear
-        tear_names = set()
+        tear_zones_by_name = {}
+        tear_enabled_in_region = False
         authored_ttl_names = set()
         promote_native_ttl = False
         if getattr(self, "tear_enabled", False):
             excluded = set()
-            for _, empty in self._collect_enabled_zone_entries():
+            for zone_id, empty in self._collect_enabled_zone_entries():
                 settings = empty.ssmt_drag_zone
-                if getattr(settings, "grabbable", True):
-                    tear_names.update(_zone_allowed_names(settings))
-                    for item in getattr(settings, "include_objects", ()):
-                        obj = getattr(item, "object", None)
-                        if obj is not None and any(
-                            str(getattr(getattr(slot, "material", None), "name", "")).startswith("TTLMap")
-                            for slot in getattr(obj, "material_slots", ())
-                        ):
-                            authored_ttl_names.add(_blender_object_key(obj.name))
-                excluded.update(_collider_allowed_names(settings))
-            tear_names = {_blender_object_key(name) for name in tear_names} - excluded
+                excluded.update(_blender_object_key(name) for name in _collider_allowed_names(settings))
+                if not (getattr(settings, "grabbable", True) and getattr(settings, "tear_enabled", True)):
+                    continue
+                tear_enabled_in_region = True
+                for name in _zone_allowed_names(settings):
+                    tear_zones_by_name.setdefault(_blender_object_key(name), set()).add(zone_id)
+                for item in getattr(settings, "include_objects", ()):
+                    obj = getattr(item, "object", None)
+                    if obj is not None and any(
+                        str(getattr(getattr(slot, "material", None), "name", "")).startswith("TTLMap")
+                        for slot in getattr(obj, "material_slots", ())
+                    ):
+                        authored_ttl_names.add(_blender_object_key(obj.name))
+            for name in excluded:
+                tear_zones_by_name.pop(name, None)
             promote_native_ttl = drag_tear.ttlib_available(mod_export_path)
             if not promote_native_ttl and current_logic:
                 mods_folder = getattr(GlobalConfig, "path_mods_folder", None)
@@ -2230,7 +2243,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
             components = active_components
             cloth_tokens.update(comp['cloth']['token'] for comp in components if comp.get('cloth'))
             tear = drag_tear.bake(self, mod_export_path, sections, components, ns, ini_file,
-                                  tear_names, _blender_object_key, authored_ttl_names)
+                                  tear_zones_by_name, _blender_object_key, authored_ttl_names)
 
             # 2) 生成 CustomShader/CommandList/Resource 段
             self._emit_sections(sections, components, ns)
@@ -2273,7 +2286,7 @@ class SSMTNode_PostProcess_DragInteraction(SSMTNode_PostProcess_Base):
         ns = self._resolve_namespace(None)
         untouched_tokens = {drag_tear.asset_token(ns, name) for name in ini_files if name not in written_inis}
         drag_tear.prune(mod_export_path, ns, tear_tokens | untouched_tokens)
-        if getattr(self, "tear_enabled", False) and not tear_tokens:
+        if tear_enabled_in_region and not tear_tokens:
             print("[DragInteraction][WARNING] 丝袜破洞未找到可生成遮罩的衣物，请检查区域的包含物体、主 UV 和 R32_UINT 索引")
         if cloth_export and not cloth_tokens:
             raise ValueError("上下拖拽：衣物没有匹配到有效拖拽组件，请检查目标哈希、区域包含物体和身体碰撞体")

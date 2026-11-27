@@ -39,6 +39,7 @@ try:
     item.expanded = True
     assert zone.ssmt_drag_zone.cloth_direction == "AUTO"
     assert zone.ssmt_drag_zone.cloth_wear_enabled is True
+    assert zone.ssmt_drag_zone.tear_enabled is True
     assert zone.ssmt_drag_zone.cloth_proxy_enabled is True
     assert zone.ssmt_drag_zone.cloth_limb_slide is False
     zone.ssmt_drag_zone.cloth_direction = "POSITIVE"
@@ -88,6 +89,7 @@ try:
     node.tear_enabled = False
     node.draw_buttons(bpy.context, Layout())
     assert "tear_reset_key" not in properties
+    assert properties.count("tear_enabled") == 2
     properties.clear()
     node.tear_enabled = True
     node.draw_buttons(bpy.context, Layout())

@@ -99,13 +99,14 @@ def asset_token(ns, ini_name):
     return hashlib.sha256(f"{ns}\0{ini_name}".encode("utf8")).hexdigest()[:20]
 
 
-def bake(node, root, sections, components, ns, ini_name, names, name_key, authored_ttl_names=()):
-    if not names:
+def bake(node, root, sections, components, ns, ini_name, zones_by_name, name_key, authored_ttl_names=()):
+    if not zones_by_name:
         return None
+    zone_words = max(max(zones) for zones in zones_by_name.values()) // 32 + 1
     token = asset_token(ns, ini_name)
     assets = None
     for component_id, comp in enumerate(components, 1):
-        if not any(name_key(name) in names for part in comp["parts"] for _, _, name in part["name_ranges"]):
+        if not any(name_key(name) in zones_by_name for part in comp["parts"] for _, _, name in part["name_ranges"]):
             continue
         positions = node._read_position_buf(root, sections, comp, comp["vertex_count"])
         if positions is None:
@@ -114,7 +115,7 @@ def bake(node, root, sections, components, ns, ini_name, names, name_key, author
         for part_id, part in enumerate(comp["parts"]):
             if node._part_vertex_base(comp, part) != comp["vertex_base"]:
                 continue
-            data = _part_owners(root, sections, part, len(positions), names, name_key)
+            data = _part_owners(root, sections, part, len(positions), zones_by_name, name_key)
             if data is None:
                 continue
             uv = read_uv(root, sections, comp, part, len(positions))
@@ -134,6 +135,14 @@ def bake(node, root, sections, components, ns, ini_name, names, name_key, author
                 continue
             header = np.array([component_id, part_id], dtype="<u4")
             owners_file = assets.put(f"{cn}-p{part_id}-owners.buf", np.concatenate((header, owners)))
+            # Row owner - 1 holds the bitset of regions that may tear this object.
+            zone_masks = np.zeros((len(ids), zone_words), dtype="<u4")
+            for name, owner in ids.items():
+                for zone in zones_by_name.get(name, ()):
+                    word, bit = divmod(zone, 32)
+                    zone_masks[owner - 1, word] |= np.uint32(1 << bit)
+            zone_table = np.concatenate((np.array([zone_words], dtype="<u4"), zone_masks.ravel()))
+            part["tear_zones_file"] = assets.put(f"{cn}-p{part_id}-zones.buf", zone_table)
             part["tear"] = (filename, owners, owners_file, masks)
             part["tear_authored_ttl"] = {ids[name] for name in authored_ttl_names if name in ids}
             comp["tear_token"] = component_id
@@ -148,15 +157,16 @@ def _emit_part(sections, comp, part_id, ns, gesture_shader):
     tag = f"{comp['comp_name']}P{part_id}_{ns}"
     resource = "ResourceDragTear"
     rest = f"{resource}Rest_{comp['comp_name']}_{ns}"
-    original, faces, gesture = (
-        f"{resource}{name}_{tag}" for name in ("Original", "Faces", "Gesture")
+    original, faces, zones, gesture = (
+        f"{resource}{name}_{tag}" for name in ("Original", "Faces", "Zones", "Gesture")
     )
     base = ["type = Buffer", "format = R32_UINT", f"filename = {original_file}"]
     sections[f"[{rest}]"] = ["type = StructuredBuffer", "stride = 12", f"filename = {comp['tear_rest']}"]
     sections[f"[{original}]"] = base
     sections[f"[{faces}]"] = ["type = Buffer", "format = R32_UINT", f"filename = {owners_file}"]
+    sections[f"[{zones}]"] = ["type = Buffer", "format = R32_UINT", f"filename = {part['tear_zones_file']}"]
     sections[f"[{gesture}]"] = ["type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = 4"]
-    shared = [f"cs-t108 = {rest}", f"cs-t109 = {original}", f"cs-t110 = {faces}"]
+    shared = [f"cs-t108 = {rest}", f"cs-t109 = {original}", f"cs-t110 = {faces}", f"cs-t111 = {zones}"]
     step = f"CustomShaderDragTearStep_{tag}"
     sections[f"[{step}]"] = [
         f"cs = {gesture_shader}", f"cs-t106 = ResourceDragPinnedDetectInfo_{ns}",
@@ -455,7 +465,7 @@ def emit(node, sections, tail, components, ns, assets, *, promote_native_ttl=Non
     mode = node._runtime_variable_names(ns)[0]
     update = f"CommandListDragTearUpdate_{ns}"
     save_slots, restore_slots = [], []
-    for slot in range(106, 111):
+    for slot in range(106, 112):
         saved = f"ResourceDragTearSavedCsT{slot}_{ns}"
         sections[f"[{saved}]"] = []
         save_slots.append(f"\t{saved} = ref cs-t{slot}")

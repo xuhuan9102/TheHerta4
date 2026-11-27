@@ -35,7 +35,7 @@ class DragTearTests(unittest.TestCase):
         ini.parent.mkdir(parents=True)
         ini.write_text("namespace = TTL\n[CommandListDraw]\n", "utf8")
 
-    def generate(self, root, cloth=False, ttl=False, authored_ttl_names=()):
+    def generate(self, root, cloth=False, ttl=False, authored_ttl_names=(), zones_by_name=None):
         fixture = cloth_tests.GarmentExportTests()
         node, sections, comp = fixture.prepare(root, bake=cloth, prefix=3 if cloth else 0)
         self.add_uv(root, sections)
@@ -58,8 +58,10 @@ class DragTearTests(unittest.TestCase):
             ]
             tail = "[CommandListSSMTTTLDraw_legacy]\nib = ResourceIB\nrun = CommandList\\TTL\\Draw\n"
             comp["parts"] = node._collect_draw_parts(sections, comp["hash"])
+        if zones_by_name is None:
+            zones_by_name = {"Stocking0": {0}, "Stocking1": {0}}
         assets = self.tear.bake(
-            node, root, sections, [comp], "unit", "Mod.ini", {"Stocking0", "Stocking1"},
+            node, root, sections, [comp], "unit", "Mod.ini", zones_by_name,
             fixture.mod._blender_object_key, authored_ttl_names,
         )
         self.assertIsNotNone(assets)
@@ -138,8 +140,15 @@ class DragTearTests(unittest.TestCase):
             node.execute_postprocess(temp)
             self.assertEqual(ini.read_text("utf8").count("[KeyDragTearReset_unit]"), 1)
             self.assertEqual(ini.read_text("utf8").count("[CommandListDragTearNativeTTL0_unit]"), 1)
+            settings.tear_enabled = False
+            node.execute_postprocess(temp)
+            self.assertNotIn("DragTear", ini.read_text("utf8"))
+            self.assertIn("CustomShaderDragJiggleabc123_unit", ini.read_text("utf8"))
+            self.assertFalse((root / "res/drag_tear").exists())
+            settings.tear_enabled = True
             (root / "Core/ZZMI/Libraries/TTLib/TTLib.ini").unlink()
             node.execute_postprocess(temp)
+            self.assertIn("CommandListDragTearUpdate_unit", ini.read_text("utf8"))
             self.assertNotIn("CommandListDragTearNativeTTL", ini.read_text("utf8"))
             node.tear_enabled = False
             node.hash_values = "deadbeef"
@@ -234,25 +243,29 @@ class DragTearTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            sections, comp, _, _, _ = self.generate(root, ttl=True)
+            sections, comp, _, _, _ = self.generate(
+                root, ttl=True, zones_by_name={"Stocking0": {35}, "Stocking1": {2}},
+            )
             render = GeneratedCloth(root, sections, comp)
             update = "CommandListDragTearUpdate_unit"
+            end_frame = "CommandListDragTearEndFrame_unit"
             display = render.resource("ResourceDragTearMask_abc123P0M1_unit")
             other = render.resource("ResourceDragTearMask_abc123P0M2_unit")
             source = render.resource("ResourceDragTearOriginal_abc123P0_unit")
-            for slot in range(106, 111):
+            for slot in range(106, 112):
                 render.resources[f"cs-t{slot}"] = source
                 render.gpu.bind(slot, render.view(source, False))
             initial = np.fromfile(root / "Meshes/Index.buf", dtype="<u4").reshape(-1, 3)
             owners = comp["parts"][0]["tear"][1]
-            eligible = np.flatnonzero(owners)
-            face = eligible[len(eligible) // 4]
+            stocking = np.flatnonzero(owners == 1)
+            face = stocking[len(stocking) // 2]
             hit = np.zeros((15, 4), np.float32)
             hit[1, 3] = 7
             hit[2, 3] = face
             # The detector accepts hits within its cursor padding and projects
             # them onto a triangle edge, with the inside flag left at zero.
             hit[4] = (0.12837, 0, 0.87163, 0)
+            hit[7, 3] = 2  # This region allows tears on Stocking1 only.
             hit[13, 0] = 1
             grab = np.zeros((15, 4), np.float32)
             grab[3, 3] = 1
@@ -275,6 +288,16 @@ class DragTearTests(unittest.TestCase):
                 self.assertEqual(render.dispatches, 0)
                 render.variables["$isMouseButtonDown"] = 1
                 render.execute(update)
+                move(175)
+                self.assertFalse(_tear_fields(render, display).any())
+                self.assertFalse(_tear_fields(render, other).any())
+
+                render.variables["$isMouseButtonDown"] = 0
+                render.execute(end_frame)
+                hit[7, 3] = 35
+                render.external("ResourceDragPinnedDetectInfo_unit", hit, 16, structured=True)
+                render.variables["$isMouseButtonDown"] = 1
+                render.execute(update)
                 move(20)
                 self.assertFalse(_tear_fields(render, display).any())
 
@@ -289,7 +312,7 @@ class DragTearTests(unittest.TestCase):
                 self.assertFalse(_tear_fields(render, other).any())
                 kept = render.gpu.read_bytes(source.pointer, source.size).view("<u4").reshape(-1, 3)
                 np.testing.assert_array_equal(kept, initial)
-                for slot in range(106, 111):
+                for slot in range(106, 112):
                     restored = render.resources[f"cs-t{slot}"]
                     self.assertEqual(restored.pointer, source.pointer)
                     self.assertEqual(restored.fmt, source.fmt)
@@ -341,7 +364,6 @@ class DragTearTests(unittest.TestCase):
                     render.resources[f"cs-t{slot}"] = resource
                     render.gpu.bind(slot, render.view(resource, False))
 
-                end_frame = "CommandListDragTearEndFrame_unit"
                 reset = "$ssmtdragtear_reset_unit"
                 drawn = "$ssmtdrag_drawn_unit"
                 ready = "$ssmtdragtear_ready_unit"
