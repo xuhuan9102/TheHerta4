@@ -6608,6 +6608,14 @@ class ExportZZMI(ExportUnity):
                             + "_"
                             + component_suffix
                         )
+                        if original_category_name == "Position":
+                            texture_override_vb_section.append(
+                                "vb3 = Resource"
+                                + draw_ib
+                                + original_category_name
+                                + "_"
+                                + component_suffix
+                            )
 
                     blend_draw_category_name = d3d11_game_type.CategoryDrawCategoryDict.get("Blend", None)
                     if blend_draw_category_name is not None and category_name == blend_draw_category_name:
@@ -6643,6 +6651,10 @@ class ExportZZMI(ExportUnity):
                     continue  # The native VB must remain drawable until both render transforms arrive.
                 category_original_slot = d3d11_game_type.CategoryExtractSlotDict[original_category_name]
                 texture_override_vb_section.append(category_original_slot + " = Resource" + draw_ib + original_category_name)
+                if original_category_name == "Position":
+                    texture_override_vb_section.append(
+                        "vb3 = Resource" + draw_ib + original_category_name
+                    )
 
             draw_category_name = d3d11_game_type.CategoryDrawCategoryDict.get("Blend", None)
             if draw_category_name is not None and category_name == draw_category_name:
