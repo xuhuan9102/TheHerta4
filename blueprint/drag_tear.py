@@ -413,11 +413,12 @@ def emit(node, sections, tail, components, ns, assets, *, promote_native_ttl=Non
                 line = sections[section][index].strip()
                 ttl = TTL.fullmatch(line)
                 run = RUN.fullmatch(line)
-                if ttl:
+                authored_ttl = ownership[0] in part.get("tear_authored_ttl", ())
+                if ttl or (authored_ttl and DRAW.match(line)):
                     ttl_masks[tag] = mask
                 if ttl and ttl[1].casefold() != TTL_DRAW:
                     wrappers[ttl[1].casefold()][(part["ib_resource"], tag)] = (mask, tag, None)
-                elif promote_native_ttl and DRAW.match(line) and ownership[0] not in part.get("tear_authored_ttl", ()):
+                elif promote_native_ttl and DRAW.match(line) and not authored_ttl:
                     ttl_masks[tag] = mask
                     vertex_base = record["vertex_base"]
                     key = (tag, count, start, vertex_base)

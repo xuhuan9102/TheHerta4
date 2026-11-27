@@ -2118,6 +2118,51 @@ class HTMIMaterialPostProcessTests(unittest.TestCase):
             self.assertLess(_anchor_index(lines, mesh_a), _anchor_index(lines, mesh_b))
             self.assertLess(lines.index(block_a[-1]), _anchor_index(lines, mesh_b))
 
+    def test_ttl_material_rewrite_composes_existing_tear_mask(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mesh_name = "LOD0.241deac5-56376-0.Stocking_copy"
+            _fake_bpy.data.objects[mesh_name] = _FakeObject(mesh_name, {}, [
+                ("TTLMap_Stocking", _write_png(temp_dir, "ttl.png")),
+            ])
+            section = "[TextureOverride_LOD0.241deac5_56376_0]"
+            bind = "run = CommandListDragTearTTLBind_241deac5P0M1_unit"
+            restore = "run = CommandListDragTearTTLRestore_unit"
+            pixel_mask = "ps-t116 = ref ResourceDragTearMask_241deac5P0M1_unit"
+            pixel_restore = "ps-t116 = ref ResourceDragTearSavedPS_unit"
+            guard = "if $ssmtdragtear_ready_unit == 1"
+            sections = OrderedDict([
+                (section, [
+                    "hash = 241deac5", "ib = ResourceIB",
+                    f"; [mesh:{mesh_name}] [vertex_count:6]",
+                    "; --- SSMT TEAR BEGIN ---", guard,
+                    "\tResourceDragTearSavedPS_unit = ref ps-t116",
+                    "\t$ssmtdragtear_saved_magic_unit = x494", "\t" + pixel_mask,
+                    "\tx494 = 7312404", "endif", "; --- SSMT TEAR END ---",
+                    "drawindexed = 12, 6, 3",
+                    "; --- SSMT TEAR BEGIN ---", guard,
+                    "\tx494 = $ssmtdragtear_saved_magic_unit", "\t" + pixel_restore,
+                    "\tResourceDragTearSavedPS_unit = null", "endif", "; --- SSMT TEAR END ---",
+                ]),
+                ("[CommandListDragTearTTLBind_241deac5P0M1_unit]", []),
+                ("[CommandListDragTearTTLRestore_unit]", []),
+                ("_config_path", temp_dir),
+            ])
+            node = _ttl_node()
+            for _ in range(2):
+                _run_process(node, sections, section)
+                lines = [line.strip() for line in sections[section]]
+                selection = next(i for i, line in enumerate(lines)
+                                 if line.startswith(r"Resource\TTL\TransparencyTex = ref Resource_TTLMap_"))
+                self.assertIn(pixel_mask, lines)
+                self.assertLess(selection, lines.index(bind))
+                self.assertLess(lines.index(bind), lines.index(TTL_DRAW_RUN))
+                self.assertLess(lines.index(TTL_DRAW_RUN), lines.index(restore))
+                self.assertIn(pixel_restore, lines)
+                self.assertEqual(lines.count(bind), 1)
+                self.assertEqual(lines.count(restore), 1)
+                draw = lines.index(TTL_DRAW_RUN)
+                self.assertEqual(lines[draw - 3:draw], [r"$\TTL\_1 = 12", r"$\TTL\_2 = 6", r"$\TTL\_3 = 3"])
+
     def test_ttl_drag_hook_lines_stay_in_place(self):
         """TTL：拖拽钩子行一个字都不动，且不生成任何命令列表。
 

@@ -66,6 +66,10 @@ _TTL_DRAW_TAKEN_PREFIX = "; [SSMT TTL 已接管] "
 _TTL_DRAW_TAKEN_RE = re.compile(r"^;\s*\[SSMT TTL 已接管\]", re.IGNORECASE)
 # 就地替换后块里出现的调用行：见到它就知道这个块已经换过，重导出别再来一遍。
 _TTL_CALL_LINE = "run = CommandList{}TTL{}Draw".format(chr(92), chr(92))
+_DRAG_TEAR_BEGIN = "; --- SSMT TEAR BEGIN ---"
+_DRAG_TEAR_END = "; --- SSMT TEAR END ---"
+_DRAG_TEAR_GUARD_RE = re.compile(r"if \$ssmtdragtear_ready_(\w+) == 1")
+_DRAG_TEAR_MASK_RE = re.compile(r"ps-t116 = ref ResourceDragTearMask_(\w+)")
 # TTL 合成亮度默认值（TTLib 的 $\TTL\V，即 HSV 的 Value）。
 # 必须写在 if 条件块之外：TTLib 的 CommandListFrameReset 每帧把 $V 重置为 1.0，
 # 只有绘制前重新赋值才生效；不需要提亮的段落手动删掉这一行即可。
@@ -2320,6 +2324,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
     def _strip_generated_material_lines(self, lines, preserved_ps_slots=None):
         cleaned_lines = []
         inside_mesh_block = False
+        inside_drag_tear = False
         skipping_material_switch_block = False
         preserved_ps_slots = {
             str(slot or "").strip().lower()
@@ -2328,13 +2333,19 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         }
 
         for line in lines:
+            stripped = line.strip()
+            if stripped == _DRAG_TEAR_BEGIN:
+                inside_drag_tear = True
+            if inside_drag_tear:
+                cleaned_lines.append(line)
+                inside_drag_tear = stripped != _DRAG_TEAR_END
+                continue
             if self.extract_mesh_name(line):
                 inside_mesh_block = True
                 skipping_material_switch_block = False
                 cleaned_lines.append(line)
                 continue
 
-            stripped = line.strip()
             if inside_mesh_block and self._is_material_switch_if_line(stripped):
                 skipping_material_switch_block = True
                 continue
@@ -2417,7 +2428,28 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             kept.append(line)
         lines[:] = kept
 
-    def _ttl_inline_draws(self, block_lines, param_lines):
+    @staticmethod
+    def _ttl_drag_tear_binding(prefix, sections):
+        if not prefix or prefix[-1].strip() != _DRAG_TEAR_END:
+            return None
+
+        guard, mask = None, None
+        for index in range(len(prefix) - 2, -1, -1):
+            line = prefix[index].strip()
+            if line == _DRAG_TEAR_BEGIN:
+                break
+            if match := _DRAG_TEAR_GUARD_RE.fullmatch(line):
+                guard = match
+            if match := _DRAG_TEAR_MASK_RE.fullmatch(line):
+                mask = match[1]
+        if guard and mask:
+            bind = f"CommandListDragTearTTLBind_{mask}"
+            restore = f"CommandListDragTearTTLRestore_{guard[1]}"
+            if f"[{bind}]" in sections and f"[{restore}]" in sections:
+                return guard[0], bind, restore
+        return None
+
+    def _ttl_inline_draws(self, block_lines, param_lines, all_sections):
         """把块里的绘制行就地换成「参数 + TTL 调用」，其余行原样保留。
 
         TTLib 的捕获走的是 CustomShader，而 3Dmigoto 在执行 CustomShader 前后会把
@@ -2434,12 +2466,22 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 inline.append(line)
                 continue
             indent = raw[:len(raw) - len(raw.lstrip())]
+            tear_binding = self._ttl_drag_tear_binding(inline, all_sections)
             for param in param_lines:
                 inline.append(indent + str(param))
+            if tear_binding:
+                guard, bind, restore = tear_binding
+                inline.extend(indent + line for line in (
+                    _DRAG_TEAR_BEGIN, guard, f"\trun = {bind}", "endif", _DRAG_TEAR_END,
+                ))
             inline.append("{}${}TTL{}_1 = {}".format(indent, chr(92), chr(92), draw[0]))
             inline.append("{}${}TTL{}_2 = {}".format(indent, chr(92), chr(92), draw[1]))
             inline.append("{}${}TTL{}_3 = {}".format(indent, chr(92), chr(92), draw[2]))
             inline.append("{}run = CommandList{}TTL{}Draw".format(indent, chr(92), chr(92)))
+            if tear_binding:
+                inline.extend(indent + line for line in (
+                    _DRAG_TEAR_BEGIN, guard, f"\trun = {restore}", "endif", _DRAG_TEAR_END,
+                ))
         return inline
 
     def _ttl_material_candidate_filter(self):
@@ -2608,7 +2650,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
             # 就地替换：块位置、mesh 注释、贴图绑定、if 结构都不动，只把这一笔绘制
             # 换成库调用。重导出时块照旧被这张节点认领；拖拽节点的 vb0 换绑也天然
             # 作用在同一段上（命令列表内部的换绑不会传给嵌套的 run）。
-            lines[block_start:block_end] = self._ttl_inline_draws(block_lines, param_lines)
+            lines[block_start:block_end] = self._ttl_inline_draws(block_lines, param_lines, all_sections)
 
         return next_swap_key_num
 

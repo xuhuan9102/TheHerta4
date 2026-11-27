@@ -35,7 +35,7 @@ class DragTearTests(unittest.TestCase):
         ini.parent.mkdir(parents=True)
         ini.write_text("namespace = TTL\n[CommandListDraw]\n", "utf8")
 
-    def generate(self, root, cloth=False, ttl=False):
+    def generate(self, root, cloth=False, ttl=False, authored_ttl_names=()):
         fixture = cloth_tests.GarmentExportTests()
         node, sections, comp = fixture.prepare(root, bake=cloth, prefix=3 if cloth else 0)
         self.add_uv(root, sections)
@@ -60,7 +60,7 @@ class DragTearTests(unittest.TestCase):
             comp["parts"] = node._collect_draw_parts(sections, comp["hash"])
         assets = self.tear.bake(
             node, root, sections, [comp], "unit", "Mod.ini", {"Stocking0", "Stocking1"},
-            fixture.mod._blender_object_key,
+            fixture.mod._blender_object_key, authored_ttl_names,
         )
         self.assertIsNotNone(assets)
         node._emit_sections(sections, [comp], "unit")
@@ -152,6 +152,19 @@ class DragTearTests(unittest.TestCase):
             self.assertNotIn(self.tear.BEGIN, disabled)
             self.assertIn("CustomShaderDragJiggleabc123_unit", disabled)
             self.assertFalse((root / "res/drag_tear").exists())
+
+    def test_prepares_ttl_compositor_before_authored_material_replaces_draw(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.install_ttl_fixture(root)
+            sections, _, _, _, _ = self.generate(root, authored_ttl_names={"Stocking0"})
+            draw = sections["[TextureOverride_abc123_Draw]"]
+            self.assertFalse(any("run = CommandListDragTearNativeTTL1_unit" in line for line in draw))
+            self.assertTrue(any("ps-t116 = ref ResourceDragTearMask_abc123P0M1_unit" in line for line in draw))
+            self.assertIn(
+                "cs-t106 = ref ResourceDragTearMask_abc123P0M1_unit",
+                sections["[CustomShaderDragTearTTLCompose_abc123P0M1_unit]"],
+            )
 
     def test_direct_stocking_draw_uses_installed_ttl_without_changing_body_or_cloth(self):
         with tempfile.TemporaryDirectory() as temp:
