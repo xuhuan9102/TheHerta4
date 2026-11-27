@@ -81,6 +81,11 @@ _install_module(
     f"{PKG}.common.key_type",
     one_shot_key_type=lambda: "press",
 )
+_install_module(
+    f"{PKG}.blueprint.node_postprocess_condition",
+    _collect_detect_section_names=lambda *_args, **_kwargs: [],
+    _section_body_insert_index=lambda *_args, **_kwargs: 0,
+)
 
 _module_path = Path(__file__).resolve().parents[1] / "blueprint" / "node_postprocess_shapekey_ext.py"
 _spec = importlib.util.spec_from_file_location(
@@ -120,6 +125,81 @@ def _const_value(lines, var_name):
 def _live_lines(lines):
     return [line.strip() for line in lines
             if line.strip() and not line.strip().startswith(";")]
+
+
+class GroupSpeedControlGateTests(unittest.TestCase):
+    def test_speed_variables_require_auto_playback_enabled(self):
+        node = _make_node()
+        node.play_group_settings = [
+            types.SimpleNamespace(group_index=1, enable_auto_playback=False),
+            types.SimpleNamespace(group_index=2, enable_auto_playback=True),
+        ]
+
+        self.assertFalse(node._group_speed_control_enabled(1, [1, 2]))
+        self.assertTrue(node._group_speed_control_enabled(2, [1, 2]))
+        self.assertFalse(node._group_speed_control_enabled(3, [1, 2]))
+
+
+class SliderSpeedReferenceTests(unittest.TestCase):
+    def test_disabled_group_does_not_emit_speed_references(self):
+        import tempfile
+
+        node = _make_node()
+        node.play_group_settings = [
+            types.SimpleNamespace(group_index=1, enable_auto_playback=False),
+            types.SimpleNamespace(group_index=2, enable_auto_playback=True),
+        ]
+        node._ensure_namespace = lambda: "testns"
+        node._collect_slider_freq_params = lambda *_args, **_kwargs: (
+            ["$Freq_Group1", "$Freq_Group2"], []
+        )
+        node._glow_brightness_sliders = lambda *_args, **_kwargs: {}
+        node._group_glow_brightness_sliders = lambda *_args, **_kwargs: {}
+        node._scan_slot_icons = lambda *_args, **_kwargs: {}
+        node._measure_image_aspect = lambda *_args, **_kwargs: 1.0
+        node._find_combined_slider_panel = lambda *_args, **_kwargs: None
+        node._generate_background_image = lambda *_args, **_kwargs: None
+        node.background_image = ""
+        node.slider_handle_image = ""
+        node.left_bar_image = ""
+        node.right_bar_image = ""
+        node.button_image = ""
+        node.button_height = 0.05
+        node.slider_height = 0.05
+        node.auto_crop_background = False
+        node.panel_min_height = 0.2
+        node.panel_default_scale = 1.0
+        node.help_key = "home"
+        node.reset_key = "ctrl home"
+        node.zoom_in_key = "up"
+        node.zoom_out_key = "down"
+        node.drag_key = "VK_LBUTTON"
+        node.auto_play_toggle_key = "space"
+        node.auto_play_key_global = False
+        node.detect_hash = ""
+        node.check_hash = ""
+        node.detect_index_count = ""
+        node.match_index_count = 0
+
+        sections = OrderedDict(
+            [
+                ("[Constants]", []),
+                ("[Present]", []),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as mod_dir:
+            ok = node._apply_slider_panel(
+                mod_dir, str(Path(mod_dir) / "mod.ini"), sections
+            )
+
+        self.assertTrue(ok)
+        present = "\n".join(sections["[Present]"])
+        self.assertNotIn("$speed_percent_group1", present)
+        self.assertNotIn("$speed_percent_min_group1", present)
+        self.assertNotIn("$speed_percent_max_group1", present)
+        self.assertIn("$speed_percent_group2", present)
+        self.assertIn("$param1 = $Freq_Group1", present)
+        self.assertIn("$Freq_Group1 = $param1", present)
 
 
 class PersistUpsertTests(unittest.TestCase):

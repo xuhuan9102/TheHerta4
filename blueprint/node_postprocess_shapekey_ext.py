@@ -1618,6 +1618,12 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
             if s.group_index == group_index: return s
         return None
 
+    def _group_speed_control_enabled(self, group_index, group_ids):
+        if group_index is None or group_index not in group_ids:
+            return False
+        setting = self._find_group_setting(group_index)
+        return bool(setting and setting.enable_auto_playback)
+
     def _on_active_group_changed(self, group_index):
         """active_group_index 变化时的回调。Blender 要求 property update 回调返回 None。"""
         self._ensure_group_setting(group_index)
@@ -3309,7 +3315,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                 present_additions.append(f"        $param{i} = {sorted_freq_params[i-1]}")
             elif multi_group_mode:
                 gid = slider_to_group.get(i - 1)
-                if gid is not None and gid in group_ids:
+                if self._group_speed_control_enabled(gid, group_ids):
                     present_additions.append(f"        if ($auto_play_enabled_group{gid} == 1)")
                     present_additions.append(f"            $param{i} = ($speed_percent_group{gid} - $speed_percent_min_group{gid}) / ($speed_percent_max_group{gid} - $speed_percent_min_group{gid})")
                     present_additions.append(f"        else")
@@ -3466,9 +3472,12 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                     append_brightness_slider(i, variable)
                     continue
                 gid = slider_to_group.get(i - 1)
+                group_uses_auto_playback = self._group_speed_control_enabled(
+                    gid, group_ids
+                )
                 present_additions.append(f"    if ($dragged_slider == {i})")
                 present_additions.append(f"        $param{i} = ($rel_x{i} - $min_rel_x{i}) / $range_x{i}")
-                if gid is not None and gid in group_ids:
+                if group_uses_auto_playback:
                     present_additions.append(f"        if ($auto_play_enabled_group{gid} == 1)")
                     present_additions.append(f"            $speed_percent_group{gid} = $speed_percent_min_group{gid} + $param{i} * ($speed_percent_max_group{gid} - $speed_percent_min_group{gid})")
                     present_additions.append(f"        else")
@@ -3477,7 +3486,7 @@ class SSMTNode_PostProcess_ShapeKeyExt(SSMTNode_PostProcess_Base):
                 else:
                     present_additions.append(f"        {sorted_freq_params[i-1]} = {freq_from_param(i)}")
                 present_additions.append(f"    else")
-                if gid is not None and gid in group_ids:
+                if group_uses_auto_playback:
                     present_additions.append(f"        if ($auto_play_enabled_group{gid} == 1)")
                     present_additions.append(f"            $param{i} = ($speed_percent_group{gid} - $speed_percent_min_group{gid}) / ($speed_percent_max_group{gid} - $speed_percent_min_group{gid})")
                     present_additions.append(f"        else")
