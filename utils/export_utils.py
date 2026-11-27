@@ -719,6 +719,14 @@ class ExportUtils:
                 flip_triangles=False,
             )
 
+        if GlobalConfig.logic_name == LogicName.ZZMI:
+            unique_element_vertex_ndarray = (
+                ObjBufferHelper.stabilize_zzmi_rebuilt_tangent_w(
+                    unique_element_vertex_ndarray,
+                    ib,
+                )
+            )
+
         index_loop_id_dict = dict(enumerate(unique_first_loop_indices.tolist()))
 
         row_size = unique_element_vertex_ndarray.dtype.itemsize

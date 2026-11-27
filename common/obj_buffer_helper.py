@@ -351,6 +351,11 @@ class ObjBufferHelper:
             # Unreal引擎中这里要填写固定的1
             tangent_w = numpy.ones(mesh_loops_length, dtype=numpy.float32)
             result[3::4] = tangent_w
+        elif GlobalConfig.logic_name == LogicName.ZZMI:
+            # ZZMI native TBN keeps Blender's bitangent handedness.
+            bitangent_signs = numpy.empty(mesh_loops_length, dtype=numpy.float32)
+            mesh_loops.foreach_get("bitangent_sign", bitangent_signs)
+            result[3::4] = bitangent_signs
         else:
             # print("其它游戏翻转TANGENT的W分量")
             # 默认就设置BITANGENT的W翻转，大部分Unity游戏都要用到
@@ -1678,6 +1683,53 @@ class ObjBufferHelper:
             w = numpy.where(vb['TANGENT'][:, 3] >= 0, -1.0, 1.0)
             vb['TANGENT'][:, 3] = w
 
+        return vb
+
+    @staticmethod
+    def stabilize_zzmi_rebuilt_tangent_w(vb, flattened_ib):
+        """Match rebuilt ZZMI TANGENT.w to the final UV0 triangle orientation."""
+        if (
+            vb.dtype.names is None
+            or "TANGENT" not in vb.dtype.names
+            or "TEXCOORD" not in vb.dtype.names
+        ):
+            return vb
+        tangent = numpy.asarray(vb["TANGENT"])
+        if tangent.ndim != 2 or tangent.shape[1] < 4:
+            return vb
+
+        indices = numpy.asarray(flattened_ib, dtype=numpy.int64)
+        valid_triangle_index_count = (len(indices) // 3) * 3
+        if valid_triangle_index_count == 0:
+            return vb
+        indices = indices[:valid_triangle_index_count].reshape(-1, 3)
+        if indices.max(initial=-1) >= len(vb) or indices.min(initial=0) < 0:
+            return vb
+
+        uv = numpy.asarray(vb["TEXCOORD"], dtype=numpy.float64)
+        if uv.ndim != 2 or uv.shape[1] < 2:
+            return vb
+        triangles = uv[indices]
+        du1 = triangles[:, 1] - triangles[:, 0]
+        du2 = triangles[:, 2] - triangles[:, 0]
+        determinant = du1[:, 0] * du2[:, 1] - du1[:, 1] * du2[:, 0]
+        valid = numpy.isfinite(determinant) & (numpy.abs(determinant) > 1e-12)
+        if not valid.any():
+            return vb
+
+        valid_indices = indices[valid]
+        weights = numpy.abs(determinant[valid])
+        signs = numpy.sign(determinant[valid]) * weights
+        sign_sum = numpy.zeros(len(vb), dtype=numpy.float64)
+        numpy.add.at(
+            sign_sum,
+            valid_indices.ravel(),
+            numpy.repeat(signs, 3),
+        )
+        expected = numpy.sign(sign_sum)
+        update = expected != 0
+        tangent[update, 3] = expected[update]
+        vb["TANGENT"] = tangent
         return vb
 
     @staticmethod
