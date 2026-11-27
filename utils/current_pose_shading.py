@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import bpy
 import numpy
 
+from ..common.mesh_attribute_names import IMPORTED_TANGENT_W
 from .export_space import position_export_matrix
 
 
@@ -184,6 +185,11 @@ class PoseLoops:
         tangents = _read(attrs[TANGENT_ATTRIBUTE].data, "vector", numpy.float32, 3) @ linear.T
         self.tangents = _normalize(tangents - (tangents * self.normals).sum(axis=1, keepdims=True) * self.normals)
         self.signs = _read(attrs[SIGN_ATTRIBUTE].data, "value", numpy.float32)
+        native_w = attrs.get(IMPORTED_TANGENT_W)
+        if native_w is not None and len(native_w.data) == len(obj.data.vertices):
+            vertex_signs = _read(native_w.data, "value", numpy.float32)
+            loop_vertices = _read(obj.data.loops, "vertex_index", numpy.int32)
+            self.signs = vertex_signs[loop_vertices]
         if numpy.linalg.det(linear) < 0:
             self.signs *= -1
 

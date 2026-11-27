@@ -766,6 +766,7 @@ class ExportZZMI(ExportUnity):
         self._zzmi_merged_identity_records = []
         try:
             from ...common.zzmi_native_flow import UV_LAYER, prepare_native_flow, has_native_flow_node
+            from ...common.native_attribute_transfer import has_native_reference_uv2
 
             self._normalize_merged_object_drawcalls(blueprint_model)
             native_flow_enabled = has_native_flow_node(blueprint_model)
@@ -775,6 +776,7 @@ class ExportZZMI(ExportUnity):
                 for draw in getattr(blueprint_model, "ordered_draw_obj_data_model_list", ())
                 if not getattr(draw, "zzmi_stub", False)
                 for obj in (self._zzmi_drawcall_object(draw),)
+                if not has_native_reference_uv2(obj)
             )
             if GlobalProterties.import_merged_vgmap():
                 # 占位是合并骨架渲染身份完整性的硬前提。创建失败时中止导出，

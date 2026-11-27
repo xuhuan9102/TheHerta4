@@ -12,6 +12,7 @@ from .preprocess_cache import PreProcessCache
 from ..common.global_properties import GlobalProterties
 from ..common.non_mirror_workflow import NonMirrorWorkflowHelper
 from ..common.object_prefix_helper import ObjectPrefixHelper
+from ..common.native_attribute_transfer import inherit_native_render_attributes
 
 
 class PreProcessHelper:
@@ -281,12 +282,14 @@ class PreProcessHelper:
     def execute_objects_without_cache(cls, object_names: List[str]) -> Dict[str, str]:
         cls.reset_runtime_state()
         cls._execute_preprocess_without_cache(object_names)
+        inherit_native_render_attributes(list(cls.original_to_copy_map.values()))
         return dict(cls.original_to_copy_map)
 
     @classmethod
     def execute_objects_without_cache_preserve_shape_keys(cls, object_names: List[str]) -> Dict[str, str]:
         cls.reset_runtime_state()
         cls._execute_preprocess_preserve_shape_keys_without_cache(object_names)
+        inherit_native_render_attributes(list(cls.original_to_copy_map.values()))
         return dict(cls.original_to_copy_map)
 
     @classmethod
@@ -302,6 +305,7 @@ class PreProcessHelper:
         else:
             cls._execute_preprocess_without_cache(unique_objects)
         
+        inherit_native_render_attributes(list(cls.original_to_copy_map.values()))
         LOG.info(f"🔧 前处理完成: {len(unique_objects)} 个物体")
         
         return cls.original_to_copy_map
@@ -315,6 +319,7 @@ class PreProcessHelper:
             cls._execute_preprocess_preserve_shape_keys_with_cache(unique_objects)
         else:
             cls._execute_preprocess_preserve_shape_keys_without_cache(unique_objects)
+        inherit_native_render_attributes(list(cls.original_to_copy_map.values()))
         LOG.info(f"保留形态键前处理完成: {len(unique_objects)} 个物体")
         return cls.original_to_copy_map
 
@@ -329,6 +334,7 @@ class PreProcessHelper:
         else:
             cls._execute_preprocess_capture_shape_keys_without_cache(unique_objects)
 
+        inherit_native_render_attributes(list(cls.original_to_copy_map.values()))
         LOG.info(f"直出形态键前处理完成: {len(unique_objects)} 个物体")
         return dict(cls.original_to_copy_map)
 
