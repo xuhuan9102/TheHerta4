@@ -18,11 +18,12 @@ _VB_ELEMENT = re.compile(
 
 def texcoord_layout(game_type):
     layout = {}
-    offset = 0
     for element in game_type.D3D11ElementList:
         if element.Category == "Texcoord":
-            layout[element.SemanticName, element.SemanticIndex] = offset, element.Format
-            offset += element.ByteWidth
+            layout[element.SemanticName, element.SemanticIndex] = (
+                int(element.AlignedByteOffset),
+                element.Format,
+            )
     return layout
 
 
@@ -125,24 +126,16 @@ def render_layout_captures(workspace):
 
 class APMICapture:
     def __init__(self, folder):
+        self.folder = Path(folder)
         self.skin = defaultdict(dict)
         self.draw = defaultdict(dict)
         self.texcoord_dumps = {}
         self.calls = {}
         self.dispatches = {}
-        for path in Path(folder).glob("*.buf"):
-            match = _SKIN_DUMP.fullmatch(path.name)
-            if match:
-                ordinal, slot, resource_hash, shader = match.groups()
-                self.skin[ordinal, shader][slot] = (resource_hash, path)
-                continue
-            match = _DRAW_DUMP.fullmatch(path.name)
-            if match:
-                ordinal, slot, resource_hash, shader = match.groups()
-                self.draw[ordinal, shader][slot] = resource_hash
-                if slot == "vb1":
-                    self.texcoord_dumps[ordinal, shader] = path.with_suffix(".txt")
-        with (Path(folder) / "log.txt").open(encoding="utf-8", errors="replace") as log:
+        self.dump_map = {}
+        self._resolved_paths = {}
+        log_path = self.folder / "log.txt"
+        with log_path.open(encoding="utf-8", errors="replace") as log:
             for line in log:
                 match = _DRAW_CALL.match(line)
                 if match:
@@ -152,6 +145,46 @@ class APMICapture:
                 if match:
                     ordinal, x, y, z = match.groups()
                     self.dispatches[ordinal] = int(x), int(y), int(z)
+                if "3DMigoto Dumping Buffer " in line and " -> " in line:
+                    source, destination = line.rsplit(" -> ", 1)
+                    source_path = source.split("3DMigoto Dumping Buffer ", 1)[-1].strip()
+                    source_name = Path(source_path.replace("\\", "/")).name
+                    self.dump_map[source_name] = Path(destination.strip())
+
+        logical_buffers = {path.name for path in self.folder.glob("*.buf")}
+        logical_buffers.update(
+            name for name in self.dump_map if name.lower().endswith(".buf")
+        )
+        for logical_name in sorted(logical_buffers):
+            match = _SKIN_DUMP.fullmatch(logical_name)
+            if match:
+                path = self._resolve_dump(logical_name)
+                if not path.is_file() or not path.stat().st_size:
+                    continue
+                ordinal, slot, resource_hash, shader = match.groups()
+                self.skin[ordinal, shader][slot] = (resource_hash, path)
+                continue
+            match = _DRAW_DUMP.fullmatch(logical_name)
+            if match:
+                ordinal, slot, resource_hash, shader = match.groups()
+                self.draw[ordinal, shader][slot] = resource_hash
+                if slot == "vb1":
+                    txt_name = Path(logical_name).with_suffix(".txt").name
+                    self.texcoord_dumps[ordinal, shader] = self._resolve_dump(txt_name)
+
+    def _resolve_dump(self, logical_name):
+        if logical_name in self._resolved_paths:
+            return self._resolved_paths[logical_name]
+        candidates = [self.folder / logical_name]
+        destination = self.dump_map.get(logical_name)
+        if destination is not None:
+            destination_name = Path(str(destination).replace("\\", "/")).name
+            candidates.extend((self.folder / "deduped" / destination_name, destination))
+        existing = [path for path in candidates if path.is_file()]
+        non_empty = [path for path in existing if path.stat().st_size > 0]
+        resolved = (non_empty or existing or candidates)[0]
+        self._resolved_paths[logical_name] = resolved
+        return resolved
 
     def skin_passes(self, output_hash, position_stride, blend_stride):
         matches = []

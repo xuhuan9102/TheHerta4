@@ -67,8 +67,14 @@ class D3D11GameType:
         self.GameTypeName = game_type_json.get("WorkGameType","")
         self.CategoryDrawCategoryDict = game_type_json.get("CategoryDrawCategoryMap",{})
         d3d11_element_list_json = game_type_json.get("D3D11ElementList",[])
-        aligned_byte_offset = 0
+        category_offsets = {}
         for d3d11_element_json in d3d11_element_list_json:
+            category_name = d3d11_element_json.get("Category", "")
+            raw_aligned_byte_offset = d3d11_element_json.get("AlignedByteOffset", "")
+            if raw_aligned_byte_offset is not None and str(raw_aligned_byte_offset).strip():
+                element_offset = int(raw_aligned_byte_offset)
+            else:
+                element_offset = category_offsets.get(category_name, 0)
             d3d11_element = D3D11Element(
                 SemanticName=d3d11_element_json.get("SemanticName",""),
                 SemanticIndex=int(d3d11_element_json.get("SemanticIndex","")),
@@ -76,10 +82,13 @@ class D3D11GameType:
                 ByteWidth=int(d3d11_element_json.get("ByteWidth",0)),
                 ExtractSlot=d3d11_element_json.get("ExtractSlot",""),
                 ExtractTechnique=d3d11_element_json.get("ExtractTechnique",""),
-                Category=d3d11_element_json.get("Category",""),
-                AlignedByteOffset=aligned_byte_offset
+                Category=category_name,
+                AlignedByteOffset=element_offset,
             )
-            aligned_byte_offset = aligned_byte_offset + d3d11_element.ByteWidth
+            category_offsets[category_name] = max(
+                category_offsets.get(category_name, 0),
+                element_offset + d3d11_element.ByteWidth,
+            )
             self.D3D11ElementList.append(d3d11_element)
 
             # 这俩常用
@@ -90,8 +99,8 @@ class D3D11GameType:
         for d3d11_element in self.D3D11ElementList:
             self.CategoryExtractSlotDict[d3d11_element.Category] = d3d11_element.ExtractSlot
             self.CategoryExtractTechniqueDict[d3d11_element.Category] = d3d11_element.ExtractTechnique
-            self.CategoryStrideDict[d3d11_element.Category] = self.CategoryStrideDict.get(d3d11_element.Category,0) + d3d11_element.ByteWidth
             self.ElementNameD3D11ElementDict[d3d11_element.ElementName] = d3d11_element
+        self.CategoryStrideDict = dict(category_offsets)
 
     @classmethod
     def from_submesh_json_dict(
@@ -166,7 +175,7 @@ class D3D11GameType:
             "R32G32B32A32_SINT": ("R16G16B16A16_SINT", 8),
         }
 
-        changed = False
+        resized_ranges = {}
         for element in self.D3D11ElementList:
             if str(getattr(element, "SemanticName", "") or "").upper() != "BLENDINDICES":
                 continue
@@ -196,30 +205,33 @@ class D3D11GameType:
             old_width = int(getattr(element, "ByteWidth", 0) or 0)
             if old_width <= 0:
                 continue
+            offset = element.AlignedByteOffset
+            resized_ranges.setdefault(element.Category, {})[offset + old_width] = new_width - old_width
             element.Format = new_format
             element.ByteWidth = new_width
-            changed = True
             print(
                 f"[D3D11GameType] BLENDINDICES{element.SemanticIndex} 归一化: "
                 f"{current_format} -> {new_format} (ByteWidth {old_width} -> {new_width})"
             )
 
-        if not changed:
+        if not resized_ranges:
             return False
 
-        # 重算 AlignedByteOffset（按元素顺序累加）
-        aligned_byte_offset = 0
-        for d3d11_element in self.D3D11ElementList:
-            d3d11_element.AlignedByteOffset = aligned_byte_offset
-            aligned_byte_offset = aligned_byte_offset + int(d3d11_element.ByteWidth)
-
-        # 重算 CategoryStrideDict
-        self.CategoryStrideDict = {}
-        for d3d11_element in self.D3D11ElementList:
-            self.CategoryStrideDict[d3d11_element.Category] = (
-                self.CategoryStrideDict.get(d3d11_element.Category, 0)
-                + int(d3d11_element.ByteWidth)
+        # 只移动受骨号字段变宽或变窄影响的后续字段，保留显式填充和重叠偏移。
+        category_strides = {}
+        for element in self.D3D11ElementList:
+            deltas = resized_ranges.get(element.Category)
+            if deltas is None:
+                continue
+            offset = element.AlignedByteOffset
+            element.AlignedByteOffset = offset + sum(
+                delta for end, delta in deltas.items() if end <= offset
             )
+            category_strides[element.Category] = max(
+                category_strides.get(element.Category, 0),
+                element.AlignedByteOffset + element.ByteWidth,
+            )
+        self.CategoryStrideDict.update(category_strides)
 
         return True
 
@@ -263,19 +275,29 @@ class D3D11GameType:
         return 4
 
     def get_total_structured_dtype(self) -> numpy.dtype:
-        total_structured_dtype:numpy.dtype = numpy.dtype([])
+        names = []
+        formats = []
+        offsets = []
+        category_base_offsets = {}
+        category_base_offset = 0
+        for category_name in self.OrderedCategoryNameList:
+            category_base_offsets[category_name] = category_base_offset
+            category_base_offset += self.CategoryStrideDict.get(category_name, 0)
 
-        # 预设的权重个数，也就是每个顶点组受多少个权重影响
-        for d3d11_element_name in self.OrderedFullElementList:
-            d3d11_element = self.ElementNameD3D11ElementDict[d3d11_element_name]
-            np_type = FormatUtils.get_nptype_from_format(d3d11_element.Format)
+        for element_name in self.OrderedFullElementList:
+            element = self.ElementNameD3D11ElementDict[element_name]
+            np_type = FormatUtils.get_nptype_from_format(element.Format)
+            format_len = int(element.ByteWidth / numpy.dtype(np_type).itemsize)
+            names.append(element_name)
+            formats.append(numpy.dtype((np_type, (format_len,))))
+            offsets.append(
+                category_base_offsets[element.Category]
+                + int(element.AlignedByteOffset)
+            )
 
-            format_len = int(d3d11_element.ByteWidth / numpy.dtype(np_type).itemsize)
-                
-            # XXX 长度为1时必须手动指定为(1,)否则会变成1维数组
-            if format_len == 1:
-                total_structured_dtype = numpy.dtype(total_structured_dtype.descr + [(d3d11_element_name, (np_type, (1,)))])
-            else:
-                total_structured_dtype = numpy.dtype(total_structured_dtype.descr + [(d3d11_element_name, (np_type, format_len))])
-
-        return total_structured_dtype
+        return numpy.dtype({
+            "names": names,
+            "formats": formats,
+            "offsets": offsets,
+            "itemsize": category_base_offset,
+        })

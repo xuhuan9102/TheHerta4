@@ -758,7 +758,7 @@ class ExportUtils:
         mesh = obj.data
         digest = hashlib.sha256()
         digest.update(json.dumps([sample_version, bpy.app.version_string, GlobalConfig.logic_name]).encode())
-        digest.update(str(element_vertex_ndarray.dtype.descr).encode("utf-8"))
+        digest.update(str(element_vertex_ndarray.dtype).encode("utf-8"))
         hash_array(digest, indices_map)
         if not hash_mesh_topology(digest, mesh):
             return None, []
