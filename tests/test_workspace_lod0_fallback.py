@@ -195,6 +195,17 @@ class Lod0FallbackTests(unittest.TestCase):
         resolved = WorkSpaceHelper.get_submesh_folder_path(BARE)
         self.assertEqual(os.path.normcase(resolved), os.path.normcase(str(lod0)))
 
+    def test_source_dds_format_lookup_uses_submesh_prefix_and_texture_type(self):
+        lod0 = self._make_submesh(f"LOD0/{BARE}")
+        source = lod0 / "TYPE_GPU-X" / f"{BARE}-LightMap.dds"
+        source.write_bytes(b"DDS ")
+
+        resolved = WorkSpaceHelper.find_submesh_texture_source(
+            f"LOD0.{BARE}", "LightMap"
+        )
+
+        self.assertEqual(os.path.normcase(resolved), os.path.normcase(str(source)))
+
     # ---------------- Import.json 键兜底 ----------------
 
     def test_import_json_lod0_key_selects_gametype(self):

@@ -1786,6 +1786,32 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
                 continue
             for material in self._find_workspace_slot_materials(obj, slot_info):
                 mapping.setdefault(str(getattr(material, "name", "") or ""), source_path)
+
+        # 手动物体或旧工程可能没有 modimp_texture_slots，但物体名仍保留完整
+        # 的 LOD/DrawIB 前缀。此时直接按前缀查工作空间原始 DDS，避免退回
+        # 按贴图类型写死的格式（典型：LightMap/MaterialMap 的 BC6H 被写成 BC7）。
+        try:
+            from ..common.object_prefix_helper import ObjectPrefixHelper
+            from ..common.workspace_helper import WorkSpaceHelper
+
+            prefix_info = ObjectPrefixHelper.extract_prefix_info(getattr(obj, "name", ""))
+            if prefix_info:
+                prefix_parts = ObjectPrefixHelper.parse_prefix_parts(prefix_info[0])
+                workspace_unique_str = str(prefix_parts.get("unique_str", "") or "").strip()
+                if workspace_unique_str:
+                    for material_slot in getattr(obj, "material_slots", []):
+                        material = getattr(material_slot, "material", None)
+                        material_name = str(getattr(material, "name", "") or "").strip()
+                        if not material_name:
+                            continue
+                        texture_type = material_name.split("_", 1)[0]
+                        source_path = WorkSpaceHelper.find_submesh_texture_source(
+                            workspace_unique_str, texture_type
+                        )
+                        if source_path:
+                            mapping.setdefault(material_name, source_path)
+        except Exception:
+            pass
         return mapping
 
 
