@@ -27,13 +27,16 @@ class UV2Projection:
     v_bias: float
     r2_u: float
     r2_v: float
+    u_z: float = 0.0
+    v_x: float = 0.0
 
     def apply(self, positions):
         positions = numpy.asarray(positions, dtype=numpy.float64)
         if positions.ndim != 2 or positions.shape[1] < 3:
             raise ValueError("UV2 projection positions must be an Nx3 array")
-        u = positions[:, 0] * self.u_x + self.u_bias
-        v = positions[:, 2] * self.v_z + self.v_bias
+        x, z = positions[:, 0], positions[:, 2]
+        u = self.u_x * x + self.u_z * z + self.u_bias
+        v = self.v_x * x + self.v_z * z + self.v_bias
         return numpy.clip(numpy.stack((u, v), axis=1), 0.0, 1.0)
 
 
@@ -77,7 +80,9 @@ def fit_uv2_projection(positions, uvs, *, min_r2=0.99):
     u_coefficients, v_coefficients = fitted
     return UV2Projection(
         u_x=float(u_coefficients[0]),
+        u_z=float(u_coefficients[1]),
         u_bias=float(u_coefficients[2]),
+        v_x=float(-v_coefficients[0]),
         v_z=float(-v_coefficients[1]),
         v_bias=float(1.0 - v_coefficients[2]),
         r2_u=float(scores[0]),

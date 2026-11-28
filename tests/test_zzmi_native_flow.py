@@ -240,16 +240,16 @@ class PrepareNativeFlowTests(unittest.TestCase):
             submesh_model_list=[submesh],
         )
         projection = flow.UV2Projection(
-            u_x=0.25, u_bias=0.5,
-            v_z=0.125, v_bias=0.25,
+            u_x=0.25, u_z=0.1, u_bias=0.5,
+            v_x=0.0625, v_z=0.125, v_bias=0.25,
             r2_u=1.0, r2_v=1.0,
         )
         flow.prepare_native_flow([model], True, {"test-submesh": projection})
         expected = numpy.asarray([
-            (0.25, 0.25),
-            (0.5, 0.375),
-            (0.75, 0.5),
-            (1.0, 0.625),
+            (0.25, 0.1875),
+            (0.6, 0.375),
+            (0.95, 0.5625),
+            (1.0, 0.75),
         ], dtype=numpy.float32)
         numpy.testing.assert_allclose(uv2, expected, atol=2e-3)
         numpy.testing.assert_allclose(model_uv2, expected, atol=2e-3)
@@ -275,6 +275,27 @@ class UV2ProjectionTests(unittest.TestCase):
         expected_v = positions[:, 2] * 0.125 + 0.25
         numpy.testing.assert_allclose(projected[:, 0], uvs[:, 0], atol=1e-8)
         numpy.testing.assert_allclose(projected[:, 1], expected_v, atol=1e-8)
+
+    def test_fit_preserves_cross_terms_in_exported_uv2(self):
+        positions = numpy.asarray([
+            (-1.0, 0.0, -1.0),
+            (-1.0, 0.0, 1.0),
+            (1.0, 0.0, -1.0),
+            (1.0, 0.0, 1.0),
+        ])
+        uvs = numpy.stack((
+            0.5 + 0.2 * positions[:, 2],
+            0.5 + 0.3 * positions[:, 0],
+        ), axis=1)
+
+        projection = flow.fit_uv2_projection(positions, uvs)
+        self.assertIsNotNone(projection)
+        numpy.testing.assert_allclose(projection.apply(positions), [
+            (0.3, 0.8),
+            (0.7, 0.8),
+            (0.3, 0.2),
+            (0.7, 0.2),
+        ], atol=1e-8)
 
     def test_fit_rejects_nonlinear_reference(self):
         positions = numpy.asarray([
