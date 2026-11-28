@@ -1131,6 +1131,7 @@ def _run_worker(manifest_path: str) -> None:
         else:
             pose_kwargs = {}
             if getattr(tree, "use_current_pose_shading", False):
+                from .export_helper import BlueprintExportHelper
                 from ..utils.current_pose_shading import capture
 
                 names = BlueprintExportHelper.collect_connected_preprocess_object_names(tree)
