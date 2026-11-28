@@ -23,10 +23,12 @@
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from collections import OrderedDict
 from pathlib import Path
+from unittest import mock
 
 PKG = "_dhash_material_binding_test_pkg"
 for _package_name in (
@@ -430,6 +432,38 @@ class DHashMaterialBindingTests(unittest.TestCase):
             sections["[Filter_Body_Diffuse_fedcba98]"][1],
             "match_dhash = fedcba9876543210",
         )
+
+    def test_workspace_dds_lookup_recovers_stale_paths_and_keeps_valid_sources(self):
+        identity = "LOD0.aaaabbbb-100-0"
+        light = _FakeMaterial("LightMap_Body")
+        diffuse = _FakeMaterial("DiffuseMap_Body")
+        obj = _obj(identity + ".001")
+        obj.material_slots = [types.SimpleNamespace(material=m) for m in (light, diffuse)]
+        node = _make_resource_node()
+        with tempfile.TemporaryDirectory() as directory:
+            valid = Path(directory) / "DiffuseMap.dds"
+            fallback = Path(directory) / "LightMap.dds"
+            for path in (valid, fallback):
+                path.write_bytes(b"DDS ")
+            node._collect_modimp_texture_slots = lambda _: {
+                "ps-t1": {"mark_name": "LightMap", "source_path": str(Path(directory) / "moved.dds")},
+                "ps-t2": {"mark_name": "DiffuseMap", "source_path": str(valid)},
+            }
+            lookup = mock.Mock(return_value=str(fallback))
+            prefix = types.SimpleNamespace(
+                extract_prefix_info=lambda name: (name,),
+                parse_prefix_parts=lambda _: {"unique_str": identity},
+            )
+            with mock.patch.dict(sys.modules, {
+                f"{PKG}.common.object_prefix_helper": types.SimpleNamespace(ObjectPrefixHelper=prefix),
+                f"{PKG}.common.workspace_helper": types.SimpleNamespace(WorkSpaceHelper=types.SimpleNamespace(
+                    find_submesh_texture_source=lookup,
+                )),
+            }), mock.patch.object(node_postprocess_material, "is_dds_file", side_effect=lambda path: Path(path).is_file()):
+                resolved = node._workspace_source_paths_for_materials(obj)
+
+            self.assertEqual(resolved, {light.name: str(fallback), diffuse.name: str(valid)})
+            lookup.assert_called_once_with(identity, "LightMap")
 
     # -- 保留整个 slot_info（MarkFileName/MarkSlot/MarkHash/SourcePath）----
     def test_collect_modimp_texture_slots_keeps_mark_fields(self):

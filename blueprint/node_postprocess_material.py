@@ -1769,9 +1769,7 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
     def _workspace_source_paths_for_materials(self, obj):
         """材质名 → 工作空间里该材质原贴图的路径。
 
-        导出格式必须照抄原贴图的 DDS 头（引擎按原通道读，BC5 就是双通道），这条映射就是
-        在导出期找到那份原贴图的唯一桥梁：节点从 modimp_texture_slots 里拿到 source_path。
-        拿不到（节点不是从工作空间导入、或槽位缺 source_path）就返回空表，格式回落到规则表。
+        优先采用槽位记录中的有效 DDS。旧路径失效时，按物体前缀和材质类型查工作空间。
         """
         mapping = {}
         if obj is None:
@@ -1779,13 +1777,42 @@ class SSMTNode_PostProcess_MaterialBase(SSMTNode_PostProcess_Base):
         try:
             slots = self._collect_modimp_texture_slots(obj)
         except Exception:
-            return mapping
+            slots = {}
         for slot_info in slots.values():
             source_path = str(slot_info.get("source_path", "") or "").strip()
-            if not source_path:
+            if not is_dds_file(source_path):
                 continue
             for material in self._find_workspace_slot_materials(obj, slot_info):
                 mapping.setdefault(str(getattr(material, "name", "") or ""), source_path)
+
+        # 手动物体或旧工程可能没有 modimp_texture_slots，但物体名仍保留完整
+        # 的 LOD/DrawIB 前缀。此时直接按前缀查工作空间原始 DDS，避免退回
+        # 按贴图类型写死的格式（典型：LightMap/MaterialMap 的 BC6H 被写成 BC7）。
+        try:
+            from ..common.object_prefix_helper import ObjectPrefixHelper
+            from ..common.workspace_helper import WorkSpaceHelper
+
+            prefix_info = ObjectPrefixHelper.extract_prefix_info(getattr(obj, "name", ""))
+            if prefix_info:
+                prefix_parts = ObjectPrefixHelper.parse_prefix_parts(prefix_info[0])
+                workspace_unique_str = str(prefix_parts.get("unique_str", "") or "").strip()
+                if workspace_unique_str:
+                    fallback_by_type = {}
+                    for material_slot in getattr(obj, "material_slots", []):
+                        material = getattr(material_slot, "material", None)
+                        material_name = str(getattr(material, "name", "") or "")
+                        if not material_name.strip() or material_name in mapping:
+                            continue
+                        texture_type = material_name.split("_", 1)[0].strip()
+                        if texture_type not in fallback_by_type:
+                            fallback_by_type[texture_type] = WorkSpaceHelper.find_submesh_texture_source(
+                                workspace_unique_str, texture_type
+                            )
+                        source_path = fallback_by_type[texture_type]
+                        if source_path:
+                            mapping[material_name] = source_path
+        except Exception:
+            pass
         return mapping
 
 

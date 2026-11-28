@@ -224,6 +224,61 @@ class WorkSpaceHelper:
         return final_import_folder_path_list
 
     @staticmethod
+    def find_submesh_texture_source(unique_str: str, texture_type: str) -> str:
+        """按子网格身份和贴图类型返回工作空间里的原始 DDS。
+
+        导出贴图的容器格式必须跟游戏原始资源一致。``unique_str`` 来自物体名
+        前缀，例如 ``LOD0.31c1e79c-50724-0``；源文件位于该子网格的
+        ``TYPE_*`` 目录中，文件名形如 ``31c1e79c-50724-0-LightMap.dds``。
+        """
+        texture_type = str(texture_type or "").strip()
+        if not texture_type:
+            return ""
+
+        submesh_folder = WorkSpaceHelper.get_submesh_folder_path(unique_str)
+        if not os.path.isdir(submesh_folder):
+            return ""
+
+        _lod_name, bare_unique_str = WorkSpaceHelper.parse_lod_unique_str(unique_str)
+        bare_unique_str = WorkSpaceHelper.strip_identity_custom_suffix(bare_unique_str)
+        if not bare_unique_str:
+            return ""
+
+        expected_name = f"{bare_unique_str}-{texture_type}.dds".casefold()
+        try:
+            type_dirs = sorted(
+                entry.path
+                for entry in os.scandir(submesh_folder)
+                if entry.is_dir() and entry.name.startswith("TYPE_")
+            )
+        except OSError:
+            return ""
+
+        matches = {}
+        for type_dir in type_dirs:
+            candidate = os.path.join(type_dir, f"{bare_unique_str}-{texture_type}.dds")
+            if os.path.isfile(candidate):
+                matches[os.path.normcase(type_dir)] = candidate
+                continue
+            try:
+                with os.scandir(type_dir) as entries:
+                    for entry in entries:
+                        if entry.is_file() and entry.name.casefold() == expected_name:
+                            matches[os.path.normcase(type_dir)] = entry.path
+                            break
+            except OSError:
+                continue
+        if len(matches) < 2:
+            return next(iter(matches.values()), "")
+
+        from .submesh_metadata import check_and_get_submesh_json_path
+
+        found, _, metadata_path = check_and_get_submesh_json_path(unique_str)
+        if not found:
+            return ""
+        return matches.get(os.path.normcase(os.path.dirname(metadata_path)), "")
+
+    @staticmethod
     def create_and_get_workspace_collection() -> bpy.types.Collection:
         workspace_collection = CollectionUtils.create_new_collection(
             collection_name=GlobalConfig.get_workspace_name(),
