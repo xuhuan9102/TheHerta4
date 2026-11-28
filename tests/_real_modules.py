@@ -36,6 +36,7 @@ _REAL_MODULES = (
 	# t75：共享骨图 / 通道骨判定的唯一实现（zzmi_skeleton 与 zzmi.py 都依赖它）。
 	("common", "zzmi_channel"),
 	("common", "zzmi_native_flow"),
+	("common", "zzmi_native_vertex_data"),
 	# 跨组骨骼合并：zzmi.py 的 cross-group 分支运行期导入 zzmi_skeleton，缺这一条
 	# 就让 4 个 ZZMICrossGroupAttachTests 全部 ModuleNotFoundError（按依赖顺序追加）。
 	("utils", "json_utils"),
@@ -61,6 +62,14 @@ def _ensure_parent_package(package_name):
 	return parent
 
 
+def _install_native_vertex_data_stub(target_name):
+	"""Supply the minimal surface ZZMI tests need without importing Blender."""
+	module = types.ModuleType(target_name)
+	module.UV2_LAYER = "TEXCOORD2.xy"
+	module.build_uv2_projection_map = lambda _blueprint_model: {}
+	sys.modules[target_name] = module
+
+
 def register_real_common_modules(fake_common_package: str):
 	"""登记真实 ``common`` / ``utils`` 子模块到对应的 fake 包前缀下。
 
@@ -84,6 +93,9 @@ def register_real_common_modules(fake_common_package: str):
 		if not source_path.is_file():
 			continue
 
+		if module_name == "zzmi_native_vertex_data":
+			_install_native_vertex_data_stub(target_name)
+			continue
 		_ensure_parent_package(package_name)
 		spec = importlib.util.spec_from_file_location(target_name, source_path)
 		module = importlib.util.module_from_spec(spec)

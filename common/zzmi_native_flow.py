@@ -1,9 +1,7 @@
 """Shared front projection and the ZZMI native height-based material sweep."""
 
+from dataclasses import dataclass
 import numpy
-
-
-UV_LAYER = "TEXCOORD2.xy"
 
 # 只有蓝图里存在 Glow FX 节点且勾选「独立表面流光」时，才允许导出器
 # 生成 NativeHeightFlow / PrimaryMaterialUV 这两段 ShaderRegex。
@@ -17,6 +15,80 @@ def has_native_flow_node(blueprint_model):
         and bool(getattr(node, "enable_native_surface_flow", False))
         for node in getattr(blueprint_model, "postprocess_nodes", ())
     )
+
+
+@dataclass(frozen=True)
+class UV2Projection:
+    """The affine X/Z projection used by the native ZZMI TEXCOORD2 stream."""
+
+    u_x: float
+    u_bias: float
+    v_z: float
+    v_bias: float
+    r2_u: float
+    r2_v: float
+    u_z: float = 0.0
+    v_x: float = 0.0
+
+    def apply(self, positions):
+        positions = numpy.asarray(positions, dtype=numpy.float64)
+        if positions.ndim != 2 or positions.shape[1] < 3:
+            raise ValueError("UV2 projection positions must be an Nx3 array")
+        x, z = positions[:, 0], positions[:, 2]
+        u = self.u_x * x + self.u_z * z + self.u_bias
+        v = self.v_x * x + self.v_z * z + self.v_bias
+        return numpy.clip(numpy.stack((u, v), axis=1), 0.0, 1.0)
+
+
+def fit_uv2_projection(positions, uvs, *, min_r2=0.99):
+    """Fit the native TEXCOORD2 affine projection from a reference stream.
+
+    ``positions`` must use the exported/game-space X direction.  ``uvs`` is
+    read from the Blender UV layer, so the returned projection converts its
+    V sign into the exported buffer space where ``_parse_texcoord`` has already
+    flipped V.
+    """
+    positions = numpy.asarray(positions, dtype=numpy.float64)
+    uvs = numpy.asarray(uvs, dtype=numpy.float64)
+    if positions.ndim != 2 or positions.shape[1] < 3 or uvs.shape != (len(positions), 2):
+        return None
+    if len(positions) < 3:
+        return None
+
+    design = numpy.stack((positions[:, 0], positions[:, 2], numpy.ones(len(positions))), axis=1)
+    if numpy.linalg.matrix_rank(design) < 3:
+        return None
+
+    fitted = []
+    scores = []
+    for component in range(2):
+        values = uvs[:, component]
+        coefficients, _residuals, _rank, _singular = numpy.linalg.lstsq(
+            design, values, rcond=None,
+        )
+        prediction = design @ coefficients
+        centered = values - values.mean()
+        denominator = float(numpy.dot(centered, centered))
+        if denominator <= 1e-20:
+            return None
+        r2 = 1.0 - float(numpy.dot(values - prediction, values - prediction)) / denominator
+        if not numpy.isfinite(r2) or r2 < min_r2:
+            return None
+        fitted.append(coefficients)
+        scores.append(r2)
+
+    u_coefficients, v_coefficients = fitted
+    return UV2Projection(
+        u_x=float(u_coefficients[0]),
+        u_z=float(u_coefficients[1]),
+        u_bias=float(u_coefficients[2]),
+        v_x=float(-v_coefficients[0]),
+        v_z=float(-v_coefficients[1]),
+        v_bias=float(1.0 - v_coefficients[2]),
+        r2_u=float(scores[0]),
+        r2_v=float(scores[1]),
+    )
+
 
 _FLOAT_FORMATS = {
     "R16G16_FLOAT": "<f2",
@@ -53,8 +125,26 @@ def _element_view(buffers, game_type, name, component_count):
     return None
 
 
-def prepare_native_flow(drawib_models, reproject_uv2):
-    """Use the exported geometry's shared Blender-space bounds for UV2 and sweep height."""
+def _projection_for_submesh(uv2_projections, submesh):
+    if uv2_projections is None or submesh is None:
+        return None
+    projection = uv2_projections.get(getattr(submesh, "unique_str", ""))
+    if projection is not None:
+        return projection
+    for draw in getattr(submesh, "drawcall_model_list", ()):
+        for key in (
+            getattr(draw, "match_unique_str", ""),
+            getattr(draw, "obj_name", ""),
+            getattr(draw, "source_obj_name", ""),
+        ):
+            projection = uv2_projections.get(key)
+            if projection is not None:
+                return projection
+    return None
+
+
+def prepare_native_flow(drawib_models, reproject_uv2, uv2_projections=None):
+    """Repair native UV2 rows and compute the ZZMI material-sweep height."""
     streams = []
     minimums = []
     maximums = []
@@ -65,7 +155,7 @@ def prepare_native_flow(drawib_models, reproject_uv2):
             positions = _element_view(buffers, game_type, "POSITION", 3)
             if positions is None:
                 continue
-            streams.append((buffers, game_type, positions))
+            streams.append((buffers, game_type, positions, submesh, ()))
             draws = getattr(submesh, "drawcall_model_list", ())
             if not draws or not all(getattr(draw, "zzmi_stub", False) for draw in draws):
                 minimums.append(positions.min(axis=0))
@@ -75,7 +165,13 @@ def prepare_native_flow(drawib_models, reproject_uv2):
             game_type = getattr(model, "d3d11GameType", None)
             positions = _element_view(buffers, game_type, "POSITION", 3)
             if positions is not None:
-                streams.append((buffers, game_type, positions))
+                streams.append((
+                    buffers,
+                    game_type,
+                    positions,
+                    None,
+                    tuple(getattr(model, "submesh_model_list", ())),
+                ))
 
     if not minimums:
         return None
@@ -86,9 +182,50 @@ def prepare_native_flow(drawib_models, reproject_uv2):
         center = ((minimum + maximum) * 0.5)[[0, 2]]
         size = max(span[0], span[2], 1e-6)
         projected_count = 0
-        for buffers, game_type, positions in streams:
+        for buffers, game_type, positions, submesh, model_submeshes in streams:
             uv = _element_view(buffers, game_type, "TEXCOORD2", 2)
             if uv is None:
+                continue
+            if uv2_projections is not None:
+                if submesh is not None:
+                    projection = _projection_for_submesh(uv2_projections, submesh)
+                    if projection is None:
+                        continue
+                    # A merged submesh can contain both the modified object and
+                    # a native component. Blender materializes the missing
+                    # layer as [0, 1], so row-local heuristics cannot identify
+                    # it reliably. Apply the fitted mechanism to the complete
+                    # submesh stream.
+                    uv[:] = projection.apply(positions)
+                    projected_count += 1
+                    continue
+
+                # DrawIBModel owns a concatenated copy of the submesh buffers,
+                # and that copy is what the file writer consumes. Patch each
+                # submesh interval independently so mixed DrawIB layouts keep
+                # their own fitted native projection.
+                offset = 0
+                for model_submesh in model_submeshes:
+                    submesh_positions = _element_view(
+                        getattr(model_submesh, "category_buffer_dict", {}),
+                        getattr(model_submesh, "d3d11_game_type", None),
+                        "POSITION",
+                        3,
+                    )
+                    if submesh_positions is None:
+                        continue
+                    count = len(submesh_positions)
+                    end = offset + count
+                    projection = _projection_for_submesh(uv2_projections, model_submesh)
+                    if projection is not None:
+                        uv[offset:end] = projection.apply(positions[offset:end])
+                        projected_count += 1
+                    offset = end
+                if offset != len(uv):
+                    raise ValueError(
+                        "ZZMI DrawIB TEXCOORD2 projection does not match "
+                        f"the assembled submesh rows ({offset} != {len(uv)})"
+                    )
                 continue
             # Blender Front is X/Z. The exported Direct3D V coordinate points down.
             projected = (positions[:, (0, 2)] - center) / size
@@ -96,7 +233,10 @@ def prepare_native_flow(drawib_models, reproject_uv2):
             uv[:] = numpy.clip(projected + 0.5, 0.0, 1.0)
             projected_count += 1
         if projected_count:
-            print("[ZZMI原生流光] 已为本次导出网格统一正交前视 TEXCOORD2.xy")
+            if uv2_projections is not None:
+                print("[ZZMI原生顶点数据] 已按原生 X/Z 仿射投影补齐 TEXCOORD2.xy")
+            else:
+                print("[ZZMI原生流光] 已为本次导出网格统一正交前视 TEXCOORD2.xy")
 
     if span[2] <= 1e-6:
         return None

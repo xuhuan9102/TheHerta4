@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -29,7 +30,15 @@ _install_module(f"{PKG}.common.d3d11_gametype", D3D11GameType=object)
 _install_module(f"{PKG}.common.draw_call_model", DrawCallModel=object)
 _install_module(
     f"{PKG}.common.logic_name",
-    LogicName=types.SimpleNamespace(WWMI="WWMI", NTEMI="NTEMI", EFMI="EFMI", YYSLS="YYSLS", SnowBreak="SnowBreak", HIMI="HIMI"),
+    LogicName=types.SimpleNamespace(
+        WWMI="WWMI",
+        NTEMI="NTEMI",
+        EFMI="EFMI",
+        YYSLS="YYSLS",
+        ZZMI="ZZMI",
+        SnowBreak="SnowBreak",
+        HIMI="HIMI",
+    ),
 )
 _install_module(f"{PKG}.common.global_config", GlobalConfig=types.SimpleNamespace(logic_name="GIMI"))
 _install_module(
@@ -68,7 +77,7 @@ FormatUtils = format_utils_module.FormatUtils
 
 
 class ImportedSurfaceBasisTests(unittest.TestCase):
-    def test_missing_imported_normals_and_tangents_use_evaluated_loop_data(self):
+    def _parse_with_mixed_imported_basis(self):
         class Records:
             def __init__(self, **fields):
                 self.fields = fields
@@ -98,15 +107,62 @@ class ImportedSurfaceBasisTests(unittest.TestCase):
             },
         )
 
-        normals = ObjBufferHelper._parse_normal(
-            loops, len(loops), types.SimpleNamespace(Format="R32G32B32_FLOAT"), mesh=mesh,
+        return (
+            ObjBufferHelper._parse_normal(
+                loops, len(loops), types.SimpleNamespace(Format="R32G32B32_FLOAT"), mesh=mesh,
+            ),
+            ObjBufferHelper._parse_tangent(
+                loops, len(loops), types.SimpleNamespace(Format="R32G32B32A32_FLOAT"), mesh=mesh,
+            ),
         )
-        tangents = ObjBufferHelper._parse_tangent(
-            loops, len(loops), types.SimpleNamespace(Format="R32G32B32A32_FLOAT"), mesh=mesh,
-        )
+
+    def test_missing_imported_normals_and_tangents_use_evaluated_loop_data(self):
+        normals, tangents = self._parse_with_mixed_imported_basis()
 
         np.testing.assert_array_equal(normals, [[0, 0, 1], [1, 0, 0], [0, 0, 1], [0, 1, 0]])
         np.testing.assert_array_equal(tangents, [[0, 1, 0, 1], [0, 0, 1, 1], [0, 1, 0, -1], [0, 0, 1, -1]])
+
+    def test_zzmi_generated_tangent_keeps_native_bitangent_handedness(self):
+        with mock.patch.object(obj_buffer_helper_module.GlobalConfig, "logic_name", "ZZMI"):
+            _normals, tangents = self._parse_with_mixed_imported_basis()
+
+        np.testing.assert_array_equal(
+            tangents,
+            [[0, 1, 0, 1], [0, 0, 1, -1], [0, 1, 0, 1], [0, 0, 1, 1]],
+        )
+
+    def test_zzmi_rebuilt_tangent_w_matches_final_uv0_orientation(self):
+        dtype = np.dtype([
+            ("TEXCOORD", "<f4", (2,)),
+            ("TANGENT", "<f4", (4,)),
+        ])
+        vb = np.zeros(6, dtype=dtype)
+        vb["TEXCOORD"] = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 0.0),
+        ]
+        vb["TANGENT"][:, 3] = [
+            -1.0,
+            -1.0,
+            -1.0,
+            1.0,
+            1.0,
+            1.0,
+        ]
+
+        repaired = ObjBufferHelper.stabilize_zzmi_rebuilt_tangent_w(
+            vb,
+            [0, 1, 2, 3, 4, 5],
+        )
+
+        np.testing.assert_array_equal(
+            repaired["TANGENT"][:, 3],
+            [1.0, 1.0, 1.0, -1.0, -1.0, -1.0],
+        )
 
 
 class DummyColorAttributeData:

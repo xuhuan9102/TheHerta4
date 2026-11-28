@@ -237,6 +237,7 @@ class SubMeshModel:
 
         index_offset = 0
         submesh_temp_obj_list = []
+        zzmi_native_surface_rebuilt = False
         data_hash_cache = {}
         cache_key_to_geometry_record = {}
         cache_key_to_candidate_names = {}
@@ -362,6 +363,27 @@ class SubMeshModel:
                 temp_obj = source_obj
                 direct_source_reuse_count += 1
 
+            if GlobalConfig.logic_name == LogicName.ZZMI:
+                try:
+                    from .zzmi_native_vertex_data import ensure_zzmi_missing_vertex_data
+
+                    repaired = ensure_zzmi_missing_vertex_data(temp_obj)
+                    if repaired:
+                        zzmi_native_surface_rebuilt |= any(
+                            name in repaired
+                            for name in (
+                                "3DMigoto_NORMAL_XYZ",
+                                "3DMigoto_TANGENT_XYZ",
+                                "3DMigoto_TANGENT_W",
+                            )
+                        )
+                        print(
+                            f"[ZZMI原生顶点数据] {temp_obj.name}: "
+                            + ", ".join(f"{name}={method}" for name, method in repaired.items())
+                        )
+                except Exception as exc:  # noqa: BLE001 - 不让辅助修复击穿既有导出
+                    print(f"⚠️ [ZZMI原生顶点数据] {temp_obj.name} 修复失败: {exc}")
+
             draw_call_model.vertex_count = len(temp_obj.data.vertices)
             draw_call_model.index_count = len(temp_obj.data.polygons) * 3
             draw_call_model.index_offset = index_offset
@@ -463,6 +485,14 @@ class SubMeshModel:
             SSMTErrorUtils.raise_fatal(f"SubMesh {self.unique_str} 没有有效的对象可供合并导出")
 
         submesh_merged_obj = submesh_temp_obj_list[0]
+        if GlobalConfig.logic_name == LogicName.ZZMI and zzmi_native_surface_rebuilt:
+            from .zzmi_native_vertex_data import remove_zzmi_current_pose_overrides
+
+            if remove_zzmi_current_pose_overrides(submesh_merged_obj):
+                print(
+                    f"[ZZMI原生顶点数据] {submesh_merged_obj.name}: "
+                    "已移除会覆盖重建法线/切线的当前姿态临时属性"
+                )
         merged_obj_uses_preprocessed_copy = submesh_merged_obj.name.endswith('_copy')
         if not merged_obj_uses_preprocessed_copy:
             merged_obj_name = "TEMP_SUBMESH_MERGED_" + self.unique_str

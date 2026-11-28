@@ -1,4 +1,4 @@
-"""ZZMI 原生流光/UV2 投影的纯 Python 测试（不引真 bpy）。
+"""ZZMI 原生流与 UV2 投影的纯 Python 测试（不引真 bpy）。
 
 按仓库既有范式：空 ``__path__`` 假包 + ``tests/_real_modules.py`` 登记真实
 ``common/zzmi_native_flow.py``，再直接用它的函数做数值断言。
@@ -196,6 +196,121 @@ class PrepareNativeFlowTests(unittest.TestCase):
         self.assertAlmostEqual(float(uv[0, 0]), 0.25, places=3)
         self.assertAlmostEqual(float(uv[0, 1]), 1.0, places=3)
 
+    def test_projection_map_uses_native_mechanism_for_complete_mixed_stream(self):
+        position_buffers, _position_type = _position_buffers([
+            (-1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 2.0),
+            (2.0, 0.0, 3.0),
+        ])
+        raw = numpy.zeros(4 * 8, dtype=numpy.uint8)
+        uv0 = numpy.ndarray((4, 2), dtype="<f2", buffer=raw, offset=0, strides=(8, 2))
+        uv2 = numpy.ndarray((4, 2), dtype="<f2", buffer=raw, offset=4, strides=(8, 2))
+        uv0[:] = [(0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5)]
+        uv2[:] = [(0.1, 0.2), (0.8, 0.9), (0.3, 0.4), (0.7, 0.6)]
+        buffers = dict(position_buffers)
+        buffers["Texcoord"] = raw
+        model_raw = raw.copy()
+        model_buffers = dict(position_buffers)
+        model_buffers["Texcoord"] = model_raw
+        model_uv2 = numpy.ndarray(
+            (4, 2),
+            dtype="<f2",
+            buffer=model_raw,
+            offset=4,
+            strides=(8, 2),
+        )
+        game_type = _game_type(
+            [
+                _element("Position", "POSITION", "R32G32B32_FLOAT", 12),
+                _element("Texcoord", "TEXCOORD", "R16G16_FLOAT", 4),
+                _element("Texcoord", "TEXCOORD2", "R16G16_FLOAT", 4),
+            ],
+            {"Position": 12, "Texcoord": 8},
+        )
+        submesh = types.SimpleNamespace(
+            unique_str="test-submesh",
+            category_buffer_dict=buffers,
+            d3d11_game_type=game_type,
+            drawcall_model_list=[],
+        )
+        model = types.SimpleNamespace(
+            category_buffer_dict=model_buffers,
+            d3d11GameType=game_type,
+            submesh_model_list=[submesh],
+        )
+        projection = flow.UV2Projection(
+            u_x=0.25, u_z=0.1, u_bias=0.5,
+            v_x=0.0625, v_z=0.125, v_bias=0.25,
+            r2_u=1.0, r2_v=1.0,
+        )
+        flow.prepare_native_flow([model], True, {"test-submesh": projection})
+        expected = numpy.asarray([
+            (0.25, 0.1875),
+            (0.6, 0.375),
+            (0.95, 0.5625),
+            (1.0, 0.75),
+        ], dtype=numpy.float32)
+        numpy.testing.assert_allclose(uv2, expected, atol=2e-3)
+        numpy.testing.assert_allclose(model_uv2, expected, atol=2e-3)
+
+
+class UV2ProjectionTests(unittest.TestCase):
+    def test_fit_uses_native_xz_affine_projection_and_flips_v_for_buffer(self):
+        positions = numpy.asarray([
+            (-1.0, 0.2, 0.0),
+            (0.0, -0.4, 1.0),
+            (2.0, 0.1, 0.0),
+            (1.0, 0.7, 2.0),
+        ], dtype=numpy.float64)
+        # Blender UV space: u = 0.25*x + 0.5; v = -0.125*z + 0.75.
+        uvs = numpy.stack((
+            positions[:, 0] * 0.25 + 0.5,
+            positions[:, 2] * -0.125 + 0.75,
+        ), axis=1)
+        projection = flow.fit_uv2_projection(positions, uvs)
+        self.assertIsNotNone(projection)
+        projected = projection.apply(positions)
+        # Buffer space flips V: 1 - v = 0.125*z + 0.25.
+        expected_v = positions[:, 2] * 0.125 + 0.25
+        numpy.testing.assert_allclose(projected[:, 0], uvs[:, 0], atol=1e-8)
+        numpy.testing.assert_allclose(projected[:, 1], expected_v, atol=1e-8)
+
+    def test_fit_preserves_cross_terms_in_exported_uv2(self):
+        positions = numpy.asarray([
+            (-1.0, 0.0, -1.0),
+            (-1.0, 0.0, 1.0),
+            (1.0, 0.0, -1.0),
+            (1.0, 0.0, 1.0),
+        ])
+        uvs = numpy.stack((
+            0.5 + 0.2 * positions[:, 2],
+            0.5 + 0.3 * positions[:, 0],
+        ), axis=1)
+
+        projection = flow.fit_uv2_projection(positions, uvs)
+        self.assertIsNotNone(projection)
+        numpy.testing.assert_allclose(projection.apply(positions), [
+            (0.3, 0.8),
+            (0.7, 0.8),
+            (0.3, 0.2),
+            (0.7, 0.2),
+        ], atol=1e-8)
+
+    def test_fit_rejects_nonlinear_reference(self):
+        positions = numpy.asarray([
+            (-1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 2.0),
+            (2.0, 0.0, 3.0),
+        ], dtype=numpy.float64)
+        uvs = numpy.asarray([
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (1.0, 0.0),
+        ], dtype=numpy.float64)
+        self.assertIsNone(flow.fit_uv2_projection(positions, uvs))
 
 class FlowScopeTests(unittest.TestCase):
     def test_setup_and_restore_text(self):

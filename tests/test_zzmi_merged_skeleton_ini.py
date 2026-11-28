@@ -607,6 +607,7 @@ class ZZSIMergedSkeletonIniTests(unittest.TestCase):
         self.assertIn("handling = skip", text)
         self.assertIn("draw = 4643, 0", text)
         self.assertIn("vb0 = Resourceb20f90eaPosition", text)
+        self.assertIn("vb3 = Resourceb20f90eaPosition", text)
 
     def test_merged_skeleton_sections_content(self):
         submesh_a = _FakeSubmesh("LOD0.a23aa8a3-42759-0", 0, 105)
