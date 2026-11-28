@@ -6,11 +6,9 @@ data such as TEXCOORD1, from the matching native surface:
 
 * TEXCOORD2 is an affine X/Z projection.  Its coefficients are fitted from a
   native reference object and then applied to the modified geometry.
-* NORMAL is the normalized per-vertex average of the target mesh's evaluated
-  corner normals.
-* TANGENT is calculated from the target mesh's final UV0, triangles, and
-  reconstructed normals.  The point-domain XYZ/W attributes are then written
-  for ObjBufferHelper.
+* NORMAL and TANGENT stay in Blender's corner/loop domain.  The exporter
+  evaluates them from the target mesh's final normals and UV0, preserving
+  per-corner tangent bases at UV seams instead of averaging them per vertex.
 * TEXCOORD1 is authored vertex data, not a function of POSITION.  A constant
   reference layer is copied as that constant; a varying layer is transferred
   by nearest source triangle and barycentric interpolation.
@@ -459,29 +457,6 @@ def ensure_zzmi_missing_vertex_data(target_obj, source_obj=None):
     report = {}
     if _repair_uv1(target_obj, reference):
         report["TEXCOORD1.xy"] = "reference-surface"
-
-    normals = _vertex_normals_from_corner_normals(mesh)
-    existing_normal = _vector_attribute(mesh, IMPORTED_NORMAL_XYZ)
-    if not _valid_directions(existing_normal, len(mesh.vertices)):
-        _write_vector_attribute(mesh, IMPORTED_NORMAL_XYZ, normals)
-        report[IMPORTED_NORMAL_XYZ] = "target-corner-average"
-    _write_custom_normals_if_needed(mesh, normals)
-
-    existing_tangent = _vector_attribute(mesh, IMPORTED_TANGENT_XYZ)
-    existing_sign = _scalar_attribute(mesh, IMPORTED_TANGENT_W)
-    if not _valid_directions(existing_tangent, len(mesh.vertices)) or existing_sign is None:
-        tangents, signs = _tangent_per_vertex(mesh)
-        if tangents is not None and signs is not None:
-            _write_vector_attribute(mesh, IMPORTED_TANGENT_XYZ, tangents)
-            _write_scalar_attribute(mesh, IMPORTED_TANGENT_W, signs)
-            report[IMPORTED_TANGENT_XYZ] = "target-uv0-tbn"
-            report[IMPORTED_TANGENT_W] = "target-tbn-handness"
-
-    if any(
-        name in report
-        for name in (IMPORTED_NORMAL_XYZ, IMPORTED_TANGENT_XYZ, IMPORTED_TANGENT_W)
-    ):
-        remove_zzmi_current_pose_overrides(mesh)
 
     mesh.update()
     return report
