@@ -254,17 +254,29 @@ class WorkSpaceHelper:
         except OSError:
             return ""
 
+        matches = {}
         for type_dir in type_dirs:
             candidate = os.path.join(type_dir, f"{bare_unique_str}-{texture_type}.dds")
             if os.path.isfile(candidate):
-                return candidate
+                matches[os.path.normcase(type_dir)] = candidate
+                continue
             try:
-                for entry in os.scandir(type_dir):
-                    if entry.is_file() and entry.name.casefold() == expected_name:
-                        return entry.path
+                with os.scandir(type_dir) as entries:
+                    for entry in entries:
+                        if entry.is_file() and entry.name.casefold() == expected_name:
+                            matches[os.path.normcase(type_dir)] = entry.path
+                            break
             except OSError:
                 continue
-        return ""
+        if len(matches) < 2:
+            return next(iter(matches.values()), "")
+
+        from .submesh_metadata import check_and_get_submesh_json_path
+
+        found, _, metadata_path = check_and_get_submesh_json_path(unique_str)
+        if not found:
+            return ""
+        return matches.get(os.path.normcase(os.path.dirname(metadata_path)), "")
 
     @staticmethod
     def create_and_get_workspace_collection() -> bpy.types.Collection:
