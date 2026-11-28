@@ -750,59 +750,11 @@ def _collect_ini_variable_warnings(output_dir: str) -> list:
         return []
 
 
-def _collect_mod_pipeline_warnings(output_dir: str) -> list:
-    """跑 ``tools/mod-pipeline.ps1`` 的 verify，把 FAIL 行收集成告警。
-
-    这是导出收尾的自检：脚本不存在、PowerShell 起不来、超时或退出码非 0
-    都**只进 warnings，不影响导出**——任何异常都在这里吞掉并返回空列表。
-    """
-    if not output_dir:
-        return []
-    try:
-        script_path = Path(__file__).resolve().parents[1] / "tools" / "mod-pipeline.ps1"
-        if not script_path.is_file():
-            return []
-        completed = subprocess.run(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-File", str(script_path),
-                "verify",
-                "-ModDir", str(output_dir),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        warnings = []
-        for line in (completed.stdout or "").splitlines():
-            if line.startswith("FAIL ["):
-                warnings.append(f"mod-pipeline: {line.strip()}")
-        if completed.returncode == 3:
-            warnings.append("mod-pipeline: verify crashed (exit 3)")
-        elif completed.returncode != 0 and not warnings:
-            warnings.append(f"mod-pipeline: verify exit {completed.returncode}")
-        return warnings
-    except Exception:
-        return []
-
-
 def _collect_export_warnings(output_dir: str) -> list:
-    """导出收尾统一收集告警：ini 变量校验 + mod-pipeline verify。
-
-    两边各自兜底：任一边抛异常只丢它自己的告警，**导出结果与成功状态不变**。
-    """
+    """导出收尾只校验产物 INI 的变量声明；失败不影响导出状态。"""
     warnings = []
     try:
         warnings.extend(_collect_ini_variable_warnings(output_dir))
-    except Exception:
-        pass
-    try:
-        warnings.extend(_collect_mod_pipeline_warnings(output_dir))
     except Exception:
         pass
     return warnings

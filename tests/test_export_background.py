@@ -1592,6 +1592,29 @@ class WorkerTests(_BackgroundTestBase):
         self.assertEqual(calls, [])
         self.assertFalse(hasattr(export_background, "_backup_config_tables_in_worker"))
 
+    def test_export_warnings_do_not_run_sync_mod_pipeline_verify(self):
+        """导出收尾不得再启动全量 mod-pipeline verify 阻塞完成状态。"""
+        original_warnings = export_background._collect_ini_variable_warnings
+        export_background._collect_ini_variable_warnings = (
+            lambda _path: ["缺失变量: $x"]
+        )
+        self.addCleanup(
+            setattr,
+            export_background,
+            "_collect_ini_variable_warnings",
+            original_warnings,
+        )
+
+        subprocess_stub = types.SimpleNamespace(
+            run=mock.Mock(side_effect=AssertionError("不得启动外部自检"))
+        )
+        export_background.subprocess = subprocess_stub
+
+        warnings = export_background._collect_export_warnings(self.temp_dir)
+
+        self.assertEqual(warnings, ["缺失变量: $x"])
+        subprocess_stub.run.assert_not_called()
+
     def test_worker_direct_export_skips_config_backup_and_ini_check(self):
         """直出模式与同步直出一致：不搬配置表备份、不做 INI 自检。"""
         session_dir = os.path.join(self.temp_dir, "worker_direct_skip")
