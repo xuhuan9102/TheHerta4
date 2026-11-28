@@ -932,9 +932,9 @@ class ObjBufferHelper:
         的同一条规则（字段名等于、或以元素类型开头）匹配，例如 TEXCOORD 匹配 TEXCOORD1。
         '''
         active = numpy.zeros(row_size, dtype=bool)
-        offset = 0
         for field_name in dtype.names:
-            field_size = dtype.fields[field_name][0].itemsize
+            field_dtype, offset = dtype.fields[field_name][:2]
+            field_size = field_dtype.itemsize
             if deduplicate_element_set is None:
                 keep = True
             else:
@@ -944,7 +944,6 @@ class ObjBufferHelper:
                 )
             if keep:
                 active[offset:offset + field_size] = True
-            offset += field_size
         return active
 
     @staticmethod
@@ -1254,16 +1253,12 @@ class ObjBufferHelper:
         if not fields_to_include:
             SSMTErrorUtils.raise_fatal("顶点去重精度控制: 没有选择任何元素参与去重，请至少选择一个元素类型")
         
-        total_bytes = 0
         field_byte_ranges = []
-        for field_name in dtype.names:
-            field_dtype = dtype.fields[field_name][0]
-            field_size = field_dtype.itemsize
-            if field_name in fields_to_include:
-                field_byte_ranges.append((total_bytes, total_bytes + field_size))
-            total_bytes += field_size
-        
-        row_bytes = element_vertex_ndarray.view(numpy.uint8).reshape(n_loops, total_bytes)
+        for field_name in fields_to_include:
+            field_dtype, offset = dtype.fields[field_name][:2]
+            field_byte_ranges.append((offset, offset + field_dtype.itemsize))
+
+        row_bytes = element_vertex_ndarray.view(numpy.uint8).reshape(n_loops, dtype.itemsize)
         
         filtered_bytes_list = []
         for start, end in field_byte_ranges:

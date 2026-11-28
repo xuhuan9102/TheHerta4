@@ -165,6 +165,21 @@ class ImportedSurfaceBasisTests(unittest.TestCase):
         )
 
 
+def test_deduplication_reads_actual_offsets_for_aliased_fields():
+    dtype = np.dtype({
+        "names": ["POSITION", "TEXCOORD1", "TEXCOORD2"],
+        "formats": ["u1", "<u2", "<u2"],
+        "offsets": [0, 4, 4],
+        "itemsize": 8,
+    })
+    vertices = np.zeros(2, dtype=dtype)
+    vertices["TEXCOORD1"] = [0x1234, 0x5678]
+    columns = ObjBufferHelper._deduplicate_active_columns(dtype, {"TEXCOORD2"}, 8)
+    np.testing.assert_array_equal(np.flatnonzero(columns), [4, 5])
+    selected = ObjBufferHelper._filter_deduplicate_elements(vertices, dtype, None, {"TEXCOORD2"}, 2)
+    np.testing.assert_array_equal(selected, [[0x34, 0x12], [0x78, 0x56]])
+
+
 class DummyColorAttributeData:
     def __init__(self, records, field_name):
         self.records = np.asarray(records, dtype=np.float32).reshape(-1, 4)

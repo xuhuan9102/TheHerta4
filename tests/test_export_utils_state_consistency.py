@@ -3,6 +3,9 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import numpy
 
 
 def _install_module(name, **attrs):
@@ -142,6 +145,37 @@ spec.loader.exec_module(export_utils)
 
 class ExportUtilsStateConsistencyTests(unittest.TestCase):
     """测试导出工具中形态键值的状态一致性和构建函数"""
+
+    def test_pose_cache_signature_accepts_overlapping_field_offsets(self):
+        basis = _FakeShapeKey("Basis", 0.0)
+        shape = _FakeShapeKey("Smile", 1.0)
+        shape.relative_key = basis
+        mesh = types.SimpleNamespace(shape_keys=types.SimpleNamespace(reference_key=basis))
+        obj = types.SimpleNamespace(data=mesh)
+        mods = {
+            f"{PKG}.blueprint.frame_table_cache": types.SimpleNamespace(
+                hash_array=lambda digest, data: digest.update(numpy.asarray(data).tobytes()),
+                hash_mesh_topology=lambda digest, source: True,
+            ),
+            f"{PKG}.common.shapekey_native": types.SimpleNamespace(read_coords=lambda key: numpy.zeros(3)),
+        }
+        signatures = []
+        with (
+            mock.patch.dict(sys.modules, mods),
+            mock.patch.object(export_utils.bpy, "app", types.SimpleNamespace(version_string="test"), create=True),
+        ):
+            for offsets in ([0, 0], [4, 4]):
+                dtype = numpy.dtype({
+                    "names": ["TEXCOORD1", "TEXCOORD2"],
+                    "formats": ["<f4", "<f4"],
+                    "offsets": offsets,
+                    "itemsize": 8,
+                })
+                signature, _ = export_utils.ExportUtils._frame_table_sample_signatures(
+                    obj, [[shape]], numpy.arange(1), numpy.zeros(1, dtype=dtype), 1,
+                )
+                signatures.append(signature)
+        self.assertNotEqual(*signatures)
 
     def test_build_obj_element_context_restores_source_shape_key_values(self):
         """测试 build_obj_element_context 在上下文退出后恢复原始形态键值"""

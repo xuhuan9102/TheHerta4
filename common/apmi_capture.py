@@ -148,7 +148,7 @@ class APMICapture:
                 if "3DMigoto Dumping Buffer " in line and " -> " in line:
                     source, destination = line.rsplit(" -> ", 1)
                     source_path = source.split("3DMigoto Dumping Buffer ", 1)[-1].strip()
-                    source_name = Path(source_path).name
+                    source_name = Path(source_path.replace("\\", "/")).name
                     self.dump_map[source_name] = Path(destination.strip())
 
         logical_buffers = {path.name for path in self.folder.glob("*.buf")}
@@ -156,9 +156,11 @@ class APMICapture:
             name for name in self.dump_map if name.lower().endswith(".buf")
         )
         for logical_name in sorted(logical_buffers):
-            path = self._resolve_dump(logical_name)
             match = _SKIN_DUMP.fullmatch(logical_name)
             if match:
+                path = self._resolve_dump(logical_name)
+                if not path.is_file() or not path.stat().st_size:
+                    continue
                 ordinal, slot, resource_hash, shader = match.groups()
                 self.skin[ordinal, shader][slot] = (resource_hash, path)
                 continue
@@ -173,12 +175,11 @@ class APMICapture:
     def _resolve_dump(self, logical_name):
         if logical_name in self._resolved_paths:
             return self._resolved_paths[logical_name]
-        candidates = []
+        candidates = [self.folder / logical_name]
         destination = self.dump_map.get(logical_name)
         if destination is not None:
-            candidates.append(destination)
-            candidates.append(self.folder / "deduped" / destination.name)
-        candidates.append(self.folder / logical_name)
+            destination_name = Path(str(destination).replace("\\", "/")).name
+            candidates.extend((self.folder / "deduped" / destination_name, destination))
         existing = [path for path in candidates if path.is_file()]
         non_empty = [path for path in existing if path.stat().st_size > 0]
         resolved = (non_empty or existing or candidates)[0]

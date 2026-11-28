@@ -144,6 +144,19 @@ class D3D11GameTypeBlendIndicesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "三通道.*无法归一化"):
             game_type.widen_blendindices()
 
+    def test_blend_resize_preserves_texcoord_aliases_and_later_offsets(self):
+        texcoord = dict(_element("TEXCOORD", 1, "R32G32_FLOAT", 8),
+                        Category="Texcoord", ExtractSlot="vb1", AlignedByteOffset=4)
+        game_type = self._make([
+            texcoord,
+            dict(texcoord, SemanticIndex=2),
+            dict(_element("BLENDINDICES", 0, "R8G8B8A8_UINT", 4), AlignedByteOffset=4),
+            dict(_element("BLENDWEIGHT", 0, "R32G32_FLOAT", 8), AlignedByteOffset=12),
+        ])
+        self.assertTrue(game_type.widen_blendindices())
+        self.assertEqual([e.AlignedByteOffset for e in game_type.D3D11ElementList], [4, 4, 4, 16])
+        self.assertEqual(game_type.CategoryStrideDict, {"Texcoord": 12, "Blend": 24})
+
     def test_honors_aligned_byte_offsets_and_overlapping_texcoords(self):
         game_type = D3D11GameType.from_submesh_json_dict({
             "WorkGameType": "GPU_TEST",

@@ -162,7 +162,7 @@ class SubmeshJson:
 			d3d11_element_list = []
 			for d3d11_element_json in category_buffer_json.get("D3D11ElementList", []):
 				raw_aligned_byte_offset = d3d11_element_json.get("AlignedByteOffset", "")
-				if str(raw_aligned_byte_offset).strip():
+				if raw_aligned_byte_offset is not None and str(raw_aligned_byte_offset).strip():
 					element_offset = int(raw_aligned_byte_offset)
 				else:
 					element_offset = aligned_byte_offset

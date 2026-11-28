@@ -44,7 +44,11 @@ class Skeleton:
 
 def capture_folder(workspace):
     local_capture = Path(workspace) / "APMICapture"
-    if (local_capture / "log.txt").is_file() and any(local_capture.glob("*.buf")):
+    if (local_capture / "log.txt").is_file() and any(
+        path.is_file()
+        for folder in (local_capture, local_capture / "deduped")
+        for path in folder.glob("*.buf")
+    ):
         return local_capture
 
     from .efmi_skeleton import EFMISkeletonMergeHelper

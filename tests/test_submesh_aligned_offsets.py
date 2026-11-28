@@ -81,6 +81,16 @@ class SubmeshAlignedOffsetTests(unittest.TestCase):
                             "ExtractTechnique": "trianglelist",
                             "Category": "Texcoord",
                         },
+                        {
+                            "SemanticName": "TEXCOORD",
+                            "SemanticIndex": 3,
+                            "Format": "R32G32_FLOAT",
+                            "ByteWidth": 8,
+                            "AlignedByteOffset": None,
+                            "ExtractSlot": "vb1",
+                            "ExtractTechnique": "trianglelist",
+                            "Category": "Texcoord",
+                        },
                     ],
                 }
             ],
@@ -91,10 +101,10 @@ class SubmeshAlignedOffsetTests(unittest.TestCase):
             submesh = submesh_module.SubmeshJson(str(path))
 
         category = submesh.CategoryBufferList[0]
-        self.assertEqual(category.Stride, 20)
+        self.assertEqual(category.Stride, 28)
         self.assertEqual(
             [element.AlignedByteOffset for element in category.D3D11ElementList],
-            [4, 12, 12],
+            [4, 12, 12, 20],
         )
 
 

@@ -175,7 +175,7 @@ class D3D11GameType:
             "R32G32B32A32_SINT": ("R16G16B16A16_SINT", 8),
         }
 
-        changed = False
+        resized_ranges = {}
         for element in self.D3D11ElementList:
             if str(getattr(element, "SemanticName", "") or "").upper() != "BLENDINDICES":
                 continue
@@ -205,28 +205,33 @@ class D3D11GameType:
             old_width = int(getattr(element, "ByteWidth", 0) or 0)
             if old_width <= 0:
                 continue
+            offset = element.AlignedByteOffset
+            resized_ranges.setdefault(element.Category, {})[offset + old_width] = new_width - old_width
             element.Format = new_format
             element.ByteWidth = new_width
-            changed = True
             print(
                 f"[D3D11GameType] BLENDINDICES{element.SemanticIndex} 归一化: "
                 f"{current_format} -> {new_format} (ByteWidth {old_width} -> {new_width})"
             )
 
-        if not changed:
+        if not resized_ranges:
             return False
 
-        # 重算各类别内部的 AlignedByteOffset。
-        category_offsets = {}
-        for d3d11_element in self.D3D11ElementList:
-            offset = category_offsets.get(d3d11_element.Category, 0)
-            d3d11_element.AlignedByteOffset = offset
-            category_offsets[d3d11_element.Category] = (
-                offset + int(d3d11_element.ByteWidth)
+        # 只移动受骨号字段变宽或变窄影响的后续字段，保留显式填充和重叠偏移。
+        category_strides = {}
+        for element in self.D3D11ElementList:
+            deltas = resized_ranges.get(element.Category)
+            if deltas is None:
+                continue
+            offset = element.AlignedByteOffset
+            element.AlignedByteOffset = offset + sum(
+                delta for end, delta in deltas.items() if end <= offset
             )
-
-        # 重算 CategoryStrideDict
-        self.CategoryStrideDict = dict(category_offsets)
+            category_strides[element.Category] = max(
+                category_strides.get(element.Category, 0),
+                element.AlignedByteOffset + element.ByteWidth,
+            )
+        self.CategoryStrideDict.update(category_strides)
 
         return True
 
