@@ -77,7 +77,13 @@ class SubmeshCategoryBuffer:
 		self.FilePath = os.path.join(dir_path, self.FileName)
 
 	def calc_stride(self):
-		self.Stride = sum(d3d11_element.ByteWidth for d3d11_element in self.D3D11ElementList)
+		self.Stride = max(
+			(
+				d3d11_element.AlignedByteOffset + d3d11_element.ByteWidth
+				for d3d11_element in self.D3D11ElementList
+			),
+			default=0,
+		)
 
 
 @dataclass
@@ -155,6 +161,11 @@ class SubmeshJson:
 			aligned_byte_offset = 0
 			d3d11_element_list = []
 			for d3d11_element_json in category_buffer_json.get("D3D11ElementList", []):
+				raw_aligned_byte_offset = d3d11_element_json.get("AlignedByteOffset", "")
+				if str(raw_aligned_byte_offset).strip():
+					element_offset = int(raw_aligned_byte_offset)
+				else:
+					element_offset = aligned_byte_offset
 				d3d11_element = D3D11Element(
 					SemanticName=d3d11_element_json.get("SemanticName", ""),
 					SemanticIndex=int(d3d11_element_json.get("SemanticIndex", 0)),
@@ -163,9 +174,12 @@ class SubmeshJson:
 					ExtractSlot=d3d11_element_json.get("ExtractSlot", ""),
 					ExtractTechnique=d3d11_element_json.get("ExtractTechnique", ""),
 					Category=d3d11_element_json.get("Category", ""),
-					AlignedByteOffset=aligned_byte_offset,
+					AlignedByteOffset=element_offset,
 				)
-				aligned_byte_offset += d3d11_element.ByteWidth
+				aligned_byte_offset = max(
+					aligned_byte_offset,
+					element_offset + d3d11_element.ByteWidth,
+				)
 				d3d11_element_list.append(d3d11_element)
 
 			category_buffer = SubmeshCategoryBuffer(

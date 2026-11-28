@@ -937,6 +937,7 @@ function Test-DuplicateDraws {
         $stack = New-Object System.Collections.ArrayList
         for ($i = $sec.BodyStart; $i -lt $sec.BodyEnd; $i++) {
             $t = $Doc.Lines[$i].Trim()
+            $path = ''
             if ($t.StartsWith(';') -or $t.StartsWith('//')) { continue }
             if ($t -match '^if\b') {
                 [void]$stack.Add('if' + ($i + 1))

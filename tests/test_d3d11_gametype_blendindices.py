@@ -144,6 +144,51 @@ class D3D11GameTypeBlendIndicesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "三通道.*无法归一化"):
             game_type.widen_blendindices()
 
+    def test_honors_aligned_byte_offsets_and_overlapping_texcoords(self):
+        game_type = D3D11GameType.from_submesh_json_dict({
+            "WorkGameType": "GPU_TEST",
+            "CategoryBufferList": [{
+                "D3D11ElementList": [
+                    {
+                        "SemanticName": "TEXCOORD",
+                        "SemanticIndex": 0,
+                        "Format": "R32G32_FLOAT",
+                        "ByteWidth": 8,
+                        "AlignedByteOffset": 4,
+                        "ExtractSlot": "vb1",
+                        "ExtractTechnique": "trianglelist",
+                        "Category": "Texcoord",
+                    },
+                    {
+                        "SemanticName": "TEXCOORD",
+                        "SemanticIndex": 1,
+                        "Format": "R32G32_FLOAT",
+                        "ByteWidth": 8,
+                        "AlignedByteOffset": 12,
+                        "ExtractSlot": "vb1",
+                        "ExtractTechnique": "trianglelist",
+                        "Category": "Texcoord",
+                    },
+                    {
+                        "SemanticName": "TEXCOORD",
+                        "SemanticIndex": 2,
+                        "Format": "R32G32_FLOAT",
+                        "ByteWidth": 8,
+                        "AlignedByteOffset": 12,
+                        "ExtractSlot": "vb1",
+                        "ExtractTechnique": "trianglelist",
+                        "Category": "Texcoord",
+                    },
+                ],
+            }],
+        })
+
+        self.assertEqual(game_type.CategoryStrideDict["Texcoord"], 20)
+        self.assertEqual(
+            [element.AlignedByteOffset for element in game_type.D3D11ElementList],
+            [4, 12, 12],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

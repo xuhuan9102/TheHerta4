@@ -197,7 +197,10 @@ class SSMTImportHelper:
 			raise Fatal("Category buffer file size is not aligned with stride: " + category_buffer.FileName)
 
 		vertex_count = int(file_size / category_buffer.Stride)
-		category_dtype = SSMTImportHelper.create_dtype_from_elements(category_buffer.D3D11ElementList)
+		category_dtype = SSMTImportHelper.create_dtype_from_elements(
+			category_buffer.D3D11ElementList,
+			itemsize=category_buffer.Stride,
+		)
 		category_buffer_data = numpy.fromfile(category_buffer.FilePath, dtype=category_dtype, count=vertex_count)
 		if vertex_slice_count > 0:
 			vertex_slice_end = vertex_slice_offset + vertex_slice_count
@@ -309,13 +312,30 @@ class SSMTImportHelper:
 		return category_elements, category_vb_data, vb_vertex_count
 
 	@staticmethod
-	def create_dtype_from_elements(d3d11_element_list:list):
-		fields = []
+	def create_dtype_from_elements(d3d11_element_list:list, itemsize:int | None = None):
+		names = []
+		formats = []
+		offsets = []
+		calculated_itemsize = 0
 		for d3d11_element in d3d11_element_list:
 			numpy_type = FormatUtils.get_nptype_from_format(d3d11_element.Format)
 			size = int(d3d11_element.ByteWidth / numpy.dtype(numpy_type).itemsize)
-			if size == 1:
-				fields.append((d3d11_element.ElementName, numpy_type))
-			else:
-				fields.append((d3d11_element.ElementName, numpy_type, size))
-		return numpy.dtype(fields)
+			names.append(d3d11_element.ElementName)
+			formats.append(numpy_type if size == 1 else numpy.dtype((numpy_type, (size,))))
+			offsets.append(d3d11_element.AlignedByteOffset)
+			calculated_itemsize = max(
+				calculated_itemsize,
+				d3d11_element.AlignedByteOffset + d3d11_element.ByteWidth,
+			)
+		resolved_itemsize = int(itemsize or calculated_itemsize)
+		if calculated_itemsize > resolved_itemsize:
+			raise Fatal(
+				f"Category buffer stride {resolved_itemsize} is smaller than element layout "
+				f"{calculated_itemsize}."
+			)
+		return numpy.dtype({
+			"names": names,
+			"formats": formats,
+			"offsets": offsets,
+			"itemsize": resolved_itemsize,
+		})

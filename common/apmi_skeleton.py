@@ -43,11 +43,18 @@ class Skeleton:
 
 
 def capture_folder(workspace):
+    local_capture = Path(workspace) / "APMICapture"
+    if (local_capture / "log.txt").is_file() and any(local_capture.glob("*.buf")):
+        return local_capture
+
     from .efmi_skeleton import EFMISkeletonMergeHelper
 
     folder = EFMISkeletonMergeHelper.resolve_frame_analysis_dir(str(workspace))
     if not folder or not (Path(folder) / "log.txt").is_file():
-        raise ValueError("APMI：请关联提取模型时的 FrameAnalysis 目录。")
+        raise ValueError(
+            "APMI：工作空间缺少 APMICapture，且原 FrameAnalysis 目录不可用。"
+            "请使用修复版 SSMT4 重新提取该工作空间。"
+        )
     return Path(folder)
 
 
